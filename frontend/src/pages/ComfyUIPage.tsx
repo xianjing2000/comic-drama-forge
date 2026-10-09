@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
-import { Badge, Button, Card, Select } from '@/components/ui';
+import { Badge, Button, Select } from '@/components/ui';
+import DepsReportPanel from '@/components/DepsReportPanel';
 import { AlertTriangle, RefreshCw } from '@/components/ui/icons';
 import { comfyuiModelsApi } from '@/api/client';
-import type { ComfyUIModelSlot, ComfyUIModelsResponse } from '@/types';
+import type { ComfyUIModelsResponse } from '@/types';
 
 /**
  * ComfyUI 生成模型（全局设置）
@@ -20,9 +21,6 @@ export function ComfyUIPage() {
   const [data, setData] = useState<ComfyUIModelsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [savingKey, setSavingKey] = useState<string | null>(null);
-  const [flash, setFlash] = useState<{ key: string; ok: boolean; msg: string } | null>(null);
-  const [showPlugins, setShowPlugins] = useState(false);
 
   const scan = useCallback(async (refresh: boolean) => {
     setLoading(true);
@@ -40,37 +38,6 @@ export function ComfyUIPage() {
     void scan(false);
   }, [scan]);
 
-  const handleChange = async (slot: ComfyUIModelSlot, value: string) => {
-    setSavingKey(slot.key);
-    setFlash(null);
-    try {
-      const res = await comfyuiModelsApi.select({ [slot.key]: value || null });
-      if (res?.success) {
-        setData(prev =>
-          prev
-            ? {
-                ...prev,
-                slots: prev.slots.map(s =>
-                  s.key === slot.key
-                    ? { ...s, selected: value, selected_valid: !value || s.values.includes(value) }
-                    : s
-                ),
-              }
-            : prev
-        );
-        setFlash({ key: slot.key, ok: true, msg: t('wb.cm.saved') });
-      } else {
-        setFlash({ key: slot.key, ok: false, msg: t('wb.cm.saveFailed') });
-      }
-    } catch (e) {
-      setFlash({ key: slot.key, ok: false, msg: e instanceof Error ? e.message : String(e) });
-    } finally {
-      setSavingKey(null);
-      window.setTimeout(() => setFlash(null), 2500);
-    }
-  };
-
-  const slots = data?.slots || [];
   const offline = data ? !data.success : false;
 
   return (
@@ -91,6 +58,9 @@ export function ComfyUIPage() {
           {loading ? t('wb.cm.scanning') : t('wb.cm.scan')}
         </Button>
       </div>
+
+      {/* ===== 依赖就绪：按当前生产工作流比对 ComfyUI 的模型与自定义节点 ===== */}
+      <DepsReportPanel />
 
       {/* ===== Stats ===== */}
       {data?.success && (
@@ -118,10 +88,10 @@ export function ComfyUIPage() {
 
       {/* ===== Error / Offline ===== */}
       {(error || offline) && (
-        <div className="flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
-          <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0 text-amber-500" />
+        <div className="flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/5 p-4">
+          <AlertTriangle className="mt-0.5 h-5 w-5 flex-shrink-0 text-warning" />
           <div className="text-sm">
-            <p className="font-medium text-amber-600 dark:text-amber-400">
+            <p className="font-medium text-warning-strong">
               {t('wb.cm.offline')}
             </p>
             <p className="mt-1 text-ink-3">{error || data?.error || t('wb.cm.offlineHint')}</p>
@@ -129,107 +99,6 @@ export function ComfyUIPage() {
         </div>
       )}
 
-      {/* ===== Model slots ===== */}
-      <div className="space-y-4">
-        {slots.length === 0 && !loading && !offline && (
-          <Card>
-            <p className="p-4 text-sm text-ink-3">{t('wb.cm.empty')}</p>
-          </Card>
-        )}
-
-        {slots.map(slot => {
-          const mismatch = Boolean(slot.selected) && !slot.selected_valid;
-          return (
-            <Card key={slot.key} bodyClassName="p-5">
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-base font-semibold text-ink-1">{slot.label}</h3>
-                  <span className="rounded bg-black/5 px-1.5 py-0.5 font-mono text-[11px] text-ink-3 dark:bg-white/10">
-                    {slot.node_type}.{slot.field}
-                  </span>
-                  {slot.available ? (
-                    <Badge variant="default">
-                      {t('wb.cm.candidates')}: {slot.values.length}
-                    </Badge>
-                  ) : (
-                    <Badge variant="danger">{t('wb.cm.notFound')}</Badge>
-                  )}
-                  {mismatch && (
-                    <Badge variant="danger">{t('wb.cm.mismatchBadge')}</Badge>
-                  )}
-                </div>
-
-                <p className="text-xs text-ink-3">{slot.hint}</p>
-
-                <Select
-                  label={slot.label}
-                  value={slot.selected || ''}
-                  onChange={v => void handleChange(slot, v)}
-                  disabled={!slot.available || savingKey === slot.key}
-                  options={[
-                    { value: '', label: t('wb.cm.inherit') },
-                    ...slot.values.map(v => ({ value: v, label: v })),
-                  ]}
-                />
-
-                {mismatch && (
-                  <div className="flex items-start gap-2 rounded border border-red-500/40 bg-red-500/10 p-2 text-xs text-red-600 dark:text-red-400">
-                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
-                    <span>
-                      {t('wb.cm.mismatch')}
-                      <span className="ml-1 font-mono">{slot.selected}</span>
-                    </span>
-                  </div>
-                )}
-
-                {flash?.key === slot.key && (
-                  <p className={`text-xs ${flash.ok ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                    {flash.msg}
-                  </p>
-                )}
-              </div>
-            </Card>
-          );
-        })}
-      </div>
-
-      {/* ===== Plugins ===== */}
-      {data?.success && (data.plugins?.length ?? 0) > 0 && (
-        <Card bodyClassName="p-5">
-          <button
-            type="button"
-            className="flex w-full items-center justify-between text-left"
-            onClick={() => setShowPlugins(v => !v)}
-          >
-            <div>
-              <h3 className="text-base font-semibold text-ink-1">{t('wb.cm.pluginsTitle')}</h3>
-              <p className="mt-0.5 text-xs text-ink-3">{t('wb.cm.pluginsHint')}</p>
-            </div>
-            <Badge variant="default">{data.plugins!.length}</Badge>
-          </button>
-          {showPlugins && (
-            <ul className="mt-4 max-h-80 space-y-1 overflow-y-auto pr-1">
-              {data.plugins!.map(p => (
-                <li
-                  key={p.id}
-                  className="flex items-center justify-between gap-3 rounded border border-border px-3 py-1.5 text-sm"
-                >
-                  <span className="truncate font-mono text-xs text-ink-2">{p.id}</span>
-                  <span className="flex-shrink-0 text-xs text-ink-3">
-                    {t('wb.cm.nodeCount')}: {p.node_count}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Card>
-      )}
-
-      {/* ===== Why ===== */}
-      <Card bodyClassName="p-5">
-        <h3 className="text-sm font-semibold text-ink-1">{t('wb.cm.whyTitle')}</h3>
-        <p className="mt-2 text-xs leading-relaxed text-ink-3">{t('wb.cm.whyText')}</p>
-      </Card>
     </div>
   );
 }

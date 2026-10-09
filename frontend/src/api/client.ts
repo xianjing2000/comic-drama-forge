@@ -5,15 +5,14 @@ import type {
   Project, ProjectsResponse,
   Novel, NovelsResponse,
   Task, TasksResponse,
-  Character, Relation,
+  Character,
   Memory, MemoryStats, PromptLesson, LessonQuery, LessonPage,
   AppSettings, I18nData,
   AnalyticsData,
   KeyframePlanResponse,
   StoryboardCanvasResponse,
   StoryboardShot,
-  TTSEnv, TTSPlanResponse, TTSTask,
-  MixEnv, MixPlanResponse, MixTask, MixStatusResponse,
+  TTSEnv,
   QCConfig, QCResponse,
   Episode, EpisodeListResponse, NovelSplitPlanResponse, ComfyUIModelsResponse,
   LogSource, LogsResponse,
@@ -206,40 +205,14 @@ export const charactersApi = {
       await request<unknown>(`/characters?project=${encodeURIComponent(projectId)}`),
       'characters'
     ),
-  add: (data: Partial<Character>) =>
-    request<Character>('/characters', { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: Partial<Character>) =>
-    request<Character>(`/characters/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    }),
+  // add/update（POST /characters、PUT /characters/<id>）前端零调用且无页面入口，
+  // 已作为死方法移除；角色档案由剧本生成链路维护。
   // 旧 delete（DELETE /characters/<id>）后端无对应删除端点（单资源仅 PUT）
   // 且前端零调用，已作为死方法移除；角色删除如需支持应走后端新增端点。
 };
 
-// --- Relations ---
-export const relationsApi = {
-  list: (projectId: string) =>
-    request<Relation[]>(`/relations?project=${encodeURIComponent(projectId)}`),
-  graph: (projectId: string) =>
-    request<Record<string, unknown>>(
-      `/relations/graph?project=${encodeURIComponent(projectId)}`
-    ),
-  // 审计 P2：后端 api_add_relation / update_relation / delete_relation 一律从
-  // body 读 `project`（不是 project_id）；DELETE 也必须带 body，否则 400
-  add: (data: Partial<Relation> & { project?: string }) =>
-    request<Relation>('/relations', { method: 'POST', body: JSON.stringify(data) }),
-  update: (id: string, data: Partial<Relation> & { project?: string }) =>
-    request<Relation>(`/relations/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    }),
-  delete: (id: string, project?: string) =>
-    request<void>(`/relations/${id}`, {
-      method: 'DELETE',
-      body: JSON.stringify({ project }),
-    }),
-};
+// 前端「角色关系」标签页已按需求 R4 下线，此处的关系查询接口一并移除
+// （后端 /api/relations/* 保留不动）。关系数据由剧本生成链路维护。
 
 // --- AI Chat ---
 export const chatApi = {
@@ -276,25 +249,8 @@ export const chatApi = {
       method: 'POST',
       body: JSON.stringify({ project: project || '' }),
     }),
-  applySettings: () =>
-    request<{ success: boolean }>('/ai/chat/apply', { method: 'POST' }),
-};
-
-// --- Autonomous ---
-export const autonomousApi = {
-  status: () => request<{ running: boolean; project?: string; message?: string }>('/autonomous/status'),
-  start: (projectName: string, novelId: string, overrides?: Record<string, unknown>) =>
-    request<{ success: boolean; message?: string }>('/autonomous/start', {
-      method: 'POST',
-      body: JSON.stringify({ project_name: projectName, novel_id: novelId, ...(overrides || {}) }),
-    }),
-  stop: () => request<{ success: boolean }>('/autonomous/stop', { method: 'POST' }),
-  resume: () => request<{ success: boolean }>('/autonomous/resume', { method: 'POST' }),
-  chat: (message: string) =>
-    request<{ success: boolean; reply: string }>('/autonomous/chat', {
-      method: 'POST',
-      body: JSON.stringify({ message }),
-    }),
+  // applySettings（POST /ai/chat/apply）前端零调用 —— 「应用设定」由总控 AI 在对话
+  // 链路内自动触发，无手动入口，已作为死方法移除。
 };
 
 // --- 总控 AI 自主执行（function-calling agent） ---
@@ -497,11 +453,8 @@ export const keyframesApi = {
       '/keyframes/generate',
       { method: 'POST', body: JSON.stringify(data) }
     ),
-  list: (project: string, episode?: number) =>
-    request<any>(
-      `/keyframes/list/${encodeURIComponent(project)}${episode ? `?episode_no=${episode}` : ''}`
-    ),
-  file: (filename: string) => `${API_BASE}/keyframes/file/${filename}`,
+  // list/file（GET /keyframes/list/<project>、/keyframes/file/<file>）前端零调用
+  // —— 关键帧产物直接由 plan 返回的 url 展示，已作为死方法移除。
 };
 
 // --- Storyboard ---
@@ -534,24 +487,8 @@ export const storyboardApi = {
     ),
   file: (project: string, filename: string) =>
     `${API_BASE}/storyboards/file/${encodeURIComponent(project)}/${filename}`,
-  generateNineGrid: (project: string, scene_description: string) =>
-    request<{
-      success: boolean;
-      grid_id: string;
-      project: string;
-      scene_description: string;
-      created_at?: string;
-      filepath: string;
-      shots: any[];
-    }>(
-      '/storyboard/nine-grid',
-      { method: 'POST', body: JSON.stringify({ project, scene_description }) }
-    ),
-  selectNineGridShot: (grid_id: string, project: string, selected_index: number) =>
-    request<{ success: boolean; shot: any }>(
-      `/storyboard/nine-grid/${encodeURIComponent(grid_id)}/select`,
-      { method: 'POST', body: JSON.stringify({ project, selected_index }) }
-    ),
+  // generateNineGrid / selectNineGridShot（POST /storyboard/nine-grid 与 /select）
+  // 已随后端九宫格草案路由下线移除；九宫格候选构图改走 gridCandidates / gridApply。
   // ---- 分镜九宫格候选构图（2026-10-01，对标 BigBanana：一图 9 候选→选格裁切） ----
   // 返回类型对齐后端实际契约（app.py api_storyboard_grid_candidates / grid_apply）：
   // gridApply 实际回 {success, project, shot_id, cell, applied, url, cleared, hint}，
@@ -643,14 +580,12 @@ export const videoApi = {
 };
 
 // --- TTS ---
+// 旧「TTS 配音任务」链路（plan/generate/status/tasks/list）已随后端路由一同下线移除；
+// H3 成片自带角色配音（生成时注入 voice_bank 参考音色），本组只保留环境自检 /
+// 试听 / 参考音色库管理 / 产物访问。
 export const ttsApi = {
   env: (project?: string) =>
     request<TTSEnv>(`/tts/env${project ? `?project_name=${encodeURIComponent(project)}` : ''}`),
-  plan: (data: { project_name: string; episode?: number }) =>
-    request<TTSPlanResponse>('/tts/plan', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
   voiceMap: (project: string, voiceMap: Record<string, unknown>) =>
     request<{ success: boolean }>('/tts/voice-map', {
       method: 'POST',
@@ -660,30 +595,6 @@ export const ttsApi = {
     request<{ success: boolean; url: string }>(
       '/tts/preview',
       { method: 'POST', body: JSON.stringify(data) }
-    ),
-  generate: (data: { project_name: string; episode?: number }) =>
-    request<{ success: boolean; task_id: string; line_count: number }>(
-      '/tts/generate',
-      { method: 'POST', body: JSON.stringify(data) }
-    ),
-  // ---- 场景九宫格机位预览（2026-10-01，对标 BigBanana 候选构图） ----
-  sceneGridPreview: (projectName: string, name: string) =>
-    request<{ success: boolean; task_id: string; total: number }>('/scenes/grid-preview', {
-      method: 'POST',
-      body: JSON.stringify({ project_name: projectName, name }),
-    }),
-  sceneGridApply: (projectName: string, name: string, angle: string) =>
-    request<{ success: boolean; angle: string }>('/scenes/grid-apply', {
-      method: 'POST',
-      body: JSON.stringify({ project_name: projectName, name, angle }),
-    }),
-  sceneGridFileUrl: (projectName: string, sceneDir: string, file: string) =>
-    `${API_BASE}/scenes/grid/file/${encodeURIComponent(projectName)}/${sceneDir}/${file}`,
-  status: (taskId: string) => request<TTSTask>(`/tts/status/${taskId}`),
-  tasks: () => request<{ success: boolean; items: TTSTask[] }>('/tts/tasks'),
-  list: (project: string) =>
-    request<{ success: boolean; lines: any[]; merged: any[] }>(
-      `/tts/list?project_name=${encodeURIComponent(project)}`
     ),
   file: (project: string, filename: string) =>
     `${API_BASE}/tts/file/${encodeURIComponent(project)}/${filename}`,
@@ -726,34 +637,15 @@ export const ttsApi = {
 };
 
 // --- Mix ---
-export const mixApi = {
-  env: () => request<MixEnv>('/mix/env'),
-  plan: (data: { project_name: string; episode?: number }) =>
-    request<MixPlanResponse>('/mix/plan', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  generate: (data: { project_name: string; episode?: number }) =>
-    request<{ success: boolean; task_id: string }>(
-      '/mix/generate',
-      { method: 'POST', body: JSON.stringify(data) }
-    ),
-  status: (taskId: string) => request<MixStatusResponse>(`/mix/status/${taskId}`),
-  tasks: () => request<{ success: boolean; items: MixTask[] }>('/mix/tasks'),
-  list: (project: string) =>
-    request<{ success: boolean; items: any[] }>(
-      `/mix/list?project_name=${encodeURIComponent(project)}`
-    ),
-  file: (project: string, filename: string) =>
-    `${API_BASE}/mix/file/${encodeURIComponent(project)}/${filename}`,
-};
+// 旧「音画混音」任务链（/api/mix/* 全部路由）已下线，mixApi 整块移除；
+// H3 成片自带配音与音效，无需再单独合成。
 
 // --- QC ---
 /** 音频质检结结论（两层：客观层 ffmpeg 指标 + AI 层频谱/波形送检） */
 export interface QCAudioResult {
   success: boolean;
   project_name?: string;
-  /** 检验对象来源：mix=带配音成片 / merged=整集音轨 / line=单句 / path=显式路径 */
+  /** 检验对象来源：final=成片音轨 / mix=带配音成片 / merged=整集音轨 / line=单句 / path=显式路径 */
   source?: string;
   path?: string;
   passed: boolean | null;
@@ -817,8 +709,8 @@ export const qcApi = {
     project_name?: string;
     /** 显式指定产物文件（必须在 output/ 内） */
     path?: string;
-    /** 未给 path 时按此推导：mix > merged > line */
-    source?: 'mix' | 'merged' | 'line';
+    /** 未给 path 时按此推导：final（成片音轨）> mix > merged > line */
+    source?: 'final' | 'mix' | 'merged' | 'line';
     expect_sec?: number;
     line_text?: string;
     /** 有声占比下限判定。单句传 true；整集/成片必须 false（天然有留白） */
@@ -1019,34 +911,9 @@ export const logsApi = {
   },
 };
 
-// --- Continuity ---
-export const continuityApi = {
-  get: (novelId: string) =>
-    request<any>(`/continuity/${encodeURIComponent(novelId)}`),
-  getByEpisode: (novelId: string, episodeNo: number) =>
-    request<any>(`/continuity/${encodeURIComponent(novelId)}/${episodeNo}`),
-  revalidate: (novelId: string, episodeNo: number) =>
-    request<{ success: boolean }>(
-      `/continuity/${encodeURIComponent(novelId)}/${episodeNo}/revalidate`,
-      { method: 'POST' }
-    ),
-};
-
-// --- Coverage ---
-export const coverageApi = {
-  get: (novelId: string) =>
-    request<any>(`/coverage/${encodeURIComponent(novelId)}`),
-  getByEpisode: (novelId: string, episodeNo: number) =>
-    request<any>(`/coverage/${encodeURIComponent(novelId)}/${episodeNo}`),
-};
-
-// --- Script Consistency（P0-3 剧本↔原著一致性；区别于 consistencyApi 的资产多视图一致性） ---
-export const scriptConsistencyApi = {
-  get: (novelId: string) =>
-    request<any>(`/script-consistency/${encodeURIComponent(novelId)}`),
-  getByEpisode: (novelId: string, episodeNo: number) =>
-    request<any>(`/script-consistency/${encodeURIComponent(novelId)}/${episodeNo}`),
-};
+// --- Continuity / Coverage / Script Consistency ---
+// continuityApi / coverageApi / scriptConsistencyApi 三个只读报告接口前端零调用
+// （连贯性/覆盖率/一致性结论已并入剧本生成结果与总控面板），整块移除。
 
 // --- Autopilot ---
 export const autopilotApi = {
@@ -1301,17 +1168,8 @@ export interface ExportedFile {
   size_mb?: number | null;
 }
 export const exportApi = {
-  generate: (projectName: string, formats: string[]) =>
-    request<{
-      success: boolean;
-      files: ExportedFile[];
-      /** 后端据剧本实际构建出的镜头数，0 表示导出内容为空 */
-      shot_count?: number;
-      total_sec?: number;
-    }>(
-      `/export/${encodeURIComponent(projectName)}`,
-      { method: 'POST', body: JSON.stringify({ formats }) }
-    ),
+  // generate（POST /export/<project>）已随后端项目级导出路由下线移除；
+  // 后端仅保留 /api/export/{run,current,download,list}（前端暂无对应方法，按需补接）。
   listFiles: (projectName: string) =>
     request<{ success: boolean; files: ExportedFile[]; items?: any[] }>(
       `/export/list?project=${encodeURIComponent(projectName)}`
@@ -1407,6 +1265,55 @@ export const promptEnhanceApi = {
     request<{ success?: boolean; effective?: { enhance_enabled?: boolean; review_enabled?: boolean } }>('/prompt_enhance/config', {
       method: 'POST',
       body: JSON.stringify(patch),
+    }),
+};
+
+/**
+ * 提示词模板中心（2026-10-07，借鉴 Moha 的提示词管理布局）。
+ *
+ * 分层：用户覆盖 > 出厂默认（app/prompts/*.txt）> 代码内兜底常量（见 app/prompt_templates.py）。
+ * list/get 回显的 text 是**文件原文**（含 `#` 头注释块）—— 头注释是给人看的文档，
+ * 实际送模型的正文会在 load() 时剥掉，编辑器所见即所存，直接回显即可。
+ * save 时后端校验占位符完整性：注册在案的变量（如 {style}）缺失会被 400 拒绝，
+ * 错误文案经 readError() 透传给前端 toast。
+ */
+export interface PromptTemplateSummary {
+  /** 模板键（prompt_templates.REGISTRY 的 key，如 qc_script_check） */
+  name: string;
+  title: string;
+  /** 当前生效来源：override（用户覆盖）/ default（出厂默认） */
+  source: string;
+  /** 文件原文（含 # 头注释块），编辑器直接回显 */
+  text: string;
+  /** 正文字符数（后端统计，列表徽标用） */
+  length: number;
+  /** 注册在案的占位符变量名（不含花括号），如 ['style', 'script_data'] */
+  variables: string[];
+}
+
+export const promptsApi = {
+  list: () =>
+    request<{ success: boolean; prompts: PromptTemplateSummary[] }>('/prompts/list'),
+  get: (name: string) =>
+    request<{
+      success: boolean;
+      name: string;
+      title: string;
+      text: string;
+      variables: string[];
+      source: string;
+    }>(`/prompts/get?name=${encodeURIComponent(name)}`),
+  /** 保存用户覆盖。后端校验占位符完整性，缺变量 → 400 {success:false,error} */
+  save: (name: string, text: string) =>
+    request<{ success: boolean; path?: string; message?: string }>('/prompts/save', {
+      method: 'POST',
+      body: JSON.stringify({ name, text }),
+    }),
+  /** 删除用户覆盖，回到出厂默认（对 default 模板调用是无害的 no-op） */
+  reset: (name: string) =>
+    request<{ success: boolean; message?: string }>('/prompts/reset', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
     }),
 };
 

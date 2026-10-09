@@ -1,18 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '@/context/AppContext';
 import { t } from '@/i18n';
-import { projectsApi, keyframesApi, storyboardApi, videoApi, ttsApi, mixApi, qcApi, exportApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi, novelsSplitPlanApi, preflightApi, screenplayApi, characterOutfits, characterSheetUpload, assetPrecipitation, generationApi, type VideoMode, type EpisodeScenesResponse, type ChapterPreflightResult, type AssetPrecipitationResponse, type PrecipitationStatus } from '@/api/client';
+import { projectsApi, keyframesApi, storyboardApi, videoApi, qcApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi, novelsSplitPlanApi, preflightApi, screenplayApi, characterOutfits, characterSheetUpload, assetPrecipitation, generationApi, type VideoMode, type EpisodeScenesResponse, type ChapterPreflightResult, type AssetPrecipitationResponse, type PrecipitationStatus } from '@/api/client';
 import { Button, ConfirmDialog, Input, EmptyState, ErrorState, Loading, Skeleton, Modal, Select } from '@/components/ui';
 // tab 图标統一走线性 SVG（方案 P2-10）：此前是 emoji，字号受系统字体影响且观感与全站割裂
 import {
   AlertTriangle, BarChart3, Box, Check, CheckCircle2, Clapperboard, ClipboardCheck, ClipboardList, FileText,
-  FolderOpen, ImageIcon, MessageSquare, Mountain, Music, Network, Share2, Target, Upload, User, X, ZoomIn,
+  FolderOpen, ImageIcon, MessageSquare, Mountain, Music, Pause, Play, Share2, Upload, User, X, ZoomIn,
 } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { useComfyProgress } from '@/hooks/useComfyProgress';
 import { getAgentSession, type ChatMsg } from '@/agentSession';
-import { GridPage } from '@/pages/GridPage';
-import { RelationGraphTab } from '@/components/RelationGraphTab';
 import { OutputReviewTab } from '@/components/OutputReviewTab';
 import { AudioTab } from '@/components/AudioTab';
 import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact, AgentStep, AutopilotCurrent, CharacterOutfit, ShotGridStatusResponse, ShotGridTaskState } from '@/types';
@@ -25,7 +23,12 @@ const FOCUS_RING =
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
-type WorkbenchTab = 'overview' | 'storyboard' | 'qc' | 'upscale' | 'relation' | 'audio' | 'output';
+import AutonomousPanel from '@/components/AutonomousPanel';
+import QualityPanel from '@/components/QualityPanel';
+import TriagePanel from '@/components/TriagePanel';
+import ExportPanel from '@/components/ExportPanel';
+
+type WorkbenchTab = 'overview' | 'storyboard' | 'qc' | 'upscale' | 'audio' | 'output';
 
 interface AssetItem {
   name: string;
@@ -120,9 +123,7 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
     // 超分：后端 upscale_client 与其 8 个端点早已可用，但前端此前零引用 ——
     // 与已删除的孤儿页面同属「建好没入口」的能力，这里补上手工入口。
     { id: 'upscale', icon: <ZoomIn className="h-4 w-4" />, label: t('wb.upscale') },
-    // 角色关系图：后端 API 早已完整实现，前端此前缺失可视化组件
-    { id: 'relation', icon: <Network className="h-4 w-4" />, label: t('wb.relation') },
-    // 声音处理：合并 TTS 配音 + 音画混音 + 音频质检
+    // 参考音色：H3 成片自带角色配音，本页管理各角色的参考音色库 + 音频质检
     { id: 'audio', icon: <Music className="h-4 w-4" />, label: t('wb.audio') },
     // 输出与验收：合并导出 + 成品验收
     { id: 'output', icon: <Share2 className="h-4 w-4" />, label: t('wb.output') },
@@ -236,19 +237,31 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
               <StoryboardHubTab projectKey={projectKey} novelId={project.novel_id} />
             )}
             {activeTab === 'qc' && (
-              <QcTab projectKey={projectKey} />
+              <>
+                <QcTab projectKey={projectKey} />
+
+                {/* 质量：原文覆盖率 / 字幕校对 / 跨集一致性 / 项目连贯性 */}
+                <QualityPanel project={projectKey} />
+
+                {/* 诊断与补救建议（POST /api/qc/triage）—— 只给建议，点了才执行 */}
+                <TriagePanel project={projectKey} />
+              </>
             )}
             {activeTab === 'audio' && (
-              <AudioTab projectKey={projectKey} />
+              <>
+                <AudioTab projectKey={projectKey} />
+              </>
             )}
             {activeTab === 'output' && (
-              <OutputReviewTab projectKey={projectKey} assets={assets} />
+              <>
+                <OutputReviewTab projectKey={projectKey} assets={assets} />
+
+                {/* 导出与交付：剪映草稿 / FCPXML / SRT / 成片 / 交付物 */}
+                <ExportPanel project={projectKey} />
+              </>
             )}
             {activeTab === 'upscale' && (
               <UpscaleTab projectKey={projectKey} />
-            )}
-            {activeTab === 'relation' && (
-              <RelationGraphTab projectKey={projectKey} />
             )}
           </div>
         </div>
@@ -313,12 +326,13 @@ function sanitizeError(err: unknown, fallback = t('wb.actionFailed')): string {
 // ========== Overview Tab ==========
 
 // 生产流水线步骤序列：与后端 pipeline.STEP_SEQUENCE 对齐（技术标识符 → i18n 键）。
+// 2026-10-06：keyframe（尾帧）步骤已移出流水线 —— 7 步：script→tts_pre→assets→
+// storyboard→video→upscale→final。
 const PRODUCTION_STEPS: { id: string; labelKey: string }[] = [
   { id: 'script', labelKey: 'wb.stepScript' },
   { id: 'tts_pre', labelKey: 'wb.stepTtsPre' },
   { id: 'assets', labelKey: 'wb.stepAssets' },
   { id: 'storyboard', labelKey: 'wb.stepStoryboard' },
-  { id: 'keyframe', labelKey: 'wb.stepKeyframe' },
   { id: 'video', labelKey: 'wb.stepVideo' },
   { id: 'upscale', labelKey: 'wb.stepUpscale' },
   { id: 'final', labelKey: 'wb.stepFinal' },
@@ -330,6 +344,9 @@ const PRODUCTION_STEPS: { id: string; labelKey: string }[] = [
 function ProductionProgress({ projectKey }: { projectKey: string }) {
   const { t } = useApp();
   const [cur, setCur] = useState<AutopilotCurrent | null>(null);
+  const [paused, setPaused] = useState(false);
+  const [ctrlBusy, setCtrlBusy] = useState(false);
+  const [failurePause, setFailurePause] = useState<{ episode?: number; reason?: string; error?: string } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -339,6 +356,8 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
         const st = await autopilotApi.status(projectKey);
         if (!alive) return;
         setCur((st.current as AutopilotCurrent) || null);
+        setPaused(Boolean(st.paused));
+        setFailurePause((st.failure_pause as any) || null);
       } catch {
         // 轮询失败静默：状态刷新是锦上添花，不能因一次失败打断整页
       }
@@ -350,6 +369,22 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
       if (timer) clearInterval(timer);
     };
   }, [projectKey]);
+
+  // 托管 启动/暂停 控制（2026-10-08：API 早已具备，此前无 UI 入口，用户只能干等）
+  const togglePause = async () => {
+    if (ctrlBusy) return;
+    setCtrlBusy(true);
+    try {
+      if (paused) await autopilotApi.resume();
+      else await autopilotApi.pause();
+      const st = await autopilotApi.status(projectKey);
+      setPaused(Boolean(st.paused));
+    } catch {
+      // 控制失败静默（轮询兜底刷新）
+    } finally {
+      setCtrlBusy(false);
+    }
+  };
 
   // ComfyUI 采样级实时进度：有生产任务时才轮询 comfyui 日志源（tqdm N/M）
   const comfy = useComfyProgress(!!cur);
@@ -379,43 +414,63 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
           <span className="inline-block w-2 h-2 rounded-full bg-info animate-pulse" />
           {t('wb.productionProgress')}
         </span>
-        {cur.episode != null && (
-          <span className="text-sm text-ink-2">{t('wb.producingEpisode', { n: cur.episode })}</span>
-        )}
+        <div className="flex items-center gap-2">
+          {cur.episode != null && (
+            <span className="text-sm text-ink-2">{t('wb.producingEpisode', { n: cur.episode })}</span>
+          )}
+          {/* 托管 启动/暂停 控制（2026-10-08：API 早已具备，此前无 UI 入口） */}
+          <button
+            type="button"
+            onClick={togglePause}
+            disabled={ctrlBusy}
+            className={`
+              inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors 
+              ${paused ? 'border-success text-success hover:bg-success-subtle' : 'border-warning text-warning hover:bg-warning-subtle'}
+              ${ctrlBusy ? 'opacity-50 cursor-wait' : ''}
+            `}
+          >
+            {ctrlBusy ? (
+              <span className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+            ) : paused ? (
+              <Play className="h-3 w-3" />
+            ) : (
+              <Pause className="h-3 w-3" />
+            )}
+            {paused ? t('wb.resumeAutopilot') : t('wb.pauseAutopilot')}
+          </button>
+        </div>
       </div>
 
-      {/* 进度条 */}
-      <div className="w-full bg-line rounded-full h-2 mb-3">
-        <div
-          className="progress-fill h-2 rounded-full transition-all"
-          style={{ width: `${percent}%` }}
-        />
-      </div>
+      {/* ⚠️ 2026-10-08：单集失败自动暂停（stop_on_failure）醒目横幅 */}
+      {failurePause && (
+        <div className="flex items-start gap-2.5 mt-3 p-3 rounded-lg bg-danger-subtle border border-danger text-danger-strong text-xs">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="font-semibold text-sm">{failurePause.reason || ('第' + (failurePause.episode ?? '') + '集生产失败，已暂停')}</p>
+            {failurePause.error && (
+              <p className="mt-1 break-all text-danger/80">{failurePause.error}</p>
+            )}
+            <p className="mt-1.5 text-danger/70">任务已自动暂停（stop_on_failure）。处理后点上方「恢复托管」继续；第{failurePause.episode ?? ''}集数据已保留，不会丢失。</p>
+          </div>
+          <button
+            type="button"
+            onClick={togglePause}
+            className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-danger text-white hover:opacity-90 transition-opacity"
+          >
+            <Play className="h-3 w-3" />
+            {t('wb.resumeAutopilot')}
+          </button>
+        </div>
+      )}
 
-      {/* 步骤链 */}
-      <div className="flex flex-wrap items-center gap-1.5 mb-2">
-        {PRODUCTION_STEPS.map((s, i) => {
-          const done = stepsDone.includes(s.id);
-          const active = s.id === currentStepId;
-          return (
-            <React.Fragment key={s.id}>
-              {i > 0 && <span className="text-ink-3 text-xs">→</span>}
-              <span
-                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs ${
-                  done
-                    ? 'bg-success-subtle text-success-strong'
-                    : active
-                      ? 'bg-brand-subtle text-brand font-medium'
-                      : 'bg-surface-2 text-ink-3'
-                }`}
-              >
-                {done && <Check className="h-3 w-3" />}
-                {t(s.labelKey)}
-              </span>
-            </React.Fragment>
-          );
-        })}
-      </div>
+      {/* ⚠️ 2026-10-09 合并：进度条与步骤链已**移交** LiveExecutionFeed ——
+       *  同一件事不再两套实现。本组件只保留它独有的三样：
+       *    ① 单集失败自动暂停横幅（stop_on_failure）
+       *    ② ComfyUI 采样级进度（解析 comfyui 日志 tqdm）
+       *    ③ 步骤超时告警（stalled >= 900）
+       *  另保留托管 暂停/恢复 按钮（LiveExecutionFeed 不管控制面）。 */}
+
+
 
       {/* 当前步骤消息 + 超时告警 */}
       {cur.message && <p className="text-xs text-ink-2 mb-1">{cur.message}</p>}
@@ -447,6 +502,46 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+
+/** 生产模式统一入口（2026-10-09 用户拍板合并）
+ *
+ * 背景：「托管」(/api/autopilot/*) 与「自主」(/api/autonomous/*) 是**同一件事的两套实现** ——
+ *   托管：按既定计划逐集跑固定步骤，失败自动暂停，人可介入；
+ *   自主：把决策权交给总控 AI（function-calling），由它自己判断下一步做什么。
+ * 此前概览页上两个面板各有一个「启动」按钮，语义重叠、用户不知道点哪个。
+ * 这里合并为**一个模式选择器**，同一时刻只呈现一种模式的控制面。
+ */
+function ProductionModeCard({ projectKey }: { projectKey: string }) {
+  const [mode, setMode] = useState<'autopilot' | 'autonomous'>('autopilot');
+  const seg = (active: boolean) =>
+    `px-3 py-1 text-xs rounded transition-colors ${active
+       ? 'bg-brand text-white font-medium'
+       : 'text-ink-2 hover:bg-surface-2'}`;
+  return (
+    <div className="mb-4">
+      <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface px-3 py-2">
+        <span className="text-sm font-semibold text-ink-1">生产模式</span>
+        <div className="inline-flex rounded-md border border-line p-0.5">
+          <button type="button" className={seg(mode === 'autopilot')} onClick={() => setMode('autopilot')}>
+            托管 · 按计划
+          </button>
+          <button type="button" className={seg(mode === 'autonomous')} onClick={() => setMode('autonomous')}>
+            自主 · AI 决策
+          </button>
+        </div>
+        <span className="min-w-0 flex-1 text-xs text-ink-3">
+          {mode === 'autopilot'
+            ? '按既定计划逐集生产，步骤固定；单集失败会自动暂停等你处理。'
+            : '由总控 AI 自己判断下一步做什么（可调用工具），适合无人值守长跑。'}
+        </span>
+      </div>
+      {mode === 'autopilot'
+        ? <ProductionProgress projectKey={projectKey} />
+        : <AutonomousPanel project={projectKey} />}
     </div>
   );
 }
@@ -990,8 +1085,9 @@ function OverviewTab({
 
   return (
     <div className="space-y-8">
-      {/* 生产进度（实时）：把 autopilot 当前正在生产的一集/步骤/百分比/超时告警展示出来 */}
-      <ProductionProgress projectKey={projectKey} />
+      {/* 生产模式（托管 / 自主 二选一，见 ProductionModeCard）*/}
+      <ProductionModeCard projectKey={projectKey} />
+
 
       {/* 资产展示 */}
       <div className="flex items-center justify-between mb-3">
@@ -1245,7 +1341,7 @@ function OverviewTab({
                               </span>
                               <span className="text-xs text-ink-2">{t('wb.splitPlanParts', { n: ch.total_parts })}</span>
                               {ch.needs_confirm && (
-                                <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-warning-subtle text-warning-strong">
+                                <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-warning-subtle text-warning-strong">
                                   {t('wb.splitPlanConfirmNote')}
                                 </span>
                               )}
@@ -1260,7 +1356,7 @@ function OverviewTab({
                                     <span className="tabular-nums">{t('wb.splitPlanShots', { n: u.est_shots ?? '—' })}</span>
                                     <span className="tabular-nums">{t('wb.splitPlanSec', { sec: u.est_sec ?? '—' })}</span>
                                     {u.over_redline && (
-                                      <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-danger-subtle text-danger-strong">
+                                      <span className="px-1.5 py-0.5 rounded text-xs font-medium bg-danger-subtle text-danger-strong">
                                         {t('wb.splitPlanOverRedline')}
                                       </span>
                                     )}
@@ -1441,21 +1537,21 @@ function OverviewTab({
                                   <span className="tabular-nums text-xs text-ink-2">{t('wb.sceneShotCount', { n: sc.shot_count })}</span>
                                   {/* 分镜状态：齐了亮绿「分镜完成」，否则显示「分镜 k/N」 */}
                                   {sc.shot_count > 0 && sc.storyboard_ok >= sc.shot_count ? (
-                                    <span className="rounded bg-success-subtle px-1.5 py-0.5 text-[11px] font-medium text-success-strong">
+                                    <span className="rounded bg-success-subtle px-1.5 py-0.5 text-xs font-medium text-success-strong">
                                       {t('wb.sceneStoryboardDone')}
                                     </span>
                                   ) : (
-                                    <span className="rounded bg-warning-subtle px-1.5 py-0.5 text-[11px] font-medium text-warning-strong">
+                                    <span className="rounded bg-warning-subtle px-1.5 py-0.5 text-xs font-medium text-warning-strong">
                                       {t('wb.sceneStoryboardPart', { done: sc.storyboard_ok, total: sc.shot_count })}
                                     </span>
                                   )}
                                   {/* 视频状态：该场 scene_XX.mp4 是否已生成 */}
                                   {sc.video_ready ? (
-                                    <span className="rounded bg-success-subtle px-1.5 py-0.5 text-[11px] font-medium text-success-strong">
+                                    <span className="rounded bg-success-subtle px-1.5 py-0.5 text-xs font-medium text-success-strong">
                                       ✓ {t('wb.sceneVideoReady')}
                                     </span>
                                   ) : (
-                                    <span className="rounded bg-surface-2 px-1.5 py-0.5 text-[11px] font-medium text-ink-3">
+                                    <span className="rounded bg-surface-2 px-1.5 py-0.5 text-xs font-medium text-ink-3">
                                       {t('wb.sceneVideoMissing')}
                                     </span>
                                   )}
@@ -1805,13 +1901,13 @@ function UploadSheetModal({
                 {['front', 'left', 'back'].map((k) => (
                   <div
                     key={k}
-                    className="w-12 h-16 rounded border border-dashed border-ink-3 bg-surface flex items-center justify-center text-[10px] text-ink-3"
+                    className="w-12 h-16 rounded border border-dashed border-ink-3 bg-surface flex items-center justify-center text-xs text-ink-3"
                   >
                     {t(`uploadSheet.view.${k}`)}
                   </div>
                 ))}
               </div>
-              <div className="w-12 h-16 rounded border border-dashed border-ink-3 bg-surface flex items-center justify-center text-[10px] text-ink-3">
+              <div className="w-12 h-16 rounded border border-dashed border-ink-3 bg-surface flex items-center justify-center text-xs text-ink-3">
                 {t('uploadSheet.view.half')}
               </div>
             </div>
@@ -2094,7 +2190,7 @@ function AssetPreviewModal({
                   placeholder={t('wb.assetPromptPlaceholder')}
                   className={`w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink-1 resize-y ${FOCUS_RING}`}
                 />
-                <p className="text-[11px] text-ink-3">{t('wb.assetPromptHint')}</p>
+                <p className="text-xs text-ink-3">{t('wb.assetPromptHint')}</p>
               </>
             )}
           </div>
@@ -2187,7 +2283,7 @@ function AssetPrecipitationSection({
         <span className="flex items-center gap-2">
           <span>{t('precip.title')}</span>
           {summary && (
-            <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] font-normal text-ink-3">
+            <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs font-normal text-ink-3">
               {t('precip.summary.done', { done: summary.done, total: summary.total_steps })}
             </span>
           )}
@@ -2206,18 +2302,18 @@ function AssetPrecipitationSection({
               {/* 概览：质检次数 / 命中教训 / 视角数 / 是否用户上传 */}
               <div className="flex flex-wrap gap-1.5">
                 {summary?.is_user_upload && (
-                  <span className="rounded-full bg-brand-subtle px-2 py-0.5 text-[11px] font-medium text-brand-strong">
+                  <span className="rounded-full bg-brand-subtle px-2 py-0.5 text-xs font-medium text-brand-strong">
                     {t('precip.badge.userUpload')}
                   </span>
                 )}
-                <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-ink-2">
+                <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs text-ink-2">
                   {t('precip.stat.qc', { n: summary?.qc_attempts ?? 0 })}
                 </span>
-                <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-ink-2">
+                <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs text-ink-2">
                   {t('precip.stat.lessons', { n: summary?.lessons ?? 0 })}
                 </span>
                 {!!summary?.views?.length && (
-                  <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[11px] text-ink-2">
+                  <span className="rounded-full bg-surface-2 px-2 py-0.5 text-xs text-ink-2">
                     {t('precip.stat.views', { n: summary.views.length })}
                   </span>
                 )}
@@ -2236,7 +2332,7 @@ function AssetPrecipitationSection({
                       <div className="flex items-center gap-2">
                         <span className="text-sm text-ink-1">{s.label}</span>
                         <span
-                          className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${badgeOf(s.status)}`}
+                          className={`shrink-0 rounded-full px-1.5 py-0.5 text-xs font-medium ${badgeOf(s.status)}`}
                         >
                           {statusText(s.status)}
                         </span>
@@ -2251,7 +2347,7 @@ function AssetPrecipitationSection({
                           {s.items.map((it, j) => (
                             <li
                               key={j}
-                              className="rounded-md border border-line bg-surface-2 px-2 py-1.5 text-[11px]"
+                              className="rounded-md border border-line bg-surface-2 px-2 py-1.5 text-xs"
                             >
                               <div className="flex items-center gap-2">
                                 <span className="text-ink-2">
@@ -2290,17 +2386,17 @@ function AssetPrecipitationSection({
                           {s.items.map((it, j) => (
                             <li
                               key={j}
-                              className="rounded-md border border-line bg-surface-2 px-2 py-1.5 text-[11px]"
+                              className="rounded-md border border-line bg-surface-2 px-2 py-1.5 text-xs"
                             >
                               <div className="flex items-start gap-2">
                                 <span className="min-w-0 flex-1 text-ink-2 break-words">{it.issue}</span>
                                 {it.category && (
-                                  <span className="shrink-0 rounded-full bg-surface px-1.5 py-0.5 text-[10px] text-ink-3">
+                                  <span className="shrink-0 rounded-full bg-surface px-1.5 py-0.5 text-xs text-ink-3">
                                     {it.category}
                                   </span>
                                 )}
                                 {it.priority && (
-                                  <span className="shrink-0 rounded-full bg-surface px-1.5 py-0.5 text-[10px] text-ink-3">
+                                  <span className="shrink-0 rounded-full bg-surface px-1.5 py-0.5 text-xs text-ink-3">
                                     {it.priority}
                                   </span>
                                 )}
@@ -2319,7 +2415,7 @@ function AssetPrecipitationSection({
                       {s.id !== 'qc' && s.id !== 'lesson' && s.items.filter((x) => x.key).length > 0 && (
                         <dl className="mt-1 space-y-0.5">
                           {s.items.filter((x) => x.key).map((it, j) => (
-                            <div key={j} className="flex gap-2 text-[11px]">
+                            <div key={j} className="flex gap-2 text-xs">
                               <dt className="shrink-0 text-ink-3">{it.key}</dt>
                               <dd className="min-w-0 flex-1 text-ink-2 break-words whitespace-pre-wrap">
                                 {it.value}
@@ -2431,7 +2527,7 @@ function CharacterOutfitsSection({ projectKey, character }: { projectKey: string
                     )}
                   </span>
                   <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${
                       o.ready ? 'bg-success-subtle text-success-strong' : 'bg-surface-2 text-ink-3'
                     }`}
                   >
@@ -2457,7 +2553,7 @@ function CharacterOutfitsSection({ projectKey, character }: { projectKey: string
               {t('assets.outfit.add')}
             </Button>
           </div>
-          <p className="text-[11px] text-ink-3">{t('assets.outfit.hint')}</p>
+          <p className="text-xs text-ink-3">{t('assets.outfit.hint')}</p>
         </div>
       )}
     </div>
@@ -2995,15 +3091,17 @@ function QcTab({ projectKey }: { projectKey: string }) {
   );
 }
 
-// ========== 分镜管理（九宫格 + 关键帧 + 分镜序列 三合一） ==========
-// 三者本是同一工序的三个阶段：先出构图草案 → 再定首尾关键帧 → 最后成型分镜序列。
-// 拆成 3 个顶级标签会让用户在标签间来回跳，这里收成一个标签页 + 3 个子标签。
+// ========== 分镜管理（关键帧 + 分镜序列） ==========
+// 2026-10-06：九宫格草案子页已下线（后端 /storyboard/nine-grid 已删，候选构图入口
+// 移到分镜卡片上的「九宫格候选构图」按钮），只保留 分镜序列 / 关键帧 两个子标签。
+//
+// 拆成 2 个顶级标签会让用户在标签间来回跳，这里收成一个标签页 + 2 个子标签。
 //
 // ⭐ 集级隔离（2026-09-25）：同一部小说会产多集，而分镜图/尾帧/视频**按集落盘**
 // （第 1 集平铺，第 2 集起 `epNN/`）。此前这里**完全不选集** ——
 // `storyboardApi.canvas(projectKey)` 不带 episode_no，后端 `_load_script_for` 就
 // 只看「已生成的集里最新的那集」，于是无论用户在哪一集，看到的永远是最近一集的分镜；
-// 关键帧同理。这里统一加一个集切换器，把选中集号透传给下面三个子页。
+// 关键帧同理。这里统一加一个集切换器，把选中集号透传给下面两个子页。
 function useEpisodeList(novelId?: string) {
   const [episodes, setEpisodes] = useState<any[]>([]);
   useEffect(() => {
@@ -3176,7 +3274,7 @@ function ShotPromptEditor({ shot, novelId, episodeNo, onSaved }: {
         </span>
         {!live.done && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />}
       </div>
-      <pre className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap text-[11px] leading-4 text-ink-2">{live.prompt}</pre>
+      <pre className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap text-xs leading-4 text-ink-2">{live.prompt}</pre>
     </div>
   ) : null;
 
@@ -3232,7 +3330,9 @@ function ShotPromptEditor({ shot, novelId, episodeNo, onSaved }: {
 
 function StoryboardHubTab({ projectKey, novelId }: { projectKey: string; novelId?: string }) {
   const { t } = useApp();
-  const [sub, setSub] = useState<'storyboard' | 'ninegrid' | 'keyframes'>('storyboard');
+  // 2026-10-06：子标签收敛——九宫格草案（后端已删）与「关键帧」尾帧入口都下线。
+  // 尾帧已由 H3 导演台在视频生成时逐镜产出（keyframe 步骤 2026-10-05 移出 7 步流水线），
+  // 前端不再有独立的「关键帧」生成页；本标签只保留分镜序列（StoryboardTab）。
   // 选中集号：null = 未指定（沿用后端「最新一集」的兜底，兼容无剧集数据的纯项目）
   const [selectedEpisode, setSelectedEpisode] = useState<number | null>(null);
   const episodes = useEpisodeList(novelId);
@@ -3250,183 +3350,16 @@ function StoryboardHubTab({ projectKey, novelId }: { projectKey: string; novelId
     }
   }, [episodes, selectedEpisode]);
 
-  const subs: { id: 'storyboard' | 'ninegrid' | 'keyframes'; icon: React.ReactNode; label: string; hint: string }[] = [
-    { id: 'storyboard', icon: <Clapperboard className="h-4 w-4" />, label: t('wb.subStoryboard'), hint: t('sb.subStoryboardHint') },
-    { id: 'ninegrid', icon: <Target className="h-4 w-4" />, label: t('wb.subNinegrid'), hint: t('sb.subNinegridHint') },
-    { id: 'keyframes', icon: <ImageIcon className="h-4 w-4" />, label: t('wb.subKeyframes'), hint: t('sb.subKeyframesHint') },
-  ];
-
   return (
     <div className="space-y-5">
-      {/* 子标签导航 */}
-      <div className="flex flex-wrap gap-2">
-        {subs.map((s) => (
-          <button
-            key={s.id}
-            onClick={() => setSub(s.id)}
-            title={s.hint}
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-all ${FOCUS_RING} ${
-              sub === s.id
-                ? 'bg-brand text-white shadow'
-                : 'bg-surface-2 text-ink-2 hover:bg-line hover:text-ink-1'
-            }`}
-          >
-            <span>{s.icon}</span>
-            <span>{s.label}</span>
-          </button>
-        ))}
-      </div>
+      {/* 集切换器：分镜产物按集隔离，必须先在集之间分流 */}
+      <EpisodeSwitcher
+        episodes={episodes}
+        value={selectedEpisode}
+        onChange={setSelectedEpisode}
+      />
 
-      {/* 集切换器：分镜 / 关键帧两类产物按集隔离，必须先在集之间分流 */}
-      {sub !== 'ninegrid' && (
-        <EpisodeSwitcher
-          episodes={episodes}
-          value={selectedEpisode}
-          onChange={setSelectedEpisode}
-        />
-      )}
-
-      {sub === 'storyboard' && <StoryboardTab projectKey={projectKey} episodeNo={selectedEpisode} />}
-      {sub === 'ninegrid' && <GridPage projectKey={projectKey} />}
-      {sub === 'keyframes' && <KeyframesTab projectKey={projectKey} episodeNo={selectedEpisode} />}
-    </div>
-  );
-}
-
-// ========== Keyframes Tab ==========
-function KeyframesTab({ projectKey, episodeNo }: { projectKey: string; episodeNo?: number | null }) {
-  const { t } = useApp();
-  const toast = useToast();
-  const [plan, setPlan] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [error, setError] = useState('');
-
-  const fetchPlan = async () => {
-    if (!projectKey) return;
-    setLoading(true);
-    setError('');
-    try {
-      const data = await keyframesApi.plan(projectKey, episodeNo ?? undefined);
-      setPlan(data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('sb.fetchFailed'));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleGenerate = async () => {
-    if (!projectKey) return;
-    setGenerating(true);
-    setError('');
-    try {
-      const result = await keyframesApi.generate({
-        project_name: projectKey,
-        episode_no: episodeNo ?? undefined,
-      });
-      toast.success(`${t('keyframes.generateStarted')}：${result.task_id}`);
-      setTimeout(fetchPlan, 3000);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : t('sb.generateFailed');
-      setError(msg);
-      toast.error(msg);
-    } finally {
-      setGenerating(false);
-    }
-  };
-
-  // 切集必须重新拉取：否则会一直显示上一集的尾帧计划（同一项目多集共用 projectKey）
-  useEffect(() => { fetchPlan(); }, [projectKey, episodeNo]);
-
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h3 className="text-lg font-semibold">{t('keyframes.title')}</h3>
-        <Button size="sm" onClick={fetchPlan} disabled={loading}>{t('common.refresh')}</Button>
-      </div>
-
-      {/* 加载态（此前首屏只剩标题栏，无任何反馈）：对齐真实区块的 4 张统计卡 */}
-      {loading && !plan && (
-        <div role="status" aria-live="polite" aria-label={t('common.loading')}>
-          <div className="grid grid-cols-4 gap-4">
-            {[0, 1, 2, 3].map((i) => (
-              <Skeleton key={i} className="h-24 rounded-lg" />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* 硬失败：整块拿不到 plan（无数据可展示）→ ErrorState；
-          已有 plan 时仅是刷新/生成失败 → 降级为下面那条紧凑行内提示，不吃掉已展示内容 */}
-      {error && !plan && (
-        <ErrorState
-          title={t('project.loadingFailed')}
-          description={error}
-          onRetry={fetchPlan}
-        />
-      )}
-      {error && plan && (
-        <div className="p-4 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong">{error}</div>
-      )}
-
-      {plan && (
-        <div className="grid grid-cols-4 gap-4">
-          <div className="bg-surface rounded-lg border border-line p-4 text-center">
-            <div className="text-3xl font-bold text-brand">{plan.shot_count}</div>
-            <div className="text-sm text-ink-2">{t('keyframes.totalShots')}</div>
-          </div>
-          <div className="bg-surface rounded-lg border border-line p-4 text-center">
-            <div className="text-3xl font-bold text-success-strong">{plan.start_frames_ready}</div>
-            <div className="text-sm text-ink-2">{t('keyframes.startReady')}</div>
-          </div>
-          <div className="bg-surface rounded-lg border border-line p-4 text-center">
-            <div className="text-3xl font-bold text-info-strong">{plan.end_frames_ready}</div>
-            <div className="text-sm text-ink-2">{t('keyframes.endReady')}</div>
-          </div>
-          <div className="bg-surface rounded-lg border border-line p-4 text-center">
-            <div className="text-3xl font-bold text-warning-strong">{plan.to_generate}</div>
-            <div className="text-sm text-ink-2">{t('keyframes.toGenerate')}</div>
-          </div>
-        </div>
-      )}
-
-      {plan && plan.to_generate > 0 && (
-        <Button
-          onClick={handleGenerate}
-          disabled={generating}
-          className="w-full bg-warning hover:bg-warning-strong"
-        >
-          {generating ? t('common.generating') : t('keyframes.generate')}
-        </Button>
-      )}
-
-      {plan && (
-        <div className="space-y-2">
-          <h4 className="font-semibold text-ink-1 mb-3">{t('keyframes.shotList')}</h4>
-          {plan.plan?.map((shot: any) => (
-            <div
-              key={shot.seq}
-              className={`flex items-center gap-4 p-3 rounded-lg ${
-                shot.need_gen ? 'bg-warning-subtle border border-warning/30' :
-                shot.has_end ? 'bg-success-subtle border border-success/30' :
-                'bg-surface-2'
-              }`}
-            >
-              <span className="w-12 font-mono text-ink-2">#{shot.seq}</span>
-              <span className="flex-1">{shot.status || shot.shot_id}</span>
-              <div className="flex gap-2">
-                {shot.has_start && <span className="px-2 py-1 bg-success/20 text-success-strong rounded text-xs">{t('keyframes.startFrame')}</span>}
-                {shot.has_end && <span className="px-2 py-1 bg-info/20 text-info-strong rounded text-xs">{t('keyframes.endFrame')}</span>}
-                {shot.need_gen && !shot.has_end && <span className="px-2 py-1 bg-warning/20 text-warning-strong rounded text-xs">{t('keyframes.toGenerate')}</span>}
-              </div>
-              {shot.url && (
-                <a href={shot.url} target="_blank" rel="noopener noreferrer" className={`text-brand hover:text-brand rounded-sm ${FOCUS_RING}`}>{t('common.view')}</a>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
+      <StoryboardTab projectKey={projectKey} episodeNo={selectedEpisode} />
     </div>
   );
 }
@@ -3504,7 +3437,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
   // ---- 分镜图点击放大（lightbox）----
   /** 正在放大的分镜图：正式图或生成中 scratch 图；null = 弹窗关闭。
    *  分镜缩略图原先没有任何点击交互（点了没反应），这里补上全屏放大查看。 */
-  const [zoomImg, setZoomImg] = useState<{ src: string; seq: number } | null>(null);
+  const [zoomImg, setZoomImg] = useState<{ src: string; seq: number; grid?: boolean } | null>(null);
 
   // ---- 分镜画布自动刷新（轮询）----
   /**
@@ -3977,11 +3910,11 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
                   role={zoomSrc ? 'button' : undefined}
                   tabIndex={zoomSrc ? 0 : undefined}
                   aria-label={zoomSrc ? t('sb.zoomTitle') : undefined}
-                  onClick={zoomSrc ? () => setZoomImg({ src: zoomSrc, seq: card.seq }) : undefined}
+                  onClick={zoomSrc ? () => setZoomImg({ src: zoomSrc, seq: card.seq, grid: !!card.storyboard?.grid }) : undefined}
                   onKeyDown={(e) => {
                     if (zoomSrc && (e.key === 'Enter' || e.key === ' ')) {
                       e.preventDefault();
-                      setZoomImg({ src: zoomSrc, seq: card.seq });
+                      setZoomImg({ src: zoomSrc, seq: card.seq, grid: !!card.storyboard?.grid });
                     }
                   }}
                   className={`w-24 h-24 shrink-0 rounded bg-surface-2 border overflow-hidden flex items-center justify-center text-xs text-ink-3 ${
@@ -4003,7 +3936,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
                         alt={t('sb.imageAlt', { seq: card.seq })}
                         className="w-full h-full object-cover"
                       />
-                      <span className="absolute inset-x-0 bottom-0 bg-brand/85 text-white text-[10px] leading-4 text-center">
+                      <span className="absolute inset-x-0 bottom-0 bg-brand/85 text-white text-xs leading-4 text-center">
                         {t('sb.generating')}
                       </span>
                     </div>
@@ -4192,7 +4125,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
                   }`}
                 >
                   <span
-                    className={`absolute left-1 top-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                    className={`absolute left-1 top-1 rounded px-1.5 py-0.5 text-xs font-medium ${
                       gridCell === n ? 'bg-brand text-white' : 'bg-slate-900/70 text-white'
                     }`}
                   >
@@ -4214,12 +4147,25 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
         size="full"
       >
         {zoomImg && (
-          <div className="flex items-center justify-center">
+          <div className="relative mx-auto w-fit select-none">
             <img
               src={zoomImg.src}
               alt={t('sb.imageAlt', { seq: zoomImg.seq })}
               className="max-w-full max-h-[78vh] rounded-lg border border-line bg-surface-2 object-contain"
             />
+            {/* 九宫格 1-9 编号覆盖层（2026-10-06）：编号由前端叠加，不再让模型画进图
+                （扩散模型写数字实测乱码）。划分与后端裁切口径一致：整图等分三行三列。 */}
+            {zoomImg.grid && (
+              <div className="pointer-events-none absolute inset-0 grid grid-cols-3 grid-rows-3">
+                {Array.from({ length: 9 }, (_, i) => i + 1).map((n) => (
+                  <span key={n} className="relative">
+                    <span className="absolute left-1 top-1 rounded bg-slate-900/70 px-1.5 py-0.5 text-xs font-medium text-white">
+                      {n}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </Modal>
@@ -4837,7 +4783,7 @@ function AgentStatusCard({ projectKey }: { projectKey: string }) {
     >
       {current && (
         <>
-          <div className="flex items-center gap-2 text-[11px]">
+          <div className="flex items-center gap-2 text-xs">
             <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-brand" />
             <span className="shrink-0 text-ink-2">{t('chat.producingNow')}</span>
             <span className="truncate font-medium text-ink-1">
@@ -4852,14 +4798,14 @@ function AgentStatusCard({ projectKey }: { projectKey: string }) {
             />
           </div>
           {stallMin >= 3 && (
-            <div className="text-[10px] text-warning-strong">
+            <div className="text-xs text-warning-strong">
               {t('chat.producingStalled', { m: stallMin })}
             </div>
           )}
         </>
       )}
       {comfy.active && comfy.total > 0 && (
-        <div className="flex items-center gap-2 text-[11px]">
+        <div className="flex items-center gap-2 text-xs">
           <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent" />
           <span className="shrink-0 text-ink-2">{t('live.comfySampling')}</span>
           <span className="shrink-0 font-medium tabular-nums text-ink-1">
@@ -4940,7 +4886,7 @@ function AgentTrace({ steps, status, startedAt, live = false }: {
           {steps.map((s, i) => {
             const isCurrent = live && i === steps.length - 1;
             return (
-              <li key={i} className="relative text-[11px] leading-snug">
+              <li key={i} className="relative text-xs leading-snug">
                 <span
                   className={`absolute -left-[22px] top-0 flex h-3.5 w-3.5 items-center justify-center rounded-full border bg-surface ${
                     s.blocked
@@ -4975,7 +4921,7 @@ function AgentTrace({ steps, status, startedAt, live = false }: {
             );
           })}
           {running && (
-            <li className="relative text-[11px] text-ink-3">
+            <li className="relative text-xs text-ink-3">
               <span
                 className="absolute -left-[22px] top-0 flex h-3.5 w-3.5 items-center justify-center rounded-full border border-brand/40 bg-surface"
                 aria-hidden="true"
@@ -5222,13 +5168,13 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
           <div className="min-w-0">
             <h3 className="font-semibold text-ink-1 leading-tight">{t('chat.panelTitle')}</h3>
             <div className="flex items-center gap-1.5 mt-0.5">
-              <p className="text-[11px] text-ink-2 leading-tight">
+              <p className="text-xs text-ink-2 leading-tight">
                 {autoMode ? t('chat.autoExec', { n: toolCount || '…' }) : t('chat.chatOnly')}
               </p>
               <button
                 onClick={() => setAutoMode(v => !v)}
                 title={autoMode ? t('chat.switchToChat') : t('chat.switchToAuto')}
-                className={`text-[10px] leading-none px-1.5 py-0.5 rounded border transition-colors ${FOCUS_RING} ${
+                className={`text-xs leading-none px-1.5 py-0.5 rounded border transition-colors ${FOCUS_RING} ${
                   autoMode
                     ? 'border-brand/30 text-brand bg-brand-subtle'
                     : 'border-line text-ink-2'

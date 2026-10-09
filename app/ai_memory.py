@@ -22,6 +22,10 @@ import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+# 原子写（删除项目时按项目键摘除 memories.json 条目后写回，2026-10-06）。
+# fs_atomic 只依赖标准库，可被任意业务模块顶层 import，无循环导入风险。
+from fs_atomic import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 
@@ -133,13 +137,6 @@ class AIPatternRecognizer:
                 })
 
         return detected
-
-    def classify_issue(self, issue_text: str) -> Optional[str]:
-        """分类问题类型"""
-        detections = self.detect_pattern(issue_text)
-        if detections:
-            return detections[0]["category"]
-        return None
 
 
 class AIEvolutionEngine:
@@ -371,16 +368,6 @@ class AISemorySystem:
         results.sort(key=lambda x: self._calculate_relevance(x, query), reverse=True)
         return results[:limit]
 
-    def search_by_tag(self, tag: str, limit: int = 20) -> List[AISemoryEntry]:
-        """基于标签搜索"""
-        results = []
-        with self.lock:
-            for entry in self.list_all():
-                if tag.lower() in [t.lower() for t in entry.tags]:
-                    results.append(entry)
-                if len(results) >= limit:
-                    break
-        return results
 
     def list_all(self, mem_type: Optional[str] = None, limit: int = 100) -> List[AISemoryEntry]:
         """列出所有记忆"""
@@ -453,16 +440,6 @@ class AISemorySystem:
         )
         return entry
 
-    def record_insight(self, insight: str, context: Dict[str, Any], tags: Optional[List[str]] = None) -> AISemoryEntry:
-        """记录洞察"""
-        return self.add_memory(
-            mem_type="insight",
-            content=insight,
-            context=context,
-            confidence=0.7,
-            tags=tags or [],
-            source="evolution",
-        )
 
     def get_stats(self) -> Dict[str, Any]:
         """获取记忆统计"""
@@ -487,6 +464,45 @@ class AISemorySystem:
             self.entries = [e for e in self.entries if self._parse_time(e.created_at).timestamp() > cutoff]
             self._save()
         return before - len(self.entries)
+
+    def purge_project(self, projects: List[str]) -> int:
+        """项目被删除时，摘除 context.project 命中该项目别名的记忆条目（关联清理）。
+
+        为什么必须做：memories.json 是**全局单文件**、条目级按 ``context.project``
+        归属（record_lesson / record_success 落的 project 字段）——软删产物目录收不走，
+        必须按键摘除后原子写回，否则同名重建会把旧项目的教训/成功经验挂到新项目头上。
+
+        ``projects`` 传该项目的全部别名（dir_key + 显示名），精确匹配 context.project。
+        写回走 fs_atomic.atomic_write_json（唯一临时名 + fsync + .bak 快照 + replace），
+        与本类 ``_save`` 的「整文件覆盖」相比多一层防并发截断保护。
+        返回摘除条数；任何失败只 warning（记忆是旁路数据，绝不阻断删除主流程）。
+        """
+        vals = {str(p).strip() for p in (projects or []) if p and str(p).strip()}
+        if not vals:
+            return 0
+        removed = 0
+        with self.lock:
+            before = len(self.entries)
+
+            def _keep(e: AISemoryEntry) -> bool:
+                ctx = e.context if isinstance(e.context, dict) else {}
+                proj = str(ctx.get("project") or "").strip()
+                return proj not in vals
+
+            self.entries = [e for e in self.entries if _keep(e)]
+            removed = before - len(self.entries)
+            if removed:
+                try:
+                    atomic_write_json(
+                        os.path.join(self.root_dir, "memories.json"),
+                        {"entries": [e.to_dict() for e in self.entries],
+                         "updated_at": datetime.now().isoformat()})
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("AI 记忆摘除写回失败（不影响删除主流程）：%s", e)
+        if removed:
+            logger.info("AI 记忆已随项目删除摘除 %d 条（context.project ∈ %s）",
+                        removed, sorted(vals))
+        return removed
 
     def _generate_id(self, mem_type: str, content: str) -> str:
         """生成记忆 ID"""

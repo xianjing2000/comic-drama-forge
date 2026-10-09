@@ -36,7 +36,10 @@ from typing import Dict, List, Optional, Tuple
 
 import ai_config
 import h3_prompt_kit
-import prompt_qc
+from prompt_protocol import (  # 协议标记下沉（2026-10-08 解耦）：不再模块级依赖 prompt_qc
+    SB_MARK_CONTENT, SB_MARK_CONTENT_LEGACY, SB_MARK_FRAMING_LEGACY, SB_MARK_FRAMING_NEW,
+    SB_MARK_NO_TEXT, SB_MARK_NO_TEXT_LEGACY, SB_MARK_PRESERVE, SB_MARK_REF_USAGE,
+    SB_MARK_REF_USAGE_LEGACY, SB_MARK_STYLE, SB_MARK_STYLE_LEGACY, SB_MARK_TASK)
 from config import (AI_CONFIG_PATH, LLM_CONFIG_PATH,
                     PROMPT_ENHANCE_ENABLED, PROMPT_MODEL_REVIEW_ENABLED,
                     PROMPT_ENHANCE_TIMEOUT_SEC, PROMPT_ENHANCE_CACHE_SIZE)
@@ -133,12 +136,12 @@ _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 
 #: 分镜图协议段名（旧中文协议 + 新英文协议一并检查：原文有的段，结果必须有）
 _STORYBOARD_SECTIONS: Tuple[str, ...] = (
-    prompt_qc.SB_MARK_TASK, prompt_qc.SB_MARK_PRESERVE,
-    prompt_qc.SB_MARK_CONTENT, prompt_qc.SB_MARK_CONTENT_LEGACY,
-    prompt_qc.SB_MARK_STYLE, prompt_qc.SB_MARK_STYLE_LEGACY,
-    prompt_qc.SB_MARK_FRAMING_NEW, prompt_qc.SB_MARK_FRAMING_LEGACY,
-    prompt_qc.SB_MARK_REF_USAGE, prompt_qc.SB_MARK_REF_USAGE_LEGACY,
-    prompt_qc.SB_MARK_NO_TEXT, prompt_qc.SB_MARK_NO_TEXT_LEGACY,
+    SB_MARK_TASK, SB_MARK_PRESERVE,
+    SB_MARK_CONTENT, SB_MARK_CONTENT_LEGACY,
+    SB_MARK_STYLE, SB_MARK_STYLE_LEGACY,
+    SB_MARK_FRAMING_NEW, SB_MARK_FRAMING_LEGACY,
+    SB_MARK_REF_USAGE, SB_MARK_REF_USAGE_LEGACY,
+    SB_MARK_NO_TEXT, SB_MARK_NO_TEXT_LEGACY,
 )
 
 
@@ -179,10 +182,53 @@ def _skeleton_ok(kind: str, original: str, candidate: str) -> Tuple[bool, str]:
         if len(_TS_RE.findall(cand)) < len(_TS_RE.findall(original)):
             return False, "时间码数量变少（节拍被删）"
     else:  # asset / keyframe：过一遍确定性检查，判废即弃
+        import prompt_qc  # 惰性导入（2026-10-08 解耦）：只在需要确定性复检时才依赖质检模块
         v = prompt_qc.check_prompt(kind, cand, ctx=None, style="")
         if v.get("blocked"):
             return False, "确定性检查判废"
     return True, ""
+
+
+def prompt_len_budget(original: str) -> Tuple[int, int]:
+    """返回骨架校验**实际接受**的字符区间 ``(下限, 上限)``。
+
+    ⚠️ 与 :func:`_skeleton_ok` 的判据**逐字同源**，改一处必须同步改另一处。
+    存在的意义：把「校验器接受什么」提前变成「生成前就告诉模型什么」——
+    2026-10-08 实录：优化器/增强器的系统提示里**完全没有长度约束**，模型自由扩写 →
+    129 次结果因「超出长度上限 / 篇幅骤减 / 丢协议段」被全部弃用，每次都是一个白打的
+    LLM 调用（几十秒 × 上百次）。
+    """
+    hi = int(h3_prompt_kit.MAX_PROMPT_CHARS)
+    lo = max(24, int(len(str(original or "")) * 0.7))
+    return lo, hi
+
+
+def has_valid_window(original: str) -> bool:
+    """原文是否**存在**一个骨架校验能接受的输出长度。
+
+    ``lo = 原文×0.7``、``hi = MAX_PROMPT_CHARS(6000)`` —— 原文一长到约 8571 字符
+    （6000/0.7），区间就成了空集：模型**无论怎么写都过不了**。此时再打一次 LLM
+    纯属白费（几十秒 + 一次配额），应当直接跳过增强/优化并回落原文。
+    """
+    lo, hi = prompt_len_budget(original)
+    return lo <= hi
+
+
+def length_clause(original: str, *, keep_ratio: float = 1.2) -> str:
+    """生成一段可直接拼进 system 提示的**输出长度硬约束**。
+
+    只描述长度，不碰其它规则；调用方自行拼接（增强 / 即时优化共用同一把尺子）。
+    """
+    lo, hi = prompt_len_budget(original)
+    n = len(str(original or ""))
+    target = min(hi, max(lo, int(n * keep_ratio)))
+    return (
+        "\n【输出长度硬约束 —— 不满足则本次结果直接作废】\n"
+        f"- 原提示词 {n} 字符；你的输出**完整字符数**必须落在 {lo}–{hi} 之间。\n"
+        f"- 目标约 {target} 字符：比原文略具体即可，不要大幅扩写。\n"
+        f"- 严禁超过 {hi} 字符（超出即判废）；严禁少于 {lo} 字符（骤缩即判废）。\n"
+        "- 不得为压缩篇幅而删减任何段落或节拍，结构必须与原文同样齐全。"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -302,10 +348,22 @@ def enhance_prompt(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
         user = (f"【目标风格】{str(style or '').strip() or '（未指定）'}\n"
                 f"【镜头上下文】\n{_ctx_brief(ctx)}\n"
                 f"【待增强的生成提示词】\n{prompt}")
+        # ⭐ 2026-10-08：把骨架校验的长度区间**前置**成模型硬约束（原提示词里零长度
+        #    约束 → 模型自由扩写 → 高频因「超出长度上限」被判废，白打一次 LLM）。
+        if not has_valid_window(prompt):
+            _lo0, _hi0 = prompt_len_budget(prompt)
+            logger.info("提示词增强[%s] 跳过：原文 %d 字符，骨架校验的接受区间 [%d,%d] 为空集"
+                        "（模型无论怎么写都过不了）", kind, len(prompt), _lo0, _hi0)
+            out["note"] = "原文超长，长度区间为空集，跳过增强"
+            return out
+        _system = _ENHANCE_INSTRUCTIONS[kind] + length_clause(prompt)
+        # max_tokens 只是物理兜底（中文约 1.5 字符/token，取 1.2 保守系数并留思考余量）；
+        # 真正的长度控制由 system 里的硬约束表达。
+        _mt = max(1500, min(8192, int(h3_prompt_kit.MAX_PROMPT_CHARS / 1.2)))
         resp = client.chat(
-            [{"role": "system", "content": _ENHANCE_INSTRUCTIONS[kind]},
+            [{"role": "system", "content": _system},
              {"role": "user", "content": user}],
-            temperature=0.4, max_tokens=8192, timeout=PROMPT_ENHANCE_TIMEOUT_SEC)
+            temperature=0.4, max_tokens=_mt, timeout=PROMPT_ENHANCE_TIMEOUT_SEC)
         cand = _strip_fence(resp)
         ok, why = _skeleton_ok(kind, prompt, cand)
         if not ok:
@@ -404,6 +462,7 @@ def model_review(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
         if client is None:
             out["note"] = "qc 模块未配置，跳过复审"
             return out
+        import prompt_qc  # 惰性导入（2026-10-08 解耦）：仅取类型标签
         user = (f"【提示词类型】{prompt_qc.KIND_LABELS.get(kind, kind)}\n"
                 f"【目标风格】{str(style or '').strip() or '（未指定）'}\n"
                 f"【镜头上下文】\n{_ctx_brief(ctx)}\n"

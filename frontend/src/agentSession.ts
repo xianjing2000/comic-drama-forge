@@ -40,3 +40,16 @@ export function getAgentSession(projectKey: string): AgentSession {
   }
   return s;
 }
+
+/**
+ * 项目删除时清掉该键的会话缓存（ProjectsPage.handleDelete 删除成功后调用）。
+ *
+ * 为什么必须：缓存按 projectKey（= dir_key）作键，而「删除项目 → 同名重建」会得到
+ * **同一个** dir_key —— 不清的话，重挂载的 ChatPanel 会命中旧缓存（loadHistory 对
+ * 非空缓存直接短路、不回后端重拉），把已删项目的对话原样带回新项目面板；
+ * 其中 run 执行轨迹（kind='run'）**只存在于这份缓存里**（后端历史不落轨迹），
+ * 用户看到的「旧项目的操作播报」正是从这里来的。
+ */
+export function dropAgentSession(projectKey: string): void {
+  sessions.delete(projectKey);
+}

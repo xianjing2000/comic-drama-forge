@@ -13,6 +13,12 @@ import json
 
 from config import COMFYUI_URL, PROJECT_OUTPUT_DIR, VIDEOS_DIR, FINAL_DIR
 
+# 探测工具已下沉到叶子模块 media_probe（2026-10-08 解耦）：
+# comfyui_client / dub_mix / caption_verify 只需要 ffprobe 探测，却被本模块的超分/拼接
+# 依赖拖着走（comfyui_client → video_postprocess 还是环形依赖的一条边）。此处保留同名
+# 再导出，历史调用点（含 .workbuddy/test 下的守卫）零改动。
+from media_probe import probe_media, has_audio_stream  # noqa: F401
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -113,7 +119,8 @@ def _ordered_shot_files(videos_dir: str, ep: int) -> List[str]:
     except OSError:
         return []
     media = [f for f in names if f.lower().endswith((".mp4", ".mov", ".mkv"))]
-    shots = sorted((f for f in media if _SHOT_RE.match(f) and not f.endswith("_full.mp4")),
+    shots = sorted((f for f in media if _SHOT_RE.match(f)
+                    and not f.endswith("_full.mp4") and not f.endswith(".bak.mp4")),
                    key=lambda f: int(_SHOT_RE.match(f).group(1)))
     if shots:
         return [os.path.join(videos_dir, f) for f in shots]
@@ -150,74 +157,13 @@ def _filter_existing_segments(video_files: List[str]) -> tuple:
     return valid, missing
 
 
-def probe_media(path: str) -> Dict:
-    """ffprobe 读取媒体信息（含视频/音频流清单），任何异常都落到 info.error，不抛出"""
-    info = {"path": os.path.abspath(path) if path else "", "ok": False,
-            "has_video": False, "has_audio": False,
-            "video_streams": 0, "audio_streams": 0}
-    if not path or not os.path.exists(path):
-        info["error"] = "文件不存在"
-        return info
-    info["size_bytes"] = os.path.getsize(path)
-    info["size_mb"] = round(info["size_bytes"] / 1048576, 3)
-    cmd = ["ffprobe", "-v", "error", "-show_entries",
-           "stream=index,codec_type,codec_name,width,height,r_frame_rate,"
-           "sample_rate,channels:format=duration,format_name",
-           "-of", "json", path]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-        if r.returncode != 0:
-            info["error"] = (r.stderr or "ffprobe 失败").strip()[:200]
-            return info
-        d = json.loads(r.stdout or "{}")
-        streams = d.get("streams") or []
-        info["streams"] = [{"index": s.get("index"), "type": s.get("codec_type"),
-                            "codec": s.get("codec_name"), "width": s.get("width"),
-                            "height": s.get("height")} for s in streams]
-        videos = [s for s in streams if s.get("codec_type") == "video"]
-        audios = [s for s in streams if s.get("codec_type") == "audio"]
-        info["video_streams"] = len(videos)
-        info["audio_streams"] = len(audios)
-        info["has_video"] = bool(videos)
-        info["has_audio"] = bool(audios)
-        info["video_codec"] = videos[0].get("codec_name") if videos else None
-        info["audio_codec"] = audios[0].get("codec_name") if audios else None
-        if videos:
-            info["width"] = videos[0].get("width")
-            info["height"] = videos[0].get("height")
-            # B-05 P1-4：实测帧率（ffprobe r_frame_rate 形如 "30000/1001"），供降级重编码参考
-            _fr = str(videos[0].get("r_frame_rate") or "")
-            try:
-                num, _, den = _fr.partition("/")
-                if den:
-                    info["fps"] = round(int(num) / int(den), 3)
-                elif num:
-                    info["fps"] = float(num)
-            except (ValueError, ZeroDivisionError) as e:
-                logger.debug("fps 字段解析失败（忽略）：%s", e)
-        if audios:
-            # B-04 P1-3（已修复 S-01）：补 audio 采样率/声道探测，供音轨一致性判定
-            info["sample_rate"] = audios[0].get("sample_rate")
-            info["channels"] = audios[0].get("channels")
-        info["duration"] = round(float((d.get("format") or {}).get("duration") or 0), 3)
-        info["format_name"] = (d.get("format") or {}).get("format_name")
-        info["ok"] = True
-    except Exception as e:  # pragma: no cover - 环境相关
-        info["error"] = f"{type(e).__name__}: {e}"
-    return info
-
-
-def has_audio_stream(path: str) -> bool:
-    """视频是否含音频流（ffprobe 实测，不猜测）"""
-    return bool(probe_media(path).get("has_audio"))
-
-
 def strip_audio(video_path: str, output_path: Optional[str] = None,
                 backup: bool = True) -> Dict:
     """剥离视频音轨（-an，视频流直接复制不重编码；失败时降级 libx264 重编码）
 
     - 不传 output_path 时原地替换：先写临时文件，校验无音轨后再替换，原文件可按 backup 留存
-    - backup=True 且原文件确有音轨时，备份为 <同名>.withaudio.bak.mp4（同目录）
+    - backup=True 且原文件确有音轨时，备份为 <同名>.withaudio.bak（同目录；刻意不带 .mp4
+      后缀，避免被 *.mp4 glob 当成分片混进拼接清单）
     """
     t0 = time.time()
     report = {"ok": False, "input": os.path.abspath(video_path) if video_path else "",
@@ -243,7 +189,9 @@ def strip_audio(video_path: str, output_path: Optional[str] = None,
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
 
     if backup and in_place:
-        bak = os.path.splitext(video_path)[0] + ".withaudio.bak.mp4"
+        # 备份不带 .mp4 后缀（双保险）：.bak.mp4 会被 *.mp4 glob（_ordered_shot_files /
+        # get_output_status）当成正片混进拼接；读侧/清理侧均按返回的 report["backup"] 取路径
+        bak = os.path.splitext(video_path)[0] + ".withaudio.bak"
         try:
             shutil.copy2(video_path, bak)
             report["backup"] = bak
@@ -376,7 +324,6 @@ def ensure_audio_track(video_path: str, sample_rate: int = 48000) -> Dict:
     return report
 
 
-
 class VideoPostProcessor:
     """视频后期处理器"""
 
@@ -447,7 +394,12 @@ class VideoPostProcessor:
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
             with open(list_file, 'w', encoding='utf-8') as f:
                 for v in video_paths:
-                    f.write(f"file '{os.path.abspath(v)}'\n")
+                    # 路径含单引号时必须转义，否则引号会把路径截断（No such file or
+                    # directory）。concat 清单的引号按成对解析，转义写法是「' → '\''」
+                    # （关引号 + \' 字面引号 + 重开引号）；与 add_subtitles 对 SRT 路径
+                    # 的单引号处理同一动机，但清单语法不能直接写 \'（引号内 \ 原样保留）。
+                    _p = os.path.abspath(v).replace("'", "'\\''")
+                    f.write(f"file '{_p}'\n")
 
             cmd = [
                 "ffmpeg", "-y",
@@ -500,8 +452,8 @@ class VideoPostProcessor:
         n = len(video_paths)
 
         # B-05：从源片实测推导目标分辨率/帧率（以出现最多的宽/高/帧率为准）
-        target_w, target_h = 1280, 720  # 兜底值（probe 全部失败时才用）
-        target_fps = 30
+        target_w, target_h = 1280, 720  # 兜底值；B-05 已改为源片实测投票，仅 ffprobe 全失败时触达
+        target_fps = 30  # 兜底值；B-05 已改为源片实测投票，仅 ffprobe 全失败时触达
         w_votes: Dict[int, int] = {}
         h_votes: Dict[int, int] = {}
         fps_votes: Dict[int, int] = {}
@@ -777,25 +729,3 @@ class VideoPostProcessor:
         logger.info(f"第 {ep} 集最终视频: {output_path}")
         return output_path
 
-    def get_output_status(self, project_name: str) -> Dict:
-        """获取项目输出状态"""
-        project_dir = os.path.join(PROJECT_OUTPUT_DIR, project_name)
-        result = {
-            "project": project_name,
-            "exists": os.path.exists(project_dir),
-            "videos": [],
-            "images": [],
-            "final": None
-        }
-
-        videos_dir = os.path.join(PROJECT_OUTPUT_DIR, "videos", project_name)
-        final_dir = os.path.join(PROJECT_OUTPUT_DIR, "final", project_name)
-
-        if os.path.exists(videos_dir):
-            result["videos"] = [f for f in os.listdir(videos_dir) if f.endswith('.mp4')]
-
-        if os.path.exists(final_dir):
-            final_files = [f for f in os.listdir(final_dir) if f.endswith('.mp4')]
-            result["final"] = final_files[0] if final_files else None
-
-        return result

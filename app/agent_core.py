@@ -107,6 +107,54 @@ def _proj_prop(desc="项目名（缺省用当前项目）"):
     return {"type": "string", "description": desc}
 
 
+def _read_production_log_call(a, c):
+    """read_production_log 的参数构造（沿用 call → (method, path, payload) 分发约定）。
+
+    episode_no 缺省时定位「最近在生产的集」：
+    ① autopilot.status(project, brief=True) 的 current（正在生产的集；
+       status() 对他项目在跑时会回 current=None，不会张冠李戴）；
+    ② 兜底：output/autopilot/<项目>/episodes/ 下 mtime 最新的 epNN_log.jsonl。
+    两处都取不到时 episode_no 传 0 —— 端点会以 exists:false + note 明确回答
+    「该集还没有操作日志」，模型不会拿到误导性数据。
+    """
+    a = dict(a or {})
+    project = _p(a.get("project") or c.get("project"))
+    ep = 0
+    try:
+        ep = int(a.get("episode_no") or 0)
+    except (TypeError, ValueError):
+        ep = 0
+    if ep <= 0:
+        try:
+            import autopilot as _ap  # 惰性引入：避免顶层导入链耦合
+            cur = (_ap.status(project, brief=True) or {}).get("current") or {}
+            if project and str(cur.get("project") or "") == project:
+                ep = int(cur.get("episode") or 0)
+        except Exception:  # noqa: BLE001
+            ep = 0
+    if ep <= 0:
+        try:
+            import autopilot as _ap
+            base = os.path.join(_ap._autopilot_dir(project), "episodes")
+            best_t = -1.0
+            if project and os.path.isdir(base):
+                for fn in os.listdir(base):
+                    m = re.match(r"^ep(\d+)_log\.jsonl$", fn)
+                    if not m:
+                        continue
+                    t = os.path.getmtime(os.path.join(base, fn))
+                    if t > best_t:
+                        best_t, ep = t, int(m.group(1))
+        except Exception:  # noqa: BLE001
+            ep = 0
+    try:
+        tail = max(1, min(int(a.get("tail") or 60), 500))
+    except (TypeError, ValueError):
+        tail = 60
+    return ("GET", f"/api/autopilot/episode_log?project={_qp(project)}"
+                   f"&episode_no={int(ep or 0)}&tail={tail}", {})
+
+
 TOOLS = [
     # ---------- 只读探针 ----------
     {
@@ -209,11 +257,41 @@ TOOLS = [
                               + quote(_p(a.get("project") or c.get("project")), safe=""), {}),
     },
     {
+        "name": "list_asset_definitions",
+        "description": ("列出某集需要生成的**资产定义**（角色 / 物品 / 场景），"
+                        "含外貌、参考图提示词（中英）、是否被设定集锁定。"
+                        "用来查清「这一集到底要生成哪些资产、各自长什么样」。"),
+        "parameters": _schema({
+            "project": _proj_prop(),
+            "episode_no": {"type": "integer", "description": "集号，默认 1"},
+        }, []),
+        "risk": "safe", "expensive": False,
+        # 后端 GET /api/projects/<pid>/asset-definitions 读剧本顶层 characters/items/scenes
+        # ⚠️ 不是剧本里的 assets 字段（那个是空的），见 routes/projects.py 的实现说明
+        "call": lambda a, c: ("GET",
+                              "/api/projects/"
+                              + quote(_p(a.get("project") or c.get("project")), safe="")
+                              + "/asset-definitions?episode_no="
+                              + str(a.get("episode_no") or 1), {}),
+    },
+    {
         "name": "list_exceptions",
         "description": "列出自动生产中的异常（失败集、卡住的步骤），判断要不要处理。",
         "parameters": _schema({}),
         "risk": "safe", "expensive": False,
         "call": lambda a, c: ("GET", "/api/autopilot/exceptions", {}),
+    },
+    {
+        "name": "read_production_log",
+        "description": "读取某集生产操作日志（每步的开始/跳过/完成/失败与进度事件，"
+                       "含时间戳与耗时）。生产卡住、进度长时间不动、需要向用户解释"
+                       "某环节耗时或失败原因时调用。参数：project（项目键，必填）、"
+                       "episode_no（集号，缺省=最近在生产的集）、tail（返回最近 N 条，"
+                       "缺省 60，上限 500）。返回 exists:false 表示该集还没有操作日志。",
+        "parameters": _schema({"project": _proj_prop(), "episode_no": _INT,
+                               "tail": _INT}),
+        "risk": "safe", "expensive": False,
+        "call": _read_production_log_call,
     },
     {
         "name": "search_memory",
@@ -232,10 +310,12 @@ TOOLS = [
         "name": "update_plan",
         "description": "修改自动生产计划。patch 只接受计划字段，例如 "
                        "episodes('all' 或 [1,2,3]) / target_shots / style / enable_upscale / "
-                       "upscale_scale / enable_tts / enable_tts_pre / enable_mix / "
-                       "step_max_retries / video_mode / "
+                       "upscale_scale / enable_tts_pre / "
+                       "step_max_retries / "
                        "auto_accept(产出即自动验收，默认 false) / auto_revive_hours(失败集挂起多久后"
-                       "自动复活重试，默认 6 小时，0=永不) / max_episode_attempts 等。",
+                       "自动复活重试，默认 6 小时，0=永不) / max_episode_attempts 等。"
+                       "（enable_tts / enable_mix / video_mode 已废弃：tts/mix 步骤下线，"
+                       "视频只有整集模式，设置了也不会生效。）",
         "parameters": _schema({"project": _proj_prop(), "patch": _OBJ},
                               ["patch"]),
         "risk": "write", "expensive": False,
@@ -367,7 +447,9 @@ TOOLS = [
     },
     {
         "name": "stop_production",
-        "description": "停止全自动生产。",
+        "description": "停止全自动生产。⚠️ 实际是**全局暂停**（autopilot.pause），"
+                       "会影响**所有项目**的托管生产，不只是当前项目；只想停当前项目请用 "
+                       "disable_autopilot(project=…)。",
         "parameters": _schema({"project": _proj_prop()}),
         "risk": "write", "expensive": False,
         "call": lambda a, c: ("POST", "/api/autonomous/stop",
@@ -375,7 +457,8 @@ TOOLS = [
     },
     {
         "name": "resume_production",
-        "description": "恢复被暂停的全自动生产。",
+        "description": "恢复被暂停的全自动生产。⚠️ 同 stop_production，这是**全局**恢复，"
+                       "会影响所有项目。",
         "parameters": _schema({"project": _proj_prop()}),
         "risk": "write", "expensive": False,
         "call": lambda a, c: ("POST", "/api/autonomous/resume",
@@ -415,8 +498,9 @@ TOOLS = [
     # ---------- 昂贵动作（烧 GPU / 耗时） ----------
     {
         "name": "produce_episode",
-        "description": "立即完整生产指定一集（走完整流水线：剧本→配音先行→资产→分镜→关键帧→"
-                       "视频→超分→成片）。耗时长，一次只能一集。",
+        "description": "立即完整生产指定一集（走完整流水线 7 步：剧本→配音先行→资产→分镜→"
+                       "视频→超分→成片）。耗时长，一次只能一集。注意：托管流水线以小说章节"
+                       "为原文直接生产；「文学剧本→人工审核→改写」的两段式入口在前端剧集列表。",
         "parameters": _schema({"project": _proj_prop(),
                                "episode": {"type": "integer", "description": "章节序号，默认 1"}}),
         "risk": "expensive", "expensive": True,
@@ -449,26 +533,6 @@ TOOLS = [
                                "shot_id": str(a.get("shot_id")),
                                "mode": a.get("mode") or "reference",
                                "episode_no": a.get("episode") or c.get("episode")}),
-    },
-    {
-        "name": "generate_tts",
-        "description": "为整集批量配音（TTS）。调用后会等到配音任务真正结束才返回结果。",
-        "parameters": _schema({"project": _proj_prop(), "episode": _INT}),
-        "risk": "expensive", "expensive": True,
-        "call": lambda a, c: ("POST", "/api/tts/generate",
-                              {"project_name": a.get("project") or c.get("project"),
-                               "episode": a.get("episode") or c.get("episode") or 1}),
-        "poll": {"status": "/api/tts/status/{task_id}", "timeout": 1800},
-    },
-    {
-        "name": "mix_audio",
-        "description": "把配音与画面合成为带声音的成片。调用后会等到合成任务真正结束才返回结果。",
-        "parameters": _schema({"project": _proj_prop(), "episode": _INT}),
-        "risk": "expensive", "expensive": True,
-        "call": lambda a, c: ("POST", "/api/mix/generate",
-                              {"project_name": a.get("project") or c.get("project"),
-                               "episode": a.get("episode") or c.get("episode") or 1}),
-        "poll": {"status": "/api/mix/status/{task_id}", "pick": "task", "timeout": 900},
     },
     {
         "name": "upscale_video",
@@ -529,27 +593,28 @@ SYSTEM_PROMPT = """你是这部漫剧的**总控导演 AI**，有权直接操作
 - 先查后做：不确定项目状态时，先用 get_status / get_progress / get_qc_summary 等只读工具看一眼，
   再决定动什么。只读工具不花钱不烧卡，多用没关系。
 - 一次决策里可以并行调用多个**互不依赖**的只读工具。
-- 昂贵动作（produce_episode / retry_shot / retry_shot_video / generate_tts / mix_audio /
-  upscale_video / export_project）单轮有次数上限，超了会被系统拒绝。
+- 昂贵动作（produce_episode / retry_shot / retry_shot_video / upscale_video / export_project）
+  单轮有次数上限，超了会被系统拒绝。
   **不要为了「保险」重复调用同一个昂贵动作**——完全相同的参数在冷却期内会被直接复用缓存结果。
 - 工具返回 success:false 时，先读 error 判断原因（环境没配好 / 依赖产物不存在 / 参数非法），
   能修的自己修（比如先补跑「配音先行」、补齐角色参考音色，再生成视频），修不了就如实告诉用户卡在哪、缺什么。
-- 配音(generate_tts) / 超分(upscale_video) 是**异步长任务**（`mix_audio` 同为异步，
-  但**已不在自动流水线内**，仅用户明确要求手工混音时才会用到），
-  系统已自动等到任务真正结束才把结果给你。若结果里出现 `timeout: true`，
-  说明任务**仍在后台运行**：请如实汇报「正在后台合成中」+ 当前阶段与进度，
-  并让用户稍后再问，**绝对不能说成「已完成」**。
+- 超分(upscale_video) 是**异步长任务**，系统已自动等到任务真正结束才把结果给你。
+  若结果里出现 `timeout: true`，说明任务**仍在后台运行**：请如实汇报「正在后台合成中」+
+  当前阶段与进度，并让用户稍后再问，**绝对不能说成「已完成」**。
 - 绝对不要调用工具去删除任何东西；系统没有给你删除能力。
 
 【当前流水线口径（务必遵守，绝对不要提旧步骤）】
-自动流水**固定 8 步、顺序不可改动**，与后端 `pipeline.STEP_SEQUENCE` 逐位一致：
+自动流水**固定 7 步、顺序不可改动**，与后端 `pipeline.STEP_SEQUENCE` 逐位一致：
 1. script 剧本生成 → 2. tts_pre 配音先行（为**每个角色**生成一段参考音色）→
-3. assets 资产（角色/物品/场景）→ 4. storyboard 分镜图 → 5. keyframe 尾帧（关键帧驱动，可选）→
-6. video 视频生成 → 7. upscale 超分（FlashVSR，fail-open）→ 8. final 成片合成。
-⚠️ 已下线的旧步骤：`tts`（配音合成）与 `mix`（音画对齐混音）**已不在流水线内**。
-   描述「后续步骤」时**绝对不要**再说「配音 → 混音」——这是过时口径。
+3. assets 资产（角色/物品/场景）→ 4. storyboard 分镜图 →
+5. video 视频生成（整集一次生成）→ 6. upscale 超分（FlashVSR，fail-open）→ 7. final 成片合成。
+⚠️ 已下线的旧步骤：`tts`（配音合成）、`mix`（音画对齐混音）、`keyframe`（尾帧）**均不在流水线内**。
+   描述「后续步骤」时**绝对不要**再说「配音 → 混音」——这是过时口径；尾帧的手动生成入口
+   仍在（前端分镜操作里），但自动流水线不再包含尾帧步骤。
 H3 视频自带原生音轨（生成时已注入角色参考音色），**成片即带配音**，
    不存在「口型」「混音合成」环节；被问到声音时按这个口径回答。
+两段式生产（2026-10-04）：前端剧集列表支持「文学剧本 → 人工审核 → 改写分镜表 → 按场次
+   生成/单场重做」；被问到剧本审改、单场重做时指引用户去工作台剧集列表操作。
 
 汇报风格：简短、说人话、讲结果，不复述工具返回的原始 JSON。
 
@@ -598,7 +663,13 @@ H3 视频自带原生音轨（生成时已注入角色参考音色），**成片
   并说明可能原因；**绝不允许**拿其他项目的数据来汇报。
 - get_status 返回 `other_project_running: true` 表示**别的项目**正在生产，与本项目无关：
   不要把它当成本项目的进度、小说或报错来汇报（这正是「我新建项目、总控却谈旧项目」的成因）。
-- 用户说「这个项目」「我的项目」时，指的就是会话绑定的项目，不要反问是哪个。"""
+- 用户说「这个项目」「我的项目」时，指的就是会话绑定的项目，不要反问是哪个。
+- 生产失败要**主动大声提醒**，不许静默跳过（2026-10-08 用户报的真实坑）：
+  get_status 里若 `failure_pause` 非空（或 `needs_user` 为真 / exceptions > 0），
+  说明某集生产失败已被系统自动暂停（stop_on_failure）—— 你**必须**在回复开头
+  醒目标注「⚠ 第N集生产失败，任务已自动暂停」并说明失败原因，再给用户
+  「查看/重跑/跳过」的处理建议。绝不能只汇报「当前空闲/正在做别的集」而把
+  失败的集悄悄带过 —— 用户无法感知失败，这是被点名的缺陷。"""
 
 
 # ===================== 内部调用 =====================
@@ -810,7 +881,9 @@ def execute_tool(name: str, args: dict, ctx: dict, stats: dict, job_id: str = ""
             res["elapsed_sec"] = round(time.time() - t0, 1)
 
     if res.get("ok") and tool["risk"] != "safe":
-        _COOLDOWN[key] = (now, res)
+        # 第 3 位记归属项目键（purge_project 按它摘除）；读取侧只取 [0]/[1]，
+        # 旧形状 2 元组由 purge 侧 len(v) > 2 守卫兼容，TTL 120s 内自然淘汰。
+        _COOLDOWN[key] = (now, res, _p(ctx.get("project")))
     _audit(ctx.get("project", ""), job_id, name, args or {}, res)
     return res
 
@@ -1127,3 +1200,57 @@ def cleanup_jobs():
     with _LOCK:
         for jid in [k for k, v in _JOBS.items() if now - v.get("updated", now) > JOB_TTL_SEC]:
             _JOBS.pop(jid, None)
+
+
+def purge_project(names: list) -> dict:
+    """项目删除时摘除总控内核里按项目键组织的**进程内运行态**（关联清理钩子）。
+
+    agent_core 自身**不持久化**按项目隔离的对话：总控对话（用户消息 / 最终回复）
+    都写进 ai_chat 的 chat_history.json 项目桶与 archive 归档（由 ai_chat.purge_project
+    摘除，见 project_store.delete_project）。本模块只剩三份**进程内**状态按项目键组织：
+
+      1. _JOBS     —— 任务表（steps / 最终回复），TTL 1 小时；不摘的话同名重建后
+                      /api/agent/job/<id> 仍能读到旧项目任务（含旧回复）。
+      2. _BUSY     —— 单项目互斥占位（start_job 的 proj_key）；旧项目任务若在删除时
+                      仍在跑，不摘会让同名重建的项目拿到「该项目已有一个 AI 任务在执行」。
+      3. _COOLDOWN —— 同参数冷却缓存（键 md5 内嵌项目键，见 execute_tool）；
+                      不摘的话同名重建后 120s 冷却窗口内同参数工具会直接复用
+                      **旧项目**的执行结果。
+
+    ``names`` 是项目的别名并集（dir_key / 显示名 / 各侧目录键变体，来自
+    project_store._project_alias_names）；匹配时对每个别名再取 canonical
+    （与 ai_chat.project_key 同规则，惰性导入失败则退回原样名，只降级不阻断）。
+    审计流水 output/agent/audit-<date>.jsonl 是**跨项目**审计记录（条目内嵌 project
+    字段，仅 /api/agent/log 运维视图读取，不进对话面板），**保留不删**。
+    本函数永不抛错（关联簿记语义：失败不阻断项目删除），返回摘除统计供汇总。
+    """
+    alias: set = set()
+    for n in (names or []):
+        n = str(n or "").strip()
+        if not n:
+            continue
+        alias.add(n)
+        try:
+            import ai_chat  # 惰性导入：与 _settings_keys_hint 同风格，避免顶层耦合
+            alias.add(ai_chat.canonical_project_key(n))
+        except Exception:  # noqa: BLE001 - 规则库不可用就按原样名匹配（降级，不阻断）
+            pass
+    if not alias:
+        return {"jobs_removed": 0, "busy_cleared": 0, "cooldown_cleared": 0,
+                "names": []}
+
+    with _LOCK:
+        jobs_removed = 0
+        for jid in [jid for jid, j in _JOBS.items()
+                    if str(j.get("project") or "").strip() in alias]:
+            _JOBS.pop(jid, None)
+            jobs_removed += 1
+        busy_cleared = len(_BUSY & alias)
+        _BUSY.difference_update(alias)
+        cooldown_cleared = 0
+        for k in [k for k, v in _COOLDOWN.items()
+                  if len(v) > 2 and str(v[2] or "").strip() in alias]:
+            _COOLDOWN.pop(k, None)
+            cooldown_cleared += 1
+    return {"jobs_removed": jobs_removed, "busy_cleared": busy_cleared,
+            "cooldown_cleared": cooldown_cleared, "names": sorted(alias)}

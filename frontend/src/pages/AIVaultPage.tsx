@@ -5,6 +5,7 @@ import { Badge, Button, Card, ConfirmDialog, Input, Select, Skeleton } from '@/c
 import { AlertTriangle, Brain, CheckCircle2, Eye, EyeOff, Network, Pencil, RefreshCw, Search, X } from '@/components/ui/icons';
 import type { IconProps } from '@/components/ui/icons';
 import type { AIConfigModule, AIConfigResponse, AITestResult, AIFallbackModel } from '@/types';
+import { PromptManagerTab } from '@/components/PromptManagerTab';
 
 type ModuleKey = 'text' | 'qc' | 'chat';
 
@@ -809,7 +810,7 @@ export function AIVaultPage() {
                               {fb.label || `备用${i + 1}`}
                               <span className="ml-2 text-ink-3">{fb.model}</span>
                             </div>
-                            <div className="font-mono text-[11px] text-ink-3 truncate">{fb.base_url}</div>
+                            <div className="font-mono text-xs text-ink-3 truncate">{fb.base_url}</div>
                           </div>
                           {/*
                            * 「未填密钥」只在**确实没有任何密钥**时显示。
@@ -819,14 +820,14 @@ export function AIVaultPage() {
                            * 现在三种来源任一存在即视为已填：已保存标记 / 已保存脱敏值 / 草稿明文。
                            */}
                           {!(fb.has_api_key || fb.api_key_masked || (fb.api_key && fb.api_key.trim())) && (
-                            <span className="text-[11px] text-warning-strong shrink-0">{t('vault.fallbackNoKey')}</span>
+                            <span className="text-xs text-warning-strong shrink-0">{t('vault.fallbackNoKey')}</span>
                           )}
                           {/* 测试连接：与主模型同款能力。密钥不回前端，只传索引由后端取。 */}
                           <button
                             type="button"
                             onClick={() => handleTestFallback(moduleKey, i)}
                             disabled={fbTesting === `${moduleKey}#${i}`}
-                            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-[11px] text-ink-2 hover:text-brand hover:border-brand transition-colors disabled:opacity-40"
+                            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-xs text-ink-2 hover:text-brand hover:border-brand transition-colors disabled:opacity-40"
                             title={t('vault.fallbackTest')}
                           >
                             <RefreshCw className={`h-3 w-3 ${fbTesting === `${moduleKey}#${i}` ? 'animate-spin' : ''}`} />
@@ -835,7 +836,7 @@ export function AIVaultPage() {
                           <button
                             type="button"
                             onClick={() => openFbEditor(moduleKey, i)}
-                            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-[11px] text-ink-2 hover:text-brand hover:border-brand transition-colors"
+                            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-xs text-ink-2 hover:text-brand hover:border-brand transition-colors"
                             title={t('vault.fallbackEdit')}
                           >
                             <Pencil className="h-3 w-3" />
@@ -855,7 +856,7 @@ export function AIVaultPage() {
                               // 删完立刻落盘，不用再点下面的「保存配置」
                               persistFallbacks(moduleKey, next, t('vault.fallbackDeleted'));
                             }}
-                            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-[11px] text-ink-2 hover:text-danger hover:border-danger transition-colors"
+                            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-xs text-ink-2 hover:text-danger hover:border-danger transition-colors"
                             title={t('vault.fallbackRemove')}
                           >
                             <X className="h-3 w-3" />
@@ -863,7 +864,7 @@ export function AIVaultPage() {
                           </button>
                         </div>
                         {fbTesting === `${moduleKey}#${i}` && (
-                          <div className="mt-1 text-[11px] text-ink-3">
+                          <div className="mt-1 text-xs text-ink-3">
                             {t('vault.fallbackTesting')}
                           </div>
                         )}
@@ -871,7 +872,7 @@ export function AIVaultPage() {
                           const r = fbResults[`${moduleKey}#${i}`]!;
                           const partial = r.success && r.verdict !== 'ok';
                           return (
-                            <div className={`mt-1 text-[11px] ${r.success ? (partial ? 'text-warning-strong' : 'text-success-strong') : 'text-danger-strong'}`}>
+                            <div className={`mt-1 text-xs ${r.success ? (partial ? 'text-warning-strong' : 'text-success-strong') : 'text-danger-strong'}`}>
                               {r.success
                                 ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: fb.label || `备用${i + 1}` }))
                                 : `${t('vault.fallbackTestFail')}：${String(r.error || '').slice(0, 180)}`}
@@ -883,7 +884,7 @@ export function AIVaultPage() {
                   </ul>
                 )}
                 {fbDirty[moduleKey] && (
-                  <div className="mt-2 flex items-start gap-1.5 text-[11px] text-warning-strong">
+                  <div className="mt-2 flex items-start gap-1.5 text-xs text-warning-strong">
                     <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-[1px]" />
                     <span>{t('vault.fallbackSaveFailed')}</span>
                   </div>
@@ -1005,6 +1006,11 @@ export function AIVaultPage() {
           );
         })}
       </div>
+
+      {/* ===== 提示词模板管理（借鉴 Moha 的提示词管理布局）=====
+          出厂默认 + 用户覆盖两级（见 app/prompt_templates.py）；保存/恢复立即对后续生成生效。
+          AI 配置页是单页卡片流（非分 Tab），这里按「卡片区块」内嵌，改动最小且入口直觉。 */}
+      <PromptManagerTab />
 
       {/* Info Card */}
       <Card title={t('vault.infoTitle')} bodyClassName="p-4">

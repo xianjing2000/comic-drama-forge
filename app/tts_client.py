@@ -25,14 +25,14 @@ import shutil
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
 
 from config import COMFYUI_URL, MODELS_DIR, PROJECT_ROOT_DIR, TTS_DEFAULT_PARAMS, KEEP_MODEL_LOADED
 from dialogue_utils import (
-    normalize_lines as _norm_dlg_lines, dialogue_text as _dlg_text,
-    dialogue_speaker as _dlg_speaker,
+    normalize_lines as _norm_dlg_lines,
     format_line as _dlg_line, has_dialogue as _has_dlg,
 )
 
@@ -76,7 +76,6 @@ LANGUAGES = ["Auto", "Chinese", "English", "Japanese", "Korean", "French",
 
 _FEMALE_HINTS = ("女", "少女", "姑娘", "女子", "母", "姐", "妹", "娘", "婆婆", "妃", "后",
                  "妈", "妮", "姬", "丫鬟", "圣女", "仙姑", "丫头")
-_ELDER_HINTS = ("老", "苍老", "沧桑", "古稀", "岁月", "长辈", "长老", "爷爷", "老翁", "师尊")
 
 
 class TTSError(Exception):
@@ -85,6 +84,75 @@ class TTSError(Exception):
 
 # ===================== 基础工具 =====================
 
+def _http_error_message(code: int, url: str, body: str, reason: str = "") -> str:
+    """把 ComfyUI 的 HTTP 错误响应翻译成用户可读的中文提示（R5a）。
+
+    背景：ComfyUI 在「工作流校验失败 / 节点参数错误」时返回 **HTTP 400**，响应体是
+    形如 ``{"error": {...}, "node_errors": {"12": {"errors": [{"message": "..."}]}}}``
+    的 JSON。此前 ``_http_json`` 不捕获 ``urllib.error.HTTPError`` → 用户试听时只看到
+    urllib 的 ``HTTP Error 400: Bad Request``，完全不知道哪个节点、哪里错（报错不可读）。
+
+    这里优先从响应体抽取「节点级 message」，其次 ``error`` / ``error.message``，
+    最后回落 ``HTTP <code> <reason>（<url>）``。任何解析异常都吞掉，绝不让「报错翻译」
+    本身再抛异常。
+
+    Args:
+        code: HTTP 状态码。
+        url: 请求 URL（回落信息里带上，便于定位）。
+        body: 已解码的响应体文本（可能为空）。
+        reason: HTTPError 的 reason phrase（如 "Bad Request"），可空。
+
+    Returns:
+        面向用户的单行可读提示。
+    """
+    parsed = None
+    if body:
+        try:
+            parsed = json.loads(body)
+        except Exception:  # noqa: BLE001  响应体不是 JSON → 走回落
+            parsed = None
+
+    detail = ""
+    if isinstance(parsed, dict):
+        # 1) node_errors：最有用 —— 指出「哪个节点、缺什么 / 参数错」
+        node_errors = parsed.get("node_errors")
+        if isinstance(node_errors, dict) and node_errors:
+            parts = []
+            for nid, info in node_errors.items():
+                msgs = []
+                if isinstance(info, dict):
+                    errs = info.get("errors")
+                    if isinstance(errs, list):
+                        for one in errs:
+                            if isinstance(one, dict):
+                                m = str(one.get("message") or one.get("details") or "").strip()
+                                if m:
+                                    msgs.append(m)
+                            elif one:
+                                msgs.append(str(one))
+                    if not msgs:
+                        cls = str(info.get("class_type") or "").strip()
+                        if cls:
+                            msgs.append(f"节点类型 {cls}")
+                if msgs:
+                    parts.append(f"节点 {nid}：" + "；".join(msgs))
+            if parts:
+                detail = "；".join(parts)
+        # 2) error / error.message（部分接口把原因放在顶层 error）
+        if not detail:
+            err = parsed.get("error")
+            if isinstance(err, dict):
+                detail = str(err.get("message") or err.get("type") or "").strip()
+            elif err:
+                detail = str(err).strip()
+
+    if detail:
+        return f"ComfyUI 请求被拒绝（HTTP {code}）：{detail}"
+    # 无可用响应体信息：回落「HTTP <code> <reason>（<url>）」
+    head = f"HTTP {code}" + (f" {reason}" if reason else "")
+    return f"ComfyUI 请求失败（{head}）（{url}）"
+
+
 def _http_json(url: str, payload: Optional[dict] = None, timeout: int = 60):
     if payload is None:
         req = urllib.request.Request(url)
@@ -92,8 +160,20 @@ def _http_json(url: str, payload: Optional[dict] = None, timeout: int = 60):
         req = urllib.request.Request(
             url, data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        # R5a：ComfyUI 校验失败返回 400 + JSON（含 node_errors / error）。此前
+        # urllib 直接抛 HTTPError（用户只看到 "HTTP Error 400: Bad Request"），
+        # 且 `_submit` 里随后的 node_errors 解析永远跑不到（异常先抛了）。
+        # 这里先读出响应体、翻译成可读 TTSError，让试听页能显示真实原因。
+        try:
+            body = e.read().decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001  读响应体失败也要给出可读信息
+            body = ""
+        raise TTSError(_http_error_message(e.code, url, body,
+                                           getattr(e, "reason", "") or ""))
 
 
 def _http_bytes(url: str, timeout: int = 300) -> bytes:
@@ -199,10 +279,6 @@ def guess_gender(text: str) -> str:
     if any(k in s for k in _FEMALE_HINTS):
         return "female"
     return "male"
-
-
-def is_elder(text: str) -> bool:
-    return any(k in str(text or "") for k in _ELDER_HINTS)
 
 
 # ===================== 环境自检 =====================
@@ -524,49 +600,11 @@ def clean_line_text(text, character="") -> str:
     return s.strip()
 
 
-SELF_REF_MARKERS = ("吾乃", "吾是", "老夫", "在下", "本座", "余乃", "我叫", "我是", "某乃")
-
-
 def _first_present(*vals) -> str:
     for v in vals:
         if isinstance(v, str) and v.strip():
             return v.strip()
     return ""
-
-
-def parse_dialogue(raw) -> Tuple[str, str]:
-    """兼容台词多种写法，返回 (说话人, 台词文本)
-
-    内部委托 dialogue_utils，保证与剧本/分镜生成阶段的结构定义完全一致：
-    - 结构化 [{"speaker","text"}] / {"speaker","text"}：原样读取；
-    - dict 兼容 character/role/line/content 等别名；
-    - 旧纯字符串：说话人为空（由上层按角色表推断）。
-    """
-    return _dlg_speaker(raw), _dlg_text(raw)
-
-
-def infer_character(text: str, characters: List[dict]) -> str:
-    """台词未标注说话人时按文本推断（角色全名 / 名字片段 / 自称句式）"""
-    if not text:
-        return ""
-    best, best_score, best_len = "", 0, 0
-    for ch in characters or []:
-        name = _first_present(ch.get("name") if isinstance(ch, dict) else str(ch))
-        if not name:
-            continue
-        score = 0
-        if name in text:
-            score = 3
-        else:
-            tokens = [t for t in name.replace("·", " ").replace("・", " ").split() if t]
-            for t in tokens:
-                if len(t) >= 2 and t in text:
-                    score = max(score, 2)
-                elif len(t) == 1 and t in text and any(m in text for m in SELF_REF_MARKERS):
-                    score = max(score, 2)
-        if score > best_score or (score == best_score and score and len(name) > best_len):
-            best, best_score, best_len = name, score, len(name)
-    return best
 
 
 def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
@@ -590,7 +628,7 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
     vmap.setdefault("characters", {})
     vmap.setdefault("lines", {})
 
-    # ---- 参考音频克隆（2026-10-06）----
+    # ---- 参考音频克隆（voice_bank）----
     # 某角色在 voice_bank 里登记过参考音频 → 其音色自动切 clone 模式（除非 voice_map
     # 里**显式**指定了其它模式，显式优先）。dub_dir 由 out_dir_wav 反推（parent），
     # 这样不用改 build_dub_plan 的签名（4 处调用方零改动）。
@@ -675,8 +713,19 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
             emotion = str(shot.get("emotion") or "").strip()
             if emotion and _emotion_aware() and not _is_neutral_emotion(emotion):
                 desc = _char_desc.get(char_name) or ""
-                voice = dict(voice, mode="design",
-                             instruct=_emotion_instruct(emotion, desc))
+                _instr = _emotion_instruct(emotion, desc)
+                # ⚠️⭐ 2026-10-08 修复（用户实测「音色不对」）：**有角色参考音色时
+                #     必须保持 clone**，情绪只写进 instruct —— 本节点
+                #     （FB_Qwen3TTSVoiceClone）的入参表里**就有 instruct**。
+                #     旧实现在这里无条件切 design，等于把上面刚按 voice_bank 定好的
+                #     克隆音色整个丢掉，改由一段中文音色描述现「造」一个嗓音：
+                #       · 同一角色逐句音色漂移（每句的 emotion 不同 → 描述不同）；
+                #       · 与用户上传/约定的角色嗓音毫无关系。
+                #     只有「没有参考音色」的角色才退回 design。
+                if str(voice.get("mode") or "") == "clone":
+                    voice = dict(voice, mode="clone", instruct=_instr)
+                else:
+                    voice = dict(voice, mode="design", instruct=_instr)
             suffix = f"_{li + 1}" if multi else ""
             out_name = (f"ep{int(episode):02d}_shot{_sid_int:02d}{suffix}"
                         f"_{safe_name(char_name, 12)}.wav")
@@ -746,7 +795,7 @@ def load_voice_map(path: str) -> Optional[Dict]:
         return None
 
 
-# ===================== 参考音频音色库（voice_bank，2026-10-06） =====================
+# ===================== 参考音频音色库（voice_bank） =====================
 # 每个角色可以挂一段参考音频（+ 该音频里说的话）作为克隆源。落盘结构：
 #   <dub_dir>/voice_bank/<角色安全名>/ref.<ext>   ← 参考音频本体（用户上传的）
 #   <dub_dir>/voice_bank/<角色安全名>/ref.json    ← {ref_text, original_filename, ...}
@@ -918,6 +967,14 @@ class QwenTTSClient:
             logger.warning(f"QwenTTS 模型卸载请求失败（不影响结果，仅显存未释放）：{e}")
 
     def _submit(self, prompt: Dict) -> str:
+        # 提交前「模型名对齐」：与 comfyui_client.queue_prompt 同一收口（见 comfyui_models
+        # 模块文末「运行时模型名对齐」）。TTS 工作流同样含模型文件型控件，写死的名字换机器
+        # 就会失效 → 这里按本机 object_info 对齐（拉不到就跳过，绝不阻断配音）。
+        try:
+            import comfyui_models
+            comfyui_models.align_prompt_models(prompt, base_url=self.comfyui_url, tag="TTS")
+        except Exception as _ma_err:  # noqa: BLE001
+            logger.warning("TTS 模型名对齐失败（按原样提交）：%s", _ma_err)
         r = _http_json(f"{self.comfyui_url}/prompt",
                        {"prompt": prompt, "client_id": f"dub-{int(time.time())}"})
         if not r.get("prompt_id"):
@@ -1010,7 +1067,12 @@ class QwenTTSClient:
             # 参考音频克隆：FB_Qwen3TTSVoiceClone 用 ref_audio（+可选 ref_text）驱动音色。
             # ⚠️ ref_node 缺失时**绝不**静默退回 CustomVoice —— 那会得到一个与用户
             # 上传音频毫无关系的预置音色，且日志上看不出来。调用方负责先兜底。
-            inputs = dict(common, text=text,
+            # ⚠️⭐ 2026-10-08 修复（用户实测「音色不对 / 克隆跑不通」）：本节点
+            #    的必填入参名是 **target_text**，不是 text —— 传 text 会直接被
+            #    ComfyUI 判为 required_input_missing: target_text，克隆整条挂掉
+            #    （实测报错见 2026-10-08 日志）。这也是 voice_bank 里 8 段角色参考
+            #    音色一直没被用上、只能退回预置 speaker 的根因。
+            inputs = dict(common, target_text=text,
                           instruct=str(voice.get("instruct") or ""),
                           x_vector_only=False)
             if ref_node:

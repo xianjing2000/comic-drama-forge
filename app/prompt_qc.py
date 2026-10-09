@@ -73,46 +73,17 @@ DEFAULT_MODE = "repair"
 # --------------------------------------------------------------------------- #
 # 分镜图提示词：骨架标记（与 build_storyboard_prompt 一一对应）
 # --------------------------------------------------------------------------- #
-# ⚠️ 2026-09-25：图片链路切到 QwenImage2.1 后，提示词协议从中文分节（【取景】…）
-# 改为官方 Prompt Rewriter 的英文 <imageN> 协议（TASK / PRIMARY CANVAS / IDENTITY /
-# REFERENCE ROLES / PRESERVE，见 comfyui_client.build_storyboard_prompt 的 docstring）。
-# 本层的判据必须与生成端**同源**，否则会出现「生成端一个标准、质检端另一个标准」的
-# 历史坑（景别判定曾因两端标准不同，把 43% 的镜头误判为不合格）。
-SB_MARK_TASK = "TASK:"
-#: 景别硬约束（旧版标记，保留兼容存量数据：2026-09-25 之前生成的提示词里是中文）
-SB_MARK_FRAMING_LEGACY = "景别（必须严格遵守）"
-SB_MARK_FRAMING_NEW = "FRAMING (must be strictly followed)"
-#: 景别**未指定**时的显式声明（camera 只给了机位/运镜）
-#: ⚠️ 此时提示词里不含任何景别词，若仍按「必须有 FRAMING 硬约束」判，会整批假红。
-SB_MARK_FRAMING_UNSPEC = "FRAMING (not specified"
-#: 画面内容段（新旧两种写法）
-SB_MARK_CONTENT = "SCENE AND ACTION:"
-SB_MARK_CONTENT_LEGACY = "【画面内容】"
-#: 参考图职责段（官方协议要求每张图有唯一职责）
-SB_MARK_REF_USAGE = "REFERENCE ROLES:"
-SB_MARK_REF_USAGE_LEGACY = "参考图用途"
-#: 画布/身份锚点段
-SB_MARK_CANVAS = "PRIMARY CANVAS:"
-SB_MARK_IDENTITY = "IDENTITY:"
-#: 3D 导演台「构图基准图」段（2026-09-27）：带了站位基准图就必须声明它的职责，
-#: 否则模型会把人偶当成身份基准（复刻灰彩色身体/无面头部）。
-SB_MARK_BLOCKING = "COMPOSITION BASELINE:"
-#: 保留子句（官方 Preservation Clause）
-SB_MARK_PRESERVE = "PRESERVE:"
-SB_MARK_PRESERVE_LEGACY = "【禁令】"
-#: 保留子句的 blanket 写法（官方推荐，避免逐项罗列反复触发生成）
-SB_PRESERVE_BLANKET = "Keep all untargeted content unchanged"
-#: 风格段（新旧两种写法）
-SB_MARK_STYLE = "STYLE:"
-SB_MARK_STYLE_LEGACY = "【风格】"
-#: 无参考图时的显式声明
-SB_MARK_NO_REF = "No reference image is provided for this shot"
-SB_MARK_NO_REF_LEGACY = "本镜无参考图"
-#: 身份必须指向参考图（官方要点：不要用文字重述五官）
-SB_MARK_IDENTITY_FROM_REF = "Preserve the exact identity from"
-#: 无文字禁令（新旧两种措辞）
-SB_MARK_NO_TEXT = "must not contain any text"
-SB_MARK_NO_TEXT_LEGACY = "不得出现任何文字、字幕、台词文本、水印"
+# ⚠️ 标记串已下沉到叶子模块 prompt_protocol（2026-10-08 解耦）：prompt_enhance 此前只为
+#    几个标记就模块级 import 本模块，与本模块内部的惰性 import 构成静态环。这里保留
+#    同名再导出，app.py 等历史调用点与守卫脚本零改动；「判据与生成端同源」这条铁律不变。
+from prompt_protocol import (  # noqa: F401
+    SB_MARK_BLOCKING, SB_MARK_CANVAS, SB_MARK_CONTENT, SB_MARK_CONTENT_LEGACY,
+    SB_MARK_FRAMING_LEGACY, SB_MARK_FRAMING_NEW, SB_MARK_FRAMING_UNSPEC, SB_MARK_IDENTITY,
+    SB_MARK_IDENTITY_FROM_REF, SB_MARK_NO_REF, SB_MARK_NO_REF_LEGACY, SB_MARK_NO_TEXT,
+    SB_MARK_GRID_ZH_LAYOUT, SB_MARK_GRID_ZH_NO_TEXT, SB_MARK_GRID_ZH_PANEL,
+    SB_MARK_NO_TEXT_LEGACY, SB_MARK_PRESERVE, SB_MARK_PRESERVE_LEGACY, SB_MARK_REF_USAGE,
+    SB_MARK_REF_USAGE_LEGACY, SB_MARK_STYLE, SB_MARK_STYLE_LEGACY, SB_MARK_TASK,
+    SB_PRESERVE_BLANKET)
 #: 参考图编号标记：官方协议的核心，提示词里**必须**用 <imageN> 而非自然语言指代
 SB_IMAGE_TAG_RE = re.compile(r"<image\s*(\d+)\s*>", re.IGNORECASE)
 #: 自然语言指代参考图（官方明确禁用，会产生歧义）
@@ -174,13 +145,22 @@ _BARE_TS_RE = re.compile(r"(?<![\d:])(\d{1,2}):(\d{2})\.(\d{3})")
 #: 匹配**说话动作句**（speaks … voice … lips moving），同时保留对历史 ``(S1): <d>…</d>``
 #: 格式的兼容（存量项目重出视频时不应被新规则误判缺陷）。
 _SPOKEN_RE = re.compile(
-    r"speaks\s*[—\-–][^.\n]{0,120}?voice"          # 新：开口说话动作（speaks — … voice）
+    r"speaks\s*[—\-–][^.\n]{0,120}?voice"          # 旧：speaks — … voice
+    # 2026-10-09 对齐生成侧（build_ref2va）实测句式 —— 精确匹配，**不放宽**：
+    #   (S1) says in a clear voice with a measured, controlled delivery, <d>…</d> …
+    # 注意只认「says in a <定语> voice」这种紧邻结构，避免把普通叙述里的 voice 也算成说话动作
+    #（上一轮我用宽正则 [^.]{0,60} 导致反向探针失效，已回滚重做）。
+    r"|\(S\d+\)\s*says?\s+in\s+a?\s*[A-Za-z][A-Za-z ,\-]{0,40}?voice"
     r"|\(S\d+\)\s*[^：:\n]{0,6}[：:]\s*(?:<d>\s*)?\[[A-Za-z\-]+\]"  # 旧：<d>台词</d> 兼容
     , re.IGNORECASE)
 #: 「开口说话」动作描述（2026-09-24 二次对齐）：模板每句台词前都有
 #: ``speaks — a clear, resonant female voice with …, at a measured declarative rate``。
 #: **没有这句就没有唇部动画**（H3 只配音、不开口，实测现象），故升级为硬检查。
-_SPEAK_ACTION_RE = re.compile(r"speaks\s*[—\-–][^.]{0,120}?voice", re.IGNORECASE)
+_SPEAK_ACTION_RE = re.compile(
+    # 2026-10-09：同时接受旧「speaks — … voice」与生成侧现行的「(S1) says in a … voice」（精确匹配）。
+    r"speaks\s*[—\-–][^.]{0,120}?voice"
+    r"|\(S\d+\)\s*says?\s+in\s+a?\s*[A-Za-z][A-Za-z ,\-]{0,40}?voice",
+    re.IGNORECASE)
 #: 「无台词」显式声明（2026-09-27 起新官方句式：no one … speaks / no voice-over；
 #: 保留对旧「No dialogue」的兼容，存量项目重出视频时不应被误判缺陷）。
 _NO_DIALOGUE_RE = re.compile(
@@ -398,6 +378,22 @@ def _new_protocol(text: str) -> bool:
     return SB_MARK_TASK in t or SB_MARK_PRESERVE in t
 
 
+def _grid_zh_protocol(text: str) -> bool:
+    """提示词是否用中文「逐格写死」九宫格范式（storyboard_grid_main，2026-10-07）。
+
+    2026-10-09 实跑暴露：它是**第三种**骨架 —— 既不含英文官方段名（TASK: / PRESERVE:），
+    也不含旧中文分节段名（【画面内容】/「景别（必须严格遵守）」）。
+    原先只分「新协议 / 存量」两支，于是它被误判成存量 → 每镜假红 2 条
+    （实跑实测：10 条教训全部栽在这上面）。
+
+    ⚠️ 不能把它并进 _new_protocol：那会让质检改用**英文段名**去要求它
+    （TASK / PRESERVE / SCENE AND ACTION…），issues 反而从 2 条涨到 7 条（已实测）。
+    故这里单列一支，只按它自己真实存在的骨架判。
+    """
+    t = text or ""
+    return (SB_MARK_GRID_ZH_LAYOUT in t) and (SB_MARK_GRID_ZH_PANEL in t)
+
+
 def _ref_tag_indices(text: str) -> List[int]:
     """提示词里出现的 <imageN> 编号（去重升序）"""
     got = sorted({int(m.group(1)) for m in SB_IMAGE_TAG_RE.finditer(text or "")})
@@ -417,8 +413,18 @@ def _check_storyboard(prompt: str, ctx, style, ref_count: Optional[int] = None,
         fatal.append("镜头缺少画面描述（description / visual_detail / storyboard_prompt_zh 均为空）")
 
     new_proto = _new_protocol(prompt)
+    grid_zh = _grid_zh_protocol(prompt)
 
-    if new_proto:
+    if grid_zh:
+        # ---------- 中文「逐格写死」九宫格范式（storyboard_grid_main）----------
+        # 2026-10-09：第三支骨架。只按它**真实存在**的结构判，不套英文段名、也不套 legacy 段名。
+        if SB_MARK_GRID_ZH_PANEL not in prompt:
+            issues.append("九宫格逐格版缺少「分镜N（景别，色调）：」逐格清单：9 格无从区分，易整片雷同")
+        if "分镜9（" not in prompt:
+            issues.append("九宫格逐格版不足 9 格：3×3 布局与左下角数字标注会断档")
+        if "格间差异" not in prompt:
+            issues.append("九宫格逐格版缺少「格间差异」硬约束：模型倾向复刻同一构图")
+    elif new_proto:
         # ---------- Qwen-Image-2.1 官方 <imageN> 协议 ----------
         if not _has_section(prompt, SB_MARK_PRESERVE) \
                 and SB_MARK_PRESERVE_LEGACY not in prompt:
@@ -493,7 +499,15 @@ def _check_storyboard(prompt: str, ctx, style, ref_count: Optional[int] = None,
         if SB_MARK_STYLE_LEGACY not in prompt and not style_declared(prompt, style):
             issues.append("未声明画面风格：画风会漂移到参考图或模型默认风格")
 
-    if not _has_any(prompt, SB_MARK_NO_TEXT, SB_MARK_NO_TEXT_LEGACY):
+    # 2026-10-09：中文逐格版的防文字措辞有两种形态 ——
+    #   · 有台词 → 注入「严禁出现任何台词文字或字幕」；
+    #   · 无台词 → 注入「均不出现开口说话的口型」（此时本就不会画字，**不该**再要求防文字句）。
+    # 逐格版按 grid_zh 单独判，避免对无台词镜假红。
+    if grid_zh:
+        if not _has_any(prompt, SB_MARK_NO_TEXT, SB_MARK_NO_TEXT_LEGACY,
+                        SB_MARK_GRID_ZH_NO_TEXT, "不出现开口说话的口型"):
+            issues.append("缺少「不得出现文字/字幕/水印」约束：生成图易带字幕或水印")
+    elif not _has_any(prompt, SB_MARK_NO_TEXT, SB_MARK_NO_TEXT_LEGACY):
         issues.append("缺少「不得出现文字/字幕/水印」约束：生成图易带字幕或水印")
 
     # 台词被写进画面提示词 —— 模型会把台词当字幕画出来（硬缺陷，可自愈）
@@ -812,7 +826,9 @@ def _repair_asset(prompt: str, ctx, style) -> Tuple[str, List[str]]:
             repairs.append("移除质量类空词")
     out = _tidy(out)
     # with_style 内部先 _collapse_style（自愈双写）再按标记判幂等 → 一次同时修「缺失」与「双写」
-    new = style_kit.with_style(out, style)
+    # ⚠️ 资产参考图走 with_reference_style（2026-10-07）：剥离色调/光影 token 并补颜色保真条款，
+    #    否则自愈会把「色调灰蓝压抑」重新写回角色三视图 → 皮肤染蓝。
+    new = style_kit.with_reference_style(out, style)
     if new and new != out:
         out = new
         repairs.append("规范化风格声明（补齐缺失 / 合并重复）")

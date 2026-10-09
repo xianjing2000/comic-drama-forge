@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from pathlib import Path
+
+# 提示词模板中心（2026-10-07 外置改造）：GENERATE_INSTRUCTIONS 的生效值从这里加载。
+import prompt_templates
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +31,17 @@ def screenplays_root() -> str:
 
 
 def _safe_project_key(project_key: str) -> str:
-    """项目键白名单化（中文/字母/数字/_/-），防路径穿越。"""
-    key = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_-]", "_", str(project_key or "default").strip())
-    return (key.strip("._") or "default")[:60]
+    """项目键清洗（防路径穿越）。
+
+    2026-10-05 统一：与分镜剧本侧同一清洗规则，防止 screenplays/ 与 scripts/ 目录键分叉
+    ——旧实现是「白名单替换 + 截 60 字符」，而 scripts/ 侧（novel_to_script.safe_project_name）
+    是「替换 \\/:*?\"<>| 与空白 + 截 40 字符」，两套规则对超长或含特殊字符的项目键会推导出
+    两个不同目录。现直接委托 safe_project_name，两侧目录键恒一致；路径穿越防护不变
+    （反斜杠/正斜杠/冒号均被替换，screenplay_path 仍有 commonpath 包含校验兜底）。
+    函数内延迟导入：novel_to_script 为下游重模块，避免加载顺序/循环导入耦合。
+    """
+    from novel_to_script import safe_project_name
+    return safe_project_name(project_key)
 
 
 def screenplay_path(project_key: str, episode_no: int) -> str:
@@ -44,7 +54,10 @@ def screenplay_path(project_key: str, episode_no: int) -> str:
     return p
 
 
-GENERATE_INSTRUCTIONS = (
+# 2026-10-07 提示词外置（app/prompts/screenplay_generate.txt）：常量改名保留为**代码内兜底**；
+# 实际生效值在常量定义之后由 prompt_templates.load("screenplay_generate") 加载。
+# 已核实本常量无任何运行时改写（全文件仅此一处赋值，消费点仅 generate_screenplay）。
+_DEFAULT_GENERATE_INSTRUCTIONS = (
     "你是资深短剧/漫剧编剧。请把用户给出的小说章节正文，改编成「可拍摄的文学剧本」"
     "（供制片人/导演人审，后续再由另一个模型改写成机器分镜表）。硬性要求：\n"
     "一、先输出简短分析（共 4 小节，每节 2-4 条）：\n"
@@ -64,6 +77,12 @@ GENERATE_INSTRUCTIONS = (
     "  6. 场次划分按时空转换自然切分，每场 3-12 个 △ 行；\n"
     "  7. 直接输出 Markdown（用 ## 做大标题、### 做场次标题），不要解释你做了什么。"
 )
+
+# 2026-10-07 提示词外置：实际生效 = app/prompts/screenplay_generate.txt（可被
+# PROJECT_DATA_DIR/prompt_overrides/screenplay_generate.txt 覆盖）；任一级读失败回落
+# 上方 _DEFAULT_GENERATE_INSTRUCTIONS，行为与外置前逐字一致（load 已剥离模板头注释）。
+GENERATE_INSTRUCTIONS = prompt_templates.load("screenplay_generate") or _DEFAULT_GENERATE_INSTRUCTIONS
+prompt_templates.register_fallback("screenplay_generate", _DEFAULT_GENERATE_INSTRUCTIONS)
 
 
 def generate_screenplay(client, book_title: str, chapter_title: str,

@@ -401,8 +401,8 @@ def build_te_workflow(input_video: str, filename_prefix: str, scale: int = 2,
         },
     }
 
-    # 音轨旁路：仅在显式要求且源视频确实带音轨时接入（成片统一交由 QwenTTS 配音，
-    # 且 H3 成片本身无声，接空音频链会导致执行报错，故默认不接）
+    # 音轨旁路：H3 成片自带原生音轨（成片即带配音）：默认 attach_audio=True，
+    # has_audio 时保留音轨；仅当显式传 attach_audio=false 或源片实测无音轨时才不接
     if attach_audio and has_audio:
         _wf["5"]["inputs"]["audio"] = ["1", 2]
     return _wf
@@ -575,7 +575,7 @@ class VideoUpscaler:
                 mode=mode or TE_UPSCALE_DEFAULT_PARAMS["mode"],
                 frame_rate=src["fps"] or 24.0,
                 has_audio=src["has_audio"],
-                attach_audio=bool(overrides.get("attach_audio", False)),
+                attach_audio=bool(overrides.get("attach_audio", True)),
                 **{k: v for k, v in overrides.items() if k != "attach_audio"},
             )
         else:

@@ -169,75 +169,9 @@ class CharacterManager:
         char = self.data['characters'][char_id]
         return [v for v in char['views'].values() if v]
 
-    def get_characters_by_role(self, role: str) -> dict:
-        """按角色类型筛选"""
-        return {
-            cid: c for cid, c in self.data['characters'].items()
-            if c['role'] == role
-        }
 
     def get_all_characters(self) -> dict:
         """获取所有角色"""
         return self.data['characters']
 
-    def export_for_generation(self, char_id: str) -> dict:
-        """导出角色生成所需的所有数据"""
-        if char_id not in self.data['characters']:
-            return {}
 
-        char = self.data['characters'][char_id]
-        return {
-            "id": char_id,
-            "name": char['name'],
-            "prompt": self.get_character_prompt(char_id),
-            "references": self.get_character_reference_urls(char_id),
-            "status": char['status']
-        }
-
-
-class CharacterConsistencyEngine:
-    """角色一致性引擎 - 确保跨镜头角色一致性
-
-    核心策略:
-    1. 参考图约束: 使用角色定妆照作为参考
-    2. 提示词锁定: 固定角色描述词
-    3. 种子复用: 关键镜头使用相同seed
-    4. 人脸一致性: 可选的人脸识别匹配
-    """
-
-    def __init__(self, character_manager: CharacterManager):
-        self.char_mgr = character_manager
-        self.consistency_history = {}
-
-    def get_consistency_prompt(self, char_id: str, view_type: str = VIEW_FRONTSIDE) -> str:
-        """获取带一致性约束的提示词"""
-        base_prompt = self.char_mgr.get_character_prompt(char_id)
-
-        # 添加一致性提示词后缀
-        consistency_suffix = (
-            f", consistent character design, "
-            f"same facial features, "
-            f"reference image: {view_type}"
-        )
-
-        return f"{base_prompt}{consistency_suffix}"
-
-    def calculate_similarity(self, img1: str, img2: str) -> float:
-        """计算两张图片的相似度 (简化版: 实际应使用CLIP或其他模型)"""
-        # TODO: 集成实际的图像相似度计算
-        return 0.85  # 默认高相似度
-
-    def should_use_reference(self, current_shot: dict, prev_shots: list) -> bool:
-        """判断当前镜头是否应使用角色参考图"""
-        # 如果前一个镜头有角色，且相似度低于阈值，使用参考
-        if prev_shots:
-            prev_char = prev_shots[-1].get('character_id')
-            curr_char = current_shot.get('character_id')
-            if prev_char == curr_char:
-                return True
-        return False
-
-    def get_seed_strategy(self, char_id: str, shot_index: int) -> int:
-        """获取种子策略"""
-        # 同一角色的关键镜头使用固定种子
-        return hash(f"{char_id}_{shot_index}") % (2**32)

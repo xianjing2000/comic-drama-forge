@@ -1,0 +1,98 @@
+%% 漫剧生成系统 · 增量架构类图（R1–R5b）
+%% 仅含本轮新增/变更的类与关系；既有类以「引用」形式出现。
+classDiagram
+    direction LR
+
+    class ComfyUIClient {
+        +_ensure_item_white_bg(prompt_zh, style, surface_text) str
+        +generate_item_base(prompt_zh, seed, style, size, filename_prefix, surface_text) List~str~
+        +generate_item_base_with_ref(prompt_zh, ref_image_path, seed, style, size, filename_prefix, surface_text) List~str~
+        +_run_multiview_workflow(uploaded_image_name, prompt_zh, image_dir, seed, size, filename_prefix, wf_name) str
+        +generate_storyboard(prompt_zh, ref_images, filename_prefix, seed, timeout, size) dict
+        +_find_image_slots(api_prompt, prompt_node_id) List
+    }
+
+    class AssetGenerationWorker {
+        <<app.py 函数级 dispatch>>
+        +_item_owner_ref_image(project_name, owner) str
+        +surface_text : str
+        +owner_photo : bool
+        +fail_streak : int
+        +degraded : bool
+    }
+
+    class AssetNameMatch {
+        <<module asset_name_match.py>>
+        +normalize_asset(name, kind) str
+        +match(queried, index, kind) tuple
+        +resolve_names(raw_names, index, kind) tuple
+    }
+
+    class QCClient {
+        +_empty_config() dict
+        +load_config(config_path) dict
+        +_normalize(cfg) dict
+        +public_view(cfg) dict
+        +image_qc_ready(cfg, override) bool
+        +migrate_enabled_default(config_path) bool
+    }
+
+    class QwenTTSClient {
+        +_submit(prompt) str
+    }
+
+    class TTSHttpHelper {
+        <<module tts_client.py>>
+        +_http_json(url, payload, timeout)
+        +_http_error_message(code, url, body) str
+    }
+
+    class TTSError {
+        <<Exception>>
+    }
+
+    class AudioQCTarget {
+        <<app.py 函数>>
+        +_resolve_audio_qc_target(project, source) tuple
+        +source : "final | mix | merged | line | path | ''"
+    }
+
+    class BibleItem {
+        +name : str
+        +category : str
+        +appearance : str
+        +owner : str
+        +importance : str
+        +owner_photo : bool
+        +surface_text : str
+        +reference_prompt_zh : str
+        +reference_prompt_en : str
+    }
+
+    class WorkflowTemplate {
+        <<config.py WORKFLOW_TEMPLATE>>
+        +item_gen = "物品生成_Qwen21.json"
+        +item_ref_gen = "物品生成_参考图_Qwen21.json"
+        +storyboard_gen = "分镜生成_Qwen21.json"
+        +multiview_gen = "分镜生成_Qwen21.json"
+    }
+
+    class QCConfigFile {
+        <<qc_config.json>>
+        +enabled : bool
+        +image_enabled : bool
+        +video_enabled : bool
+        +audio_enabled : bool
+        +_qc_migrated : bool
+        +base_url : str
+        +model : str
+    }
+
+    AssetGenerationWorker --> ComfyUIClient : generate_item_base_with_ref / generate_item_base
+    AssetGenerationWorker --> AssetNameMatch : match(owner, dirs, "character")
+    AssetGenerationWorker ..> BibleItem : 读 owner_photo / surface_text / owner
+    ComfyUIClient ..> WorkflowTemplate : WORKFLOW_TEMPLATE[item_ref_gen / item_gen]
+    QCClient --> QCConfigFile : load / migrate / save
+    QwenTTSClient --> TTSHttpHelper : _http_json
+    TTSHttpHelper ..> TTSError : raise HTTPError→TTSError
+    AudioQCTarget --> QCClient : audio_qc_ready

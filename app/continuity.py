@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import datetime
 
@@ -58,9 +59,13 @@ import continuity_contract as cc_contract
 
 logger = logging.getLogger(__name__)
 
-# ===================== 常量 =====================
+# ---- 路径/JSON 小工具 + bible 读写已下沉到叶子模块 continuity_store（2026-10-08 解耦）----
+# 保留同名再导出：app.py 与守卫脚本的既有 import 零改动；需要 bible 的新代码应直接
+# from continuity_store import load_bible / save_bible（不再经过本模块）。
+from continuity_store import (  # noqa: F401
+    CONTINUITY_VERSION, _now, _path, _safe, bible_path, continuity_root, load_bible,
+    load_json, save_bible, save_json)
 
-CONTINUITY_VERSION = "continuity_v1"
 
 SYSTEM_CONTINUITY = ("你是漫剧编剧组的『连贯性总监』，精通长篇小说改编中的跨集设定一致性、时间线锚点与伏笔管理，"
                      "只输出严格合法的 JSON。")
@@ -104,28 +109,12 @@ TRANSITION_MARKERS = ["转场", "切换", "过渡", "字幕", "旁白", "画外�
 # 六类跨集一致性比对维度（D⑨）
 CROSS_CHECK_CATEGORIES = ["角色一致性", "剧情因果", "时间地点", "台词一致性", "伏笔回收", "风格统一"]
 
-REWRITE_MIN_INTERVAL = 0  # 同集重写次数上限（1 次，避免无限循环）
 MAX_REWRITE_ROUNDS = 1
 COVERAGE_MAX_ROUNDS = 1   # 原文覆盖率不足时的自动补生成轮次上限（压缩提炼后只补 1 轮，避免补出大量空镜）
 
 
-# ===================== 基础读写 =====================
-
-def _safe(name: str, limit: int = 60) -> str:
-    s = re.sub(r'[\\/:*?"<>|\s]+', "_", str(name or "").strip())
-    return s[:limit] or "novel"
-
-
-def continuity_root(continuity_dir: str, project_key: str) -> str:
-    return os.path.abspath(os.path.join(continuity_dir, _safe(project_key)))
-
-
 def _ep_dir(continuity_dir: str, project_key: str) -> str:
     return os.path.join(continuity_root(continuity_dir, project_key), "episodes")
-
-
-def _path(continuity_dir: str, project_key: str, filename: str) -> str:
-    return os.path.join(continuity_root(continuity_dir, project_key), filename)
 
 
 def shots_cache_dir(continuity_dir: str, project_key: str, episode_no) -> str:
@@ -137,23 +126,6 @@ def shots_cache_dir(continuity_dir: str, project_key: str, episode_no) -> str:
     """
     return os.path.join(continuity_root(continuity_dir, project_key),
                         "shots_cache", f"ep{int(episode_no):02d}")
-
-
-def load_json(path: str, default=None):
-    """严格读 JSON（A-4）：缺失→default；损坏→从 .bak 恢复；无 .bak→抛错。
-
-    旧实现 `except Exception: logger.warning(...); return default` 会把「文件损坏」
-    降级成「没有内容」，而 bible / style_guide / quotes / voice_dict / camera_terms
-    这几个读取点都是「读改写」（读出来改一改再 save_json 写回）→ 损坏态被读成空后
-    写回，项目设定库被永久清空。现在改为 fail-loud，由调用方按需在边界处显式降级。
-    """
-    return read_json_strict(path, default)
-
-
-def save_json(path: str, data) -> str:
-    """原子写 JSON（A-3）：唯一临时名 + fsync + .bak 快照 + replace 重试。"""
-    atomic_write_json(path, data)
-    return path
 
 
 def _read_optional(path: str, what: str):
@@ -216,33 +188,6 @@ def _json_call(client, prompt: str, label: str, system: str = None,
                                "max_tokens": meta.get("max_tokens"),
                                "finish_reason": meta.get("finish_reason"),
                                "truncated": bool(meta.get("truncated"))})
-
-
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
-
-
-# ===================== A① 项目级 bible（设定库） =====================
-
-def bible_path(continuity_dir: str, project_key: str) -> str:
-    return _path(continuity_dir, project_key, "bible.json")
-
-
-def load_bible(continuity_dir: str, project_key: str) -> dict:
-    data = load_json(bible_path(continuity_dir, project_key), None)
-    if not isinstance(data, dict):
-        return {}
-    for k in ("characters", "items", "scenes"):
-        if not isinstance(data.get(k), list):
-            data[k] = []
-    return data
-
-
-def save_bible(continuity_dir: str, project_key: str, bible: dict) -> str:
-    bible = dict(bible or {})
-    bible["version"] = CONTINUITY_VERSION
-    bible["updated_at"] = _now()
-    return save_json(bible_path(continuity_dir, project_key), bible)
 
 
 def _norm_name(name) -> str:
@@ -1713,8 +1658,8 @@ def rewrite_shots_for_issues(client, script: dict, issues: list, episode_no: int
      'audio_cues', 'characters_in_shot', 'items_in_shot', 'prompt_h3')} for s in target], ensure_ascii=False)}
 【输出要求】严格只输出一个 JSON 对象：
 {{"shots": [{{"shot_id": 镜头号（必须与输入一致）, "camera": "景别与运镜（取自运镜术语表）", "location": "场景名",
-  "description": "修正后的画面描述（80 字以内，写清人物动作过程、外貌衣着、环境与光线、构图与景别）",
-  "visual_detail": "画面补充细节（可选；光源方向/时间天气/动作过程等更细的描写写这里，80 字以内；没有就写空字符串）",
+  "description": "修正后的画面描述（100~120 字，下限 100 上限 120；动作过程写关键动作分解，用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座；并写清外貌衣着、环境与光线、构图与景别）",
+  "visual_detail": "画面补充细节（可选；光源方向/时间天气/动作过程等更细的描写写这里，≤120 字；没有就写空字符串）",
   "dialogue": [{{"speaker": "角色名", "text": "台词"}}],
   "emotion": "情绪", "audio_cues": "音效", "characters_in_shot": ["角色名"], "items_in_shot": ["物品名"],
   "fix_note": "本次修正点（15 字以内）"}}]}}
@@ -1817,15 +1762,62 @@ def rewrite_shots_for_issues(client, script: dict, issues: list, episode_no: int
 
 # ===================== 编排：带连贯性的一集转换 =====================
 
+def _run_parallel_steps(steps: list) -> list:
+    """并行执行 [(名称, fn), ...]，全部 join 后按 steps 原顺序返回各 fn() 的结果。
+
+    失败语义与串行版完全一致：join 全部线程后，按 steps 原顺序找到**第一个**抛异常
+    的步骤原样 re-raise（串行版即「首个失败中断整步」），其余失败仅记 warning ——
+    它们的缓存副作用（各自 ensure_* 的落盘文件）幂等可复用，多写无害。
+    各线程 daemon=True：上层异常上抛时不因等待并行步骤而阻塞进程收尾。
+    某步线程启动失败（如系统线程耗尽）时该步退回内联执行，整体退化为串行、语义不变。
+    """
+    results = [None] * len(steps)
+    threads = []
+    for i, (name, fn) in enumerate(steps):
+        def _run(i=i, fn=fn):
+            try:
+                results[i] = ("ok", fn())
+            except Exception as e:  # noqa: BLE001
+                results[i] = ("err", e)
+        t = threading.Thread(target=_run, name=f"continuity:{name}", daemon=True)
+        try:
+            t.start()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("并行步骤 %s 线程启动失败，退回内联执行：%s", name, e)
+            _run()
+            continue
+        threads.append(t)
+    for t in threads:
+        t.join()
+    # 按原顺序找第一个 err：与串行版「首个失败即该次生产失败」的失败语义一致
+    first_err = None
+    for i, r in enumerate(results):
+        if r is None or r[0] != "err":
+            continue
+        if first_err is None:
+            first_err = r[1]
+        else:
+            logger.warning("并行步骤 %s 失败（非首个失败，不改变主失败语义）：%s",
+                           steps[i][0], r[1])
+    if first_err is not None:
+        raise first_err
+    return [r[1] if isinstance(r, tuple) else None for r in results]
+
+
 def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, chapter: dict,
                                     project_key: str, continuity_dir: str, *,
                                     style: str = "3D动漫渲染", target_shots: int = 12,
                                     episode_no: int = 1, save_dir: str = None,
                                     enable_rewrite: bool = True,
-                                    progress_cb=None, force_refresh_assets: bool = False) -> dict:
+                                    progress_cb=None, force_refresh_assets: bool = False,
+                                    screenplay_text: str = None) -> dict:
     """A/B/C/D 全流程单集生成：资产加载 → 上下文注入生成 → state 抽取 → 校验 → 必要时局部重写 → 落盘。
 
     返回：{script, script_path, state, summary, validation, assets, events, elapsed_sec}
+
+    参数：
+    - screenplay_text: 文学剧本改写稿（若存在）。用作 coverage 与 script_consistency 的比对基准；
+      剧本生成仍以原著 chapter 为准，质检初筛保留原著基准。
     """
     t0 = time.time()
     events = []
@@ -1837,17 +1829,34 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"进度回调异常：{e}")
 
+    # 原著章节正文（剧本生成、质检初筛基准）
     seg = (novel_text or "")[int(chapter.get("start") or 0):int(chapter.get("end") or 0)]
+    # 文学剧本改写稿（coverage / script_consistency 基准）：存在时覆盖，为空则回退原著
+    ref_text = screenplay_text if (screenplay_text and screenplay_text.strip()) else seg
 
     # ---- 1) 项目级资产：bible / style_guide / quotes / voice_dict / camera_terms
     bible = load_bible(continuity_dir, project_key)
     report("assets", f"第{episode_no}集：加载项目级设定库与风格配置…", 4)
-    style_guide = ensure_style_guide(client, continuity_dir, project_key,
-                                     {**(bible or {}), "title": novel_meta.get("title") or ""},
-                                     style, episode_no, events=events, force=force_refresh_assets)
-    voice_dict = ensure_voice_dict(client, continuity_dir, project_key, bible, episode_no, events=events)
+    # 三件套并行（2026-10-06）：style_guide / voice_dict / quotes 是三次互不依赖的 LLM 调用，
+    # 缓存文件两两不相交（ensure_style_guide 只读写 style_guide.json；ensure_voice_dict 只读写
+    # voice_dict.json；ensure_quotes_for_episode 只读写 quotes.json；三者都不读写 bible.json
+    # —— bible 以内存入参传入，bible.json 的写入只发生在下方 3.1 merge_bible_from_episode），
+    # 线程并行把串行 3 次 LLM 往返压成约 1 次往返（网络等待期 GIL 已释放，真并行）。
+    # camera_terms 是零 LLM 的内置规则表（可能做并集升级落盘），保持内联零开销。
+    # 失败语义：_run_parallel_steps 在全部 join 后按原顺序（style_guide → voice_dict → quotes）
+    # 重抛首个异常，与串行版「首个失败即整步失败」一致；其余失败记 warning。
+    # events 跨线程 append（list.append 为 GIL 原子）安全，仅条目先后按完成时间交错。
+    style_guide, voice_dict, quotes = _run_parallel_steps([
+        ("style_guide", lambda: ensure_style_guide(
+            client, continuity_dir, project_key,
+            {**(bible or {}), "title": novel_meta.get("title") or ""},
+            style, episode_no, events=events, force=force_refresh_assets)),
+        ("voice_dict", lambda: ensure_voice_dict(
+            client, continuity_dir, project_key, bible, episode_no, events=events)),
+        ("quotes", lambda: ensure_quotes_for_episode(
+            client, continuity_dir, project_key, seg, episode_no, events=events)),
+    ])
     camera_terms = ensure_camera_terms(continuity_dir, project_key)
-    quotes = ensure_quotes_for_episode(client, continuity_dir, project_key, seg, episode_no, events=events)
 
     # ---- 2) 组装上下文并生成剧本（注入 ①②③⑥⑦⑧）
     ctx = build_continuity_context(continuity_dir, project_key, episode_no, style, quotes=quotes)
@@ -1882,6 +1891,48 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
         report("assets", f"第{episode_no}集：资产对齐（改名 {len(alignment.get('aliases') or [])}、"
                          f"服装归一 {len(alignment.get('outfit_fixed') or [])}、"
                          f"外观归一 {len(alignment.get('appearance_fixed') or [])}）", 89)
+
+    # ---- 4.5) 覆盖率校验后台并行启动（2026-10-06 改造二；在 7.5 收敛）
+    # 原串行顺序：state 抽取 → 校验 → 局部重写 → coverage。coverage 是全程最长的静默环节
+    # （2026-10-06 第2集静默 34 分钟实录），遂在「资产对齐完成」时点提前后台启动，与主线程
+    # 的 state 抽取 / 校验全程重叠，在「局部重写轮之前」join 收结果（见 7.5）。
+    # run_coverage_check 的全部实参原样搬入 worker（progress_cb / events 原样传入；结果与
+    # 异常装进 dict 盒子）。
+    # join 点在重写之前：镜头表 script["shots"] 任何时刻只有一个写方 —— coverage 的判定 /
+    # 补生成（rebind shots）/ 复检全部在 join 前收敛完毕，对 shots 的重写只发生在 join 后，
+    # 无并发写冲突；仅当重写被触发时（少数路径）主线程需在 7.5 等 coverage 完成，
+    # coverage 与 state 抽取 / 校验的公共路径重叠收益不受影响。
+    # 线程内不加 should_stop/取消检查：与现状 run_coverage_check 内部一致（取消信号仍在
+    # 主线程各 LLM 调用点生效；主线程取消/失败时，daemon 线程不强行打断，后台收敛完
+    # 当前链路后自然结束）。线程内也不新增文件写入面：只写「第N集_覆盖率.json」与
+    # script["metadata"]["coverage"]，与主线程在本窗口的写入（quotes.json / state 字段）互不相交。
+    coverage_box = {"report": None, "error": None}
+
+    def _coverage_worker():
+        try:
+            coverage_box["report"] = coverage_mod.run_coverage_check(
+                client, ref_text, script, episode_no=int(episode_no), threshold=None,
+                max_rounds=COVERAGE_MAX_ROUNDS, events=events,
+                detail_threshold=None,
+                continuity_dir=continuity_dir, project_key=project_key, save=True,
+                # 2026-10-06：coverage 全程此前零进度回报（托管停滞指标在该环节恒等于全程时长，
+                # 「卡住 vs 慢」无法区分，2026-10-06 第2集静默 34 分钟实录）——把初检/补生成/
+                # 复检节点透传给流水线进度条。
+                progress_cb=lambda msg: report("coverage", msg, 97))
+        except Exception as e:  # noqa: BLE001
+            coverage_box["error"] = e
+
+    report("coverage", f"第{episode_no}集：原文覆盖率校验（逐句核对是否被镜头承载）…", 97)
+    coverage_thread = threading.Thread(target=_coverage_worker,
+                                       name=f"continuity:coverage-ep{int(episode_no)}",
+                                       daemon=True)
+    try:
+        coverage_thread.start()
+    except Exception as e:  # noqa: BLE001
+        # 线程启动失败（如系统线程耗尽）：退回内联执行，行为与串行版等价
+        logger.warning("第 %s 集：coverage 后台线程启动失败，退回内联执行：%s", episode_no, e)
+        _coverage_worker()
+        coverage_thread = None
 
     # ---- 5) state_in / state_out（B④）
     report("state", f"第{episode_no}集：抽取时间线锚点 state_in / state_out…", 90)
@@ -1934,6 +1985,18 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
         validation["issue_stats"]["medium"] = int(validation["issue_stats"].get("medium") or 0) + 1
         validation["rewrite_needed"] = validation.get("rewrite_needed") or True
 
+    # ---- 7.5) 收敛覆盖率线程（计算已在 4.5 提前并行；join 点刻意放在局部重写轮之前）
+    # worker 异常原样 re-raise —— 与串行版「coverage 失败 = 整步失败」语义一致。
+    # join 后才进入重写轮：script["shots"] 任何时刻只有一个写方 —— coverage 的判定 /
+    # 补生成（rebind shots）/ 复检全部在 join 前收敛完毕，对 shots 的重写只发生在 join 后，
+    # 无并发写冲突；仅当重写被触发时（少数路径）主线程需在此等 coverage 完成，
+    # coverage 与 state 抽取 / 校验的公共路径重叠收益不受影响。
+    if coverage_thread is not None:
+        coverage_thread.join()
+    if coverage_box["error"] is not None:
+        raise coverage_box["error"]
+    coverage_report = coverage_box["report"]
+
     # ---- 8) 局部重写（D⑨：high 级问题 / 时间线冲突 / 金句缺失）
     rewrite_info = {"triggered": False, "rounds": 0, "rewritten_shot_ids": [], "notes": []}
     if enable_rewrite and validation.get("rewrite_needed"):
@@ -1968,13 +2031,9 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
             cc_contract.merge_contract_issues(validation, script, bible, int(episode_no))
         rewrite_info["rounds"] = rounds
 
-    # ---- 8.5) 原文覆盖率校验（④⑤：逐句核对原文章节是否被镜头/台词/旁白承载；不足自动补生成，只增不删）
-    report("coverage", f"第{episode_no}集：原文覆盖率校验（逐句核对是否被镜头承载）…", 97)
-    coverage_report = coverage_mod.run_coverage_check(
-        client, seg, script, episode_no=int(episode_no), threshold=None,
-        max_rounds=COVERAGE_MAX_ROUNDS, events=events,
-        detail_threshold=None,
-        continuity_dir=continuity_dir, project_key=project_key, save=True)
+    # ---- 8.5) 覆盖率结果汇总与后处理（coverage 计算已在 4.5 提前并行、7.5 收敛）
+    # 此处按原顺序接回 coverage 之后的全部既有逻辑（report 汇总、supplement_shots 判断、
+    # 补生成后 state 重抽、consistency），逻辑一字未改；coverage_report 已在 7.5 从盒子取回。
     report("coverage", f"第{episode_no}集：情节级覆盖 {coverage_report.get('plot_coverage_percent')}%"
                        f"（{coverage_report.get('plot_covered_count')}/{coverage_report.get('plot_unit_count')} 单元）、"
                        f"细节级覆盖 {coverage_report.get('detail_coverage_percent')}%，"
@@ -2007,11 +2066,13 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
     # ---- 8.6) 剧本↔原著一致性校验（P0-3：章节锚定 / 元信息泄漏 / 要素覆盖 + 定向修复闭环）
     #      泄漏走局部重写、要素缺失走定向补生成（只增不删），绝不整集重生成；
     #      章节锚定偏差根因在章节切分（P0-1 面），只记告警、不自动改。
+    #      coverage 与 script_consistency 的比对基准改为文学剧本改写稿（ref_text）；
+    #      剧本生成、质检初筛仍以原著 seg 为准。
     consistency_summary = {}
     try:
         import script_consistency as sc_mod
         consistency_report = sc_mod.run_script_consistency_check(
-            client, script, novel_meta=novel_meta, chapter_text=seg, chapter=chapter,
+            client, script, novel_meta=novel_meta, chapter_text=ref_text, chapter=chapter,
             episode_no=int(episode_no), auto_fix=bool(enable_rewrite), events=events,
             continuity_dir=continuity_dir, project_key=project_key, save=True,
             continuity_ctx=ctx)

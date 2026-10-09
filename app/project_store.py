@@ -524,16 +524,25 @@ def update_config(ref: str, patch: dict) -> dict:
 #: continuity（跨镜连续性）、autopilot（托管计划/历史/交付物索引）、autonomous（自主模式）、
 #: comic_drama（漫画剧资产）、exports（导出件）、watermark（水印成片）。
 #: 后果是「删掉项目」后 output/ 里仍残留 76MB 的 final_dub，用户以为已经删干净了。
+#: ⚠️ 2026-10-06 实测教训（同名重建串历史）：这里又漏了 screenplays（文学剧本，
+#: novel_screenplay.screenplays_root()）与 reports（生产报告，autonomous.export_report）。
+#: 最恶性的一个：删项目→同名重建→托管续跑时，残留的 output/screenplays/<键>/第1集_文学剧本.md
+#: 会被「文件存在即改写」的文学剧本链路（autopilot._produce → pipeline.run_episode）当成
+#: **新项目第 1 集的原文**用上——旧项目的历史直接污染新项目的生产。
 #: 新增产物目录时**必须**同步登记到这里，否则删除会再次漏。
 def project_kind_roots() -> list:
     """(kind, 根目录) 列表 —— 删除/清理项目时需要覆盖的**全部**产物目录。
 
-    注意：其中若干目录（autopilot/autonomous/exports/export/comic_drama）没有独立
+    注意：其中若干目录（screenplays/reports/autopilot/autonomous/exports/export/comic_drama）没有独立
     config 常量，按名字从 PROJECT_OUTPUT_DIR 拼出，避免为了一个字符串去动 config 接口。
     """
     out = PROJECT_OUTPUT_DIR
     return [
         ("scripts", SCRIPT_DIR),
+        # 文学剧本（两段式生产的第一段，Markdown）与生产报告（autonomous.export_report）：
+        # 都按 output/<kind>/<项目键>/ 落盘，此前漏登记 → 同名重建时残留（见上方 2026-10-06 教训）。
+        ("screenplays", os.path.join(out, "screenplays")),
+        ("reports", os.path.join(out, "reports")),
         ("characters", CHARACTERS_DIR),
         ("items", ITEMS_DIR),
         ("scenes", SCENES_DIR),
@@ -572,6 +581,19 @@ def _project_alias_names(rec: dict) -> list:
         v = str(v or "").strip()
         if v and v not in names:
             names.append(v)
+    # 2026-10-06 补充（同名重建串历史）：screenplays 侧的目录键走的是
+    # novel_to_script.safe_project_name（替换 \\/:*?\"<>| 与空白 + **截 40 字符**），
+    # 与本模块 safe_key（**截 50 字符**）在超长项目键上会推导出两个不同目录名。
+    # 把该形态并入别名并集，保证 _match_project_entries 对 screenplays/ 等产物根
+    # 也能命中「按 safe_project_name 落盘」的目录；推导失败只降级（不阻断删除）。
+    try:
+        from novel_to_script import safe_project_name as _spn
+        for v in list(names):
+            _alt = str(_spn(v) or "").strip()
+            if _alt and _alt not in names:
+                names.append(_alt)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("推导 screenplays 侧目录别名失败（忽略）：%s", e)
     return names
 
 
@@ -715,6 +737,79 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
         logger.error("删除项目 %s 时清理 continuity 缓存失败（主删除已成功，不影响）：%s", key, e)
         continuity_purge["error"] = str(e)
 
+    # 关联清理（直挂 output/ 根的散目录）：CharacterManager / RelationManager 以
+    # `PROJECT_OUTPUT_DIR/<项目键>/characters/…`（characters.json、references/、
+    # relations/relations.json）为工作区（app.py 的关系图谱/角色管理路由传
+    # base_dir=PROJECT_OUTPUT_DIR/<project>），**不在任何产物根（project_kind_roots）
+    # 覆盖内**，不清会在同名重建时被新项目继承。只按别名**精确名**匹配，且显式跳过
+    # 系统保留名（projects/novels/qc/scripts/…）——防止项目键恰好撞上系统目录名时
+    # 把整个产物根误搬进回收站。
+    loose_purge = {"purged": [], "error": None}
+    try:
+        _reserved = {os.path.basename(os.path.normpath(d)) for _, d in project_kind_roots()}
+        _reserved.update({"projects", "novels", "ai_chat", "lessons", "memory",
+                          "assets", "comic_drama", "temp", ".leases",
+                          "_te3d_render", "_trash"})
+        _seen_loose = set()
+        for _n in _project_alias_names(rec):
+            if not _n or _n in _reserved or _n in _seen_loose:
+                continue
+            _seen_loose.add(_n)
+            _loose = os.path.join(PROJECT_OUTPUT_DIR, _n)
+            if not os.path.isdir(_loose):
+                continue
+            _dst = os.path.join(trash_root, "output_root_loose", _n)
+            os.makedirs(os.path.dirname(_dst), exist_ok=True)
+            shutil.move(_loose, _dst)
+            loose_purge["purged"].append(_loose)
+    except Exception as e:  # noqa: BLE001 - 关联簿记：失败不阻断主删除，只响亮降级
+        logger.error("删除项目 %s 时清理直挂 output/ 根的散目录失败（主删除已成功，不影响）：%s",
+                     key, e)
+        loose_purge["error"] = str(e)
+
+    # 关联清理（AI 记忆）：output/memory/memories.json 是全局单文件，条目按
+    # context.project 归属（ai_memory.record_lesson / record_success 落的 project 字段）。
+    # 软删产物目录收不走「文件内嵌条目」，不摘除的话同名重建会把旧项目的教训/成功
+    # 经验挂到新项目头上。
+    ai_memory_purge = {"purged": False, "removed": 0, "error": None}
+    try:
+        import ai_memory
+        ai_memory_purge["removed"] = int(
+            ai_memory.get_memory_system().purge_project(_project_alias_names(rec)) or 0)
+        ai_memory_purge["purged"] = True
+    except Exception as e:  # noqa: BLE001 - 关联簿记：失败不阻断主删除，只响亮降级
+        logger.error("删除项目 %s 时清理 AI 记忆失败（主删除已成功，不影响）：%s", key, e)
+        ai_memory_purge["error"] = str(e)
+
+    # 关联清理（文件租约）：集级租约 scope = episode:<项目>#<集号>（pipeline._episode_scope），
+    # 项目名是租约文件名的成分。不清的话，同名重建后的一个 TTL 窗口（默认 900 秒）内
+    # pipeline.is_episode_running 会把该集误判成「正在运行」而拒绝开跑。
+    task_lease_purge = {"purged": False, "removed": 0, "error": None}
+    try:
+        import task_lease
+        task_lease_purge["removed"] = int(
+            task_lease.purge_project(_project_alias_names(rec)) or 0)
+        task_lease_purge["purged"] = True
+    except Exception as e:  # noqa: BLE001 - 关联簿记：失败不阻断主删除，只响亮降级
+        logger.error("删除项目 %s 时清理文件租约失败（主删除已成功，不影响）：%s", key, e)
+        task_lease_purge["error"] = str(e)
+
+    # 关联清理（总控内核运行态）：总控对话本体都在 ai_chat 的项目桶/归档里
+    # （上方 ai_chat.purge_project 已摘），但 agent_core 还有三份**进程内**运行态
+    # 按项目键组织：任务表 _JOBS（含最终回复，TTL 1 小时）、单项目互斥占位 _BUSY、
+    # 同参数冷却缓存 _COOLDOWN（键 md5 内嵌项目键）。同名重建时不清会让新项目
+    # 继承旧运行态：/api/agent/job 还能读到旧任务回复、互斥占位报「已有任务在执行」、
+    # 冷却窗口内同参数工具直接复用旧项目的执行结果。审计 audit-*.jsonl 是跨项目
+    # 流水，保留不删（agent_core.purge_project 自身也不碰它）。
+    agent_purge = {"purged": False, "report": None, "error": None}
+    try:
+        import agent_core  # 延迟导入：agent_core 顶层不依赖 project_store，单向
+        agent_purge["report"] = agent_core.purge_project(_project_alias_names(rec))
+        agent_purge["purged"] = True
+    except Exception as e:  # noqa: BLE001 - 关联簿记：失败不阻断主删除，只响亮降级
+        logger.error("删除项目 %s 时清理总控内核运行态失败（主删除已成功，不影响）：%s", key, e)
+        agent_purge["error"] = str(e)
+
     # 关联清理（小说库）：全局小说库与项目是「素材 vs 生产工作区」的解耦关系，删项目
     # 默认**不**删小说（同一素材可复用到别的项目）。但当且仅当「该小说不再被任何其它
     # 项目绑定」时，说明它已无归属 → 一并软删进回收站（可恢复），避免「删完项目，
@@ -736,11 +831,58 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
                              key, _novel_id, e)
                 novel_purge["error"] = str(e)
 
+    # 清理结果汇总（2026-10-06）：删除接口返回值新增 cleaned 字段——这次删除到底
+    # 收走了什么（移入回收站的目录逐条列出 + 簿记类清理按「条目 × 数量」列出）。
+    # 前端不消费该字段（不报错），供运维/日志核对「同名重建前是否真的清干净」。
+    cleaned = [{"kind": m["kind"], "path": m["from"]} for m in moved]
+    _r = ai_purge.get("report") or {}
+    if ai_purge.get("purged") and isinstance(_r, dict):
+        for _k, _label in (("history_projects", "ai_chat/chat_history 项目桶"),
+                           ("history_drafts", "ai_chat/drafts 草稿"),
+                           ("settings", "ai_chat/project_settings 条目"),
+                           ("archived_dirs", "ai_chat/archive 归档目录")):
+            if int(_r.get(_k) or 0):
+                cleaned.append({"kind": "entry",
+                                "target": f"{_label} ×{_r[_k]}"})
+    _r = (db_purge.get("report") or {}) if db_purge.get("purged") else {}
+    if int(_r.get("tasks") or 0) or int(_r.get("units") or 0):
+        cleaned.append({"kind": "entry",
+                        "target": "tasks.db tasks ×%s / units ×%s"
+                                  % (_r.get("tasks", 0), _r.get("units", 0))})
+    if autopilot_purge.get("purged"):
+        cleaned.append({"kind": "entry",
+                        "target": "autopilot 运行态（current/last_error/last_run/attempts/死信）"})
+    if continuity_purge.get("purged"):
+        cleaned.append({"kind": "entry", "target": f"continuity/{key}"})
+    for _p in (loose_purge.get("purged") or []):
+        cleaned.append({"kind": "dir", "target": _p})
+    _n = int(ai_memory_purge.get("removed") or 0)
+    if _n:
+        cleaned.append({"kind": "entry",
+                        "target": f"ai_memory/memories.json 条目 ×{_n}"})
+    _n = int(task_lease_purge.get("removed") or 0)
+    if _n:
+        cleaned.append({"kind": "entry", "target": f".leases 租约文件 ×{_n}"})
+    _r = (agent_purge.get("report") or {}) if agent_purge.get("purged") else {}
+    if int(_r.get("jobs_removed") or 0) or int(_r.get("busy_cleared") or 0) \
+            or int(_r.get("cooldown_cleared") or 0):
+        cleaned.append({"kind": "entry",
+                        "target": "agent_core 运行态（jobs ×%s / busy ×%s / cooldown ×%s）"
+                                  % (_r.get("jobs_removed", 0), _r.get("busy_cleared", 0),
+                                     _r.get("cooldown_cleared", 0))})
+    if novel_purge.get("purged"):
+        cleaned.append({"kind": "entry",
+                        "target": f"novels/{novel_purge.get('novel_id') or ''}"})
+
     return {"project": rec, "trash_dir": trash_root, "moved": moved,
-            "skipped": skipped, "recoverable": True,
+            "skipped": skipped, "recoverable": True, "cleaned": cleaned,
             "ai_chat_purge": ai_purge, "tasks_db_purge": db_purge,
             "autopilot_purge": autopilot_purge,
             "continuity_purge": continuity_purge,
+            "loose_dirs_purge": loose_purge,
+            "ai_memory_purge": ai_memory_purge,
+            "task_lease_purge": task_lease_purge,
+            "agent_purge": agent_purge,
             "novel_purge": novel_purge}
 
 

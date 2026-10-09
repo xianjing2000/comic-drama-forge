@@ -2,6 +2,9 @@
 音画对齐与混音合成（配音轨 × 成片视频 → 带配音成片）
 ====================================================
 
+⚠️ 2026-10-04 起 mix 步骤已下线，本模块仅服务 pipeline 回滚位（step_mix）与手动链路；
+现行成片口径是 H3 自带原生音轨（H3_EMIT_AUDIO=True）。
+
 把 QwenTTS 产出的逐句配音音频，按「镜头时间轴」对齐叠合到 H3 无声成片上，
 产出一个带配音、仍不含原始音轨的最终成片。
 
@@ -34,7 +37,7 @@ import time
 from typing import Dict, List, Optional
 
 from config import MIX_DEFAULT_PARAMS, DUB_MIX_DIR
-from video_postprocess import probe_media
+from media_probe import probe_media  # 2026-10-08 解耦：探测走叶子模块
 import shot_key
 
 logger = logging.getLogger(__name__)
@@ -250,15 +253,6 @@ def build_entries(lines: List[Dict], timeline: Dict, params: Optional[Dict] = No
             "coverage_sec": round(sum(e["audio_dur"] for e in entries), 3)}
 
 
-def apply_line_offsets(entries: List[Dict], total_sec: float = 0.0) -> List[Dict]:
-    """条目越界提示（超出视频总时长时仅告警，不静默裁掉）"""
-    warns = []
-    for e in entries or []:
-        if total_sec and e.get("start", 0) >= total_sec:
-            warns.append(f"{e.get('line_id')} 起始 {e.get('start')}s 已超出视频时长 {total_sec}s")
-    return warns
-
-
 # =====================================================================
 # 合成
 # =====================================================================
@@ -324,8 +318,9 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
 
     filters = [f"[1:a]aformat=sample_rates={sr}:channel_layouts=mono[base]"]
     mix_inputs = ["[base]"]
-    # 原音轨（H3 生成的环境音/打斗音效）作为「垫底」混入，音量默认 0.3：
-    # 1.0 会盖住台词，0.3 是"听得到但不抢戏"。2026-09-17 之前这里默认直接被丢弃。
+    # 原音轨（H3 生成的环境音/打斗音效）作为「垫底」混入：默认取
+    # config.MIX_DEFAULT_PARAMS["original_audio_volume"]=0.3（1.0 会盖住台词，
+    # 0.3 是"听得到但不抢戏"）；下方 1.0 兜底仅在键缺失/显式传 None 时触达。
     orig_vol = p.get("original_audio_volume")
     orig_vol = 1.0 if orig_vol is None else float(orig_vol)
     orig_kept = bool(p.get("keep_original_audio") and vinfo.get("has_audio"))

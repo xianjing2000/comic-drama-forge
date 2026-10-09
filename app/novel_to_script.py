@@ -29,13 +29,21 @@ import style_kit
 import h3_prompt_kit
 import asset_prompt_kit
 import asset_name_match
+# 提示词模板中心（2026-10-07 外置改造）：REWRITE_RULES 等常量的生效值从这里加载
+# （用户覆盖 > 出厂默认 app/prompts/*.txt > 代码内兜底常量）。只依赖标准库、config 延迟
+# 导入，不会形成循环依赖。
+import prompt_templates
 # 景别唯一权威表（写入侧白名单与提示词枚举都由它派生；config 是叶子模块，无循环依赖）
 from config import (
+    COVERAGE_THRESHOLD,   # 唯一事实源在 config（2026-10-08 解耦）
     SHOT_TYPES, ACTION_WORDS, ACTION_CLAUSE_RE, count_action_beats,
     SHOT_DURATION_MIN, SHOT_DURATION_MAX, SHOT_DURATION_SILENT, CHARS_PER_SECOND,
     BEAT_CLIMAX_BONUS_SEC, SHOT_SPEECH_BUDGET_CHARS,
     SHOT_DURATION_DESC_SEC_MAX, SHOT_DURATION_DESC_CHARS_PER_SEC,
     SHOT_DURATION_ACTION_SEC_MAX,
+    # 分镜粒度（2026-10-06 用户指定：每集 20~30 镜、每镜 5~6 秒）——见 config 里
+    # SHOT_GRANULARITY_* 与本文件 CHARS_PER_SHOT / REF_INSERT_RATIO / SPLIT_ACTION_BEATS 的注释。
+    SHOT_CAP_GROWTH, SHOT_GRANULARITY_TARGET_SHOTS, SHOT_GRANULARITY_MAX_SHOTS,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,12 +54,12 @@ logger = logging.getLogger(__name__)
 #    把「一次调用」变成「先拆再调」，既慢又平白多一层失败面。
 #    改为 2400 字 → 约 20 镜/块，首次调用即落在红线内（预劈半退回真正的兜底而非常态）。
 #    原文字字不丢：只是块数变多、每块更短，总覆盖不变。
+#    （⚠️ 现值注记：`CHARS_PER_SHOT` 已于 2026-10-06 由 120 改为 240 → 3000 字 ≈ 13 镜/块，
+#     「预劈半是常态」的前提**已不成立**；`CHUNK_CHARS=2400` 本身保留不动。）
 CHUNK_CHARS = 2400
-MAX_CHUNKS = 8
 MIN_CHUNK_CHARS = 300
 MAX_CHARS_PER_CHUNK_PROMPT = 3400
 COVERAGE_MAX_ROUNDS = 1          # 原文覆盖率不足时自动补生成轮次上限（与 continuity.COVERAGE_MAX_ROUNDS 对齐）
-COVERAGE_THRESHOLD = 0.70        # 原文覆盖率阈值（coverage.py 读取，缺省同值；下方会被 env 覆盖）
 
 # ===================== 每集时长口径（产品需求，2026-09-26） =====================
 # ⚠️ 这是**产品口径**，不是技术红线 —— 与下方两条技术红线（H3 资源红线 / LLM 响应体红线）
@@ -223,10 +231,26 @@ SYSTEM_BIBLE = ("你是资深漫剧编剧与 AI 绘画提示词工程师，精�
 
 # ===================== 全量覆盖策略常量（改编 ≠ 缩写，严禁删减原文） =====================
 
-CHARS_PER_SHOT = 120          # 每个镜头承载的原文字数基准（镜头数随内容体量自动扩展，收紧以承载细节）
+#: 每个镜头承载的原文字数基准（镜头数随内容体量自动扩展）——
+#: ⚠️ 这是**镜头数规划的唯一杠杆**，它同时喂给：分块写分镜的目标镜数
+#: （`convert_chapter_to_script` 的 `per_chunk`）、`coverage` 与 `script_consistency`
+#: 的「该块应写几镜」判据、以及 metadata 的 `chars_per_shot`。
+#:
+#: 【2026-10-06 用户口径：减镜增时长 → 120 改 240】
+#:   实测（桌面版《进境》第 1 集）：文学剧本 4617 字 / 2 个子块，按 120 字/镜算出
+#:   `estimated_shots = 38`，模型产出约 40 镜，再叠加「补局部插入镜 16 个」→ 落盘 56 镜 /
+#:   平均 2.82 秒。用户口径要「每集 20~30 镜、每镜 5~6 秒」，故每镜承载量翻倍：
+#:   4617 / 240 ≈ 19 镜/集 → 模型按此产出 ~20~25 镜，正好落进目标区间。
+#:
+#: ⚠️ 与 `EPISODE_PLAN_CHARS_PER_SHOT=26`（实测密度，拆集规划用）**是两回事**：
+#:   那个是「已知模型会超产」时的**规划口径**；这个是**下给模型的引导口径**。
+#:   历史注释：早期实测模型产出是引导值的 4 倍，故两者差一个量级；本仓库当前
+#:   实测（2026-10-05）模型**基本照办**（目标 38 → 产出 40），故这里如实按目标值设定。
+#: 回滚：`MJSCXT_CHARS_PER_SHOT=120`。
+CHARS_PER_SHOT = _env_pos_int("MJSCXT_CHARS_PER_SHOT", 240, floor=30)
 SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这么多镜）
 
-# ---- 单集镜头数硬上限（H3 连续渲染的资源红线，2026-09-24 实测）----
+# ---- 历史资源红线（2026-09-24 实测；**2026-10-09 起不再是单集上限**）----
 # ⚠️ 背景：整集视频走 H3 连续工作流（84 段一个 prompt，全程约 7 小时）。实测渲染到
 # **第 78 段**时 ComfyUI 崩溃：
 #     aimdo: xfer_file_read_at: GetOverlappedResult failed error=1450
@@ -234,10 +258,13 @@ SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这
 # error=1450 = Windows ERROR_NO_SYSTEM_RESOURCES —— 长跑把系统资源（尤其是 ComfyUI 默认
 # pin 住的 ram*0.40 ≈ 12.9GB 锁定页）耗尽，异步重叠 I/O 读不进模型权重。
 # 根因是**长跑累积**（时间相关，不是段号本身），但表现为「跑到 78 段左右必崩」。
-# 因此在剧本阶段就设硬上限：单集分镜数 ≤ MAX_SHOTS_PER_EPISODE，从源头不让任务长到会崩。
 # 配套：ComfyUI 侧可加 --disable-pinned-memory 进一步降低资源压力（见项目记忆）。
-# 超限处理：不丢原文 —— 按该集总字数等比收紧**每块的镜头额度**（每镜承载更多原文），
-# 全部子块仍然逐块送模型、原文覆盖率不受影响，只是镜头密度变稀。
+#
+# ⚠️ 2026-10-09 用户口径变更：**单集分镜数不再设上限**。
+#   原因：生产已从「整集一次连续渲染」改为「**按场次生产**」——每场单独提交渲染、最后拼接成片，
+#   上面那条「整集长跑到 78 段左右崩」的资源红线不再适用于单集口径。
+#   处置：剧本阶段不再收紧每块镜头额度、也不再对最终 shots 做硬截断（见下方两处 2026-10-09 注释）。
+#   本常量保留为**诊断参考线**（over_redline 告警仍在用），但**不再是任何截断依据**。
 MAX_SHOTS_PER_EPISODE = 78
 
 # ---- 单块镜头数上限（LLM 响应体红线，2026-09-25 实测）----
@@ -288,7 +315,6 @@ except (TypeError, ValueError):
 # （12 镜 → 4800）远低于水位，故改为「固定思考预留 + 每镜正文额度」。
 SHOTS_THINKING_RESERVE = 16384   # 思考预留（与 llm_client.REASONING_ONLY_TOKEN_FLOOR 对齐）
 SHOTS_TOKENS_PER_SHOT = 300      # 单镜正文额度（description+visual_detail+dialogue+audio_cues 实测够用）
-COVERAGE_THRESHOLD = _env_float("MJSCXT_COVERAGE_THRESHOLD", 0.70, floor=0.0, ceiling=1.0)  # 原文覆盖率阈值：低于该值自动补生成缺失片段（压缩提炼后只需覆盖情节单元，不再要求逐句 95%）
 
 # ===================== 提炼 / 分镜阶段的断点缓存（对抗网关偶发挂起） =====================
 # 背景（2026-09-24 实测）：网关上游偶发挂起 —— 连 max_tokens=3600 的小请求也会挂满
@@ -381,7 +407,10 @@ def _cache_put(cache_dir: str, kind: str, prompt: str, payload: dict) -> None:
     _cache_write(_cache_file(cache_dir, kind, prompt), payload)
 
 
-REWRITE_RULES = (
+# 2026-10-07 提示词外置（app/prompts/script_rewrite_rules.txt）：常量改名保留为**代码内兜底**；
+# 实际生效值在常量定义之后由 prompt_templates.load("script_rewrite_rules") 加载
+# （用户覆盖 > 出厂默认 > 本常量）。已核实本常量无任何运行时改写（全文件仅此一处赋值）。
+_DEFAULT_REWRITE_RULES = (
     "【改写规则（这是压缩提炼，不是逐句照搬：只保留推动剧情的信息，删掉纯背景铺陈）】\n"
     "1) 先提炼：把本段原文压缩成 3~5 句剧情梗概，只保留「冲突、转折、关键动作、金句」四类信息；"
     "世界观、势力背景、环境补叙、器物来历等**不推进剧情**的描写，一律不逐句复述、不单独成镜；\n"
@@ -443,13 +472,18 @@ REWRITE_RULES = (
     "    · ④机位克制：同一场景内的连续镜头**尽量保持机位统一**（同机位/同视角切换构图），"
     "      只在节拍切换或空间转换时才换机位，减少无意义机位跳变（承接规则9「运镜以固定为主」）；\n"
     "    · ⑤画面变化幅度自分级：写镜头时**自行**判断本镜画面内容相对上一镜的变化幅度，"
-    "      并在 description/visual_detail 里**体现**这种幅度——大幅变化（场景切换/冲突爆发，"
-    "      写足空间与动作的完整过程）、中幅变化（人物动作推进，写清动作起势与结果）、"
-    "      小幅变化（表情微变/道具细节，只写变化点不重写全景），让相邻镜的画面递进**可追踪**，"
-    "      变化幅度与本镜叙事节拍（规则11）节奏一致：高潮镜允许大幅、过渡镜用小幅快切。\n"
+    "      并在 description/visual_detail 里**体现**这种幅度——按「起点 → 关键动作节点 → 结果」写，"
+    "      动作过程写**关键动作分解**（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座），"
+    "      只写关键节点、不写琐碎中间步（见「描述粒度口径」段）：大幅变化（场景切换/冲突爆发）"
+    "      写「切换后空间里的新主体与结果态」、中幅变化（动作推进）写**关键动作分解**、"
+    "      小幅变化（表情微变/道具细节）只写变化点。让相邻镜的画面递进**可追踪**，"
+    "      变化幅度与本镜叙事节拍（规则11）节奏一致：高潮镜允许大幅、过渡镜用小幅快切。"
+    "      琐碎中间步留给视频/九宫格阶段按时间切片完成，剧本层只写 2~4 个关键节点，"
+    "      写满琐碎中间步反而导致九宫格雷同。\n"
     "13) 【台词长度·切镜节奏的总开关｜权重高于规则 9 的镜头语言】参考片单镜中位时长只有 2.08 秒，"
     "它的快节奏**不是靠运镜、是靠「一句短台词说完就切」**。换算成台词：一镜台词以 8~14 字为宜"
-    "（按中文语速≈5 字/秒，对应 2~3 秒），**上限 20 字**。禁止一镜塞一句长台词（30 字以上）——"
+    "（按中文语速≈5 字/秒，对应 2~3 秒），**上限 16 字（与 config.SHOT_SPEECH_BUDGET_CHARS 一致）**。"
+    "禁止一镜塞一句长台词（30 字以上）——"
     "本系统旧剧本实测单镜台词中位要 8 秒才念完，镜头被迫拉长到 8~12 秒，成片观感就是"
     "「一个分镜演半天不切换」。因此：\n"
     "    · 长台词必须按**停顿/语义换气点**拆成相邻多镜，一句一镜（问句一镜、答句一镜、"
@@ -459,6 +493,13 @@ REWRITE_RULES = (
     "      不允许把同一画面重复两遍充数；\n"
     "    · 无台词的镜头靠动作与反应推进，同样保持短促（2~4 秒），不要写成静态长镜。\n"
 )
+
+# 2026-10-07 提示词外置：实际生效 = app/prompts/script_rewrite_rules.txt（可被
+# PROJECT_DATA_DIR/prompt_overrides/script_rewrite_rules.txt 覆盖）；任一级读失败回落
+# 上方 _DEFAULT_REWRITE_RULES，行为与外置前逐字一致（load 已剥离模板头注释）。
+# 同时把兜底注册进 loader：默认文件丢失时 load() 仍能拿到本常量原文。
+REWRITE_RULES = prompt_templates.load("script_rewrite_rules") or _DEFAULT_REWRITE_RULES
+prompt_templates.register_fallback("script_rewrite_rules", _DEFAULT_REWRITE_RULES)
 
 
 # ===================== 分块与全量覆盖 =====================
@@ -549,19 +590,6 @@ def _chunk_title(c: dict) -> str:
             return f"第{c['from_chapter']}章"
         return f"第{c['from_chapter']}-{c['to_chapter']}章"
     return first[:24] or f"第{c['index']}块"
-
-
-def sample_chunks(chunks: list, max_chunks: int = MAX_CHUNKS):
-    """均匀抽样（必含首块与末块），返回 (抽样块列表, 抽样下标 1-based)"""
-    n = len(chunks)
-    if n <= max_chunks:
-        return list(chunks), [c["index"] for c in chunks]
-    step = (n - 1) / (max_chunks - 1)
-    idxs = sorted({int(round(i * step)) for i in range(max_chunks)})
-    idxs[0], idxs[-1] = 0, n - 1
-    if len(idxs) > max_chunks:  # 极端情况去重后再补
-        idxs = idxs[:max_chunks - 1] + [n - 1]
-    return [chunks[i] for i in idxs], [chunks[i]["index"] for i in idxs]
 
 
 # ===================== 三段式生成 =====================
@@ -741,7 +769,7 @@ def extract_chunk_outline(client, chunk: dict, novel_title: str,
 {{
   "summary": "本段剧情摘要，120 字以内",
   "characters": [{{"name": "人物名", "role": "主角/配角/反派", "gender": "性别，只填「男」或「女」（必须按原文称谓/代词推断给出）", "appearance": "静态外貌（发色/瞳色/脸型/体格等**不随剧情变化的定妆特征**，**不含会随集变化的服饰/配饰**），35 字以内", "personality": "性格，20 字以内"}}],
-  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观，30 字以内", "importance": "重要/临时。判定三问（任一答案为「是」即判临时、宁缺勿滥）：①删掉它剧情还成立吗？②它只是随手用的日常物品吗？③它只是场景陈设吗？只有推动剧情且后续会反复出现/被反复指认的关键道具才判「重要」"}}],
+  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观＋**结构三要素**（见下方硬约束），60 字以内", "structure": "**结构三要素**（每项 8 字以内）：①功能端＝哪一端是使用端（吹嘴/刃口/接口/开口）②尾端＝哪一端是尾（系绳/握把/底座）③使用朝向＝用起来时功能端朝哪儿（如「吹嘴贴唇、腔体朝外」）", "importance": "重要/临时。判定三问（任一答案为「是」即判临时、宁缺勿滥）：①删掉它剧情还成立吗？②它只是随手用的日常物品吗？③它只是场景陈设吗？只有推动剧情且后续会反复出现/被反复指认的关键道具才判「重要」"}}],
   "scenes": [{{"name": "场景名", "location": "地点类型", "appearance": "环境特征，30 字以内"}}],
   "key_beats": ["按原文顺序列出本段关键情节节点，每条 30 字以内，最多 12 条（分镜阶段会读取完整原文，这里只做索引，不要逐句复述、不要写成英文）"]
 }}
@@ -908,8 +936,8 @@ def build_bible(client, outlines: list, novel_title: str, style: str, episodes: 
   "theme": "一句话主题/卖点（30 字以内）",
   "style": "{style}",
   "characters": [{{"name": "姓名", "gender": "性别，只允许「男」或「女」两个值；必须按原文的人物称谓/代词/姓名线索推断后明确给出，禁止留空或写「未知」", "age": "年龄", "identity": "身份/阵营（15 字以内）", "appearance": "静态外貌定妆（含发色/瞳色/脸型/体格/标志特征等**不随剧情变化的特征**，**必须包含性别（如「女性」「男子」）**，**不含会逐集变化的服饰/配饰——那些写进 outfit**，60 字以内；若上方设定库已锁定则该字段必须与锁定值逐字一致）", "outfit": "本集服装状态（**动态特征：逐集可变的服饰/配饰，与静态 appearance 解耦**——appearance 是定妆照约束的静态外貌，outfit 是分镜画面约束的本集服装），20 字以内，与上集结尾一致；若本集确有换装必须体现原因", "personality": "性格（30 字以内）", "voice_style": "配音风格（15 字以内）", "reference_prompt_zh": "中文参考图提示词：角色三视图设定图，60 字以内，**必须写明角色性别（如开头写「女性角色，」「男性角色，」）**，只写画面可见的具体特征——发色发型、瞳色、脸型、服装款式与材质配色、标志配饰、三视图版式（**必须写明「正面、侧面、背面三张全身视图横排，从头到脚完整入画、同一角色身高比例一致」**，不要写成半身/胸像）；**严禁写任何风格词/画风词/质量词**（如「国漫」「3D渲染」「电影级」「高清」「精致」）", "reference_prompt_en": "English prompt for a character reference sheet with three full-body views (front, side, back laid out horizontally, head-to-toe, consistent body proportions), under 45 words, must explicitly state the character's gender (e.g. 'a woman,' / 'a man,'), comma-separated CONCRETE visual keywords (hair color and style, eye color, face shape, outfit material and colors, signature accessories, view layout). It MUST be an accurate translation of reference_prompt_zh. Never romanize Chinese concepts into invented pinyin (「国漫」 must become 'Chinese animated style', NOT 'xuanxuan'); never write style or quality words — the program appends them"}}],
-  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观（50 字以内）, reference_prompt_zh（只写物品本体：造型/材质/颜色/纹样/尺寸感）", "owner": "持有人", "importance": "重要/临时。判定三问（任一答案为「是」即判临时）：①删掉它剧情还成立吗？②它只是随手用的日常物品吗？③它只是场景陈设吗？", "reference_prompt_zh": "中文参考图提示词，50 字以内，只写形制、材质、颜色、纹样与磨损状态；**严禁写风格词/画风词/质量词**", "reference_prompt_en": "English prompt for an item prop sheet, under 40 words, comma-separated concrete visual keywords (shape, material, color, pattern, wear). Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"}}],
-  "scenes": [{{"name": "场景名", "location": "地点类型（**同一个场所的不同机位、朝向或景别一律视作同一个 location**，不要重复建场景；只有当边界、入口、功能区或固定结构真的不同时才算新地点）", "appearance": "环境与氛围（70 字以内）：把「压抑/肃杀/温暖」翻译成**已有依据的空间选择**——通道宽窄、光比强弱、材质反射、空气状态（雾/尘/雪/烟）、色温关系；不得为造气氛而新增剧情事故、封锁出口或搬动固定结构。并点明此空间能承载的戏：谁掌控入口、座位与视线高点，谁会被阻拦、围观或逼入死角，哪件道具可被交接、摔碎或藏匿（撑不起对抗、羞辱、救援、揭露与反转的空间，不要写成核心场景）", "scene_lighting": "该场景的**统一光影基调**（30 字以内）：整个场景所有镜头共享的主光源/时间/色温（如「黄昏暖调逆光」「冷蓝月光」「正午顶光」），用于消除同场景内逐镜光影漂移；无明确光源倾向时写「自然漫射光」。此字段只写光影，不写风格词/画风词/质量词，也不要出现人物", "int_ext": "本场景内外景（只填「内景」「外景」「内外景」三值之一：封闭空间＝内景、露天＝外景、跨内外＝内外景）", "time_of_day": "本场景时间（8 字以内，如「黄昏」「夜」「清晨」「雨夜」「正午」；必须与 scene_lighting 的时间口径一致）", "reference_prompt_zh": "中文参考图提示词，90 字以内，**地理优先**：用「从哪个入口看向哪个方向、前中后景分别是什么、锚点在彼此哪一侧」的两两关系来写，不堆装饰清单。必写：①空间身份与功能；②观察方向与可见边界；③入口与通道如何连通；④1-3 个固定锚点及其左右前后相对关系；⑤前景/中景/背景层次与一处尺度参照；⑥墙地顶材质与主次色。最后写时间天气与光源方向。**严禁写风格词/画风词/质量词，且不要出现人物**（保持空场，才能作为地理参考被后续镜头反复复用）", "reference_prompt_en": "English prompt for an environment concept art sheet, under 60 words, comma-separated concrete visual keywords. Geography-first: state the viewpoint and what falls in foreground, midground and background, then entrance and circulation, then one to three fixed anchors as pairwise relations (what sits left or right of what), then materials and palette, then time, weather and light direction. Spatial layout, architecture, no decoration inventory, no people. Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"}}],
+  "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观（50 字以内）＋**结构三要素**（功能端/尾端/使用朝向，见硬约束）", "structure": "**结构三要素**（每项 8 字以内）：①功能端＝哪一端是使用端（吹嘴/刃口/接口/开口）②尾端＝哪一端是尾（系绳/握把/底座）③使用朝向＝用起来时功能端朝哪儿（如「吹嘴贴唇、腔体朝外」）——**同一致命细节**：道具在多帧/多角度运动中必须保持该朝向，否则会画反（实测：旧哨子被画成反吹）", "reference_prompt_zh（只写物品本体：造型/材质/颜色/纹样/尺寸感 + **必须写明功能端与尾端各在哪一侧、系绳系在哪一端**）", "owner": "持有人", "owner_photo": "布尔值 true/false：该物品表面是否承载某人的肖像（证件照/头像/画像/悬赏告示上的人像/屏幕里的人像）；物品有归属主人但本体不含人像时填 false。⭐ 填 true 时，reference_prompt_zh **必须**写明「印有 {{owner}} 本人的正面免冠证件照／头像，五官与 {{owner}} 一致」，**严禁**自行描写表情或五官（如「异常睁眼笑脸」「狰狞笑容」「诡异微笑」）——那会让出图模型画出一张与角色无关的陌生脸（用户已反馈：证件照上是个陌生怪笑脸）；该物品的主人须与 owner 字段一致", "surface_text": "该物品表面**确切**要呈现的文字，**必须逐字给出、不留想象空间**（如工牌抬头「安保部」、告示标题「注意安全」、书名「员工守则」）。⭐ **只要该物品表面存在任何可读文字（书名/告示/牌匾/卡片/标签/证件/屏幕/横幅/刻字），本字段就必须填写，不得留空**——留空会让出图模型自行编造汉字，实测必出乱码（形似汉字的错字）。文字必须**简短、通用、高频**：只写 2-12 个字的常见词，**切勿**写剧情长句、生僻字或英文；确无文字的普通物品才留空字符串。⭐ 本字段的值会被**逐字放进出图提示词的引号内**做文字渲染，因此**必须填可直接印刷的原文本身**（如「楼层安全守则」），**严禁**填「标题」「小字」「告示文字」「手写内容」这类**描述性词语**", "importance": "重要/临时。判定三问（任一答案为「是」即判临时）：①删掉它剧情还成立吗？②它只是随手用的日常物品吗？③它只是场景陈设吗？", "reference_prompt_zh": "中文参考图提示词，50 字以内，只写形制、材质、颜色、纹样与磨损状态；**严禁写风格词/画风词/质量词**", "reference_prompt_en": "English prompt for an item prop sheet, under 40 words, comma-separated concrete visual keywords (shape, material, color, pattern, wear). Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"}}],
+  "scenes": [{{"name": "场景名", "location": "地点类型（**同一个场所的不同机位、朝向或景别一律视作同一个 location**，不要重复建场景；只有当边界、入口、功能区或固定结构真的不同时才算新地点）", "appearance": "环境与氛围（70 字以内）：把「压抑/肃杀/温暖」翻译成**已有依据的空间选择**——通道宽窄、光比强弱、材质反射、空气状态（雾/尘/雪/烟）、色温关系；不得为造气氛而新增剧情事故、封锁出口或搬动固定结构。并点明此空间能承载的戏：谁掌控入口、座位与视线高点，谁会被阻拦、围观或逼入死角，哪件道具可被交接、摔碎或藏匿（撑不起对抗、羞辱、救援、揭露与反转的空间，不要写成核心场景）", "scene_lighting": "该场景的**统一光影基调**（30 字以内）：整个场景所有镜头共享的主光源/时间/色温（如「黄昏暖调逆光」「冷蓝月光」「正午顶光」），用于消除同场景内逐镜光影漂移；无明确光源倾向时写「自然漫射光」。此字段只写光影，不写风格词/画风词/质量词，也不要出现人物", "int_ext": "本场景内外景（只填「内景」「外景」「内外景」三值之一：封闭空间＝内景、露天＝外景、跨内外＝内外景）", "time_of_day": "本场景时间（8 字以内，如「黄昏」「夜」「清晨」「雨夜」「正午」；必须与 scene_lighting 的时间口径一致）", "surface_text": "该场景中**确切**要呈现的文字，**必须逐字给出**（如告示/招牌/标识/门牌/守则/铭牌/横幅/屏幕上的字）。⭐ **只要场景里存在任何可读文字（告示、招牌、门牌、安全守则、楼层号、标语、屏幕文字等），本字段就必须填写，不得留空**——留空会让出图模型自行编造汉字，实测必出乱码（形似汉字的错字）。文字必须**简短、通用、高频**：只写 2-12 个字的常见词（如「注意安全」「禁止通行」「楼层安全守则」），**切勿**写剧情长句、生僻字或英文；确实没有文字的空场场景才留空字符串", "reference_prompt_zh": "中文参考图提示词，90 字以内，**地理优先**：用「从哪个入口看向哪个方向、前中后景分别是什么、锚点在彼此哪一侧」的两两关系来写，不堆装饰清单。必写：①空间身份与功能；②观察方向与可见边界；③入口与通道如何连通；④1-3 个固定锚点及其左右前后相对关系；⑤前景/中景/背景层次与一处尺度参照；⑥墙地顶材质与主次色。最后写时间天气与光源方向。**严禁写风格词/画风词/质量词，且不要出现人物**（保持空场，才能作为地理参考被后续镜头反复复用）", "reference_prompt_en": "English prompt for an environment concept art sheet, under 60 words, comma-separated concrete visual keywords. Geography-first: state the viewpoint and what falls in foreground, midground and background, then entrance and circulation, then one to three fixed anchors as pairwise relations (what sits left or right of what), then materials and palette, then time, weather and light direction. Spatial layout, architecture, no decoration inventory, no people. Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"}}],
   "production_notes": {{"style_guide": "画面与叙事风格说明（60 字以内）"}}
 }}
 【硬性约束】characters / items / scenes **不设数量上限**——原文有多少就登记多少，不得为省篇幅合并或丢弃条目；characters 按戏份从大到小排序；纯背景路人（无台词、无独立动作、不推进情节，如老人甲、村民若干）不登记，但共同推进情节的一方阵营／敌群／首领或群像（有共同称谓、各自开腔或行动）必须登记——有具名首领就登首领，只有共同称谓的群体就登记为一个群像角色（name 用群体称谓如「正道群敌」，role 标敌方，appearance 写可辨识代表形象）；items 仍按三问过滤（①删掉它剧情还成立吗？②只是随手用的日常物品吗？③只是场景陈设吗？任一答案为「是」即剔除，临时道具不得进 items）；不要输出示例里的占位文字。若上方提供了「项目级设定库」，则已登记角色的 name / gender / appearance / personality 必须与该库完全一致（禁止改名、禁止改性别、禁止改外观），只允许更新 outfit（当前服装状态）。
@@ -1007,8 +1035,9 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     continuity_ctx 非空时（跨集连贯性方案 A②③ / C⑦⑧）：注入上集摘要卡、衔接契约、
     项目级风格指南、人物口吻词典、金句保留清单与运镜术语表。
     cache_dir 非空时启用断点缓存：命中即跳过模型调用（见文件上方缓存说明）。
-    shots_hard_cap > 0 时收紧本块镜头数上限（单集硬上限 MAX_SHOTS_PER_EPISODE 的分配额度）——
-    只压上限、不动下限，避免与 SHOTS_PER_CHUNK_MIN 打架（下限由调用方按预算调低）。
+    shots_hard_cap > 0 时收紧本块镜头数上限（**显式额度**，只压上限、不动下限，
+    避免与 SHOTS_PER_CHUNK_MIN 打架）。2026-10-09 起主流程**不再传单集上限**
+    （按场次生产后单集镜数不设上限），该参数仅用于调用方显式收紧。
 
     ⚠️ 单块镜数超过 MAX_SHOTS_PER_CHUNK 时**先二分再送模型**（见该常量注释）：
     一次性要几十镜会让响应体大到读超时（实测 49 镜 ReadTimeout 1200s）。
@@ -1061,14 +1090,66 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     _hard = int(shots_hard_cap or 0)
     shots_target = int(shots_target)
     if _hard > 0:
-        # 单集镜头数硬上限是**权威**：目标也不得超过它。否则 prompt 会自相矛盾
-        #（「至少 25 个、上限 6 个」），模型只会照目标超额产出 → 硬上限形同虚设。
+        # 调用方显式给了额度时，它是**权威**：目标也不得超过它，否则 prompt 自相矛盾
+        #（「至少 25 个、上限 6 个」）。⚠️ 2026-10-09 起主流程不再传单集上限（按场次生产）。
         shots_target = max(1, min(shots_target, _hard))
-    shots_cap = max(shots_target, min(120, shots_target * 2 + 3))
+    shots_cap = max(shots_target, min(120, int(math.ceil(shots_target * SHOT_CAP_GROWTH))))
     if _hard > 0:
         shots_cap = min(shots_cap, max(shots_target, _hard))
     speech_budget = SHOT_SPEECH_BUDGET_CHARS
-    prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：至少 {shots_target} 个、上限 {shots_cap} 个。把下方原文**压缩提炼**成可拍摄的镜头，只保留推动剧情的关键情节（冲突/转折/关键动作/金句），纯背景铺陈直接删去、勿逐句照搬。
+    # ---- 2026-10-07 提示词外置（app/prompts/script_generate.txt）：原内联 f-string 的
+    # 静态骨架抽到提示词模板中心，全部内插值改为 render() 的命名参数（逐字同值，清单见
+    # prompt_templates.REGISTRY["script_generate"].variables）。模板读取失败/为空时回落
+    # 下方原 f-string 兜底分支 —— 两条路径产出的提示词必须逐字一致（改模板正文时需同步
+    # prompt_templates._DEFAULT_SCRIPT_GENERATE 与此处 f-string）。
+    # ⚠️ render() 对值为 None 的变量不替换占位符，而 f-string 会把 None 渲染成 "None"：
+    # 故可能为 None 的取值（chunk_title / outline_summary）先按 f-string 语义 str() 化，
+    # 保证极端输入下两条路径仍逐字一致；其余取值均带 or ''/默认值兜底或恒为 str/int。
+    _tpl = prompt_templates.load("script_generate")
+    if _tpl:
+        prompt = prompt_templates.render(
+            "script_generate",
+            rules=REWRITE_RULES,
+            drama_title=bible.get('title') or '',
+            chunk_title=str(chunk.get('title')),
+            chunk_index=chunk['index'],
+            chunk_total=chunk['total'],
+            target_shots=shots_target,
+            shots_cap=shots_cap,
+            style=bible.get('style') or '',
+            style_guide=(_ctx_block(continuity_ctx, 'style_guide_text')
+                         or (bible.get('production_notes') or {}).get('style_guide') or ''),
+            prev_block=_ctx_line(continuity_ctx, 'prev_block'),
+            bible_block=_ctx_line(continuity_ctx, 'bible_block'),
+            contract_block=_ctx_line(continuity_ctx, 'contract_block'),
+            style_block=_ctx_line(continuity_ctx, 'style_block'),
+            camera_block=_ctx_line(continuity_ctx, 'camera_block'),
+            preflight_block=_ctx_line(continuity_ctx, 'preflight_block'),
+            prev_tail=prev_tail,
+            char_brief_json=json.dumps(char_brief, ensure_ascii=False),
+            item_brief_json=json.dumps(item_brief, ensure_ascii=False),
+            scene_brief_json=json.dumps(scene_brief, ensure_ascii=False),
+            chunk_text=chunk.get('text') or '',
+            outline_summary=str(outline.get('summary', '')),
+            key_beats_json=json.dumps(outline.get('key_beats') or [], ensure_ascii=False),
+            shot_type_count=len(SHOT_TYPES),
+            shot_type_enum=_SHOT_TYPE_ENUM_ZH,
+            speech_budget=speech_budget,
+        )
+    else:
+        # 兜底：用户覆盖 / 出厂模板 / 代码内注册兜底三级都不可用时走原 f-string（正文与
+        # app/prompts/script_generate.txt 的骨架、prompt_templates._DEFAULT_SCRIPT_GENERATE
+        # 逐字一致，仅占位符由运行时值填充）。
+        prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：至少 {shots_target} 个、上限 {shots_cap} 个。把下方原文**压缩提炼**成可拍摄的镜头，只保留推动剧情的关键情节（冲突/转折/关键动作/金句），纯背景铺陈直接删去、勿逐句照搬。
+【粒度口径（2026-10-06 用户指定，**务必先读**）】本片目标是**每集 20~30 个镜头、每镜 5~6 秒**（不是每镜 2 秒的快切）。
+  · **镜数少了不等于少写情节**：目标镜数变少时，请把相邻的连续情节**合并进同一个镜头**（一个镜头里可以容纳一个完整的动作过程、以及前后两段关键情节），而**不是**把原文情节丢掉。原文里的冲突/转折/关键动作/金句仍必须**全部**落到镜头里 —— 本系统对原文覆盖率有硬校验，漏情节会导致整集重跑。
+  · **不要把一个完整动作拆成几个镜头**：「抬手→握拳→挥出」是**一个**镜头里的连续动作，不是三个镜头。只有当**空间/时间/视角真的发生跳跃**（换了地点、跳了时间、要强调另一个主体）时才切镜。
+  · **不要为同一件事再补一个镜头**：已经拍过的道具/手部，不要为了「规避人脸」再单独切一个几乎同画面的插入镜。
+
+【描述粒度口径（2026-10-06 用户指定：写关键动作分解、只写关键节点，**务必先读**）】
+  · description 写「**起点 → 关键动作节点 → 结果**」：动作过程写**关键动作分解**（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座），只写关键节点、不写琐碎中间步（「拉开窗帘」写「走到窗前→拉开窗帘」即可，不写手指逐片推开的过程）。
+  · 琐碎中间步与逐格推进**由视频/九宫格生成阶段负责**：5~6 秒镜头的 9 宫格就是把关键节点之间的时间自然切片，剧本层只写 2~4 个关键节点即可——把琐碎中间步写满反而让 9 个格全画同一个中间态（九宫格雷同，用户已纠正）。
+  · 每镜 description **100~120 字（下限 100，上限 120）**，写：主体、关键动作分解、关键构图位置、情绪落点。光线/氛围/背景**只在推动剧情或首次出场时写一句**，不逐句铺陈。
 {REWRITE_RULES}
 【全剧风格】{bible.get('style') or ''}　【画面风格指南】{_ctx_block(continuity_ctx, 'style_guide_text') or (bible.get('production_notes') or {}).get('style_guide') or ''}
 {_ctx_line(continuity_ctx, 'prev_block')}{_ctx_line(continuity_ctx, 'bible_block')}{_ctx_line(continuity_ctx, 'contract_block')}{_ctx_line(continuity_ctx, 'style_block')}{_ctx_line(continuity_ctx, 'camera_block')}{_ctx_line(continuity_ctx, 'preflight_block')}{prev_tail}【可用角色】{json.dumps(char_brief, ensure_ascii=False)}
@@ -1079,7 +1160,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 【本段剧情摘要】{outline.get('summary', '')}
 【本段情节要点】{json.dumps(outline.get('key_beats') or [], ensure_ascii=False)}
 【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字，结构如下：
-{{"shots": [{{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟随/近景轻推，10 字以内）", "shot_type": "景别（只填以下 {len(SHOT_TYPES)} 值之一：{_SHOT_TYPE_ENUM_ZH}；局部=只拍手部/道具的插入镜；与 camera 里的景别词保持一致；本镜确实无法确定景别时写空字符串）", "camera_motion": "运镜（只填运镜词，优先用上方【克制运镜·推荐】的 固定/轻推/轻摇/跟随/轻手持；无运镜的静止镜头填「固定」）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（80 字以内，只写人物动作过程与关键构图：谁做了什么、怎么做的、在画面什么位置；外貌衣着/环境光线只在推动剧情或首次出场时写，不逐句铺陈，禁止写背景陈述/世界观/来历评述）", "visual_detail": "画面补充细节（可选；当 description 之外还有更细的关键动作过程/环境细节时写在这里，80 字以内；没有多余细节时写空字符串）", "dialogue": [{{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤30 字；原文对话尽量原样保留；角色的自语/心声写成该角色本人的台词）"}}], "emotion": "情绪（8 字以内）", "edit_reason": "剪辑动机（20~30字，具体说明这一镜为什么切/承担什么叙事功能，禁止写可套用的空话，如：切掉环境只留下他的反应/用空间拉开取代告别对白/物件回环把十年压缩到一张纸上）", "beat": "叙事节拍（本镜所处节拍，只填「开场」「触发」「高潮」「收尾」四值之一；拿不准填「触发」）", "audio_cues": "音效/配乐提示（60 字以内，只写环境音/音效/配乐，不写人声）", "characters_in_shot": ["出场角色名"], "first_frame": "首帧画面（运动开始前那一刻的静态快照：画面主体与构图，40字以内；无明显运动变化写空字符串）", "last_frame": "末帧画面（运动结束后的终态，40字以内；与首帧相同或无运动时写空字符串）", "motion": "运动描述（严格区分【摄影机运动】推拉摇移跟升降 与【画面内运动】人物/物体自身动作；30字以内；静止镜头写空字符串）", "caption": "字幕（**默认写空对象 {{}}**；仅当本镜承担时空落点交代或集尾悬念时才写，形如 {{"text": "字幕文字（≤20字）", "kind": "时间地点/回溯/悬念 三值之一"}}。字幕是后期叠加的文字，不进画面描述、不产生人声）", "items_in_shot": ["出场物品名"]}}]}}
+{{"shots": [{{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟随/近景轻推，10 字以内）", "shot_type": "景别（只填以下 {len(SHOT_TYPES)} 值之一：{_SHOT_TYPE_ENUM_ZH}；局部=只拍手部/道具的插入镜；与 camera 里的景别词保持一致；本镜确实无法确定景别时写空字符串）", "camera_motion": "运镜（只填运镜词，优先用上方【克制运镜·推荐】的 固定/轻推/轻摇/跟随/轻手持；无运镜的静止镜头填「固定」）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（100~120字，下限100上限120，按「起点→关键动作节点→结果」写：谁做了什么、**动作过程写关键动作分解（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座）**、**做完后画面是什么状态**、在画面什么位置；只写关键节点不写琐碎中间步（琐碎中间步交给九宫格/视频阶段切片）；外貌衣着/环境光线只在推动剧情或首次出场时写一句，不逐句铺陈，禁止写背景陈述/世界观/来历评述）", "visual_detail": "画面补充细节（可选；当 description 之外还有本镜**结果态**里必须交代的关键环境/道具状态时写在这里，≤120字；不要重复动作过程；没有多余细节时写空字符串）", "dialogue": [{{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤30 字；原文对话尽量原样保留；角色的自语/心声写成该角色本人的台词）"}}], "emotion": "情绪（8 字以内）", "edit_reason": "剪辑动机（20~30字，具体说明这一镜为什么切/承担什么叙事功能，禁止写可套用的空话，如：切掉环境只留下他的反应/用空间拉开取代告别对白/物件回环把十年压缩到一张纸上）", "beat": "叙事节拍（本镜所处节拍，只填「开场」「触发」「高潮」「收尾」四值之一；拿不准填「触发」）", "audio_cues": "音效/配乐提示（60 字以内，只写环境音/音效/配乐，不写人声）", "characters_in_shot": ["出场角色名"], "first_frame": "首帧画面（运动开始前那一刻的静态快照：画面主体与构图，40字以内；无明显运动变化写空字符串）", "last_frame": "末帧画面（运动结束后的终态，40字以内；与首帧相同或无运动时写空字符串）", "motion": "运动描述（严格区分【摄影机运动】推拉摇移跟升降 与【画面内运动】人物/物体自身动作；30字以内；静止镜头写空字符串）", "caption": "字幕（**默认写空对象 {{}}**；仅当本镜承担时空落点交代或集尾悬念时才写，形如 {{"text": "字幕文字（≤20字）", "kind": "时间地点/回溯/悬念 三值之一"}}。字幕是后期叠加的文字，不进画面描述、不产生人声）", "items_in_shot": ["出场物品名"]}}]}}
 【禁止输出 prompt_h3 字段】视频提示词由程序在生成阶段按 H3 规范自动构建（它会结合当次实际传入的参考图，生成 subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music 六段）。你在剧本阶段并不知道最终配几张参考图，写出来的英文提示词缺少 <Picture N> 标签，反而会覆盖规范提示词导致出片偏离设定。因此**不要写 prompt_h3、不要写英文提示词**；把画面信息全部写进 description 即可。
 【站位与动作（3D 导演台依赖，逐镜必填）】每一镜都要写：\n
   ① blocking：本镜出场角色的**站位**，每个出场角色一条，形如 
@@ -1090,7 +1171,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
   ② action：本镜的**动作 beat**——谁做了什么、动作从哪到哪（例：「羡进抬头直视赵天霸，右手缓缓握拳」）。
 **不得留空**，纯对话镜也要写神态与小动作。\n
 【台词要求】dialogue 必须是数组，数组元素为 {{"speaker": 角色名, "text": 台词}}；speaker 必须精确等于「可用角色」中的名字，禁止写“旁白/众人”等未登记角色；无台词的镜头 dialogue 写 []（空数组），禁止写成字符串或 null。角色的心理活动改写成该角色**本人**的自语台词时，speaker 仍写角色名（不要写成「旁白」，本系统没有旁白角色）。dialogue **只承载**：原文对话、以及原文明确心理活动/独白改写的第一人称自语——第三人称叙述与背景补叙**禁止**写成任何角色开口的台词（改写规则 8）。
-【台词预算（防成片截断）】单个镜头的 dialogue **合计不超过 {speech_budget} 字**（≈6.7 秒配音）。台词过多时**先精简冗余语气词与重复表述**，仍超预算才拆成相邻镜头——配音是按镜头时间轴铺的，单镜台词超出镜头时长会被成片尾部静默截掉。
+【台词预算（防成片截断）】单个镜头的 dialogue **合计不超过 {speech_budget} 字**（≈3.6 秒配音，按 config.CHARS_PER_SECOND=4.5 字/秒）。台词过多时**先精简冗余语气词与重复表述**，仍超预算才拆成相邻镜头——配音是按镜头时间轴铺的，单镜台词超出镜头时长会被成片尾部静默截掉。
 【音轨说明（本系统不产出旁白）】成片没有画外音解说，配音链路**只读 dialogue**：audio_cues 里写「雨声」「风声」这类音效**不会产生人声**。因此：① 有对话或自语的镜头必须写 dialogue，禁止把台词塞进 description / visual_detail / audio_cues；② 纯画面/纯动作镜头允许没有台词（该镜成片留白，由音效与配乐铺底），但**必须**在 audio_cues 写明音效/配乐提示；③ **严禁**凭空编造原文里没有的台词来「凑人声」——宁可留白，也不要无中生有。
 【字幕/转场（caption）】本系统不产出旁白，**时空跳跃靠字幕点明落点**。只在三种情况写 caption：
 ①上下集之间时间/地点发生跳变（kind=时间地点，如「一年后」「青茅山·古月山寨」）；
@@ -1721,14 +1802,19 @@ def _norm_camera_motion(value) -> str:
 
 #: 一镜一动作的**拆镜阈值**：动作节拍 ≥ 此值的镜头会被拆成相邻两镜。
 #:
-#: 为什么需要它（而不是只靠提示词）：同输入 A/B 实测（旧规则 vs 加了「一镜一动作」的新规则，
-#: 素材《剑冢》第一章、shots_target=8）——
-#:   旧规则：10 镜，节拍均值 1.60，≥3 节拍的镜 2/10 = **20%**，最多 3 个；
-#:   新规则： 8 镜，节拍均值 1.12，≥3 节拍的镜 0/8  = **0%**， 最多 2 个。
-#: 提示词把「一镜多动作」在样本内压到了 0，但它仍是**软约束**：换个素材/长度就可能故态复萌。
-#: 故这里补一刀**硬兜底** —— 拆镜是确定性的（不调模型、不引入新内容），只把动作按先后切开，
-#: 保证成片真的产生「切换」而不是一镜里演好几件事。
-SPLIT_ACTION_BEATS = 3
+#: ⚠️ 2026-10-06：**默认关闭**（阈值抬到 99 = 任何镜头都拆不动）。
+#:   用户口径改为「每集 20~30 镜、每镜 5~6 秒」后，这一刀与目标**直接冲突**：
+#:   它把一个镜头劈成两个更短的镜头，正是「分镜切得太细」的来源之一
+#:   （实测第 1 集日志：镜14/17/21/40/53/61 共 6 处被拆）。
+#:   而且 5~6 秒的镜头本来就**装得下** 2~3 个动作节拍 —— 一个完整动作过程
+#:   （抬手→握拳→挥出）本来就该在同一镜里演完，而不是切成三镜各 2 秒。
+#:   回滚：`MJSCXT_SPLIT_ACTION_BEATS=3`。
+#:
+#: 历史依据（保留，说明当初为什么要这刀）：同输入 A/B 实测（素材《剑冢》第一章、
+#: shots_target=8）—— 旧规则 10 镜、节拍均值 1.60、≥3 节拍的镜 2/10；新规则 8 镜、
+#: 节拍均值 1.12、≥3 节拍的镜 0/8。提示词把「一镜多动作」压到 0，但它仍是软约束，
+#: 故当时补了这一刀确定性兜底。**该兜底在 2 秒短镜口径下成立，在 5~6 秒长镜口径下不成立。**
+SPLIT_ACTION_BEATS = _env_pos_int("MJSCXT_SPLIT_ACTION_BEATS", 99, floor=1)
 
 
 # ===================== 参考片风格对齐（2026-09-30）=====================
@@ -1752,13 +1838,29 @@ _FORCE_LOCKED_TYPES = ("特写",)
 #: 极端景别收窄：参考片大特写/远景/大远景 0 使用。只收窄到**同距离家族**，
 #: 避免「描述写环境为主体、景别却给近景」这种取景与描述互相矛盾的改法。
 _TYPE_NARROW = {"大特写": "特写", "远景": "全景", "大远景": "全景"}
-#: 「局部」插入镜目标占比（参考片 25%，取略低值留余量）
-REF_INSERT_RATIO = 0.22
+#: 「局部」插入镜目标占比（参考片 25%，取略低值留余量）。
+#:
+#: ⚠️ 2026-10-06：**默认关闭（0.0）**。用户反馈「分镜分得太细 + 九宫格有重复」，
+#:   而这一条本身就是**定义级的重复来源**：插入镜由源镜头派生，**同一个道具、同一取景家族**，
+#:   只是把叙事压到手上（`_derive_insert_shot` 的 `edit_reason` 原话）——它在成片里就是
+#:   「同一个画面再来一次」。实测第 1 集 **56 镜里有 16 镜是插入镜（28.6%）**，
+#:   是「镜数虚高 + 画面重复」的单一最大来源。
+#:   回滚：`MJSCXT_REF_INSERT_RATIO=0.22`。
+REF_INSERT_RATIO = _env_float("MJSCXT_REF_INSERT_RATIO", 0.0, floor=0.0, ceiling=0.5)
 #: 插入镜最多把镜头数放大到原来的多少倍（防镜数与总时长失控）
 REF_INSERT_MAX_GROWTH = 1.35
-#: 单镜时长上限（参考片 92 镜实测 0.40~6.57s，中位 2.08s，没有一镜拖到 7s 以上）。
-#: 只砍长尾，不下压到台词所需时长以下。
-REF_SHOT_DURATION_MAX = 6.5
+#: 长台词拆镜的触发阈值 —— 镜头「装得下内容」所需秒数超过本值即按停顿拆成相邻两镜。
+#:
+#: ⚠️ 2026-10-06：**6.5 抬到 8.0（= SHOT_DURATION_MAX，即只在真溢出时拆）**。
+#:   旧值 6.5 是为「2 秒短镜」口径服务的：把 8 秒的镜头劈成两个 4 秒，节奏更碎。
+#:   但在新的 5~6 秒口径下，这一刀**方向反了** —— 劈出来的一半只有 3.3 秒，
+#:   会被 `SHOT_DURATION_MIN=5.0` 的下限重新抬到 5 秒，等于用一个 6.6 秒的镜头
+#:   换出 10 秒的成片时长（时长无谓变长，镜数无谓变多）。
+#:   抬到 8.0 后，只有「台词/动作真的塞不进单镜上限」的镜头才会被拆，其余原样保留。
+#:   回滚：`MJSCXT_REF_SHOT_DURATION_MAX=6.5`。
+REF_SHOT_DURATION_MAX = _env_float(
+    "MJSCXT_REF_SHOT_DURATION_MAX", float(SHOT_DURATION_MAX), floor=1.0,
+    ceiling=float(SHOT_DURATION_MAX))
 
 
 def _shot_type_of(row: dict) -> str:
@@ -2567,205 +2669,7 @@ def _run_full_coverage_check(client, novel_text: str, script: dict, reports=None
         return (script.get("metadata") or {}).get("coverage") or {}
 
 
-def convert_novel_to_script(client, novel_meta: dict, novel_text: str, style: str = "3D动漫渲染",
-                            episodes: int = 1, target_shots: int = 12, progress_cb=None,
-                            check_coverage: bool = True, continuity_dir: str = None,
-                            project_key: str = None, cache_dir: str = "",
-                            coverage_max_rounds: int = COVERAGE_MAX_ROUNDS) -> dict:
-    """完整转换流程，返回 A 版剧本 dict（含 metadata）
-
-    check_coverage=True（默认）时，整本路径同样执行「原文覆盖率校验 → 遗漏自动补生成 →
-    复检 → 报告落盘」，保证长篇小说既不删减原文，也不因分块而丢内容。
-
-    ⚠️ cache_dir（2026-09-25 补）：整本路径此前**完全不落缓存** ——
-    提炼 42 章要跑 40 次调用、约 40 分钟，只要有一次网关抖动，
-    pipeline 的 script 步骤整体重试就要**从头再烧一遍**。
-    这正是 `shots_cache_dir` 注释里写的那个坑，但当时只接到「按章分集」路径
-    （convert_chapter_to_script），整本路径漏了。现补上：口径与分集路径一致
-    （内容寻址 sha1(prompt)，命中即跳过模型调用）。
-    """
-    def report(phase, current, total, message, percent):
-        if progress_cb:
-            try:
-                progress_cb(phase, current, total, message, percent)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"进度回调异常：{e}")
-
-    t0 = time.time()
-    cache_events = []          # 缓存命中轨迹（写入 metadata，便于排查「为什么这么快」）
-    novel_title = novel_meta.get("title") or novel_meta.get("name") or "未命名小说"
-    chapters = novel_meta.get("chapters") or []
-    chunks = build_chunks(novel_text, chapters)
-    if not chunks:
-        raise LLMError("小说正文为空，无法转换")
-    # 全量覆盖：不再抽样，所有块都送模型（分块仅用于控制单次 prompt 体量）
-    sampled = list(chunks)
-    sampled_idx = [c["index"] for c in chunks]
-
-    total_steps = len(sampled) + 2 + len(sampled)
-    report("prepare", 0, total_steps,
-           f"全文 {novel_meta.get('char_count', 0)} 字，切分为 {len(chunks)} 块，"
-           f"全量覆盖送模型 {len(sampled)} 块（不抽样、不丢内容）",
-           3)
-
-    # ① 逐块提炼
-    outlines, warnings = [None] * len(sampled), []
-    for i, chunk in enumerate(sampled):
-        report("outline", i + 1, total_steps, f"提炼第 {chunk['index']} 块（{chunk.get('title')}）…",
-               int(5 + (i + 1) / total_steps * 55))
-        try:
-            outlines[i] = extract_chunk_outline(client, chunk, novel_title,
-                                                events=cache_events, cache_dir=cache_dir)
-        except LLMError as e:
-            # 大纲仅用于辅助提示，失败不丢原文（分镜阶段仍全量送该块正文）
-            warnings.append(f"第 {chunk['index']} 块大纲提炼失败（改用空大纲，原文仍全量送模型）：{e}")
-            logger.warning(f"第 {chunk['index']} 块提炼失败：{e}")
-    if not any(outlines):
-        raise LLMError("所有分块提炼均失败：" + ("；".join(warnings) or "未知错误"))
-
-    # ② 汇总设定
-    report("bible", len(sampled) + 1, total_steps, "汇总全剧人物 / 物品 / 场景设定…", 65)
-    bible = _as_dict(build_bible(client, outlines, novel_title, style, episodes, target_shots,
-                                 events=cache_events, cache_dir=cache_dir))
-
-    # 2026-09-29 资产不设数量上限（用户决策）：limit=None = 全量保留（_norm_list 的
-    # [:None] 切片语义），数量约束前移到提示词登记口径（无名群演不登记 / 道具三问）。
-    characters = _norm_list(bible.get("characters"), None,
-                            ["name", "age", "gender", "appearance", "personality", "voice_style",
-                             "reference_prompt_zh", "reference_prompt_en"])
-    items = _norm_list(bible.get("items"), None,
-                       ["name", "category", "appearance", "owner", "importance",
-                        "reference_prompt_zh", "reference_prompt_en"])
-    scenes = normalize_scenes_meta(_norm_list(
-        bible.get("scenes"), None,
-        ["name", "location", "appearance", "scene_lighting", "int_ext", "time_of_day",
-         "reference_prompt_zh", "reference_prompt_en"]))
-    if not characters:
-        raise LLMError("模型未返回有效角色设定，转换中止")
-    # 风格：以调用方传入的 style 为准 + 确定性补写（模型不得自写风格，统一由此收尾）
-    eff_style = style_kit.normalize_style(style) or style_kit.normalize_style(bible.get("style"))
-    style_filled = style_kit.apply_asset_style_all(characters, eff_style) \
-        + style_kit.apply_asset_style_all(items, eff_style) \
-        + style_kit.apply_asset_style_all(scenes, eff_style)
-    if eff_style and style_filled:
-        logger.info("全剧设定：已为 %d 条资产参考提示词补写风格「%s」", style_filled, eff_style)
-    bible = {"title": str(bible.get("title") or novel_title)[:40],
-             "theme": str(bible.get("theme") or "")[:200],
-             "style": eff_style[:60],
-             "characters": characters, "items": items, "scenes": scenes,
-             "production_notes": bible.get("production_notes") or {}}
-
-    # ③ 逐块写分镜（镜头数按每块原文体量自动扩展，不再按 target_shots 摊薄砍内容）
-
-    # ③ 逐块写分镜（镜头数按每块原文体量自动扩展，不再按 target_shots 摊薄砍内容）
-    all_shots = []
-    for i, chunk in enumerate(sampled):
-        per_chunk = estimate_shots_for_chars(chunk.get("char_count") or len(chunk.get("text") or ""))
-        # P1-2 接缝重叠（借 ViMax overlap 思路、按本架构落地）：i>0 时把「上一块结尾」
-        # （已 LLM 提炼的 outline，零新增调用）注入本块，让开头承接上段而非凭空重启；
-        # i=0（首块）→ prev_chunk/prev_outline 均 None → prev_tail="" → prompt 不出现该段（零变化）。
-        _prev_chunk = sampled[i - 1] if i > 0 else None
-        _prev_outline = (outlines[i - 1] or {}) if i > 0 else None
-        _prev_tail = _prev_tail_block(_prev_chunk, _prev_outline)
-        report("shots", len(sampled) + 2 + i, total_steps,
-               f"编写第 {chunk['index']} 块分镜（{chunk.get('title')}，{per_chunk} 镜）…",
-               int(70 + (i + 1) / total_steps * 25))
-        try:
-            all_shots.extend(build_shots_for_chunk(client, bible, outlines[i] or {"summary": "", "key_beats": []},
-                                                   chunk, per_chunk,
-                                                   events=cache_events, cache_dir=cache_dir,
-                                                   prev_tail=_prev_tail))
-        except LLMGatewayUnavailable as e:
-            # 网关问题不是「这一块运气不好」，重试无用 —— 见 _gateway_down_fallback 说明
-            fb = _gateway_down_fallback(e, chunk, per_chunk, bible, all_shots)
-            all_shots.extend(fb)
-            warnings.append(_gateway_down_warning(chunk, len(fb)))
-            logger.error(f"第 {chunk['index']} 块因网关不可用降级兜底 {len(fb)} 镜：{e}")
-        except LLMError as e:
-            # 兜底：按原文逐句生成承载镜头，绝不静默丢弃该段原文
-            fb = _fallback_shots_for_chunk(chunk, per_chunk, bible)
-            all_shots.extend(fb)
-            warnings.append(f"第 {chunk['index']} 块分镜失败，已按原文兜底生成 {len(fb)} 镜"
-                            f"（内容未丢，建议人工润色）：{e}")
-            logger.warning(f"第 {chunk['index']} 块分镜失败，已兜底 {len(fb)} 镜：{e}")
-
-    shots = _norm_shots(all_shots, bible, episodes)
-    if not shots:
-        raise LLMError("模型未返回有效分镜：" + ("；".join(warnings) or "未知错误"))
-
-    # 外形一致性收敛（2026-09-24）：资产**出图依据**是 reference_prompt_zh，而分镜
-    # 提示词 / 质检口径取 appearance —— 两者漂移会让「文字说黑寸头、参考图却是黑发高冠」
-    # 两条互斥指令同时生效（分镜是 cfg=1.0 的参考图编辑型 → 参考图压过文字），模型每次
-    # 随机倒向一边、质检必然抓到另一边 → 无限重试、整集跑不过。落盘前按 appearance 收敛。
-    asset_prompt_kit.reconcile_script({"characters": characters, "shots": shots})
-
-    # 场次表（2026-10-02）：落盘前重新编号并收表 —— 覆盖率补生成/一致性修复新增的
-    # 镜头也要落在正确的【第N场】里，不能出现没场次号的孤儿镜头。
-    # 先编号（就地写回每镜 scene_no / scene_heading），再只读取器收表。
-    # 注意：assign_scene_numbers 返回的是**场次表**，collect_scene_flow 要的是**镜头表**。
-    assign_scene_numbers(shots)
-    scene_flow = collect_scene_flow(shots)
-    script = {
-        "title": bible["title"],
-        "theme": bible["theme"],
-        "style": bible["style"],
-        "characters": characters,
-        "items": items,
-        "scenes": scenes,
-        # 场次表：按出场顺序的【第N场】内外景·地点·时间，供前端场记板与成片字幕定位
-        "scene_flow": scene_flow,
-        "shots": shots,
-        "production_notes": {
-            "total_shots": len(shots),
-            "estimated_duration": len(shots) * 5,
-            "scene_count": len(scene_flow),
-            "style_guide": str((bible.get("production_notes") or {}).get("style_guide") or "")[:300],
-        },
-        "metadata": {
-            "source": "novel_to_script",
-            "source_novel": {
-                "novel_id": novel_meta.get("novel_id"),
-                "name": novel_meta.get("name"),
-                "char_count": novel_meta.get("char_count"),
-                "chapter_count": novel_meta.get("chapter_count"),
-            },
-            "chunks_total": len(chunks),
-            "chunks_used": len(sampled),
-            # 全量覆盖：sampled_chunks 语义 = 全部块下标（保留旧字段名兼容前端）
-            "sampled_chunks": sampled_idx,
-            "coverage_mode": "full",
-            "chars_per_shot": CHARS_PER_SHOT,
-            "estimated_shots": sum(estimate_shots_for_chars(c.get("char_count") or 0) for c in chunks),
-            "shots_per_chunk": [estimate_shots_for_chars(c.get("char_count") or 0) for c in chunks],
-            "chunk_chars": CHUNK_CHARS,
-            "style": style,
-            "episodes": episodes,
-            "target_shots": target_shots,
-            "model": client.model,
-            "base_url": client.base_url,
-            "elapsed_sec": round(time.time() - t0, 1),
-            "warnings": warnings,
-            # 断点缓存命中轨迹：重跑时据此判断「这次为什么这么快 / 哪几步还在烧模型」
-            "cache_enabled": _shots_cache_enabled(),
-            "cache_hits": sum(1 for e in cache_events if e.get("event") == "cache_hit"),
-            "cache_events": cache_events[:200],
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-        },
-    }
-    # ⑤ AI 转剧本阶段自动判定「每集镜头数 / 每集时长（秒）」并写入 Schema（下游链路直接引用）
-    apply_episode_schema(script)
-    script["metadata"]["coverage"] = build_chapter_coverage_meta(shots)
-    # ⑥ 原文覆盖率校验：逐句核对原文是否被镜头承载，有遗漏即补生成镜头并复检（只增不删）
-    if check_coverage:
-        script["metadata"]["coverage"] = _run_full_coverage_check(
-            client, novel_text, script, reports=report, warnings=warnings,
-            continuity_dir=continuity_dir,
-            project_key=project_key or (novel_meta or {}).get("name"),
-            max_rounds=coverage_max_rounds, total_steps=total_steps)
-    report("done", total_steps, total_steps,
-           f"转换完成：{len(characters)} 角色 / {len(items)} 物品 / {len(scenes)} 场景 / "
-           f"{len(script.get('shots') or shots)} 镜头 / 本集约 {script['episode_duration_sec']}s", 100)
-    return script
+# 整本转剧本路径已随「一章一集」拍板移除（2026-10-05）；集级入口见 convert_chapter_with_continuity
 
 
 # ===================== 按章节分集生成（每章一集） =====================
@@ -2774,6 +2678,8 @@ CHAPTER_MIN_CHARS = 300          # 过短章节阈值（低于此值仅提示，
 # ⚠️ 2026-09-25 实测修正（与上方 CHUNK_CHARS 同因，两条路径必须同口径）：
 #    3000 字 / CHARS_PER_SHOT(120) ≈ 25 镜/块 > MAX_SHOTS_PER_CHUNK(24) 的单次调用
 #    响应体红线 → 预劈半变成常态。改为 2400 字 ≈ 20 镜/块，首次调用即合规。
+#    （⚠️ 现值注记：`CHARS_PER_SHOT` 已于 2026-10-06 改为 240，故 2400 字 ≈ 10 镜/块；
+#     本条的「120」是当时值，技术依据不变、只是现已更宽裕。）
 CHAPTER_CHUNK_CHARS = 2400       # 单章二次分块粒度（字符）
 CHAPTER_MAX_SUBCHUNKS = 12       # [兼容保留] 旧「单章最多子块数」上限；全量覆盖后不再抽样，仅前端旧字段展示
 CHAPTER_MIN_SUBCHUNK_CHARS = 200 # 章内子块最小字数（过短的尾块并入前一块，保证不丢正文）
@@ -2849,7 +2755,7 @@ def build_chapter_chunks(chapter_text: str, chunk_chars: int = CHAPTER_CHUNK_CHA
         c["index"] = i + 1
         c["total"] = len(out)
         c["title"] = f"第{i + 1}子块"
-    # 全量覆盖：所有子块连续无缝地送模型并合并，不做任何抽样（旧 sample_chunks 调用已移除）
+    # 全量覆盖：所有子块连续无缝地送模型并合并，不做任何抽样
     all_idx = [c["index"] for c in out]
     return out, list(out), all_idx
 
@@ -2981,8 +2887,9 @@ def plan_shots_for_chars(char_count) -> int:
     """**拆集规划专用**的镜头数预估（按实测密度 `EPISODE_PLAN_CHARS_PER_SHOT`）。
 
     ⚠️ 与 `estimate_shots_for_chars` 的区别是本函数存在的全部理由，别混用：
-      · `estimate_shots_for_chars` = 按 `CHARS_PER_SHOT=120`（**提示词引导值**）。
-        它喂给模型写提示词、也用作覆盖率容量基准 —— **偏乐观**（实测只有实际的 1/3）。
+      · `estimate_shots_for_chars` = 按 `CHARS_PER_SHOT`（**提示词引导值**；2026-10-06 起为
+        240，沿革见该常量定义处）。它喂给模型写提示词、也用作覆盖率容量基准 ——
+        旧口径（120）下**偏乐观**，实测只有实际的 1/3。
       · 本函数 = 按 `EPISODE_PLAN_CHARS_PER_SHOT=26`（**实测密度**，2026-09-26 起）。
         只用于「这一章要拆几集」的前置规划 —— **必须贴近实际**，否则拆集判据失效。
 
@@ -3286,21 +3193,12 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     # 全量覆盖：镜头数随内容体量自动扩展（约每 CHARS_PER_SHOT 字 1 镜），不再为凑固定时长砍内容
     est_shots_total = sum(estimate_shots_for_chars(c.get("char_count") or 0) for c in all_chunks)
 
-    # ---- 单集镜头数硬上限（见 MAX_SHOTS_PER_EPISODE 的注释）----
-    # 超过上限时不删原文，只按比例收紧**每块的镜头额度**：全部子块照样送模型、原文覆盖率不变，
-    # 只是每镜承载的原文变多（镜头密度变稀）。真正的保底在下方对最终 shots 的硬截断。
-    per_chunk_cap = 0                      # 0 = 不限制
-    if est_shots_total > MAX_SHOTS_PER_EPISODE:
-        _n_sampled = max(1, len(sampled))
-        per_chunk_cap = max(1, -(-MAX_SHOTS_PER_EPISODE // _n_sampled))   # 向上取整均分
-        warnings.append(
-            f"本章预计 {est_shots_total} 镜，超过单集硬上限 {MAX_SHOTS_PER_EPISODE} 镜"
-            f"（整集 H3 连续渲染跑到约 {MAX_SHOTS_PER_EPISODE} 段后会因系统资源耗尽崩溃，"
-            f"已实测）→ 每块镜头额度收紧为 {per_chunk_cap} 镜。原文不删减，但镜头密度变稀；"
-            f"**建议把本章拆成 2 集分别生成**以保留画面细节。")
-        logger.warning("第%s集：镜头预算超限（预计 %d > 上限 %d），每块额度收紧为 %d：%s",
-                       episode_no, est_shots_total, MAX_SHOTS_PER_EPISODE, per_chunk_cap,
-                       chapter_title)
+    # ---- 单集镜头数：**不再设上限**（2026-10-09 用户口径）----
+    # 生产已从「整集一次连续渲染」改为「**按场次生产**」（每场单独提交、最后拼接成片），
+    # 原先的 78 镜资源红线（整集长跑把 ComfyUI 系统资源耗尽、跑到约 78 段必崩）不再适用于单集口径，
+    # 因此这里不再收紧每块镜头额度、也不再对最终 shots 做截断：
+    # 镜头数完全由内容体量决定（约每 CHARS_PER_SHOT 字 1 镜），原文与画面细节都不丢。
+    per_chunk_cap = 0                      # 0 = 不限制（保留变量以兼容下游签名）
 
     total_steps = len(sampled) + 2 + len(sampled)
     report("prepare", 0, total_steps,
@@ -3340,11 +3238,15 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
                             ["name", "age", "gender", "identity", "appearance", "outfit", "personality",
                              "voice_style", "reference_prompt_zh", "reference_prompt_en"])
     items = _norm_list(bible.get("items"), 3,
-                       ["name", "category", "appearance", "owner", "importance",
+                       ["name", "category", "appearance", "owner", "owner_photo",
+                        "surface_text", "importance",
                         "reference_prompt_zh", "reference_prompt_en"])
     scenes = normalize_scenes_meta(_norm_list(
         bible.get("scenes"), 8,
         ["name", "location", "appearance", "scene_lighting", "int_ext", "time_of_day",
+         # ⭐ 2026-10-07：场景「确切文字」字段（治场景告示/招牌乱码）。
+         #    必须与其他字段同批登记 —— _norm_list 只保留白名单字段，漏登记会静默丢弃。
+         "surface_text",
          "reference_prompt_zh", "reference_prompt_en"]))
     if not characters:
         raise LLMError("模型未返回有效角色设定，转换中止")
@@ -3368,7 +3270,8 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
         chunk_chars_i = chunk.get("char_count") or len(chunk.get("text") or "")
         per_chunk = estimate_shots_for_chars(chunk_chars_i)
         if per_chunk_cap:
-            # 单集硬上限生效：本块额度不得超预算（原文不丢，只是每镜承载更多）
+            # 显式额度生效：本块额度不得超预算（原文不丢，只是每镜承载更多）。
+            # ⚠️ 2026-10-09 起主流程不传额度（单集镜数不设上限），per_chunk_cap 恒为 0。
             per_chunk = max(1, min(int(per_chunk), int(per_chunk_cap)))
         report("shots", len(sampled) + 2 + i, total_steps,
                f"第{episode_no}集 编写分镜（子块 {chunk['index']}/{chunk['total']}，"
@@ -3415,21 +3318,26 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
 
     shots = _norm_shots(all_shots, bible, 1)
 
-    # ---- 单集镜头数硬上限（保底截断）----
-    # 上面的额度收紧只是「引导」，模型仍可能超产。这里做**最终保证**：整集镜头数绝不超过
-    # MAX_SHOTS_PER_EPISODE，否则整集 H3 连续渲染会跑到崩溃点（见常量注释）。
-    # 截断会丢失尾部情节 → 必须响亮记录（写进 metadata.warnings + error 日志），
-    # 并明确指引「拆成 2 集重新生成」，不能静默吞掉。
-    if len(shots) > MAX_SHOTS_PER_EPISODE:
-        _dropped = len(shots) - MAX_SHOTS_PER_EPISODE
-        shots = shots[:MAX_SHOTS_PER_EPISODE]
-        warnings.append(
-            f"⚠ 本集生成 {len(shots) + _dropped} 镜，超过单集硬上限 {MAX_SHOTS_PER_EPISODE} 镜，"
-            f"已截断末尾 {_dropped} 镜（**尾部情节会缺失**）。请把本章拆成 2 集重新生成，"
-            f"以完整覆盖原文。")
-        logger.error("第%s集：镜头数 %d 超上限 %d，已硬截断 %d 镜（%s）—— 建议拆章分集",
-                     episode_no, len(shots) + _dropped, MAX_SHOTS_PER_EPISODE, _dropped,
-                     chapter_title)
+    # ---- 单集镜头数：不再截断（2026-10-09 用户口径）----
+    # 曾经这里会把超过 MAX_SHOTS_PER_EPISODE(78) 的镜头**硬截断**（丢尾部情节）。
+    # 现按场次生产，单集镜数不再设上限，故整段截断逻辑已删除：
+    # 模型超产多少就保留多少，尾部情节永不被吞（镜数只作粒度诊断，见下方诊断段）。
+
+    # ---- 分镜粒度诊断（2026-10-06 用户口径：每集 20~30 镜、每镜 5~6 秒）----
+    # **只诊断、不截断**（截断会丢情节，见上方注释）。镜数明显超出粒度目标 = 「又切细了」，
+    # 它的可见症状就是分镜九宫格（单镜 9 关键帧·时间推进）里大量重复格：
+    # 镜头越短，9 帧里能塞进的互异画面越少。这里响亮记一笔，便于在日志里第一时间
+    # 看出「参数被 env 改回旧值」或「模型又超产」，而不是等用户看图才发现。
+    _gran_limit = int(SHOT_GRANULARITY_MAX_SHOTS * 1.5)
+    if len(shots) > _gran_limit:
+        _avg_sec = sum(float(s.get("duration") or 0) for s in shots) / max(1, len(shots))
+        logger.warning(
+            "第%s集：分镜粒度偏离目标 —— 本集 %d 镜 / 平均 %.2f 秒（目标 %d~%d 镜、"
+            "每镜 5~6 秒）。镜数偏多会让「单镜 9 关键帧」的分镜九宫格出现重复格。"
+            "请核查 CHARS_PER_SHOT / REF_INSERT_RATIO / SPLIT_ACTION_BEATS / "
+            "SHOT_DURATION_MIN 是否被 env 改回旧值。",
+            episode_no, len(shots), _avg_sec,
+            SHOT_GRANULARITY_TARGET_SHOTS, SHOT_GRANULARITY_MAX_SHOTS)
 
     for sh in shots:
         sh["episode"] = int(episode_no)
@@ -3462,7 +3370,6 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
         "shots": shots,
         "production_notes": {
             "total_shots": len(shots),
-            "estimated_duration": len(shots) * 5,
             "scene_count": len(scene_flow),
             # C⑥：style_guide 提升为项目级唯一配置（continuity 提供时优先，不再每集各写一套）
             "style_guide": str(_ctx_block(continuity_ctx, "style_guide_text")
@@ -3617,30 +3524,4 @@ def safe_project_name(name: str) -> str:
     return name[:40] or "novel_project"
 
 
-def save_generated_script(script: dict, script_dir: str, project_name: str = None,
-                          project_key: str = None) -> str:
-    """落盘剧本 JSON。
-
-    - project_key 为空：沿用旧行为，落在 output/scripts/<项目名>_<时间戳>.json
-    - project_key 非空：落在 output/scripts/<项目键>/整本_<时间戳>.json，
-      与项目隔离目录结构一致（项目键由 project_store 统一分配）
-    """
-    meta = script.setdefault("metadata", {})
-    if project_key:
-        pname = str(project_key)
-        folder = os.path.join(script_dir, pname)
-        os.makedirs(folder, exist_ok=True)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        path = os.path.abspath(os.path.join(folder, f"整本_{ts}.json"))
-    else:
-        os.makedirs(script_dir, exist_ok=True)
-        pname = safe_project_name(project_name or script.get("title") or "novel_project")
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        path = os.path.abspath(os.path.join(script_dir, f"{pname}_{ts}.json"))
-    meta["script_path"] = path
-    meta["project_name"] = pname
-    meta["project_key"] = pname
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(script, f, ensure_ascii=False, indent=2)
-    logger.info(f"剧本已落盘：{path}")
-    return path
+# 整本转剧本路径已随「一章一集」拍板移除（2026-10-05）；集级入口见 convert_chapter_with_continuity

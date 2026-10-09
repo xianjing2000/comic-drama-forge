@@ -552,18 +552,6 @@ def _style_en(token: str) -> str:
         if token in _HAIR_STYLE_EN_SYNONYMS else _HAIR_STYLE_ZH2EN.get(token, token)
 
 
-def hair_en(phrase: str) -> str:
-    """中文发型短语 → 英文（未覆盖的取值原样保留中文，模型能理解）。"""
-    color, style = _split_hair(phrase)
-    parts = [p for p in (_color_en(color) if color else "", _style_en(style) if style else "") if p]
-    return " ".join(parts)
-
-
-def eye_en(phrase: str) -> str:
-    color, _unit = _split_eye(phrase)
-    return f"{_color_en(color)} eyes" if color else ""
-
-
 def _en_pairs(kind: str, bad: str, good: str) -> List[Tuple[Tuple[str, ...], str]]:
     """构造英文替换对 ``[(待替换写法, 替换成), ...]``。
 

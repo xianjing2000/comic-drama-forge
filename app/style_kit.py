@@ -255,11 +255,6 @@ def aspect_ratio(style) -> Optional[Tuple[int, int]]:
     return None
 
 
-def is_portrait(style) -> bool:
-    r = aspect_ratio(style)
-    return bool(r) and r[0] < r[1]
-
-
 def aspect_size(ratio: Optional[Tuple[int, int]], megapixels: float = ASSET_MEGAPIXELS_DEFAULT,
                 multiple: int = 32) -> Optional[Tuple[int, int]]:
     """画幅 → 宽高像素（复刻 ComfyUI ``nodes_resolution`` 的算法）
@@ -278,19 +273,54 @@ def aspect_size(ratio: Optional[Tuple[int, int]], megapixels: float = ASSET_MEGA
     if a <= 0 or b <= 0 or multiple <= 0:
         return None
     scale = math.sqrt(float(megapixels) * 1024 * 1024 / (a * b))
-    width = round(a * scale / multiple) * multiple
-    height = round(b * scale / multiple) * multiple
+    width = round_to_multiple(a * scale, multiple)
+    height = round_to_multiple(b * scale, multiple)
     if width <= 0 or height <= 0:
         return None
     return int(width), int(height)
 
 
-def aspect_label(style) -> str:
-    """把画幅描述成人话，用于日志 / 界面回显"""
+def round_to_multiple(val, multiple: int = 32) -> int:
+    """把任意数值严格对齐到 ``multiple`` 步长（潜空间分辨率默认 32）。
+
+    这是项目里**唯一**的「分辨率取整」出口：凡是需要把动态画幅落到潜空间
+    可接受像素上的地方（:func:`aspect_size`、参考图缩放、ResolutionSelector
+    反解 megapixels 等）都必须走这里，避免各处各写一遍 ``round(x/m)*m``
+    导致「有的对齐到 8、有的对齐到 32」的漂移。
+
+    - ``val`` 为负或 None 时返回 0（调用方自行判空）。
+    - ``multiple`` 非法（None / ≤0 / 非整数）时回落到 1（即原值取整），
+      绝不抛异常阻断生成。
+    """
+    try:
+        m = int(multiple)
+        if m <= 0:
+            m = 1
+    except (TypeError, ValueError):
+        m = 1
+    if val is None:
+        return 0
+    try:
+        return int(round(int(val) / m) * m)
+    except (TypeError, ValueError):
+        try:
+            return int(round(float(val) / m) * m)
+        except (TypeError, ValueError):
+            return 0
+
+
+def aspect_label(style, size: Optional[Tuple[int, int]] = None) -> str:
+    """把画幅描述成人话，用于日志 / 界面回显。
+
+    ``size``：**调用方已知的实际像素，务必传** —— 不传就按 :func:`aspect_size` 的
+    默认 MP 重算，会与真实渲染尺寸不一致。2026-10-08 实录：视频按
+    ``video_megapixels()=0.5`` 实际渲 960×544，日志却显示 1664×928（默认 1.5MP），
+    直接把人误导到「视频分辨率过高、应该降档」的错误结论上。
+    """
     r = aspect_ratio(style)
     if not r:
         return ""
-    size = aspect_size(r)
+    size = tuple(size) if size else aspect_size(r)
     orient = "竖屏" if r[0] < r[1] else ("横屏" if r[0] > r[1] else "方形")
     return f"{orient} {r[0]}:{r[1]}" + (f"（{size[0]}×{size[1]}）" if size else "")
 
@@ -306,6 +336,40 @@ _ASPECT_TOKENS = ("竖屏", "横屏", "竖向", "横向", "竖版", "横版", "�
 
 #: 风格后缀的固定收尾（保画质、压畸形，与既有工作流负向词配合）
 _QUALITY_TAIL = "画面精致，光影细腻，构图稳定，无畸形"
+
+#: 「色调 / 影调 / 光照」类 token —— 只作用于**画面氛围**，不进**资产参考图**。
+#: 根因（2026-10-07 用户反馈「生成的角色皮肤是蓝色的」）：
+#:   剧本 style 字段含「冷峻超现实主义，色调灰蓝压抑，光影破碎，…」，
+#:   整串被拼进角色三视图 → 模型把「色调灰蓝压抑」当**全局调色** →
+#:   皮肤与服饰固有色一起被染蓝；而 base.png 是身份基准图，会经身份网格
+#:   把蓝皮肤传染给所有分镜/关键帧（与分镜事故同一条传播通道）。
+#: ⚠️ 只收「明确指向全局调色」的子串。不要把「冷峻 / 压抑 / 配色」收进来：
+#:   「冷峻」是「冷峻超现实主义」的子串，收了会把画风一起丢掉。
+_TONE_TOKENS = (
+    "色调", "影调", "色温", "冷色", "暖色", "冷暖", "灰调",
+    "光影", "光照", "打光", "布光", "明暗", "暗部", "高光", "对比度",
+)
+
+#: 资产参考图的「颜色保真条款」。
+#: ⚠️ 措辞必须避开 comfyui_client 的 CHARACTER_WORDS（人物/角色/人影…），
+#:   否则场景链路 sanitize_scene_prompt 会把整句当「人物描述句」丢弃
+#:   （该类事故见 comfyui_client.scene_view_prompt_suffix 的注释）。
+#: ⚠️ 条款正文**绝不能出现「风格」二字**：style_kit._collapse_style 用
+#:   raw.count("风格") >= 2 判定「风格双写」并会把 `风格：…` 子句整段剥掉 ——
+#:   实测条款里写「上述风格中的色调…」会让计数变 2，于是每次调用都把风格声明
+#:   剥掉再重挂，幂等彻底失效（提示词里出现两份质量尾缀）。
+REFERENCE_COLOR_FIDELITY_ZH = (
+    "参考图颜色须准确：肤色为自然肤色、服饰与物品呈固有色；"
+    "色调与光影描述只作用于画面氛围，不得把肤色与固有色整体染偏。"
+)
+#: 幂等用的**短固定标记**：场景链路 sanitize_scene_prompt 会按标点重新分句、
+#: 把「；」并成「，」并去掉句号 → 用整句比对会失配而重复追加，故用短串判定。
+REFERENCE_COLOR_FIDELITY_MARK_ZH = "参考图颜色须准确"
+REFERENCE_COLOR_FIDELITY_EN = (
+    "colors must stay accurate: natural skin tone and true material colors; "
+    "any tone or lighting wording affects atmosphere only and must not tint skin or objects."
+)
+REFERENCE_COLOR_FIDELITY_MARK_EN = "colors must stay accurate"
 
 
 def style_suffix(style, *, with_tail: bool = True, with_aspect: bool = True,
@@ -354,6 +418,102 @@ def with_style(prompt: str, style, *, with_tail: bool = True) -> str:
         return suffix
     sep = "" if text.endswith(("。", "，", "；", ".", "!", "！", "?", "？")) else "。"
     return f"{text}{sep}{suffix}。"
+
+
+def _drop_tone_tokens(toks) -> List[str]:
+    """剔除「色调/影调/光照」类 token（参考图专用，见 _TONE_TOKENS）"""
+    return [t for t in toks if not any(a in t for a in _TONE_TOKENS)]
+
+
+def reference_style(style) -> str:
+    """参考图专用风格串：剥离「色调/影调/光照」token
+
+    参考图（角色三视图 / 物品 / 场景原画）是**身份与固有色的基准**，
+    色调/光影类词只该作用于成片氛围，不该写进基准图 —— 否则整图被调色，
+    肤色与固有色一起染偏（2026-10-07 蓝皮肤事故）。
+    """
+    norm = normalize_style(style)
+    if not norm:
+        return ""
+    return "，".join(_drop_tone_tokens(style_tokens(norm)))
+
+
+def _append_clause(text: str, clause: str, marker: str = "") -> str:
+    """拼一句附加条款（幂等：marker 已存在则不重复拼）
+
+    marker 传**短固定串**而非整句：场景链路 sanitize_scene_prompt 会按标点重新分句
+    并规范化标点，整句比对会失配 → 条款被重复追加。
+    """
+    text = str(text or "").strip()
+    if not clause:
+        return text
+    if (marker or clause) in text:
+        return text
+    if not text:
+        return clause
+    sep = "" if text.endswith(("。", "，", "；", ".", "!", "！", "?", "？")) else "。"
+    return f"{text}{sep}{clause}"
+
+
+def strip_tone_tokens_text(text: str, style) -> str:
+    """删除文本里**已存在**的「色调/影调/光照」token（含相邻分隔符）
+
+    为什么必须有这一步（2026-10-07 实测踩到）：
+      资产提示词常常在**剧本阶段**就被 style_kit.apply_asset_style_all 拼上了当时的
+      完整风格串（含色调词）。此时 with_style 的幂等判定认为「风格已存在」
+      （色调词之外的所有 token 都在文本里）→ **原样返回**，于是只做「注入时过滤」
+      根本清不掉上游写进去的色调词：重跑资产依旧是蓝皮肤（实测确认）。
+      故这里做一次与注入路径无关的确定性清除。
+
+    ⚠️ 只删当前风格串里属于 _TONE_TOKENS 的 token，不动画风/氛围类 token。
+    """
+    out = str(text or "")
+    if not out:
+        return out
+    for t in [x for x in style_tokens(style) if any(a in x for a in _TONE_TOKENS)]:
+        t = t.strip(" 。，；,;")
+        if not t or t not in out:
+            continue
+        # 连同相邻分隔符一起删，避免留下「，，」或悬空标点
+        out = out.replace("，" + t, "").replace("," + t, "")
+        out = out.replace(t + "，", "，").replace(t + ",", ",")
+        out = out.replace(t, "")
+    out = re.sub(r"[，,、]{2,}", "，", out)
+    out = re.sub(r"。\s*，", "。", out)
+    out = re.sub(r"[，,、]\s*。", "。", out)
+    return out.strip()
+
+
+def with_reference_style(prompt: str, style, *, with_tail: bool = True) -> str:
+    """资产参考图（角色三视图 / 物品 / 场景原画）专用风格注入。
+
+    与 with_style 的两点差别：
+      1) 用 reference_style 过滤后的风格串 —— 剥离色调/影调/光照 token；
+      2) 追加「颜色保真条款」（REFERENCE_COLOR_FIDELITY_ZH），
+         保证即使残留风格词也不会把肤色与固有色整体染偏。
+
+    幂等性由 with_style 自身保证（它按传入的风格串重算 marker），
+    条款用 _append_clause 去重。成片（分镜/关键帧）链路**不**走本函数，
+    风格照旧完整注入。
+    """
+    # ⓪ 2026-10-09 修复真实缺陷：本函数此前**不是幂等的**。
+    #    实测（STYLE='国漫风格'，自由风格文本）：第二次调用会把「风格段」与
+    #    「颜色保真条款」**整体对调**（第一次 …风格…条款，第二次 …条款…风格…），
+    #    原因是第①步 strip_tone_tokens_text 改动文本后，with_style 认为风格未落地 → 再拼一次。
+    #    注意：用**库内已注册**的风格串（如 '国漫3D渲染'）时不会暴露，只有自由风格文本会。
+    #    这里做入口短路：风格与条款都已落地 → 原样返回。
+    _raw = str(prompt or "").strip()
+    if (_raw and REFERENCE_COLOR_FIDELITY_MARK_ZH in _raw
+            and _style_already_present(_raw, reference_style(style) or style)):
+        return _raw
+    # ① 先删掉文本里**已存在**的色调词（上游剧本阶段就写进来的，注入时的过滤清不掉）
+    text = strip_tone_tokens_text(_raw, style) if _raw else _raw
+    # ② 再按「参考图口径」补写过滤后的风格后缀（幂等）
+    ref = reference_style(style)
+    merged = with_style(text, ref, with_tail=with_tail) if ref else text
+    # ③ 追加颜色保真条款
+    return _append_clause(merged, REFERENCE_COLOR_FIDELITY_ZH,
+                          REFERENCE_COLOR_FIDELITY_MARK_ZH)
 
 
 def _style_already_present(text: str, style) -> bool:
@@ -450,6 +610,15 @@ _LATENT_SIZE_TYPES = (
 #: 带 aspect_ratio / megapixels 的分辨率选择器节点
 _RESOLUTION_SELECTOR_TYPES = ("ResolutionSelector", "Resolution Selector")
 
+#: 参考图归一化节点（ImageScaleToTotalPixels / 缩放图像（像素））
+#: 与 ResolutionSelector 同步改写：保证参考图归一化像素与输出画幅同档。
+_REF_CANVAS_SCALE_TYPES = (
+    "ImageScaleToTotalPixels",
+    "ImageScaleToTotalPixels ",
+    "Upscale Image (Pixels)",
+    "ImageScaleByMegapixels",
+)
+
 #: 画幅 → ResolutionSelector 的下拉文本（不同版本用词不同，这里给出规范值）
 _SELECTOR_ASPECT_TEXT = {
     (1, 1): "1:1 (Square)",
@@ -465,18 +634,93 @@ _SELECTOR_ASPECT_TEXT = {
 }
 
 
-def apply_latent_size(api_prompt: dict, size: Optional[Tuple[int, int]]) -> List[str]:
-    """把 API prompt 里所有尺寸节点的宽高改成 ``size``，返回被改写的节点描述。
+def _selector_aspect_text(width: int, height: int) -> Optional[str]:
+    """由目标宽高选出 ResolutionSelector 里**最接近**的标准画幅下拉项。
 
-    只改「同时具备 width/height 输入」的节点，命中即算成功；未命中返回空列表，
-    由调用方决定是记 warning 还是静默放行（老模板无尺寸节点时不应阻断生成）。
+    与字面量逐字匹配（combo widget 按字面量校验，写错大小写会被拒收）；
+    找不到任何候选时返回 ``None``（调用方应保持原值不动）。
+    """
+    if width <= 0 or height <= 0:
+        return None
+    best_text: Optional[str] = None
+    best_dist = float("inf")
+    w, h = float(width), float(height)
+    for (a, b), text in _SELECTOR_ASPECT_TEXT.items():
+        if a <= 0 or b <= 0:
+            continue
+        dist = abs(w / h - a / b)
+        if dist < best_dist:
+            best_dist, best_text = dist, text
+    return best_text
+
+
+def apply_latent_size(api_prompt: dict, size: Optional[Tuple[int, int]]) -> List[str]:
+    """把 API prompt 的分辨率落地到画布可见的分辨率节点上，返回被改写的节点描述。
+
+    **画布可见优先（2026-10-07）**：先扫一遍 ``api_prompt`` 里的节点——
+
+    - 若存在 ``class_type`` 在 :data:`_RESOLUTION_SELECTOR_TYPES` 的分辨率选择器节点，
+      **不改** ``EmptyLatentImage``，而是改选择器节点自身的 ``aspect_ratio`` /
+      ``megapixels`` / ``multiple`` 控件（即「代码跟随画布节点」，而不是强行覆盖
+      选择器输出线到 EmptyLatentImage 的字面量）。用户因此在画布上能直接看到参数。
+    - 只有当工作流中**完全没有**分辨率选择器节点时，才回落到直接覆写
+      ``EmptyLatentImage``（及同型潜空间尺寸节点）的 ``width``/``height`` 整数值。
+
+    命中即算成功；未命中返回空列表，由调用方决定记 warning 还是静默放行。
     """
     if not api_prompt or not size:
         return []
     width, height = int(size[0]), int(size[1])
     if width <= 0 or height <= 0:
         return []
-    changed: List[str] = []
+
+    # ---- 1) 先找分辨率选择器节点（画布可见，优先改它）---- #
+    selector_ids = [
+        node_id for node_id, node in (api_prompt or {}).items()
+        if isinstance(node, dict)
+        and str(node.get("class_type") or "") in _RESOLUTION_SELECTOR_TYPES
+    ]
+    # ---- 1b) 参考图归一化节点（与选择器同档，避免 latent 与参考图尺寸不匹配）---- #
+    scale_ids = [
+        node_id for node_id, node in (api_prompt or {}).items()
+        if isinstance(node, dict)
+        and str(node.get("class_type") or "") in _REF_CANVAS_SCALE_TYPES
+    ]
+    if selector_ids or scale_ids:
+        text = _selector_aspect_text(width, height)
+        # megapixels 反解：让 aspect_size(ratio, megapixels) 尽量复现目标像素预算。
+        # ComfyUI 公式 width*height ≈ megapixels * 1024 * 1024（32 取整前后近似）。
+        megapixels = round(width * height / (1024 * 1024), 4)
+        changed: List[str] = []
+        for node_id in selector_ids:
+            node = api_prompt[node_id]
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                inputs = {}
+                node["inputs"] = inputs
+            if text is not None:
+                inputs["aspect_ratio"] = text
+            inputs["megapixels"] = megapixels
+            inputs["multiple"] = 32
+            changed.append(f"{node_id}(ResolutionSelector→aspect={text},mp={megapixels},x32)")
+        # 参考图归一化节点同步改写：与选择器同档，确保 cover 到相同像素预算 + 32 倍数。
+        # 若该节点未声明 megapixels / resolution_steps 输入则静默跳过（不报错）。
+        for node_id in scale_ids:
+            node = api_prompt[node_id]
+            inputs = node.get("inputs")
+            if not isinstance(inputs, dict):
+                inputs = {}
+                node["inputs"] = inputs
+            if "megapixels" in inputs or True:
+                inputs["megapixels"] = megapixels
+            if "resolution_steps" in inputs or True:
+                inputs["resolution_steps"] = 32
+            changed.append(f"{node_id}(RefScale→mp={megapixels},x32)")
+        # 显式「代码跟随画布」：不动 EmptyLatentImage，它的宽高由选择器输出线决定。
+        return changed
+
+    # ---- 2) 无选择器节点时，回落到直接改潜空间尺寸节点的 width/height 字面量 ---- #
+    changed = []
     for node_id, node in (api_prompt or {}).items():
         if not isinstance(node, dict):
             continue
@@ -815,7 +1059,6 @@ def _collapse_style(text: str, style) -> str:
     return out.strip(" 。，；,;")
 
 
-
 # --------------------------------------------------------------------------- #
 # 便捷组合
 # --------------------------------------------------------------------------- #
@@ -839,7 +1082,7 @@ def resolve(style, *, default_ratio: Optional[Tuple[int, int]] = None,
         "ratio": ratio,
         "size": size,
         "suffix": style_suffix(norm),
-        "label": aspect_label(norm),
+        "label": aspect_label(norm, size=size),
     }
 
 
@@ -863,10 +1106,17 @@ def apply_asset_style(assets: Optional[List[dict]], style,
             continue
         base = a.get(key) or ""
         if is_en:
-            merged = with_style_en(base, norm)
+            # 参考图口径：英文同样剥离色调/影调 token 并补颜色保真条款
+            ref_en = reference_style(norm)
+            merged = with_style_en(base, ref_en) if ref_en else str(base or "").strip()
+            merged = _append_clause(merged, REFERENCE_COLOR_FIDELITY_EN,
+                                    REFERENCE_COLOR_FIDELITY_MARK_EN)
         else:
             base = base or a.get("appearance") or ""
-            merged = with_style(base, norm)
+            # ⚠️ 资产参考图必须走 with_reference_style（见其 docstring）：
+            #    旧实现用 with_style 把「色调灰蓝压抑」整串拼进角色三视图 →
+            #    皮肤被染蓝（2026-10-07 用户反馈）。
+            merged = with_reference_style(base, norm)
         if merged and merged != str(base or "").strip():
             a[key] = merged
             changed += 1

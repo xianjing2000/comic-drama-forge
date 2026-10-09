@@ -262,12 +262,6 @@ def build_contract(script: Dict[str, Any]) -> GlobalConsistencyContract:
     return GlobalConsistencyContract((script or {}).get("shots") or [])
 
 
-def validate_cross_chunk(script: Dict[str, Any], episode_no: int = 1,
-                         **kw) -> List[Dict[str, Any]]:
-    """便捷入口：跑三类跨镜校验，返回 issue 列表（供探针/调用方直接取用）。"""
-    return CrossChunkValidator(**kw).validate(build_contract(script), episode_no)
-
-
 def merge_contract_issues(validation: Dict[str, Any], script: Dict[str, Any],
                           bible: Optional[Dict[str, Any]] = None,
                           episode_no: int = 1) -> Dict[str, Any]:

@@ -9,12 +9,16 @@
 
 本模块把整条链路编排成一条**流水线**，由 autopilot 守护进程驱动：
 
-    script → tts_pre → assets → storyboard → keyframe → video → upscale → final
+    script → tts_pre → assets → storyboard → video → upscale → final
 
 （tts_pre = 为每个角色生成参考音色，供 H3 锁定角色音色并自生成对白；
   tts / mix 已下线 —— H3 视频自带原生音轨）
 
-（assets 为项目级资产，只在首集前跑一次；keyframe 为可选模式）
+（assets 为项目级资产，只在首集前跑一次）
+
+（2026-10-05 收敛为 **7 步**：keyframe「尾帧」步骤移出流水线 —— 2026-10-01 起
+  视频只保留整集一次生成，尾帧仅 keyframe 逐镜模式消费，该步在序列里恒为
+  disabled 空转。尾帧的**手动**生成入口（/api/keyframes/*，keyframe.py）不受影响。）
 
 三个关键设计
 ------------
@@ -40,6 +44,7 @@ app.py 在模块加载期 import 本模块，此时 app 尚未完成初始化。
 from __future__ import annotations
 
 import json
+import re  # 逐场超分：场次文件名 scene_NN.mp4 解析（2026-10-08）
 import logging
 import os
 import shutil
@@ -152,20 +157,56 @@ def is_episode_running(project_name: str, episode_no: int) -> bool:
         logger.debug("查询集级租约状态失败（按未运行处理）：%s", e)
         return False
 
+
+# ===================== 集级操作日志（JSONL，一行一事件） =====================
+
+
+def _episode_log_path(project_name: str, episode_no: int) -> str:
+    """集级操作日志：output/autopilot/<项目>/episodes/ep{NN}_log.jsonl
+
+    落在 autopilot 目录树下：删除项目的级联清理（project_store.project_kind_roots 的
+    "autopilot" 项）会一并收走，不产生新残留；与 plan/history 同根便于运维定位。
+    """
+    import autopilot as _ap
+    base = os.path.join(_ap._autopilot_dir(project_name), "episodes")
+    return os.path.join(base, f"ep{int(episode_no):02d}_log.jsonl")
+
+
+def _ep_log(project_name: str, episode_no: int, event: str, message: str,
+            level: str = "info", **fields) -> None:
+    """追加一条集级操作日志（JSONL 一行一事件）。全容错：日志失败绝不影响生产。
+
+    同时镜像一行到 logging（[集日志] 前缀），人工在「运行日志」页也能看到同一份内容。
+    """
+    try:
+        rec = {"ts": _now(),
+               "project": project_name, "episode": int(episode_no),
+               "event": event, "message": str(message or ""), "level": level}
+        rec.update({k: v for k, v in fields.items() if v is not None})
+        path = _episode_log_path(project_name, episode_no)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        logger.info("[集日志] %s#ep%s %s：%s", project_name, episode_no, event, message)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("集日志写入失败（忽略）：%s", e)
+
+
 # ===================== 步骤定义 =====================
 
 #: 步骤顺序（键即步骤 id）
 #:
-#: ⭐ 2026-10-04 收敛为 **8 步**（用户决策）：H3 视频自带**原生音轨**，配音改由
-#:    「每角色参考音色 → H3 生成对白」承担，故**移除 `tts`（配音合成）与 `mix`
-#:    （音画对齐混音）两个环节**。
+#: ⭐ 2026-10-04 收敛：H3 视频自带**原生音轨**，配音改由「每角色参考音色 →
+#:    H3 生成对白」承担，故**移除 `tts`（配音合成）与 `mix`（音画对齐混音）**。
+#: ⭐ 2026-10-05 收敛为 **7 步**：`keyframe`（尾帧）移出流水线 —— 视频只保留
+#:    整集一次生成后，尾帧在序列里恒为 disabled 空转；手动尾帧入口不废。
 #: ``tts_pre`` 新语义：剧本后为**每个角色**生成一段参考音色音频（只做这件事，
 #:    **不再逐句合成整集配音、不再回填 `shot.duration`**）——参考音色经
 #:    `voice_bank` 落盘，视频生成时以 `audioMode=generate`（`global.refAudios`）
 #:    锁定角色音色、对白由 H3 自生成。
 #: `upscale` 紧跟 `video`：对**集级原片**（video 步产出的整集视频）超分；
 #:    `final` 优先消费超分产物，故 `final` 落在最后一步。
-STEP_SEQUENCE = ("script", "tts_pre", "assets", "storyboard", "keyframe", "video",
+STEP_SEQUENCE = ("script", "tts_pre", "assets", "storyboard", "video",
                  "upscale", "final")
 
 STEP_LABELS = {
@@ -173,17 +214,18 @@ STEP_LABELS = {
     "tts_pre": "配音先行（角色参考音色）",
     "assets": "资产（角色/物品/场景）",
     "storyboard": "分镜图",
-    "keyframe": "尾帧（关键帧驱动）",
     "video": "视频生成",
     "upscale": "超分（FlashVSR）",
     "final": "成片合成",
+    # 历史回放兜底（旧任务状态里可能出现；不再在 STEP_SEQUENCE 中）
+    "keyframe": "尾帧（已下线）",
 }
 
 #: 需要「质检门禁」的步骤（不达标必须重试，不允许静默通过）
 GATED_STEPS = ("script", "storyboard", "video")
 
 #: 单次占用的 GPU 重任务步骤（守护进程据此做资源互斥，避免抢显存）
-GPU_STEPS = ("storyboard", "keyframe", "video", "upscale")
+GPU_STEPS = ("storyboard", "video", "upscale")
 
 DEFAULT_CONFIG = {
     # ---- 输入 ----
@@ -196,7 +238,6 @@ DEFAULT_CONFIG = {
     "overwrite_script": False,     # 是否覆盖已存在的剧本
     # ---- 各环节开关 ----
     "enable_assets": True,
-    "enable_keyframe": False,
     "enable_video": True,
     "enable_final": True,
     # TTS 总开关：控制 `tts_pre` 里「每角色参考音色」的实际合成。
@@ -209,14 +250,13 @@ DEFAULT_CONFIG = {
     # 绝不把已经跑通的成片拖成失败。
     "enable_upscale": True,
     "upscale_scale": 2,            # 超分倍率，FlashVSR 支持 2 / 3 / 4
+        # 逐场次先超分再拼接（2026-10-08）：True = 各场次独立超分→流拼接成整集；False = 直接超分整集原片
+        "upscale_per_scene": True,
     # ⭐「配音先行」（2026-10-04 新语义）：默认开启。True = 剧本后为**每个角色**生成
     # 一段参考音色音频，供 H3 以 `audioMode=generate` 锁定角色音色并自生成对白。
     # （不再逐句合成整集配音、不再回填 shot.duration。）仅在调试或无需参考音色时关闭。
     "enable_tts_pre": True,
-    "video_mode": "episode",       # episode（整集一次生成，连续无缝）/ per_shot（逐镜独立）/ keyframe
-    # 关键帧「跨镜链式」：auto=同场景才串 / always=无条件串 / off=关闭。
-    # 上一镜尾帧作为下一镜首帧参考，镜与镜首尾相接，避免每镜各画各的。
-    "keyframe_chain_mode": "auto",
+    "video_mode": "episode",       # 2026-10-01 起只保留整集一次生成（唯一合法值）
     # ---- 质量阈值 ----
     "coverage_min_percent": 95.0,      # 原文覆盖率下限
     "consistency_min_score": 80,       # 跨镜一致性分数下限
@@ -225,6 +265,7 @@ DEFAULT_CONFIG = {
     # ---- 运行时 ----
     "auto_repair": True,               # 失败自动补救（换 seed / 重生成）
     "seed": None,
+    "timeout_per_segment": 900,        # 单段/单镜任务超时（秒；此前不在册会被静默丢弃）
 }
 
 
@@ -251,20 +292,15 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
         cfg["coverage_min_percent"] = float(cfg.get("coverage_min_percent"))
     except (TypeError, ValueError):
         cfg["coverage_min_percent"] = DEFAULT_CONFIG["coverage_min_percent"]
-    for k in ("enable_assets", "enable_keyframe", "enable_video", "enable_final",
+    for k in ("enable_assets", "enable_video", "enable_final",
               "enable_tts", "enable_mix", "enable_tts_pre",
               "enable_upscale", "require_consistency",
-              "auto_repair", "overwrite_script"):
+              "auto_repair", "overwrite_script",
+               "upscale_per_scene"):
         cfg[k] = bool(cfg.get(k))
-    # 2026-10-01：只保留整集一次生成（per_shot / keyframe 废弃）
+    # 2026-10-01：只保留整集一次生成（per_shot / keyframe 废弃，2026-10-05 起
+    # keyframe 步骤也已移出 STEP_SEQUENCE）
     cfg["video_mode"] = "episode"
-    if cfg.get("video_mode") == "keyframe":
-        cfg["enable_keyframe"] = True      # 历史关键帧模式分支，现恒不触发
-    try:
-        import keyframe as _kf
-        cfg["keyframe_chain_mode"] = _kf.norm_chain_mode(cfg.get("keyframe_chain_mode"))
-    except Exception:  # noqa: BLE001
-        cfg["keyframe_chain_mode"] = "auto"
     if not cfg.get("project_key"):
         cfg["project_key"] = default_project_key or cfg.get("novel_id") or ""
     return cfg
@@ -273,32 +309,24 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
 def assert_mode_contract(cfg: dict) -> None:
     """P0-6：「模式 × 后续步骤产物期望」一致性前置断言（纯读配置，不写盘、不发请求）。
 
-    把各步骤分支里隐含的产物契约显式化，让矛盾配置在进入步骤循环前就被拦住，
-    而不是等到视频/成片步骤运行中途才暴露：
+    video_mode 已收敛为唯一合法值 `episode`（2026-10-01），这里保留断言作为
+    兜底：拦截绕过 normalize_config、手工拼配置的调用路径。
 
-    - keyframe 模式尾帧是前置依赖（step_video 会因尾帧缺失抛「请先完成尾帧生成」）：
-      若该集启用了 video，则 keyframe 步骤必须启用（与 normalize_config 对合法模式的
-      强制收敛保持一致，此处兜底未走 normalize_config 的配置路径）；
-      若连 video 都没启用，则该模式本就无意义，提示先关闭或改为整集模式。
     - episode 模式成片 = 整集视频（step_final 直接 copy2 整集片）：
       启用成片合成（final）时必须同时启用视频生成（video），否则没有整集片可采。
 
     断言失败抛 PipelineError（进入步骤循环前调用，属配置错误而非步骤运行时故障，
     不触发步骤级重试）。
     """
-    mode = cfg.get("video_mode") or "per_shot"
-    if mode not in ("per_shot", "episode", "keyframe"):
-        raise PipelineError(f"视频生成模式「{mode}」无法识别（仅支持 per_shot/episode/keyframe），请检查托管计划配置")
+    mode = cfg.get("video_mode") or "episode"
+    if mode != "episode":
+        raise PipelineError(
+            f"视频生成模式「{mode}」已废弃（2026-10-01 起仅支持 episode 整集一次生成），"
+            "请检查托管计划配置")
     video_on = bool(cfg.get("enable_video"))
     final_on = bool(cfg.get("enable_final"))
-    if mode == "keyframe":
-        if video_on and not bool(cfg.get("enable_keyframe")):
-            raise PipelineError("关键帧模式要求先生成尾帧，但尾帧步骤被禁用；请启用尾帧生成，或将视频生成模式改为 episode/per_shot")
-        if not video_on:
-            raise PipelineError("关键帧模式本意是逐镜视频，但视频生成步骤被禁用；请启用视频生成，或将视频生成模式改为 episode")
-    elif mode == "episode":
-        if final_on and not video_on:
-            raise PipelineError("整集模式的成片需要整集视频，但视频生成步骤被禁用；请启用视频生成，或关闭成片合成")
+    if final_on and not video_on:
+        raise PipelineError("整集模式的成片需要整集视频，但视频生成步骤被禁用；请启用视频生成，或关闭成片合成")
 
 
 # ===================== 异常 =====================
@@ -505,40 +533,23 @@ def probe_storyboard(ctx) -> dict:
             "missing": missing, "done": bool(shots) and not missing, "dir": d}
 
 
-def probe_keyframe(ctx) -> dict:
-    A = _A()
-    d = A._ep_dir(os.path.join(A.KEYFRAMES_DIR, ctx["project_name"]), ctx["episode_no"])
-    shots = (ctx.get("script") or {}).get("shots") or []
-    missing = []
-    for i, s in enumerate(shots):
-        seq = A._shot_seq(s.get("shot_id", i + 1), i + 1)
-        if not _nonempty(os.path.join(d, f"shot_{seq:02d}_end.png")):
-            missing.append(s.get("shot_id", i + 1))
-    return {"total": len(shots), "ready": len(shots) - len(missing),
-            "missing": missing, "done": bool(shots) and not missing, "dir": d}
+# probe_keyframe 已随 keyframe 步骤移出流水线删除（2026-10-05）；手动尾帧链路的
+# 就绪判定在 keyframe.py / app.py 的 /api/keyframes/* 内，与此处无关。
 
 
 def probe_video(ctx) -> dict:
     A = _A()
     d = A._ep_dir(os.path.join(A.VIDEOS_DIR, ctx["project_name"]), ctx["episode_no"])
-    mode = ctx["config"].get("video_mode") or "per_shot"
-    if mode == "episode":
-        tag = ctx.get("episode_tag") or f"ep{ctx['episode_no']:02d}"
-        hit = None
-        for cand in (f"{tag}_full.mp4", "episode_full.mp4"):
-            if _playable(os.path.join(d, cand)):
-                hit = cand
-                break
-        return {"total": 1, "ready": 1 if hit else 0, "missing": [] if hit else ["整集"],
-                "done": bool(hit), "dir": d, "file": os.path.join(d, hit) if hit else ""}
-    shots = (ctx.get("script") or {}).get("shots") or []
-    missing = []
-    for i, s in enumerate(shots):
-        seq = A._shot_seq(s.get("shot_id", i + 1), i + 1)
-        if not _playable(os.path.join(d, f"shot_{seq:02d}.mp4")):
-            missing.append(s.get("shot_id", i + 1))
-    return {"total": len(shots), "ready": len(shots) - len(missing),
-            "missing": missing, "done": bool(shots) and not missing, "dir": d}
+    # 2026-10-01 起只有整集模式（episode）：整集视频 = <tag>_full.mp4（历史命名兼容
+    # episode_full.mp4）。逐镜 shot_NN.mp4 探测分支已随 per_shot/keyframe 模式废弃删除。
+    tag = ctx.get("episode_tag") or f"ep{ctx['episode_no']:02d}"
+    hit = None
+    for cand in (f"{tag}_full.mp4", "episode_full.mp4"):
+        if _playable(os.path.join(d, cand)):
+            hit = cand
+            break
+    return {"total": 1, "ready": 1 if hit else 0, "missing": [] if hit else ["整集"],
+            "done": bool(hit), "dir": d, "file": os.path.join(d, hit) if hit else ""}
 
 
 def final_path(ctx) -> str:
@@ -628,6 +639,144 @@ def probe_tts(ctx) -> dict:
     p = dub_manifest_path(ctx)
     if not _nonempty(p):
         return {"total": 0, "ready": 0, "done": False, "file": p}
+
+_SCENE_FILE_RE = re.compile(r"^scene_(\d+)\.mp4$")
+
+
+def _scene_segments(ctx) -> list:
+    """列出该集按场次生成、且**可播放**的视频片段（按场号数字排序）。
+
+    与 app._ep_dir 同口径（第 1 集平铺、第 2 集起 epNN/）；过滤掉已拼接的整集
+    *_full.mp4 与半截文件（_playable 判 ffprobe 可读到视频流且时长>0，ffprobe 缺失时
+    降级为存在+非空），确保「全部超分成功」的拼接输入都合法。
+
+    返回 [] = 该集没有逐场片段（非按场生成 / 尚未生成）→ 调用方回退整集原片路径。
+    """
+    A = _A()
+    d = A._ep_dir(os.path.join(A.VIDEOS_DIR, ctx["project_name"]), ctx["episode_no"])
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []
+    out = []
+    for n in names:
+        m = _SCENE_FILE_RE.match(n)
+        if not m:
+            continue
+        p = os.path.join(d, n)
+        if not _playable(p):
+            logger.warning("逐场超分：场次片段不可播放（半截/损坏），跳过：%s", p)
+            continue
+        out.append((int(m.group(1)), p))
+    return [p for _, p in sorted(out)]
+
+
+def _upscale_scene_once(upscaler, src_path, dst_path, project_name, scale, progress_cb) -> dict:
+    """把单场超分产物（带时间戳原文件名）归档到确定性路径 dst_path，返回 {output_path}。
+
+    与整集路径同样的归档契约：源文件（UPSCALE_DIR/<project>/ 下带时间戳）拷贝到确定性
+    路径；dst 已存在且非空时直接复用（断点续跑，幂等）；拷贝失败返回 {}。
+    """
+    res = upscaler.upscale(
+        src_path, project_name=project_name, scale=scale,
+        # 与整集路径一致：源片自带 H3 原生音轨，显式挂音轨，避免超分产物无声
+        attach_audio=True,
+        progress_cb=progress_cb,
+    )
+    produced = (res or {}).get("output_path") or ""
+    if not _nonempty(produced):
+        return {}
+    os.makedirs(os.path.dirname(dst_path) or ".", exist_ok=True)
+    if os.path.abspath(produced) != os.path.abspath(dst_path):
+        shutil.copy2(produced, dst_path)
+    if not _nonempty(dst_path):
+        return {}
+    return {"output_path": dst_path}
+
+
+def _try_per_scene_upscale(ctx, scene_srcs, out_path) -> bool:
+    """逐场次独立超分 → 流拼接成整集超分产物（out_path = 确定性 epNN_upscaled.mp4）。
+
+    全部成功且拼接可播放才返回 True（调用方采用）；任一场失败 / 拼接失败返回 False
+    （调用方回落整集原片超分）。已超分场次直接复用（断点续跑）。
+    """
+    A = _A()
+    scale = int(ctx["config"].get("upscale_scale") or 2)
+    if scale not in (2, 3, 4):
+        scale = 2
+    total = len(scene_srcs)
+    ep_no = ctx["episode_no"]
+    project = ctx["project_name"]
+    try:
+        import upscale_client
+    except Exception as e:  # noqa: BLE001
+        logger.warning("逐场超分：超分模块不可用，回落整集路径：%s", e)
+        return False
+
+    _upscaler = upscale_client.VideoUpscaler()
+    _up_tid = f"pipe_up_ps_{int(time.time() * 1000)}"
+    _upscaler.current_task_id = _up_tid
+    up_scene_files = []
+    try:
+        with gpu_task_gate.run_gpu_task(_up_tid, "托管·逐场超分"):
+            for i, src_s in enumerate(scene_srcs):
+                sn = int(re.match(_SCENE_FILE_RE, os.path.basename(src_s)).group(1))
+                dst_s = os.path.join(os.path.dirname(out_path),
+                                     f"ep{ep_no:02d}_scene{sn:02d}_upscaled.mp4")
+                if _playable(dst_s):
+                    logger.info("逐场超分：第 %d/%d 场（scene_%02d）已有产物，复用",
+                                i + 1, total, sn)
+                else:
+                    ctx["progress"](f"超分 场次 {i + 1}/{total}（FlashVSR {scale}x）…",
+                                    84, phase="upscale")
+                    # ⚠️ 2026-10-10 修复（日志显示「超分 45：…」的根因）：
+                    #    upscale_client 的进度回调签名是 progress_cb(msg, pct) —— **两个参数**；
+                    #    原 lambda 写成 (m, _tag=f"scene{sn:02d}")，于是 pct 落进了 _tag，
+                    #    日志变成「超分 45：超分执行中…」（45 是百分比，不是场次标签），
+                    #    场次标识被吞掉，排查时完全看不出在超分哪一场。
+                    #    现在显式接收 pct 并拼进消息；进度值仍用 84（整集步骤级进度，
+                    #    不把场内百分比写进整集进度条以免回退）。
+                    def _scene_up_prog(m, pct=None, _tag=f"scene{sn:02d}"):
+                        try:
+                            _p = int(float(pct))
+                            _head = f"超分 {_tag}（{_p}%）"
+                        except (TypeError, ValueError):
+                            _head = f"超分 {_tag}"
+                        ctx["progress"](f"{_head}：{m}", 84, phase="upscale")
+
+                    _r = _upscale_scene_once(
+                        _upscaler, src_s, dst_s, project, scale, _scene_up_prog)
+                    if not _r:
+                        logger.warning("逐场超分：第 %d 场（%s）失败，回落整集超分",
+                                       sn, os.path.basename(src_s))
+                        return False
+                up_scene_files.append(dst_s)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("逐场超分：异常，回落整集超分：%s", e, exc_info=True)
+        return False
+
+    # 全部场次超分完成 → 流拼接成整集超分
+    tmp_concat = os.path.join(os.path.dirname(out_path),
+                              f"_per_scene_concat_ep{ep_no:02d}.mp4")
+    cv = A.video_processor.concat_videos(up_scene_files, tmp_concat,
+                                         caller="pipeline.step_upscale.per_scene")
+    if not cv or not _playable(cv):
+        logger.warning("逐场超分：拼接失败或拼接产物不可播放，回落整集超分")
+        return False
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    if os.path.abspath(cv) != os.path.abspath(out_path):
+        try:
+            shutil.copy2(cv, out_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("逐场超分：归档失败：%s", e)
+            return False
+    if not _playable(out_path):
+        logger.warning("逐场超分：归档后不可播放，回落整集超分")
+        return False
+    logger.info("逐场超分→拼接完成：%s（%d 场，%d KB）",
+                out_path, len(up_scene_files), os.path.getsize(out_path) // 1024)
+    return True
+
     try:
         with open(p, "r", encoding="utf-8") as f:
             mf = json.load(f) or {}
@@ -677,7 +826,6 @@ PROBES = {
     "script": probe_script,
     "assets": probe_assets,
     "storyboard": probe_storyboard,
-    "keyframe": probe_keyframe,
     "video": probe_video,
     "final": probe_final,
     "tts": probe_tts,
@@ -709,14 +857,39 @@ def step_script(ctx) -> dict:
     chapter = ctx["chapter"]
     cfg = ctx["config"]
 
+    # ⚠️ phase 契约（2026-10-06）：ctx["progress"] 的 phase 只允许「当前步骤名」或
+    # 「当前步骤名:子阶段」。continuity / novel_to_script 的内部阶段名必须加
+    # "script:" 前缀后才能透传 —— 裸传与流水线步骤名（STEP_SEQUENCE）撞车的名字，
+    # 会被托管 autopilot._cb 的 base 归因当成「该步骤已完成」。
+    # continuity.convert_chapter_with_continuity 内 report(...) 的全部 phase 取值：
+    #   assets / context / state / validate / rewrite / coverage / consistency / done
+    #   （"assets"＝加载项目级设定库，与流水线步骤 assets 撞车）；
+    # novel_to_script.convert_chapter_to_script（continuity 裸转发同一 progress_cb）：
+    #   prepare / outline / bible / shots / done。
+    # 2026-10-06 实录：此前裸传 phase，剧本步骤 4% 时托管按 base="assets" 归因，把
+    # script/tts_pre/assets 三步提前标成已完成（前端显示「资产已完成 3角色/3物品/8场景」
+    # 而资产面板为 0、ComfyUI 零任务 —— 那是剧本里声明的数量）。
     def _cb(phase, cur, tot, msg, pct):
         ctx["progress"](f"第{ctx['episode_no']}集剧本：{msg}", 4 + int((pct or 0) * 0.14),
-                        phase=phase)
+                        phase=f"script:{phase}")
+
+    # 文学剧本改写稿：用作 coverage 与 script_consistency 比对基准（若存在）
+    screenplay_text = cfg.get("screenplay_text")
+    # ⚠️ 生成输入必须同步替换为文学剧本（2026-10-06 实录 bug）：continuity 是从
+    # novel_text 里按 chapter.start/end 切片的（novel_text[start:end]）。run_episode
+    # 已把 chapter 覆盖成 {start:0, end:len(剧本)}，但 novel_text 若还是**小说全文**，
+    # 切出来的就是「小说开头 len(剧本) 字」——第 1 集碰巧近似第 1 章正文，第 2 集起
+    # 就是完全错误的文本，且与 coverage 基准（文学剧本）系统性错位 → 补生成/修复
+    # 回路高频触发、耗时翻倍。手动路由（app._episodes_worker 的 _conv_text）一直是
+    # 「文本+区间成对替换」的正确口径，这里对齐它。
+    if screenplay_text:
+        text = screenplay_text
 
     conv = A.continuity.convert_chapter_with_continuity(
         client, ctx["novel_meta"], text, chapter, ctx["project_key"], A.CONTINUITY_DIR,
         style=cfg.get("style") or "", target_shots=int(cfg.get("target_shots") or 12),
         episode_no=ctx["episode_no"], save_dir=A.SCRIPT_DIR, progress_cb=_cb,
+        screenplay_text=screenplay_text,
     )
     script = conv.get("script") or {}
     cov = conv.get("coverage") or {}
@@ -910,47 +1083,9 @@ def step_storyboard(ctx) -> dict:
     return {"ok": True, "detail": detail, "artifact": recheck["dir"]}
 
 
-def step_keyframe(ctx) -> dict:
-    """尾帧生成（关键帧驱动模式的前置；走 keyframe 模块，支持断点续跑）"""
-    A = _A()
-    pd = probe_keyframe(ctx)
-    if pd.get("done"):
-        return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["dir"]}
-    script = ctx.get("script") or {}
-    shots = script.get("shots") or []
-    if not shots:
-        raise NeedsHumanError("剧本没有镜头数据，无法生成尾帧")
-    kf_dir = A._keyframes_dir(ctx["project_name"], ctx["episode_no"])
-    sb_map = A._keyframe_sb_map(ctx["project_name"], script, episode_no=ctx["episode_no"])
-    ctx["progress"](f"生成尾帧（{len(shots)} 镜）", 42, phase="keyframe")
-
-    def _cb(done, total, item):
-        pct = 42 + int((done / max(total, 1)) * 40)
-        ctx["progress"](f"尾帧 {done}/{total}", min(pct, 82), phase="keyframe")
-
-    _kf_verify, _kf_vretries = A._keyframe_qc_verifier(ctx["project_name"], script=ctx.get("script"))
-    # 尾帧提示词预检（生成前质检）：与手动链路保持同一覆盖（能自愈先自愈，成批不阻断）
-    _kf_pre, _kf_pre_on = A._keyframe_prompt_preflight(ctx["project_name"])
-    with gpu_task_gate.run_gpu_task(
-            f"pipe_kf_{int(time.time() * 1000)}", "托管·尾帧"):
-        report = A.keyframe.generate_keyframes(
-            shots, sb_map, kf_dir, seed=ctx["config"].get("seed"),
-            timeout=int(ctx.get("timeout_per_segment") or 900),
-            only_missing=True, progress_cb=_cb,
-            chain_mode=ctx["config"].get("keyframe_chain_mode") or "auto",
-            verify_cb=_kf_verify, max_verify_retries=_kf_vretries,
-            preflight_cb=_kf_pre)
-    recheck = probe_keyframe(ctx)
-    if not recheck.get("done"):
-        return {"ok": False, "detail": {"report": report, "probe": recheck},
-                "error": f"尾帧缺失 {len(recheck.get('missing') or [])} 镜："
-                         f"{recheck.get('missing')[:8]}"}
-    return {"ok": True, "detail": {"report": report, "probe": recheck,
-                                   "prompt_qc_enabled": _kf_pre_on}, "artifact": kf_dir}
-
-
 def step_video(ctx) -> dict:
-    """逐镜视频生成（视频 AI 质检门禁：抽帧送检，不达标自动重生成，阻断不入库）"""
+    """整集视频生成（2026-10-01 起唯一模式：H3 一次生成整集连续视频；视频 AI
+    质检门禁照常生效，不达标自动重生成，阻断不入库）"""
     A = _A()
     pd = probe_video(ctx)
     if pd.get("done"):
@@ -960,11 +1095,7 @@ def step_video(ctx) -> dict:
     if not shots:
         raise NeedsHumanError("剧本没有镜头数据，无法生成视频")
     cfg = ctx["config"]
-    mode = cfg.get("video_mode") or "per_shot"
-    if mode == "keyframe":
-        kf = probe_keyframe(ctx)
-        if not kf.get("done"):
-            raise NeedsHumanError("关键帧模式要求尾帧齐全，请先完成尾帧生成")
+    mode = "episode"          # 2026-10-05：per_shot / keyframe 模式已随步骤收敛删除
 
     # 参考图：优先剧本自带，缺失时由 worker 内部从磁盘资产兜底
     char_refs = script.get("characters") or []
@@ -979,7 +1110,7 @@ def step_video(ctx) -> dict:
              int(ctx.get("timeout_per_segment") or 900),
              ctx.get("episode_tag") or f"ep{ctx['episode_no']:02d}",
              ctx["episode_no"],
-             cfg.get("keyframe_chain_mode") or "auto",
+             "auto",   # keyframe_chain_mode：仅逐镜 keyframe 模式消费，整集模式恒 auto
              cfg.get("style") or ""),
             "generation_state", "lock",
             init={"total": len(shots), "phase": "视频生成", "qc": A._qc_brief("video")},
@@ -1036,13 +1167,12 @@ def _probe_concat_duration(concat_video: str, segments: list) -> float:
 
 
 def step_final(ctx) -> dict:
-    """成片合成：按剧本镜头顺序拼接该集所有片段，可选叠加字幕"""
+    """成片合成（2026-10-05 起仅整集模式）：优先采用超分产物为成片，无超分时
+    回退整集原片（copy2），不再有逐镜拼接分支"""
     A = _A()
     pd = probe_final(ctx)
     if pd.get("done"):
         return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["file"]}
-    script = ctx.get("script") or {}
-    shots = script.get("shots") or []
     vd = probe_video(ctx)
     if not vd.get("done"):
         raise PipelineError("视频未就绪，无法合成成片（请先完成视频生成）")
@@ -1050,43 +1180,22 @@ def step_final(ctx) -> dict:
     out = final_path(ctx)
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
-    # 整集模式（video_mode=episode）：step_video 由 H3 一次生成「整集视频」，
-    # 磁盘上根本没有逐镜 shot_XX.mp4。此时不能按逐镜拼接，直接把整集视频
-    # 采用为成片，否则会误报「该集没有可拼接的镜头视频」而整集卡死。
-    mode = (ctx["config"].get("video_mode") or "per_shot")
-    if mode == "episode":
-        # 优先采用**超分产物**（upscale 步在 video 之后、final 之前）：超分成功则成片
-        # 即超分版；超分被跳过 / fail-open 落空时回退整集原片，行为与改动前一致。
-        src = upscale_path(ctx)
-        if not _playable(src):
-            src = vd.get("file") or ""
-        if not _nonempty(src):
-            raise PipelineError("整集模式未找到整集视频文件，无法合成成片")
-        ctx["progress"]("整集模式：采用整集视频作为成片", 94, phase="final")
-        files = [src]
-        tmp = out + ".episode.mp4"
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        shutil.copy2(src, tmp)
-    else:
-        # 按剧本镜头顺序（而非文件名字典序）拼接，保证叙事顺序正确
-        # ⚠️ 逐镜模式**不**消费超分产物：超分对象是单条**集级**视频，与逐镜拼接语义不符。
-        files = []
-        for i, s in enumerate(shots):
-            seq = A._shot_seq(s.get("shot_id", i + 1), i + 1)
-            p = os.path.join(vd["dir"], f"shot_{seq:02d}.mp4")
-            if _nonempty(p):
-                files.append(p)
-        if not files:
-            raise PipelineError("该集没有可拼接的镜头视频")
-
-        ctx["progress"](f"合成成片（{len(files)} 段）", 94, phase="final")
-        tmp = out + ".concat.mp4"
-        if os.path.exists(tmp):
-            os.remove(tmp)
-        A.video_processor.concat_videos(files, tmp, caller="pipeline.step_final")
+    # 整集模式（video_mode=episode，唯一模式）：step_video 由 H3 一次生成「整集视频」，
+    # 磁盘上没有逐镜 shot_XX.mp4，直接把整集视频采用为成片。
+    # 优先采用**超分产物**（upscale 步在 video 之后、final 之前）：超分成功则成片
+    # 即超分版；超分被跳过 / fail-open 落空时回退整集原片。
+    src = upscale_path(ctx)
+    if not _playable(src):
+        src = vd.get("file") or ""
+    if not _nonempty(src):
+        raise PipelineError("整集模式未找到整集视频文件，无法合成成片")
+    ctx["progress"]("整集模式：采用整集视频作为成片", 94, phase="final")
+    tmp = out + ".episode.mp4"
+    if os.path.exists(tmp):
+        os.remove(tmp)
+    shutil.copy2(src, tmp)
     if not _nonempty(tmp):
-        raise PipelineError("片段拼接失败（未产出有效文件）")
+        raise PipelineError("整集视频未能落盘为成片（文件为空）")
 
     # 字幕：分成两种文字、两个开关（2026-10-02）——
     #   · 台词字幕（人物开口的转录）→ subtitle_enabled，默认 false（2026-09-24 用户要求）；
@@ -1109,56 +1218,26 @@ def step_final(ctx) -> dict:
                 return str(_c or _s.get("caption_text") or "").strip()
 
             subs, cur = [], 0.0
-            # B-07 P1-5：时间轴基准用 ffprobe 实测各段时长累加（而非剧本 duration），
-            # 与成片实际时长一致，避免字幕整体漂移。
-            if mode == "episode":
-                # 整集模式：tmp 是整集视频，按各镜剧本时长占比近似分配（单条源片无法逐段 ffprobe）
-                _ep_total = _probe_concat_duration(tmp, [tmp])
-                for s in shots:
-                    dur = float(s.get("duration") or 5)
-                    _script_total = sum(float(x.get("duration") or 5) for x in shots) or 1.0
-                    if _ep_total > 0:
-                        dur = dur / _script_total * _ep_total
-                    if _want_dlg:
-                        text = dialogue_text(s.get("dialogue"))
-                        if text:
-                            subs.append({"start": cur, "end": cur + dur, "text": text})
-                    if _want_cap:
-                        _ct = _cap_text(s)
-                        if _ct:
-                            subs.append({"start": cur, "end": cur + dur, "text": _ct})
-                    cur += dur
-            else:
-                # 逐镜模式：各段 ffprobe 实测时长累加
-                seg_durs = []
-                for p in files:
-                    _d = 0.0
-                    try:
-                        import subprocess as _sp2
-                        import json as _json2
-                        _r = _sp2.run(["ffprobe", "-v", "error", "-show_entries",
-                                       "format=duration", "-of", "json",
-                                       os.path.abspath(p)],
-                                      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
-                        if _r.returncode == 0:
-                            _d = float((_json2.loads(_r.stdout or "{}").get("format")
-                                        or {}).get("duration") or 0)
-                    except Exception:  # noqa: BLE001
-                        _d = 0.0
-                    seg_durs.append(_d)
-                for i, s in enumerate(shots):
-                    dur = seg_durs[i] if i < len(seg_durs) else float(s.get("duration") or 5)
-                    if dur <= 0:
-                        dur = float(s.get("duration") or 5)
-                    if _want_dlg:
-                        text = dialogue_text(s.get("dialogue"))
-                        if text:
-                            subs.append({"start": cur, "end": cur + dur, "text": text})
-                    if _want_cap:
-                        _ct = _cap_text(s)
-                        if _ct:
-                            subs.append({"start": cur, "end": cur + dur, "text": _ct})
-                    cur += dur
+            # B-07 P1-5：时间轴基准用成片实测总时长 + 各镜剧本时长占比分配
+            #（单条整集源片无法逐段 ffprobe），避免字幕整体漂移。
+            # （逐镜模式分支已随 per_shot/keyframe 模式删除，2026-10-05）
+            script = ctx.get("script") or {}
+            shots = script.get("shots") or []
+            _ep_total = _probe_concat_duration(tmp, [tmp])
+            for s in shots:
+                dur = float(s.get("duration") or 5)
+                _script_total = sum(float(x.get("duration") or 5) for x in shots) or 1.0
+                if _ep_total > 0:
+                    dur = dur / _script_total * _ep_total
+                if _want_dlg:
+                    text = dialogue_text(s.get("dialogue"))
+                    if text:
+                        subs.append({"start": cur, "end": cur + dur, "text": text})
+                if _want_cap:
+                    _ct = _cap_text(s)
+                    if _ct:
+                        subs.append({"start": cur, "end": cur + dur, "text": _ct})
+                cur += dur
             if subs:
                 subbed = A.video_processor.add_subtitles(tmp, subs, out)
         except Exception as e:  # noqa: BLE001  字幕失败不阻断成片
@@ -1196,7 +1275,7 @@ def step_final(ctx) -> dict:
     except Exception as e:  # noqa: BLE001  可观测性优化，绝不能阻断成片
         logger.debug("ComfyUI 任务历史清理跳过：%s: %s", type(e).__name__, e)
     return {"ok": True, "artifact": out,
-            "detail": {"segments": len(files), "subtitles": bool(subbed), "size": os.path.getsize(out)}}
+            "detail": {"mode": "episode", "subtitles": bool(subbed), "size": os.path.getsize(out)}}
 
 
 def step_tts(ctx) -> dict:
@@ -1217,6 +1296,14 @@ def step_tts(ctx) -> dict:
     if not plan.get("lines"):
         return {"ok": True, "skipped": True,
                 "detail": {"note": "该集没有可朗读台词，跳过配音"}}
+
+    # 2026-10-09 接线：_apply_audio_lessons 此前是**无调用者的孤岛函数**（守卫为此长期红）。
+    # 按 audio 教训纠偏配音计划：纯就地修改、fail-open（失败只告警，不影响配音主链路）。
+    try:
+        A._apply_audio_lessons(plan["lines"], project)
+    except Exception as _e:                       # noqa: BLE001
+        A._app_logger().warning("audio 教训回流失败（忽略）：%s", _e)
+
     try:
         A.save_voice_map(plan["voice_map"], vm_path)
     except Exception as e:  # noqa: BLE001
@@ -1291,6 +1378,18 @@ def step_upscale(ctx) -> dict:
     pd = probe_upscale(ctx)
     if pd.get("done"):
         return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["file"]}
+
+    # ⭐ 2026-10-08 逐场次先超分再拼接（upscale_per_scene 开关，默认开）：
+    # 有 ≥2 个可播放场次片段时走该路径；任一场失败 / 拼接失败 / 单场 → 落到下方
+    # 整集原片超分（旧行为，保证不劣化）。全程 fail-open：只跳过，不阻断成片。
+    per_scene_srcs = _scene_segments(ctx) if bool(ctx["config"].get("upscale_per_scene", True)) else []
+    if len(per_scene_srcs) >= 2:
+        out = upscale_path(ctx)
+        if _try_per_scene_upscale(ctx, per_scene_srcs, out):
+            return {"ok": True, "artifact": out,
+                    "detail": {"mode": "per_scene", "scenes": len(per_scene_srcs),
+                               "size": os.path.getsize(out)}}
+        # 逐场失败 → 继续走下方整集原片路径（不 return）
 
     # 超分作用对象＝**集级原片**（video 步产出的整集视频）。旧顺序里超分在混音之后，
     # 此处保留 mix/final 两个回退分支，便于「老工程续跑」时仍能命中既有产物。
@@ -1389,12 +1488,13 @@ STEP_RUNNERS = {
     "tts_pre": step_tts_pre,
     "assets": step_assets,
     "storyboard": step_storyboard,
-    "keyframe": step_keyframe,
     "video": step_video,
     "upscale": step_upscale,
     "final": step_final,
-    # tts / mix 已不在 STEP_SEQUENCE（10→8 步），但函数体保留：手工端点与「老工程续跑」
-    # 路径不废，回滚只需把它俩加回 STEP_SEQUENCE 即可。
+    # tts / mix / keyframe 已不在 STEP_SEQUENCE（2026-10-05 收敛为 7 步），函数/探测
+    # 的保留策略：tts / mix 函数体保留（手工端点与「老工程续跑」路径不废，回滚只需
+    # 把它俩加回 STEP_SEQUENCE）；keyframe 的 runner 与 probe 已删（手动尾帧链路在
+    # keyframe.py / app.py，与此处无关）。
     "tts": step_tts,
     "mix": step_mix,
 }
@@ -1413,10 +1513,6 @@ def step_enabled(step: str, ctx) -> bool:
         return bool(cfg.get("enable_assets"))
     if step == "storyboard":
         return True                      # 分镜图是视频的必要输入，恒开
-    if step == "keyframe":
-        # 2026-10-01：视频只保留整集一次生成（用户决策）——尾帧仅 keyframe 视频模式
-        # 消费，整集模式不读尾帧，此步恒关（enable_keyframe 配置不再生效）。
-        return False
     if step == "video":
         return bool(cfg.get("enable_video"))
     if step == "final":
@@ -1490,17 +1586,20 @@ def _deliverable_of(ctx, steps: dict) -> str:
 
 
 def _prefetch_next_scripts(ctx: dict, limit: int = 1) -> None:
-    """后台预热：当前集进入 GPU 任务前，先生成后续 1 集剧本，避免图片/视频排队等 LLM。
+    """后台预热：当前集进入 GPU 任务前，先生成下一集剧本，避免图片/视频排队等 LLM。
 
+    滚动预取（2026-10-06）：每集剧本步骤完成后都会触发（不再限第 1 集），
+    恒只领先 1 集 —— 等效于「每一集在产图/产视频的同时，下一集剧本都在后台转」，
+    且不会一口气把后续全部章节跑掉。
     特点：
     - 非阻塞：起一个后台线程执行，主流程不等待；
     - 只落剧本 JSON，不碰 ComfyUI，不与当前 GPU 任务抢显存；
     - 幂等：若目标集剧本已存在直接跳过（probe_script）。
+    ⚠️ 章节映射按 chapters[N-1]（一章一集默认口径）；开 MJSCXT_EPISODE_SPLIT 拆章
+    时集号≠章号，此预取的章节定位会偏——与既有行为一致，如需精确应走 episode_units。
     """
     A = _A()
     try:
-        if int(ctx["episode_no"] or 0) > 1:
-            return
         if not ctx.get("novel_meta") or not ctx.get("chapter"):
             return
         meta = ctx["novel_meta"]
@@ -1620,7 +1719,17 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
         else:
             _pct_seen["v"] = p
         _cb_user(message, p, phase=phase)
+        # 进度实时镜像到集级操作日志：记录的是单调化后的百分比（与进度条所见一致），
+        # 人工/总控可据此回放「卡在哪一步、几成、停了多久」，区分「慢」与「挂」。
+        _ep_log(project_name, int(episode_no), "progress", message,
+                percent=p, phase=phase)
 
+    # 文学剧本改写接入：config.screenplay_text 存在时覆盖 chapter 文本
+    _screenplay_text = config.get("screenplay_text")
+    if _screenplay_text:
+        # 用文学剧本文本覆盖 chapter 文本
+        chapter_text = _screenplay_text
+        chapter = {**chapter, "text": _screenplay_text, "start": 0, "end": len(_screenplay_text)}
     ctx = {
         "config": config, "project_name": project_name,
         "project_key": config.get("project_key") or project_name,
@@ -1645,6 +1754,17 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
                 "error": f"{project_name} 第{int(episode_no)}集 正在被另一个执行体生产，"
                          f"请稍后再试（避免并发写同一批路径）",
                 "note": "同一集任何时刻只有一个执行体；不同集可并行"}
+
+    # 集级操作日志第一条事件：拿到锁 = 本次执行体真正开跑。
+    # ⚠️ busy 早退（上面拿不到锁）不写日志 —— 避免与正在跑的执行体交叉写同一份 JSONL。
+    # grid_mode：normalize_config 没有 sb_grid_mode 键（不造新配置），取宿主模块的
+    # 场景九宫格开关（SCENE_GRID_MODE）作为最接近的可用口径。
+    _ep_log(project_name, int(episode_no), "episode_run_start",
+            f"开始生产第{int(episode_no)}集",
+            chapter_title=(chapter or {}).get("title"),
+            style=(config.get("style") or ""),
+            screenplay_used=bool(config.get("screenplay_text")),
+            grid_mode=bool(getattr(A, "SCENE_GRID_MODE", False)))
 
     result = {
         "ok": False, "status": "failed", "episode_no": int(episode_no),
@@ -1672,6 +1792,13 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
             if should_stop and should_stop():
                 result.update({"status": "cancelled",
                                "error": "托管已暂停，在步骤边界安全中止（已完成步骤保留，可续跑）"})
+                # 该 return 直接跳出、不经过下方统一收尾，这里补落最后一条集级事件
+                _ep_log(project_name, int(episode_no), "episode_failed",
+                        "托管暂停中止，已完成步骤已保留", level="info",
+                        status="cancelled", error=result.get("error") or "",
+                        elapsed_sec=round(time.time() - started, 1))
+                result.setdefault("episode_log",
+                                  _episode_log_path(project_name, int(episode_no)))
                 return result
             if not step_enabled(step, ctx):
                 result["steps"][step] = {"status": "disabled"}
@@ -1686,6 +1813,12 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
                 _prefetch_next_scripts(ctx)
 
             ctx["progress"](f"{STEP_LABELS[step]}…", result_pct(result, step), phase=step)
+            # 集级操作日志：步骤边界事件（start / skip / done / fail）。
+            # 上一行的 progress 回调已是该步的锚点进度回报（进入步骤即推进百分比），
+            # 进度侧不重复回报。
+            _ep_log(project_name, int(episode_no), "step_start",
+                    f"开始步骤 {step}", step=step)
+            _step_t0 = time.time()
             out, attempts = _run_step_with_retry(step, ctx)
             result["steps"][step] = {
                 "status": "done" if out.get("ok") else "failed",
@@ -1722,10 +1855,24 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
                         ctx["steps"][step] = out
                 except Exception as _ace:
                     logger.warning("角色资产自动补做检查失败（忽略）：%s", _ace)
+            _step_elapsed = round(time.time() - _step_t0, 1)
             if not out.get("ok"):
                 result["steps_status"] = "blocked"
+                _ep_log(project_name, int(episode_no), "step_fail",
+                        f"{STEP_LABELS[step]}失败：{str(out.get('error') or '未知原因')[:120]}",
+                        level="error", step=step,
+                        error=str(out.get("error") or "")[:300], attempts=attempts)
                 raise PipelineError(f"{STEP_LABELS[step]}未通过：{out.get('error')}"
                                     f"（已尝试 {attempts} 次）")
+            if out.get("skipped"):
+                # probe 命中 / 开关性跳过（skipped 由各 step runner 归一返回）
+                _ep_log(project_name, int(episode_no), "step_skip",
+                        f"步骤 {step} 产物已存在，跳过", step=step,
+                        elapsed_sec=_step_elapsed)
+            else:
+                _ep_log(project_name, int(episode_no), "step_done",
+                        f"{STEP_LABELS[step]}完成", step=step,
+                        elapsed_sec=_step_elapsed, artifact=out.get("artifact") or "")
             # 每完成一步立即记录产物，便于崩溃后从日志判断进度
             ctx["logs"].append(f"[{_now()}] {STEP_LABELS[step]} 完成"
                                f"{'（跳过）' if out.get('skipped') else ''}"
@@ -1756,6 +1903,27 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
 
     result["elapsed_sec"] = round(time.time() - started, 1)
     result["finished_at"] = _now()
+    # 集级操作日志收尾（统一出口）：成功 / 失败 / 需人工(needs_human, ok=False) /
+    # 中止(cancelled) 各按状态落最后一条事件，并把日志路径带回给调用方。
+    if result.get("status") == "cancelled":
+        _ep_log(project_name, int(episode_no), "episode_failed",
+                "托管暂停中止，已完成步骤已保留", level="info",
+                status="cancelled", error=result.get("error") or "",
+                elapsed_sec=result.get("elapsed_sec"))
+    elif result.get("ok"):
+        _ep_log(project_name, int(episode_no), "episode_done",
+                f"第{int(episode_no)}集生产完成",
+                ok=True, status=result.get("status"), error=result.get("error") or "",
+                deliverable=result.get("deliverable") or "",
+                elapsed_sec=result.get("elapsed_sec"))
+    else:
+        _ep_log(project_name, int(episode_no), "episode_failed",
+                f"第{int(episode_no)}集生产失败："
+                f"{str(result.get('error') or '未知原因')[:200]}",
+                level="error", ok=bool(result.get("ok")),
+                status=result.get("status"), error=str(result.get("error") or "")[:300],
+                elapsed_sec=result.get("elapsed_sec"))
+    result.setdefault("episode_log", _episode_log_path(project_name, int(episode_no)))
     # 记账（时长 + 成功与否），供成本看板统计
     try:
         A.analytics.record_event("pipeline", project_name,
@@ -1768,9 +1936,9 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
     return result
 
 
-#: 步骤在整体进度里的百分比锚点
+#: 步骤在整体进度里的百分比锚点（2026-10-05：keyframe 移除后重排）
 _STEP_PCT = {"script": 2, "tts_pre": 10, "assets": 18, "storyboard": 32,
-             "keyframe": 44, "video": 48, "upscale": 82, "final": 92}
+             "video": 48, "upscale": 82, "final": 92}
 
 
 def result_pct(result: dict, step: str) -> int:

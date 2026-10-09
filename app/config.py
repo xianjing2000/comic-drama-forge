@@ -26,6 +26,7 @@ def _norm_path(p: str) -> str:
 
 # ===================== ComfyUI 配置 =====================
 COMFYUI_URL = _env("COMFYUI_URL", "http://127.0.0.1:8188")
+MJSCXT_COMFYUI_DIR = _env("MJSCXT_COMFYUI_DIR", "D:\\ComfyUI_portable_TE_v260619\\ComfyUI")
 
 # ComfyUI 安装根目录：其余路径默认基于此推导，只需配置这一项即可换机
 COMFYUI_ROOT = _env("COMFYUI_ROOT", "")
@@ -77,7 +78,8 @@ COMFYUI_TEMP_DIR = _norm_path(_env(
 # WinError 3 → 收尾文件不存在 → 整集成片丢失（实测连续 18 次提交全死于此）。
 # 设为 True 后工作流跳过补帧节点（CreateVideo 直接进 SaveVideo），
 # 24fps 原速出片（无 50fps 插帧），FlashVSR 超分不受影响。
-H3_DISABLE_DLSS = _env("H3_DISABLE_DLSS", "1").strip().lower() not in ("0", "false", "off", "no")
+# 2026-10-05：与 _env_bool 白名单语义对齐（非法值一律视为 False）；默认 '1' = DLSS 旁路生效
+H3_DISABLE_DLSS = _env("H3_DISABLE_DLSS", "1").strip().lower() in ("1", "true", "yes", "on")
 
 # ===================== 工作流模板目录（项目自包含） =====================
 # ⚠️ 为什么要有这一段：工作流 JSON 以前只存在于本机 ComfyUI 的
@@ -174,7 +176,6 @@ LLM_CONFIG_PATH = os.path.join(PROJECT_DATA_DIR, "llm_config.json")
 # AI 质检配置（总开关 / 图片·视频独立开关 / 模型 / 判定标准 / 最大重试次数）
 QC_CONFIG_PATH = os.path.join(PROJECT_DATA_DIR, "qc_config.json")
 QC_DIR = os.path.join(PROJECT_OUTPUT_DIR, "qc")   # 质检与重试历史 + 视频抽帧
-QC_CHECK_INTERVAL = 3          # 生成任务状态里质检阶段的轮询提示间隔（秒，仅前端用）
 
 # 视频水印配置（C 项：默认关闭；支持文案/图片、位置、字号、透明度、边距、全视频移动模式）
 WATERMARK_CONFIG_PATH = os.path.join(PROJECT_DATA_DIR, "watermark_config.json")
@@ -190,8 +191,9 @@ AI_CONFIG_PATH = os.path.join(PROJECT_DATA_DIR, "ai_config.json")
 AI_MODULES = ("text", "qc", "chat")
 
 # 小说解析与转换参数
-NOVEL_CHUNK_CHARS = 3000        # 长篇小说分块字符数
-NOVEL_MAX_CHUNKS = 8            # 单次转换最多送入模型的块数（抽样上限，避免超出上下文）
+# ⚠️ 2026-10-05：实际分块以 novel_to_script.CHUNK_CHARS=2400 为唯一事实源。
+# 旧 NOVEL_CHUNK_CHARS=3000 / NOVEL_MAX_CHUNKS=8 已随整本转剧本路径（/api/novels/<id>/convert）
+# 下线而删除，勿再加回。
 NOVEL_DEFAULT_SHOTS = 12        # 默认目标镜头数
 NOVEL_PREVIEW_CHARS = 4000      # 前端预览单页字符数
 NOVEL_BRIEF_CHARS = 800         # 「原著简报」正文取样字符数（喂给 AI 总控做风格判断，≤ agent 结果窗口）
@@ -207,7 +209,7 @@ NOVEL_BRIEF_CHARS = 800         # 「原著简报」正文取样字符数（喂�
 # 600s 对「单次调用 + 一轮重试」已不够，会出现假 ReadTimeout 打断正常生成。
 # 现设 1200s：覆盖「最重合法调用（~5min）+ 充分余量」，同时仍能在 20 分钟内暴露真挂起。
 # 需要更严/更松仍可设 env LLM_REQUEST_TIMEOUT。
-LLM_REQUEST_TIMEOUT = int(os.environ.get("LLM_REQUEST_TIMEOUT", "1200"))
+LLM_REQUEST_TIMEOUT = int(_env("LLM_REQUEST_TIMEOUT", "1200"))
 
 # ===================== 项目级隔离（每部小说 = 一个独立项目） =====================
 # 注册表与每项目配置/隔离目录；各产物仍落在既有 output/<kind>/<项目键>/ 下，
@@ -335,20 +337,30 @@ def count_action_beats(text: str) -> int:
     """
     return len(action_clauses(text))
 
-# ===================== 单镜时长模型（参考片口径·唯一权威）=====================
-#
-# 2026-09-30 按参考片 92 镜实测**重新标定**。
-#
-# 旧口径：MIN 3s / 静默基准 3s / 描述最多 +2s / 动作最多 +1.5s / 高潮 +2s ——
-# 于是每个镜头的地板就是 4~6 秒，而**参考片单镜中位只有 2.08 秒**。
-# 用户反馈的「分镜没有切换、一镜演好几件事」，根因就在这里，不在运镜：
-# 镜头被时长模型顶到 8~12 秒，剪辑点自然稀疏，再怎么调运镜也救不回来。
+# ===================== 单镜时长模型（用户口径·唯一权威）=====================
 #
 # ⚠️ 唯一权威：novel_to_script（生成期推算）与 qc_client（质检 OK 区间）都从这里取。
 # 历史缺陷：两处各写一份（剧本端 3~12 秒 vs 质检端 1~15 秒），约束互相打架、
 # 正常剧本反被判「不可执行」（见 qc_client 旧注释）。
-SHOT_DURATION_MIN = 2.0            # 单镜最短秒数（对齐参考片中位 2.08s；AI 视频段 <2s 画面运动不足，取 2.0s）
-SHOT_DURATION_MAX = 8.0            # 单镜最长秒数（参考片最长 6.57s，留余量给长台词）
+#
+# 口径沿革（两轮方向相反的用户改动，都记在这里，别只留最后一版）：
+#
+# 【第一轮 2026-09-30】按参考片 92 镜实测重标定到 **2.0 秒下限**。
+#   旧口径（MIN 3s / 静默基准 3s / 描述 +2s / 动作 +1.5s / 高潮 +2s）让每个镜头的
+#   地板就是 4~6 秒，而参考片单镜中位只有 2.08 秒 → 用户反馈「分镜没有切换、
+#   一镜演好几件事」，根因在时长模型而不在运镜。
+#
+# 【第二轮 2026-10-06】用户改口径：**每集 20~30 镜、每镜 5~6 秒**。
+#   实测（桌面版 `进境_整本小说` 第 1 集，落盘剧本 + 运行日志）：
+#       56 镜 / 总 158.13 秒 / 平均 2.82 秒，其中 **34 镜正好卡在 2.0 秒下限上**。
+#   直接危害面（用户原话「9 宫格都有重复的了」）：分镜九宫格 = **单镜 9 关键帧**
+#   （时间推进，整图即分镜本体）。2.8 秒的镜头硬切 9 帧，时间轴上根本调不出 9 个
+#   互异的画面 → 大量格子几乎一样。**镜头越短，重复越明显**。
+#   处置（用户选定「减镜增时长」）：下限 2.0 → 5.0 秒，配套三处「加镜」机制关掉
+#   （见下方 `SHOT_GRANULARITY_*` 与 novel_to_script 的 REF_INSERT_RATIO /
+#    SPLIT_ACTION_BEATS / CHARS_PER_SHOT）。回滚 = 把本值改回 2.0 并关掉那三处。
+SHOT_DURATION_MIN = 5.0            # 单镜最短秒数（用户口径：每镜 5~6 秒）
+SHOT_DURATION_MAX = 8.0            # 单镜最长秒数（留余量给长台词；>6 秒的镜属长尾）
 SHOT_DURATION_SILENT = 0.6         # 无台词纯画面镜头的基准秒数（旧值 3.0s）
 CHARS_PER_SECOND = 4.5             # 中文配音语速基准（字/秒），按台词长度推算时长
 BEAT_CLIMAX_BONUS_SEC = 0.7        # 「高潮」节拍镜的画面停留加成（旧值 2.0s）
@@ -357,14 +369,37 @@ SHOT_DURATION_DESC_SEC_MAX = 0.5
 SHOT_DURATION_DESC_CHARS_PER_SEC = 150.0
 #: 动作复杂度带来的时长加成上限（旧值 1.5s）
 SHOT_DURATION_ACTION_SEC_MAX = 0.5
-#: 单镜台词字数预算（16 字 ≈ 3.6 秒配音）。参考片的快节奏来自「一句短台词说完就切」——
-#: 旧值 30 字（≈6.7 秒配音）是「一镜不切换」的直接原因，配合规则 13 一起收紧。
+#: 单镜台词字数预算（16 字 ≈ 3.6 秒配音）。配合规则 13 一起约束单镜台词长度。
 SHOT_SPEECH_BUDGET_CHARS = 16
+
+# ===================== 分镜粒度（2026-10-06 用户指定：减镜增时长）=====================
+# 用户口径：**每集 20~30 镜、每镜 5~6 秒**（≈110~180 秒，正好落在 EPISODE_MAX_SEC=180 内）。
+# 背景与后果见上方 SHOT_DURATION_MIN 的两轮口径沿革注释。
+#
+# ⚠️ 本组常量**不是**全部生效点，只是「口径声明 + 守卫锚点」——真正把镜数压下来的
+#    是下面四处（都在 novel_to_script，各自有 env 回滚开关）：
+#      · config.SHOT_DURATION_MIN = 5.0                ← 每镜秒数下限（本文件，决定性）
+#      · CHARS_PER_SHOT = 240（原 120）                 ← 每镜承载原文翻倍 → 目标镜数近似减半
+#      · REF_INSERT_RATIO = 0.0（原 0.22）              ← 不再补「局部插入镜」（同道具重复镜）
+#      · SPLIT_ACTION_BEATS 关闭（原 3）                 ← 不再按动作节拍硬拆镜
+#      · REF_SHOT_DURATION_MAX = 8.0（原 6.5）          ← 长台词拆镜只在真溢出时触发
+#    改任一处前先读该处注释里的实测数据（桌面版第 1 集：56 镜 / 平均 2.82 秒，其中
+#    **16 镜是补出来的「局部」插入镜**、**34 镜卡在 2.0 秒下限**）。
+SHOT_GRANULARITY_TARGET_SHOTS = 25      # 每集目标镜数（20~30 的中值）
+SHOT_GRANULARITY_MAX_SHOTS = 30         # 每集镜数上限（超过即视为「又切细了」，诊断时点名）
+SHOT_GRANULARITY_TARGET_SEC = 5.5       # 每镜目标秒数（5~6 的中值）
+#: 单块镜头数上限相对目标值的**放大倍数**（2026-10-06 由「2 倍 + 3」收紧而来）。
+#: 原口径（`shots_target * 2 + 3`，上限 120）让模型「被允许」写到目标的 2 倍以上 ——
+#: 实测第 1 集目标 38 镜、模型产出约 40 镜，再叠加插入镜/拆镜吹到 56 镜。
+#: 收紧到 1.35 倍：既留出「模型因剧情需要多发几镜」的余量，又不再给它翻倍的空间。
+SHOT_CAP_GROWTH = 1.35
 
 #: 视频生成方式（**项目级设定**，新建项目时由用户选择；全链路唯一口径）。
 #:
 #: ⚠️ 2026-10-01：**只保留「整集一次生成」**（用户决策）。per_shot / keyframe 两种
 #: 模式废弃（norm_video_mode 一律归一 episode）；保留 tuple 仅为兼容既有 import。
+#: 2026-10-05：视频模式仅剩 episode（project_store.video_mode 仍在用）；
+#: norm_video_mode 恒返回 episode，作为防御性归一保留。
 VIDEO_MODES = ("episode",)
 
 #: 视频生成方式的中文标签（后端日志 / 提示文案口径，避免与前端 i18n 两处文字漂移）
@@ -388,6 +423,9 @@ def norm_video_mode(value, default: str = "episode") -> str:
     ⚠️ 2026-10-01 需求：**只保留「整集一次生成」**，逐镜（per_shot）/ 关键帧（keyframe）
     两种模式废弃。所有入口（新建项目、托管 plan、接口直传、历史残留）一律归一成 episode，
     避免再走早已弃用的分支、或让用户「选了整集却出单镜」。
+
+    2026-10-05：视频模式仅剩 episode（project_store.video_mode 仍在用）；本函数恒返回
+    episode，作为防御性归一保留。
     """
     return "episode"
 
@@ -404,15 +442,23 @@ PROJECT_DEFAULT_CONFIG = {
     # 这里 90 是「期望中位值」，不是硬约束 —— 实际每集落在 60~180 秒都合法，
     # 集数由章节内容按 EPISODE_MAX_SEC 自动拆分决定（一本 42 章约出 90+ 集）。
     # 旧值 60 是「一集 1 分钟」时代的默认，已随口径切换上调。
+    # ⚠️ resolution：遗留展示字段——后端生成链路（app._project_style → style_kit）**不读取**
+    # 本键；其 "vertical" 字面是 2026-09-28 翻转前的旧默认残留，与现行 16:9 默认不符，
+    # 勿据它推断画幅。画幅唯一事实源 = 风格串（含下方 aspect_ratio 拼入的「画面比例：…」）
+    # + style_kit.DEFAULT_RATIO=(16,9)。
     "resolution": "768p_vertical",
-    "aspect_ratio": "16:9 横屏",         # 画面比例（视频/分镜画幅，如「16:9 横屏」；空=未设置沿用默认（2026-09-28 默认由 9:16 翻转为 16:9））
+    # 画面比例（视频/分镜画幅）。⚠️ **活配置**：app._project_style 读取本键并拼成
+    # 「画面比例：16:9 横屏」注入风格串，经 style_kit.aspect_ratio 解析后直接决定
+    # 新项目的分镜/视频画幅（显式值优先于 DEFAULT_RATIO 兜底）。2026-09-28 用户拍板
+    # 默认由 9:16 翻转为 16:9（与 style_kit.DEFAULT_RATIO=(16,9) 同源），故本值勿改回 9:16；
+    # 空=未设置沿用默认。
+    "aspect_ratio": "16:9 横屏",
     "fps": 24,
     "duration_per_shot": 5,             # 单镜头默认秒数
     # 视频生成方式（项目级）：**新建项目时由用户选择**，之后「整集生成视频」
     # 与托管生产都按它执行（取值见 VIDEO_MODES / norm_video_mode）。
     "video_mode": "episode",
     "voice_map": {},                    # 角色→音色映射（按项目隔离）
-    "qc_enabled": False,                # 质检开关（按项目隔离）
     # 成片硬字幕开关（按项目隔离）：默认关闭。
     # 2026-09-24：H3 提示词已不再往画面里引导字幕（旧版「严禁出现字幕」反而诱导模型自绘），
     # 但成片合成阶段仍会额外烧一层字幕（pipeline.step_final / video_postprocess.finalize_episode）。
@@ -426,6 +472,28 @@ PROJECT_DEFAULT_CONFIG = {
 # ===================== 跨集连贯性（相邻两章转剧本改进 A/B/C/D） =====================
 # 项目级设定库 / 风格指南 / 金句清单 / 口吻词典 / 运镜术语表 / 各集 state 与校验结果
 CONTINUITY_DIR = os.path.join(PROJECT_OUTPUT_DIR, "continuity")
+
+
+# ---------------------------------------------------------------- 覆盖率阈值（唯一事实源）
+def env_float(name: str, default: float, floor: float = 0.0, ceiling: float = 1.0) -> float:
+    """读 [floor, ceiling] 区间的浮点环境变量；缺失 / 非法 / 越界一律回落 default。
+
+    2026-10-08：从 novel_to_script._env_float 提到 config。COVERAGE_THRESHOLD 这类
+    「两个模块都要读同一个 env」的常量必须有唯一事实源，否则 coverage 只能反向 import
+    novel_to_script —— 那正是 coverage → novel_to_script 环边的成因。
+    """
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        val = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    return val if floor <= val <= ceiling else default
+
+
+#: 原文覆盖率阈值（低于该值自动补生成缺失片段）；env MJSCXT_COVERAGE_THRESHOLD 可覆盖
+COVERAGE_THRESHOLD = env_float("MJSCXT_COVERAGE_THRESHOLD", 0.70, floor=0.0, ceiling=1.0)
 SCRIPT_DIR = os.path.join(PROJECT_OUTPUT_DIR, "scripts")
 ASSETS_DIR = os.path.join(PROJECT_OUTPUT_DIR, "assets")
 CHARACTERS_DIR = os.path.join(ASSETS_DIR, "characters")   # 角色资产（含多视图）
@@ -534,9 +602,13 @@ PREVIEW_BEFORE_FINAL = _env_bool("MJSCXT_PREVIEW_BEFORE_FINAL", False)
 #   D:\ComfyUI_portable_TE_v260619\ComfyUI\ComfyUI\user\default\workflows\TE-Speed-flashVSR 视频超分放大加速工作流.json
 # 加速链：TEFlashVSRModelLoader(mode=tiny/precision=bf16) → TEFlashVSRTuning(sparse_sage2 稀疏注意力
 #         + 分块 max_tile_edge/blend_overlap) → TEFlashVSRRestore(scale/color_fix) → TESpeedVideoCombine
-UPSCALE_ENGINE = os.getenv("UPSCALE_ENGINE", "te-speed-flashvsr")   # te-speed-flashvsr / legacy-flashvsr
-UPSCALE_TE_TEMPLATE_PATH = os.path.join(
-    COMFYUI_WORKFLOWS_DIR, "TE-Speed-flashVSR 视频超分放大加速工作流.json")
+UPSCALE_ENGINE = _env("UPSCALE_ENGINE", "te-speed-flashvsr")   # te-speed-flashvsr / legacy-flashvsr
+# 2026-10-09 修复「项目自包含」缺口：原实现直连 COMFYUI_WORKFLOWS_DIR（ComfyUI 安装目录），
+# 换机/重装 ComfyUI 即失效，且下载项目后开箱不可用 —— 与 2026-09-27 的全量收敛目标不一致
+#（其余模板都已走 resolve_workflow_path，只有这一条漏了）。
+# 模板已复制到项目内 workflows/，解析顺序：MJSCXT_WORKFLOWS_DIR → 项目 workflows/ → ComfyUI 回落。
+UPSCALE_TE_TEMPLATE_PATH = resolve_workflow_path(
+    "TE-Speed-flashVSR 视频超分放大加速工作流.json")
 
 # TE-Speed-flashVSR 默认参数（与模板工作流 JSON 中的接线值一致；前端可覆盖）
 # 模板实测值：ModelLoader=[FlashVSR-v1.1, tiny, bf16, auto]
@@ -624,8 +696,8 @@ MIX_DEFAULT_PARAMS = {
     #                            里的 `if max_line > 0 and dur > max_line` 恒为假 —— 变速兜底是死代码
     #                            （实测 ep04 全部条目 fit_ratio 恒为 1.0）。台词写超预算时不再有人兜底，
     #                            只能沿时间轴溢出到后面几镜，尾部被成片 `-shortest` 静默截掉。
-    #                            取值依据：单镜台词预算 30 字 ÷ 4.5 字/秒 ≈ 6.7 秒，这里留到 8 秒，
-    #                            即「正常预算内的台词不动，明显超预算的才压」。
+    #                            取值依据：单镜台词预算 16 字（SHOT_SPEECH_BUDGET_CHARS）≈ 3.6 秒；
+    #                            上限 8.0 秒对齐 SHOT_DURATION_MAX，即「正常预算内的台词不动，明显超预算的才压」。
     "video_codec": "copy",      # copy = 不重编码画面（快）；reencode = libx264 重编码
     "audio_bitrate": "192k",
     "sample_rate": 48000,
@@ -725,6 +797,12 @@ WORKFLOW_TEMPLATE = {
     #    改图片链路前务必先跑 verify_qwen21_migration.py / verify_watermark_slot.py。
     "character_gen": "角色生成_Qwen21.json",     # QwenImage2.1 角色基础图（T2I）
     "item_gen": "物品生成_Qwen21.json",          # QwenImage2.1 物品基础图（T2I）
+    # 物品「主人形象」专用模板（2026-10-06）：物品生成_Qwen21.json 纯 T2I 的副本 +
+    # 1 个参考图槽（LoadImageOutput → TextEncodeQwenImage21.images.image_1），
+    # **保留 1:1 画幅节点**。仅当物品表面承载某角色肖像（owner_photo=True）且能
+    # 解析到该角色参考图时启用（见 app._item_owner_ref_image / 资产 worker）。
+    # 由 .workbuddy/tools/build_item_ref_workflow.py 生成（可复现）。
+    "item_ref_gen": "物品生成_参考图_Qwen21.json",  # QwenImage2.1 物品主人形象（T2I + 1 参考图槽）
     "scene_gen": "场景生成_Qwen21.json",         # QwenImage2.1 场景基础图（T2I）
     "multiview_gen": "分镜生成_Qwen21.json",     # QwenImage2.1 多视角编辑（角色多视图/物品场景3D多视角）
     "storyboard_gen": "分镜生成_Qwen21.json",    # QwenImage2.1 分镜生成（参考图编辑）
@@ -816,14 +894,6 @@ APPLIED_WORKFLOW_MAPPING = apply_workflow_mapping()
 #   always = 无条件串帧
 #   off    = 关闭（旧行为：每镜用自己的分镜图当首帧，镜与镜画面各画各的）
 KEYFRAME_CHAIN_MODE = _env("KEYFRAME_CHAIN_MODE", "auto").strip().lower() or "auto"
-
-# 分镜「候选多选一」（P2，2026-09-26）：每镜生成 K 张候选（不同 seed）、逐一质检、
-# 选 score 最高且达标的那张入库。
-#   K = 1  → 旧行为（出到第一张达标即停，早停，成本最低）
-#   K > 1  → 每镜主动出至多 K 张，选最优（质量更稳，但 GPU 成本约 K 倍）
-# ⚠️ 质检判官会抖（同图 temperature=0 分数 45~92），「选最高分」只作软排序，
-#    不改变「达标才入库」的硬闸门（_qc_gate）；抖动由 image_qc_recheck 同图复核缓解。
-STORYBOARD_CANDIDATES = max(1, _env_int("STORYBOARD_CANDIDATES", 1))
 
 # TE MAN 3D导演台「程序化站位」（2026-09-26）：把每镜 shot 的角色站位/机位/景别
 # 结构化翻译成 scene_json（te_3d_director.py），并派生出「空间锚点」文本注入
@@ -1057,40 +1127,94 @@ SCENE_VIEW_DUP_PHASH_MAX = 95.0
 #   关掉即回落到上面 4 档逐档独立出图 + 按机位选档的旧行为（旧常量 SCENE_VIEW_* 保留）。
 SCENE_GRID_MODE = _env_bool("MJSCXT_SCENE_GRID", True)
 
-#: 九宫格 9 机位的键序（**即九宫格格序**，与 ``scene_grid.stitch_grid`` 的 3×3 排布一致：
-#: 1 行 front/left45/right45，2 行 top/wide/low，3 行 detail/depth/back）。
+#: ⭐ 2026-10-07（用户拍板）：场景九宫格改「**1 次 T2I 直出整图**」——
+#:   把 9 个机位**逐格写死**进一句提示词（范式同 storyboard_grid_main），
+#:   实测 57 秒出图且机位比「9 次独立出图 + 拼接」（8 分 16 秒）更准。
+#:   关闭则回落到 9 档逐档独立出图 + stitch_grid 拼接的旧行为（旧路径原样保留）。
+SCENE_GRID_ONESHOT = _env_bool("MJSCXT_SCENE_GRID_ONESHOT", True)
+
+#: 九宫格各机位的键序（**即九宫格格序**，与 ``scene_grid.stitch_grid`` 的 3×3 排布一致）。
 #: 单一来源：机位句与标签都从这里取（见 SCENE_GRID_ANGLE_ZH / SCENE_GRID_LABELS），
 #: 出图循环与拼接循环共用同一序列，避免两份清单漂移。
-SCENE_GRID_VIEW_KEYS = ("front", "left45", "right45", "top",
-                        "wide", "low", "detail", "depth", "back")
+#:
+#: ⭐ 2026-10-06（用户指定）：按「场景 9 宫格多视角」新定义**重排为 9 档**，格序即用户
+#:    给的画面编号 1~9：
+#:      1 `front`    全景（主视角）—— 场景完整大环境 / 整体构图 / 建筑 / 空间布局 / 光影基调（基准参考）
+#:      2 `wide`     远景 —— 拉远，展示场景与周边环境的关系、氛围透视
+#:      3 `mid`      中景 —— 核心活动区域，主体陈设与空间的配比（漫剧最常用）
+#:      4 `near`     近景 —— 局部环境：近处墙面、道具、陈设
+#:      5 `detail_a` 特写细节 A —— 场景标志性物件（大门 / 招牌 / 特殊装饰）
+#:      6 `detail_b` 特写细节 B —— 材质纹理（墙面肌理 / 地面 / 特殊纹路）
+#:      7 `left45`   左 45° 侧视全景 —— 补全主视角看不到的空间结构
+#:      8 `right45`  右 45° 侧视全景 —— 另一侧，空间对称 / 结构参考
+#:      9 `top`      俯视鸟瞰 —— 场地平面布局，供后续分镜调度
+#:    沿革：2026-10-05 曾用 8 档（front/left45/right45/top/wide/low/detail/depth，删掉了
+#:    「back 背面反打」——封闭空间的背面反打在 T2I 下必出纯黑格）；本次按用户定义恢复 9 档
+#:    并**换成上面这套语义**（`low`/`detail`/`depth` 三档被 `mid`/`near`/`detail_a`/`detail_b`
+#:    取代，`top` 以「俯视鸟瞰」身份回到第 9 格）。
+SCENE_GRID_VIEW_KEYS = ("front", "wide", "mid", "near", "detail_a",
+                        "detail_b", "left45", "right45", "top")
 
 #: 九宫格各机位 → **出图**机位句（追加进正向 T2I 提示词，决定这张格画哪个机位）。
-#: 前 4 档（front/left45/right45/top）直接**复用** SCENE_VIEW_ANGLE_ZH 的口径
+#: 前 4 档中 front/left45/right45/top 直接**复用** SCENE_VIEW_ANGLE_ZH 的口径
 #: （front/top 是实证有效措辞、left45/right45 是 2026-10-03 B 方案强措辞，逐字不动）；
-#: 后 5 档（wide/low/detail/depth/back）取自 ``scene_grid.SCENE_GRID_ANGLES`` 的同款句，
-#: 保证与手动九宫格预览的机位语义一致。
+#: 其余档取自「场景 9 宫格多视角」的用户定义。
 #: ⚠️ 每条句**不得出现** ``CHARACTER_WORDS``/``CHARACTER_QTY_RE`` 能命中的词
 #: （人物/人影/人群/士兵…），否则被 ``sanitize_scene_prompt`` 整句丢弃、机位静默失效
 #: （与 SCENE_VIEW_ANGLE_ZH 同约束，改措辞前先跑 probe_scene_views.py）。
+#: ⚠️ 用户定义里第 3/4 档原话带「人物」二字，这里**必须改写掉**（「人物」在
+#: CHARACTER_WORDS 里，整句会被丢弃）—— 换成「核心活动区域 / 近处陈设」这类不含禁词的写法。
+#: ⭐ 2026-10-06 二次打磨：新增的 5 档（wide/mid/near/detail_a/detail_b）按 A7 实证范式
+#:   补上「**排斥主视角构图**」的尾巴 —— A7 定论是机位档失效的真根因＝**措辞只给位置、
+#:   不给结果**（left45/right45 曾与 base 取景几乎一样，加了「透视消失点偏向哪侧 +
+#:   不要正对的正视对称构图」才修好）。这 5 档都是**同一场地的不同景别**，最容易被模型
+#:   顺手画成 base 那张正面全景，故每档都显式声明「不再是全貌 / 不要沿用主视角构图」。
+#:   4 档复用项（front/left45/right45/top）**逐字不动**（不引入回归）。
 SCENE_GRID_ANGLE_ZH = {
     "front": SCENE_VIEW_ANGLE_ZH["front"],
     "left45": SCENE_VIEW_ANGLE_ZH["left45"],
     "right45": SCENE_VIEW_ANGLE_ZH["right45"],
     "top": SCENE_VIEW_ANGLE_ZH["top"],
-    "wide": "拉远到大远景机位，整个场景居于画面中央，四周留出大片周围环境",
-    "low": "相机贴近地面向上仰拍，前景物件因透视被放大，天空或顶部结构入画",
-    "detail": "近距离特写场景中最有辨识度的陈设细节，背景浅景深虚化",
-    "depth": "沿场景主轴纵深拍摄，两侧陈设向画面深处汇聚，强调空间透视",
-    "back": "从场景背后向入口方向反打拍摄，呈现与正面相反的空间关系",
+    "wide": "拉远到大远景机位：整个场地与四周的周边环境一并入画，交代场地与外界的关系；"
+            "画面范围明显比主视角更开阔，四周环境占画面大半，"
+            "不要与主视角相同的取景范围",
+    "mid": "中景机位：镜头只截取场地的一段核心区域，交代这一片的尺度、"
+           "主要陈设与地面通道的配比，是漫剧最常用的取景距离；"
+           "画面不再是整个场地的全貌，不要沿用主视角的正面全景构图",
+    "near": "近景机位：镜头贴近场地局部，只拍到近处的墙面、道具与陈设细节，"
+            "背景只保留少量环境信息；画面里看不到场地的整体轮廓，不要出现全景",
+    "detail_a": "特写机位：镜头抵近场地中最有标志性的物件"
+                "（大门、招牌、匾额或特殊装饰），该物件占满画面绝大部分、"
+                "背景浅景深虚化；不要拍到场地全貌",
+    "detail_b": "特写机位：镜头抵近拍摄场地的材质与纹理"
+                "（墙面肌理、地面铺装、砖缝或特殊纹路），纹理细节占满画面、"
+                "背景浅景深虚化；不要拍到场地全貌",
 }
 
 #: 九宫格各机位 → 中文标签（供日志/UI/机位句前缀用）。
 SCENE_GRID_LABELS = {
-    "front": "正面全景", "left45": "左前 45°", "right45": "右前 45°",
-    "top": "顶部鸟瞰", "wide": "大远景", "low": "低角度仰拍",
-    "detail": "细节特写", "depth": "纵深透视", "back": "背面反打",
+    "front": "全景（主视角）", "wide": "远景", "mid": "中景", "near": "近景",
+    "detail_a": "特写细节A", "detail_b": "特写细节B",
+    "left45": "左45°侧视全景", "right45": "右45°侧视全景", "top": "俯视鸟瞰",
 }
 
+#: 九宫格第 1 格（``front``）在**磁盘上**的实际来源文件名。
+#: ⚠️ 场景资产不单独产出 ``front.png``（正面档直接复用已过质检的基础图，
+#: 见 app.py 资产 worker 的 scene 分支与 `_build_asset_index` 的「front 别名到 base」）——
+#: 所以拼接时必须按本表把 ``front`` 解析到 ``base.png``，否则第一格会被当成「文件不存在」
+#: 跳过，全景点就不在九宫格里了（2026-10-06 修复：当时 8 档下实际只有 7 格入图，
+#: 3×3 里空着 2 格纯黑）。
+SCENE_GRID_CELL_FILE_STEM = {"front": "base"}
+
+#: ⭐⭐ 九宫格拼接的两条**硬契约**（2026-10-06 两处修复的结论，动拼接前先读）：
+#:   ① **按格序定长拼接**：槽位表长度恒 = 9，缺档填 ``None`` → 该格留空、
+#:      **后续格位不左移**（``scene_grid.stitch_grid(..., slot_count=9)``）。
+#:      否则中间缺一档会让它之后的机位**整体错位一格**（第 5 格＝特写细节A 变成别的
+#:      画面，比空黑格更难发现）。调用方构造槽位时**不得**「过滤后 append」。
+#:   ② **网格模式下不因「与 base 相似」丢档**：9 格里每一格都是用户指定的画面，
+#:      相似度只作**软告警**（提示该机位可能没真换构图 → 回去改机位措辞），绝不丢档 ——
+#:      丢档就是九宫格空黑格。旧 4 档模式的 phash 粗筛（``SCENE_VIEW_DUP_PHASH_MAX``）
+#:      在网格模式下**不生效**（其原始前提在网格模式已由「整图直接用」取代）。
 #: 九宫格主图的文件名（落 ``<场景目录>/grid.png``；作为 SCENE_GRID_MODE 下的场景主图，
 #: 资产索引 ``_build_asset_index`` 与下游 ``_pick_scene_view`` 都认它）。
 SCENE_GRID_FILENAME = "grid.png"

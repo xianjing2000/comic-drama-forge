@@ -1,15 +1,15 @@
 {
   "id": "a19135f2-9172-4b26-bed6-f2aad1476d15",
   "revision": 0,
-  "last_node_id": 19,
-  "last_link_id": 20,
+  "last_node_id": 30,
+  "last_link_id": 47,
   "nodes": [
     {
       "id": 1,
       "type": "UNETLoader",
       "pos": [
-        0.0,
-        0.0
+        0,
+        0
       ],
       "size": [
         510,
@@ -70,8 +70,8 @@
       "id": 2,
       "type": "CLIPLoader",
       "pos": [
-        0.0,
-        160.0
+        0,
+        160
       ],
       "size": [
         510,
@@ -143,8 +143,8 @@
       "id": 3,
       "type": "VAELoader",
       "pos": [
-        0.0,
-        360.0
+        0,
+        360
       ],
       "size": [
         510,
@@ -196,8 +196,8 @@
       "id": 4,
       "type": "TESpeedQwenImage21",
       "pos": [
-        620.0,
-        0.0
+        620,
+        0
       ],
       "size": [
         280,
@@ -285,7 +285,7 @@
         {
           "name": "status",
           "type": "STRING",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -317,8 +317,8 @@
       "id": 5,
       "type": "QwenImage21Cache",
       "pos": [
-        950.0,
-        0.0
+        950,
+        0
       ],
       "size": [
         270,
@@ -512,55 +512,55 @@
         {
           "name": "images.image_1",
           "type": "IMAGE",
-          "link": 9,
+          "link": 22,
           "shape": 7
         },
         {
           "name": "images.image_2",
           "type": "IMAGE",
-          "link": 10,
+          "link": 24,
           "shape": 7
         },
         {
           "name": "images.image_3",
           "type": "IMAGE",
-          "link": 11,
+          "link": 26,
           "shape": 7
         },
         {
           "name": "images.image_4",
           "type": "IMAGE",
-          "link": 12,
+          "link": 28,
           "shape": 7
         },
         {
           "name": "images.image_5",
           "type": "IMAGE",
-          "link": 13,
+          "link": 30,
           "shape": 7
         },
         {
           "name": "images.image_6",
           "type": "IMAGE",
-          "link": 14,
+          "link": 32,
           "shape": 7
         },
         {
           "name": "images.image_7",
           "type": "IMAGE",
-          "link": 15,
+          "link": 34,
           "shape": 7
         },
         {
           "name": "images.image_8",
           "type": "IMAGE",
-          "link": 16,
+          "link": 36,
           "shape": 7
         },
         {
           "name": "images.image_9",
           "type": "IMAGE",
-          "link": 17,
+          "link": 38,
           "shape": 7
         },
         {
@@ -575,7 +575,7 @@
           "widget": {
             "name": "prompt"
           },
-          "link": null
+          "link": 39
         },
         {
           "name": "negative_prompt",
@@ -670,13 +670,13 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            9
+            21
           ]
         },
         {
           "name": "MASK",
           "type": "MASK",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -734,13 +734,13 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            10
+            23
           ]
         },
         {
           "name": "MASK",
           "type": "MASK",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -798,13 +798,13 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            11
+            25
           ]
         },
         {
           "name": "MASK",
           "type": "MASK",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -862,13 +862,13 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            12
+            27
           ]
         },
         {
           "name": "MASK",
           "type": "MASK",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -926,13 +926,13 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            13
+            29
           ]
         },
         {
           "name": "MASK",
           "type": "MASK",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -990,13 +990,13 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            14
+            31
           ]
         },
         {
           "name": "MASK",
           "type": "MASK",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -1054,13 +1054,13 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            15
+            33
           ]
         },
         {
           "name": "MASK",
           "type": "MASK",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -1118,13 +1118,13 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            16
+            35
           ]
         },
         {
           "name": "MASK",
           "type": "MASK",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -1182,13 +1182,13 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            17
+            37
           ]
         },
         {
           "name": "MASK",
           "type": "MASK",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -1307,7 +1307,7 @@
         {
           "name": "images",
           "type": "IMAGE",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -1350,6 +1350,990 @@
       "widgets_values": [
         "QwenImage2.1 参考图编辑（TE-Speed 加速链）—— 分镜图 / 多视角共用。\n参考母版：TE-Speed-QwenImage21 加速插件-提速30%(1).json 的「参考图编辑」子图。\n\n链路：UNETLoader(qwen_image_2.1_int8_convrot) → TESpeedQwenImage21\n     → QwenImage21Cache → KSampler(model)；\n     CLIPLoader(qwen3vl_8b_int8_convrot, qwen_image) → TextEncodeQwenImage21(clip)；\n     VAELoader(qwen_image_2.1_vae_bf16) → TextEncodeQwenImage21(vae) 与 VAEDecode(vae)；\n     LoadImageOutput ×9 → TextEncodeQwenImage21(images.image_1/…/9)；\n     TextEncodeQwenImage21(latent) → KSampler(latent_image) → VAEDecode → SaveImageAdvanced。\n\n参考图槽位（9 张，Qwen-Image-2.1 reference stack 分工；官方容量上限 10）：\n  1 主角色身份锚点（<image1>，兼作画布/构图基线）\n  2 次角色身份   3 主角色服装   4 场景   5 道具\n  6 构图参考     7 光照参考     8 上一镜连续性锚点   9 备用素材\n⚠️ 官方「10 是容量不是目标」：生成端只填**实际需要**的前 N 个槽位，\n   多余槽位保持空（不连任何图），避免无意义图片稀释注意力。\n   注意：LoadImageOutput 的 image 控件为空时该路不产出 IMAGE，ComfyUI 会把\n   未连接的 optional 输入当缺失处理 —— 这正是我们要的「槽位为空」。\n\n提示词协议（官方 Prompt Rewriter 风格，英文）：\n  用 <image1>…<imageN> **显式编号**引用参考图（禁用「第一张图」类自然语言）；\n  按属性解耦分节：PRIMARY CANVAS / IDENTITY / REFERENCE ROLES / CHANGE / PRESERVE；\n  身份一律写 “Preserve the exact identity from <imageN>”，**禁止用文字重述五官**\n  （重述面部会被模型理解成「重新生成一张符合文字描述的脸」，反而降低 likeness）。\n\n与母版的差异（刻意）：\n1. 参考图节点用 LoadImageOutput（读 ComfyUI output 目录），与项目「参考图上传到\n   output 目录 + 写 '名字 [output]' 标注」的约定一致（母版是 LoadImage，读 input 目录）；\n2. 去掉母版的 ImageScaleToTotalPixels：resolution=0 保持每张参考图按自身尺寸（对齐 32\n   倍数），从而维持「分镜画幅继承基础资产图」这一项目不变量；\n3. 母版用 CR Text 喂 prompt，但运行中的 ComfyUI 未装 CR Text 插件 → prompt 留作控件，\n   由生成代码在提交前写入。\n\n采样：40 步 / CFG 1 / euler / simple（与母版一致）。seed 由生成代码注入。\n⚠️ CFG=1 时 negative_prompt 不参与引导 —— 负面压制只能靠 prompt 里的正向声明。"
       ]
+    },
+    {
+      "id": 20,
+      "type": "ResolutionSelector",
+      "pos": [
+        620,
+        3000
+      ],
+      "size": [
+        300,
+        190
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "aspect_ratio",
+          "type": "COMBO",
+          "widget": {
+            "name": "aspect_ratio"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "multiple",
+          "type": "INT",
+          "widget": {
+            "name": "multiple"
+          },
+          "link": null
+        },
+        {
+          "name": "preview",
+          "type": "RESOLUTION_PREVIEW",
+          "widget": {
+            "name": "preview"
+          },
+          "link": null,
+          "shape": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "links": []
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ResolutionSelector"
+      },
+      "widgets_values": [
+        "16:9 (Widescreen)",
+        1.5,
+        32
+      ],
+      "widgets_values_named": {
+        "aspect_ratio": "16:9 (Widescreen)",
+        "megapixels": 1.5,
+        "multiple": 32
+      }
+    },
+    {
+      "id": 21,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        800,
+        300
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 21
+        },
+        {
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution_steps",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            22,
+            40
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 1.5,
+        "resolution_steps": 32
+      }
+    },
+    {
+      "id": 22,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        800,
+        700
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 23
+        },
+        {
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution_steps",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            24,
+            41
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 1.5,
+        "resolution_steps": 32
+      }
+    },
+    {
+      "id": 23,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        800,
+        1100
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 25
+        },
+        {
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution_steps",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            26,
+            42
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 1.5,
+        "resolution_steps": 32
+      }
+    },
+    {
+      "id": 24,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        800,
+        1500
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 27
+        },
+        {
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution_steps",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            28,
+            43
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 1.5,
+        "resolution_steps": 32
+      }
+    },
+    {
+      "id": 25,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        800,
+        1900
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 29
+        },
+        {
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution_steps",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            30,
+            44
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 1.5,
+        "resolution_steps": 32
+      }
+    },
+    {
+      "id": 26,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        800,
+        2300
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 31
+        },
+        {
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution_steps",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            32,
+            45
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 1.5,
+        "resolution_steps": 32
+      }
+    },
+    {
+      "id": 27,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        800,
+        2700
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 33
+        },
+        {
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution_steps",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            34,
+            46
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 1.5,
+        "resolution_steps": 32
+      }
+    },
+    {
+      "id": 28,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        800,
+        3100
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 35
+        },
+        {
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution_steps",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            36,
+            47
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 1.5,
+        "resolution_steps": 32
+      }
+    },
+    {
+      "id": 29,
+      "type": "ImageScaleToTotalPixels",
+      "pos": [
+        800,
+        3500
+      ],
+      "size": [
+        300,
+        200
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "image",
+          "type": "IMAGE",
+          "link": 37
+        },
+        {
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "name": "megapixels",
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "name": "resolution_steps",
+          "type": "INT",
+          "widget": {
+            "name": "resolution_steps"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            38
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "ImageScaleToTotalPixels"
+      },
+      "widgets_values": [
+        "nearest-exact",
+        1,
+        1
+      ],
+      "widgets_values_named": {
+        "upscale_method": "nearest-exact",
+        "megapixels": 1.5,
+        "resolution_steps": 32
+      }
+    },
+    {
+      "id": "30",
+      "type": "TE_Qwen_Image_2_1_Prompt_Enhancer",
+      "pos": [
+        490,
+        320.0
+      ],
+      "size": [
+        417,
+        620
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "图片",
+          "name": "图片",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 40
+        },
+        {
+          "localized_name": "图片2",
+          "name": "图片2",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 41
+        },
+        {
+          "localized_name": "图片3",
+          "name": "图片3",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 42
+        },
+        {
+          "localized_name": "图片4",
+          "name": "图片4",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 43
+        },
+        {
+          "localized_name": "图片5",
+          "name": "图片5",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 44
+        },
+        {
+          "localized_name": "图片6",
+          "name": "图片6",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 45
+        },
+        {
+          "localized_name": "图片7",
+          "name": "图片7",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 46
+        },
+        {
+          "localized_name": "图片8",
+          "name": "图片8",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 47
+        },
+        {
+          "localized_name": "输入提示词",
+          "name": "输入提示词",
+          "type": "STRING",
+          "widget": {
+            "name": "输入提示词"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "任务模式",
+          "name": "任务模式",
+          "type": "COMBO",
+          "widget": {
+            "name": "任务模式"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "输出语言",
+          "name": "输出语言",
+          "type": "COMBO",
+          "widget": {
+            "name": "输出语言"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "增强方式",
+          "name": "增强方式",
+          "type": "COMBO",
+          "widget": {
+            "name": "增强方式"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "api_key",
+          "name": "api_key",
+          "type": "STRING",
+          "widget": {
+            "name": "api_key"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "api_base_url",
+          "name": "api_base_url",
+          "type": "STRING",
+          "widget": {
+            "name": "api_base_url"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "STRING",
+          "widget": {
+            "name": "model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "文生图PE模型",
+          "name": "文生图PE模型",
+          "type": "COMBO",
+          "widget": {
+            "name": "文生图PE模型"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "图生图PE模型",
+          "name": "图生图PE模型",
+          "type": "COMBO",
+          "widget": {
+            "name": "图生图PE模型"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "主模型",
+          "name": "主模型",
+          "type": "COMBO",
+          "widget": {
+            "name": "主模型"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "mmproj",
+          "name": "mmproj",
+          "type": "COMBO",
+          "widget": {
+            "name": "mmproj"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "最大生成token",
+          "name": "最大生成token",
+          "type": "INT",
+          "widget": {
+            "name": "最大生成token"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "上下文长度",
+          "name": "上下文长度",
+          "type": "INT",
+          "widget": {
+            "name": "上下文长度"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "生成后自动卸载模型",
+          "name": "生成后自动卸载模型",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "生成后自动卸载模型"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "启用思考",
+          "name": "启用思考",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "启用思考"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "增强提示词",
+          "name": "增强提示词",
+          "type": "STRING",
+          "links": [
+            39
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "tl2012tl/TE_MAN",
+        "Node name for S&R": "TE_Qwen_Image_2_1_Prompt_Enhancer"
+      },
+      "widgets_values": [
+        "",
+        "文生图",
+        "中文",
+        "API",
+        "",
+        "http://127.0.0.1:31415/v1",
+        "auto",
+        "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
+        "qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors",
+        "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+        "qwen3.5mmproj-BF16.gguf",
+        4096,
+        8192,
+        0,
+        "randomize",
+        false,
+        false
+      ],
+      "widgets_values_named": {
+        "输入提示词": "",
+        "任务模式": "文生图",
+        "输出语言": "中文",
+        "增强方式": "API",
+        "api_key": "",
+        "api_base_url": "http://127.0.0.1:31415/v1",
+        "model": "auto",
+        "文生图PE模型": "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
+        "图生图PE模型": "qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors",
+        "主模型": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+        "mmproj": "qwen3.5mmproj-BF16.gguf",
+        "最大生成token": 4096,
+        "上下文长度": 8192,
+        "seed": 0,
+        "生成后自动卸载模型": false,
+        "启用思考": false,
+        "control_after_generate": "randomize"
+      }
     }
   ],
   "links": [
@@ -1418,78 +2402,6 @@
       "LATENT"
     ],
     [
-      9,
-      8,
-      0,
-      7,
-      1,
-      "IMAGE"
-    ],
-    [
-      10,
-      9,
-      0,
-      7,
-      2,
-      "IMAGE"
-    ],
-    [
-      11,
-      10,
-      0,
-      7,
-      3,
-      "IMAGE"
-    ],
-    [
-      12,
-      11,
-      0,
-      7,
-      4,
-      "IMAGE"
-    ],
-    [
-      13,
-      12,
-      0,
-      7,
-      5,
-      "IMAGE"
-    ],
-    [
-      14,
-      13,
-      0,
-      7,
-      6,
-      "IMAGE"
-    ],
-    [
-      15,
-      14,
-      0,
-      7,
-      7,
-      "IMAGE"
-    ],
-    [
-      16,
-      15,
-      0,
-      7,
-      8,
-      "IMAGE"
-    ],
-    [
-      17,
-      16,
-      0,
-      7,
-      9,
-      "IMAGE"
-    ],
-    [
       18,
       6,
       0,
@@ -1512,6 +2424,222 @@
       18,
       0,
       "IMAGE"
+    ],
+    [
+      21,
+      8,
+      0,
+      21,
+      0,
+      "IMAGE"
+    ],
+    [
+      22,
+      21,
+      0,
+      7,
+      1,
+      "IMAGE"
+    ],
+    [
+      23,
+      9,
+      0,
+      22,
+      0,
+      "IMAGE"
+    ],
+    [
+      24,
+      22,
+      0,
+      7,
+      2,
+      "IMAGE"
+    ],
+    [
+      25,
+      10,
+      0,
+      23,
+      0,
+      "IMAGE"
+    ],
+    [
+      26,
+      23,
+      0,
+      7,
+      3,
+      "IMAGE"
+    ],
+    [
+      27,
+      11,
+      0,
+      24,
+      0,
+      "IMAGE"
+    ],
+    [
+      28,
+      24,
+      0,
+      7,
+      4,
+      "IMAGE"
+    ],
+    [
+      29,
+      12,
+      0,
+      25,
+      0,
+      "IMAGE"
+    ],
+    [
+      30,
+      25,
+      0,
+      7,
+      5,
+      "IMAGE"
+    ],
+    [
+      31,
+      13,
+      0,
+      26,
+      0,
+      "IMAGE"
+    ],
+    [
+      32,
+      26,
+      0,
+      7,
+      6,
+      "IMAGE"
+    ],
+    [
+      33,
+      14,
+      0,
+      27,
+      0,
+      "IMAGE"
+    ],
+    [
+      34,
+      27,
+      0,
+      7,
+      7,
+      "IMAGE"
+    ],
+    [
+      35,
+      15,
+      0,
+      28,
+      0,
+      "IMAGE"
+    ],
+    [
+      36,
+      28,
+      0,
+      7,
+      8,
+      "IMAGE"
+    ],
+    [
+      37,
+      16,
+      0,
+      29,
+      0,
+      "IMAGE"
+    ],
+    [
+      38,
+      29,
+      0,
+      7,
+      9,
+      "IMAGE"
+    ],
+    [
+      40,
+      "21",
+      0,
+      "30",
+      0,
+      "IMAGE"
+    ],
+    [
+      41,
+      "22",
+      0,
+      "30",
+      1,
+      "IMAGE"
+    ],
+    [
+      42,
+      "23",
+      0,
+      "30",
+      2,
+      "IMAGE"
+    ],
+    [
+      43,
+      "24",
+      0,
+      "30",
+      3,
+      "IMAGE"
+    ],
+    [
+      44,
+      "25",
+      0,
+      "30",
+      4,
+      "IMAGE"
+    ],
+    [
+      45,
+      "26",
+      0,
+      "30",
+      5,
+      "IMAGE"
+    ],
+    [
+      46,
+      "27",
+      0,
+      "30",
+      6,
+      "IMAGE"
+    ],
+    [
+      47,
+      "28",
+      0,
+      "30",
+      7,
+      "IMAGE"
+    ],
+    [
+      39,
+      "30",
+      0,
+      "7",
+      11,
+      "STRING"
     ]
   ],
   "groups": [],

@@ -373,6 +373,52 @@ def _install_shutdown_hooks() -> None:
     logger.info("已注册 atexit 优雅停机兜底")
 
 
+def _boot_qc_migration() -> None:
+    """服务**真正启动时**执行一次「质检存量迁移」（幂等，见 app.boot_qc_migration）。
+
+    ⚠️ 为什么放这里、而不是 app.py 模块级：app.py 模块级代码会在**任何** `import app`
+    （守卫脚本 / 离线探针 / `python -c "import app"`）时执行，从而改写用户的真实
+    qc_config.json —— 违反本项目「测试绝不读写用户数据」的纪律。serve.main() 是本服务
+    的唯一启动入口（main.py 亦经 `import serve; serve.main()`），且**只在真正干活的进程
+    里调用一次**（下面 main() 在重启循环之外调用，不随 _safe_run 重复触发）。
+
+    通过 `sys.modules["app"]`（由 _load_flask_app 注册的 app.py 模块）取函数，避免
+    `import app` 的命名歧义；取不到就静默跳过（如旧版模块）。失败只告警、不得阻断启动。
+    """
+    try:
+        _mod = sys.modules.get("app")
+        _fn = getattr(_mod, "boot_qc_migration", None)
+        if callable(_fn):
+            _fn()
+    except Exception as e:  # noqa: BLE001  迁移失败不得阻断启动
+        logger.warning(f"质检存量迁移调用失败（不影响启动）：{e}")
+
+
+def _boot_comfyui_heartbeat() -> None:
+    """服务**真正启动时**开启 ComfyUI 主动心跳（2026-10-09）。
+
+    与 _boot_qc_migration 同一纪律：**只在真正干活的进程里调用一次**，
+    绝不放 app.py 模块级 —— app.py 模块级代码会在任何 `import app`
+    （守卫脚本 / 离线探针）时执行，那样会让守卫也去真探/真重启 ComfyUI。
+
+    心跳本身 fail-open、daemon 线程、可用 MJSCXT_COMFYUI_HEARTBEAT=0 关闭。
+    """
+    try:
+        # ⚠️ 2026-10-09 修正：**必须直接 import 模块**。
+        #    app.py 里有条明确注释（app.py:56）：「本文件里 comfyui_client 这个名字是**实例**
+        #    （comfyui_client = ComfyUIClient()）」。我第一版取 app 模块的 comfyui_client 属性
+        #    → 拿到 ComfyUIClient **实例** → 它没有 start_comfyui_heartbeat（该函数是模块级的）
+        #    → 启动日志出现「ComfyUI 心跳未启动」，且 /api/engine/state 全是 None。
+        import comfyui_client as _hb  # noqa: PLC0415
+        _fn = getattr(_hb, "start_comfyui_heartbeat", None)
+        if callable(_fn):
+            _fn()
+        else:
+            logger.warning("ComfyUI 心跳未启动：模块里没有 start_comfyui_heartbeat")
+    except Exception as e:  # noqa: BLE001  心跳失败不得阻断启动
+        logger.warning("ComfyUI 心跳启动失败（不影响启动）：%s", e)
+
+
 def main() -> int:
     restart_count = 0
 
@@ -385,6 +431,14 @@ def main() -> int:
     except RuntimeError as e:
         logger.error("启动被安全护栏拦截（F-02）：%s", e)
         return 2
+
+    # 质检存量迁移：**服务真正启动时**执行一次（幂等）。放在重启循环之外 —— 只在
+    # 真正干活的进程里触发一次，不随 _safe_run 反复执行。⚠️ 绝不放模块级（见函数 docstring）。
+    _boot_qc_migration()
+
+    # ComfyUI 主动心跳（2026-10-09）：连续探测失败即主动重启引擎，
+    # 不再等业务请求的长超时（见 comfyui_client.start_comfyui_heartbeat 的说明）。
+    _boot_comfyui_heartbeat()
 
     _install_shutdown_hooks()
 

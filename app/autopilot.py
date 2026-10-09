@@ -4,15 +4,17 @@
 目标形态
 --------
 用户只做两件事：① 上传小说、建项目；② 用总控 AI 对话敲定风格与要求。
-之后交给本守护进程：它按章节顺序把每一集从头跑到尾（剧本→配音先行→资产→分镜→尾帧→
-视频→超分→成片），中途遇到质检不达标自动重试，只有超过阈值才挂起等人工。
-用户最终只需要在「成品验收」里点通过 / 打回。
+之后交给本守护进程：它按章节顺序把每一集从头跑到尾（剧本→配音先行→资产→分镜→
+视频→超分→成片，7 步），中途遇到质检不达标自动重试，只有超过阈值才挂起等人工。
+用户最终在「成品验收」里点通过 / 打回（或开 auto_accept 自动验收）。
 
 六个设计要点
 ------------
 1. **单线程串行 + 资源互斥**
    只有一块 GPU，多个重任务并行只会互相抢显存导致全部变慢甚至 OOM。因此托管
-   固定「同一时刻只跑一集的流水线」，用轮转（round-robin）在多个项目间公平推进。
+   固定「同一时刻只跑一集的流水线」；多项目之间按 `priority`（大者先）+
+   项目名字序**深度优先推进**——高优先级项目的待产集全部跑完才轮到下一个项目
+   （并非 round-robin 轮转）。
 
 2. **失败隔离**
    一集失败只影响这一集：记入死信并继续处理下一集 / 下一个项目。绝不因为某集
@@ -71,6 +73,10 @@ _STATE = {
     "started_at": "",
     "checked_at": "",
     "totals": {"episodes_done": 0, "episodes_failed": 0, "retries": 0},
+    #: 2026-10-08：单集失败「自动暂停」标记 —— stop_on_failure=True 时，一集生产
+    #: 失败会置 paused=True 并在此记下失败的项目/集/原因，前端与总控据此醒目提醒
+    #: 「第N集失败已暂停，请处理」；resume 时清除。未失败为空 dict。
+    "failure_pause": {},
 }
 
 #: 每个项目连续失败计数（项目名 → {集号: 次数}）
@@ -180,18 +186,15 @@ PLAN_DEFAULTS = {
     # ---- 传给 pipeline 的生产配置 ----
     "style": "",
     "target_shots": 12,
-    "video_mode": "episode",
+    # video_mode 已废弃（2026-10-01 起视频只有整集模式，pipeline 会强制归一为 episode）
     "enable_assets": True,
-    "enable_keyframe": False,
     "enable_video": True,
     "enable_final": True,
-    "enable_tts": True,
     # 「每角色参考音色」生成开关（tts_pre 步）：True = 剧本后为每个角色补一段参考音色，
     # 供 H3 以 audioMode=generate 锁定角色音色并自生成对白。
+    # （enable_tts / enable_mix / enable_keyframe 已随 tts/mix/keyframe 步骤下线移除：
+    #   计划里再设置这些键会被接口静默忽略。）
     "enable_tts_pre": True,
-    # 混音默认关闭（2026-10-04，10→8 步）：H3 原生音轨生效后混音会与之冲突，且 `mix`
-    # 已不在 STEP_SEQUENCE。必须列进 PLAN_DEFAULTS 才能经接口关闭（见下方 enable_upscale 注释）。
-    "enable_mix": False,
     # 超分（FlashVSR）：默认开启。必须列进 PLAN_DEFAULTS ——
     # api_autopilot_plan_set 会按 `k in PLAN_DEFAULTS` 过滤入参，
     # 不在此处的字段无法通过接口关闭，等于没有关掉的入口。
@@ -210,6 +213,12 @@ PLAN_DEFAULTS = {
     # 成片产出后自动验收（不再堆在「待验收」里等人点）。
     # 注意：待验收**并不阻塞**后续集生产，这个开关只是消除人工动作、让看板干净。
     "auto_accept": False,
+    # 单集失败是否「自动暂停等人工」：True = 一集生产失败就全局暂停并落异常
+    #（前端/总控会醒目提醒，用户处理后 resume 继续）；False = 旧的「失败隔离」
+    # 行为（单集失败记一次并跳到下一集，不打断整批）。
+    # ⭐ 2026-10-08 修复：此前无此开关，单集失败被静默跳过、用户不知道 ——
+    #   「第1集分镜图缺10镜 → 直接跳第2集 → 用户点开才发现」就是这个坑。
+    "stop_on_failure": True,
 }
 
 
@@ -765,12 +774,11 @@ def pause(reason: str = "") -> dict:
 
 
 def resume() -> dict:
-    if not enabled_projects() and not any(p.get("enabled") for p in list_plans()):
-        # 允许 resume 作为「启动」用；真正是否有活由循环判断
-        pass
+    """解除全局暂停并确保守护线程在跑（是否有活由循环自己判断）"""
     with _LOCK:
         _STATE["paused"] = False
         _STATE["pause_reason"] = ""
+        _STATE["failure_pause"] = {}
     _persist_runtime()
     _ensure_thread()
     wake()
@@ -835,15 +843,18 @@ PHASE_LABELS_ZH = {
     "tts_pre": "配音先行（角色参考音色）",
     "assets": "生成资产（角色/物品/场景）",
     "storyboard": "生成分镜图",
-    "keyframe": "生成尾帧",
     "video": "生成视频",
     "final": "合成成片",
-    "tts": "合成配音",
-    "mix": "音画对齐混音",
     "upscale": "超分放大",
     "qc": "质量质检",
     "retry": "重试中",
     "done": "已完成",
+    # 旧任务状态回放兜底：tts / mix / keyframe 均已下线（2026-10-04/05），
+    # 历史状态文件里若出现这些 phase，显示为「（已下线）」而不是旧环节名，
+    # 避免回放时再向用户播报「配音/混音」口径。
+    "tts": "配音（已下线）",
+    "mix": "混音（已下线）",
+    "keyframe": "尾帧（已下线）",
 }
 
 
@@ -881,11 +892,49 @@ def describe_current(cur: dict) -> str:
     if not label:
         label = step or "生产中"
     parts.append(label)
+    # 2026-10-08（用户要求）：把步骤内的**细粒度进度**（worker 逐镜上报，如
+    #    「分镜 16/41」「渲染第 5/18 场」）也拼进描述。此前只有「分镜图 · 34%」，
+    #    用户看不出在拍第几镜，只能看到「已运行 N 分钟未推进」的停滞提示。
+    _msg = str(cur.get("message") or "").strip()
+    if _msg and _msg not in parts:
+        parts.append(_msg)
     try:
         pct = int(cur.get("percent") or 0)
     except (TypeError, ValueError):
         pct = 0
     return f"{' · '.join(parts)} · {pct}%"
+
+
+def report_progress(message: str = "", percent=None) -> None:
+    """步骤内**细粒度**进度上报（供 storyboard / video worker 逐镜调用）。
+
+    动机（2026-10-08 用户反馈）：前端此前只能看到「视频生成 · 50%」配一句
+    「已运行 N 分钟未推进」—— 分不清是正常渲染还是真卡住，也不知道在拍第几镜。
+    worker 逐镜上报后，前端直接显示「第 1 集 · 视频生成 · 渲染第 5/18 场 · 50%」。
+
+    与 pipeline.progress_cb 的分工（**不要混用**）：
+      · progress_cb 负责**跨步骤**迁移 —— 维护 steps_done / retries / step；
+      · 本函数只负责**步骤内**刷新 message / percent，**绝不改** step、steps_done、
+        retries（改了会把「跑到哪一步」的进度链搅乱）。
+
+    副作用（有意）：每次上报都会刷新 step_updated_at，因此正常推进的步骤不再
+    触发「已运行 N 分钟未推进」的误报停滞告警。
+
+    线程安全：走 _set_current（内部持 _LOCK）。无 current（未在生产）时静默返回。
+    """
+    try:
+        with _LOCK:
+            if not _STATE.get("current"):
+                return
+        kw = {"message": str(message or "")}
+        if percent is not None:
+            try:
+                kw["percent"] = max(0, min(100, int(percent)))
+            except (TypeError, ValueError):
+                pass
+        _set_current(**kw)
+    except Exception as e:  # noqa: BLE001  纯展示用途，绝不能影响生产主链路
+        logger.debug("步骤内进度上报失败（忽略）：%s", e)
 
 
 def _set_current(**kw) -> None:
@@ -1161,6 +1210,107 @@ def _mark_dead(project: str, episode_no: int, reason: str, detail: dict = None) 
         logger.warning("死信标记失败：%s", e)
 
 
+# ===================== 集间流水线：下一集剧本预热（2026-10-08 用户需求） =====================
+# 动机：LLM 与 GPU 是两类**完全不同**的资源，此前整条流水线严格串行 —— 本集「资产生成」
+# 在烧 GPU 时 LLM 全程空闲，等资产跑完才轮到剧本。用户要求拆成两条线：资产在跑的同时，
+# 把**后续的剧本**（纯 LLM）先生成掉，把这段 LLM 时间从关键路径上摘除。
+#
+# 为什么选「下一集剧本」这个切入点（最干净的重叠点）：
+#   · 纯 LLM，零 GPU，不与本集的资产/分镜/视频渲染抢卡；
+#   · 只依赖小说正文 + 设定库，**不依赖本集任何产物** → 零数据依赖、无竞态；
+#   · pipeline.step_script 本身幂等（产物存在即 skipped）→ 下一集正式开跑时探针命中、
+#     秒过；预热线程随时被打断也不留半成品（写失败=没有文件=下次照常重跑）。
+_PREWARM_LOCK = threading.Lock()
+_PREWARM_RUNNING: set = set()
+
+
+def prewarm_next_script(project: str, plan: dict, cur_episode: int) -> bool:
+    """在本集生产期间，后台把**下一集剧本**先生成好（与 GPU 步骤并行）。
+
+    调用点：``_produce`` 开跑最初派发一次 —— 覆盖本集全流程（资产/分镜/视频）的 GPU
+    空档。整个过程 fail-open：任何异常只记日志，绝不影响本集生产。
+
+    开关：``MJSCXT_PREWARM_NEXT_SCRIPT``（默认 1；置 0 关闭）。
+
+    :returns: 是否**新派发**了预热线程（False = 无需 / 已在跑 / 已关）
+    """
+    if str(os.environ.get("MJSCXT_PREWARM_NEXT_SCRIPT") or "1").strip().lower() \
+            in ("0", "false", "off", "no"):
+        return False
+    try:
+        import pipeline
+        meta = _novel_meta(project, plan)
+        if not meta:
+            return False
+        chapters, text = chapters_and_text(meta)
+        if not chapters:
+            return False
+        units = episode_units(chapters, plan, text)
+        if not units:
+            return False
+        nxt = None
+        for u in units:
+            try:
+                no = int(u.get("episode_no"))
+            except (TypeError, ValueError):
+                continue
+            if no > int(cur_episode):
+                nxt = (no, u)
+                break
+        if nxt is None:
+            return False
+        nxt_no, unit = nxt
+        chapter = unit.get("chapter") or {}
+        if not chapter:
+            return False
+        config = pipeline.normalize_config({**plan, "novel_id": meta.get("novel_id") or ""},
+                                           default_project_key=project)
+        key = (project, int(nxt_no))
+        with _PREWARM_LOCK:
+            if key in _PREWARM_RUNNING:
+                return False            # 单飞：同一集只允许一个预热线程
+            _PREWARM_RUNNING.add(key)
+
+        def _pw_run():
+            try:
+                # 文学剧本改写：与 _produce 同口径（文件存在即用）
+                try:
+                    import novel_screenplay
+                    _md = novel_screenplay.load_screenplay(project, int(nxt_no))
+                    if _md:
+                        config.setdefault("screenplay_text", _md)
+                except Exception:  # noqa: BLE001 设定缺失不影响主流程
+                    pass
+                ctx = {
+                    "config": config, "project_name": project,
+                    "project_key": config.get("project_key") or project,
+                    "episode_no": int(nxt_no), "episode_tag": f"ep{int(nxt_no):02d}",
+                    "novel_meta": meta, "chapter": chapter,
+                    "timeout_per_segment": int(config.get("timeout_per_segment") or 900),
+                    "script": {}, "logs": [], "steps": {},
+                    "progress": lambda *a, **k: None,
+                }
+                res = pipeline.step_script(ctx) or {}
+                logger.info("[集间流水线] 下一集剧本预热完成：第%s集 ok=%s shots=%s（%s）",
+                            nxt_no, res.get("ok"),
+                            (res.get("detail") or {}).get("shots"),
+                            res.get("artifact") or res.get("error") or "")
+            except Exception as e:  # noqa: BLE001 预热失败绝不影响本集生产
+                logger.warning("[集间流水线] 下一集剧本预热失败（不影响本集）：%s: %s",
+                               type(e).__name__, e)
+            finally:
+                with _PREWARM_LOCK:
+                    _PREWARM_RUNNING.discard(key)
+
+        threading.Thread(target=_pw_run, name=f"prewarm-script-ep{nxt_no}",
+                         daemon=True).start()
+        logger.info("[集间流水线] 已在后台预热第%s集剧本（与本集 GPU 生产并行）", nxt_no)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[集间流水线] 预热派发失败（忽略）：%s", e)
+        return False
+
+
 def _produce(project: str, plan: dict, pick: dict) -> None:
     """跑完一集的流水线，并把结果登记到交付物 / 历史 / 死信"""
     import pipeline
@@ -1204,6 +1354,14 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
                  percent=0, started_at=_now(), retries=0, phase="start",
                  steps_done=[])
 
+    # ⭐ 2026-10-08（用户需求）：LLM 与 GPU 拆成两条线 —— 本集在烧 GPU（资产/分镜/视频）
+    #    的时候，后台把**下一集剧本**（纯 LLM）先生成掉，把这段 LLM 时间从关键路径摘除。
+    #    在开跑最初派发，覆盖本集全流程的 GPU 空档；任何失败只记日志、不影响本集。
+    try:
+        prewarm_next_script(project, plan, episode_no)
+    except Exception as _pw_e:  # noqa: BLE001
+        logger.debug("下一集剧本预热派发异常（忽略）：%s", _pw_e)
+
     # 步骤链用于前端「跑到哪一步」可视化：pipeline 每进入一个新步骤就回调一次，
     # 这里把"上一个步骤"记为已完成，从而得到实时进度链。
     _seen: list = []
@@ -1211,6 +1369,12 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
 
     def _cb(message, percent, phase=None):
         import pipeline as _pl
+        # 契约：progress_cb 的 phase 约定 = <步骤名> 或 <步骤名>:<子阶段>。下面的 base
+        # 归因只认 STEP_SEQUENCE 里的裸步骤名 —— 步骤内部子阶段若裸传与 STEP_SEQUENCE
+        # 撞名的名字，会把未跑的步骤提前标成已完成（2026-10-06 实录：step_script 裸传
+        # continuity 的内部阶段 "assets"＝加载设定库，剧本步骤 4% 时 script/tts_pre/assets
+        # 三步即被标成已完成）。产出方约定见 pipeline.step_script 的 _cb（continuity /
+        # novel_to_script 内部阶段一律加 "script:" 前缀）。
         base = str(phase or "").split(":")[0]
         if ":retry" in str(phase or ""):
             _retries[0] += 1
@@ -1224,6 +1388,15 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
     try:
         config = pipeline.normalize_config({**plan, "novel_id": meta.get("novel_id") or ""},
                                            default_project_key=project)
+        # 文学剧本改写接入：文件存在即改写，无需人工审阅
+        # ⚠️ 本模块不能引用 app（app 顶层 import 本模块，反向导入是循环；且本模块
+        #    作用域里没有 app 这个名字，写了就是 NameError——2026-10-06 第1集整批
+        #    秒败实录）。模块内日志一律走 logger。
+        import novel_screenplay
+        _md = novel_screenplay.load_screenplay(project, episode_no)
+        if _md:
+            logger.info("集 %s 使用文学剧本改写（文件存在）", episode_no)
+            config.setdefault("screenplay_text", _md)
         result = pipeline.run_episode(
             config, project, episode_no, meta, chapter,
             progress_cb=_cb, should_stop=_halt_requested)
@@ -1280,6 +1453,27 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
             _n = _bump_attempt(project, episode_no)
             logger.warning("第%s集生产失败（第 %d 次）：%s", episode_no,
                            _n, result.get("error"))
+        # ⭐ 2026-10-08 修复「静默跳过」：stop_on_failure=True 时，单集失败不再
+        # 悄悄跳下一集 —— 而是全局暂停 + 记 failure_pause，前端/总控醒目提醒
+        # 「第N集失败已暂停，请处理」，用户处理后 resume 继续。False 保持旧行为。
+        _stop_fail = bool(plan.get("stop_on_failure", True))
+        if _stop_fail:
+            _fail_reason = f"第{episode_no}集生产失败：{result.get('error') or '未知错误'}"
+            _fail_err = str(result.get("error") or "")
+            with _LOCK:
+                _STATE["failure_pause"] = {
+                    "project": project, "episode": episode_no,
+                    "reason": _fail_reason, "error": _fail_err,
+                    "at": _now(),
+                }
+                _STATE["paused"] = True
+                _STATE["pause_reason"] = _fail_reason
+            _mark_dead(project, episode_no, _fail_reason,
+                       {"status": result.get("status") or "failed",
+                        "stop_on_failure": True, "error": _fail_err})
+            _persist_runtime()
+            logger.warning("%s —— 已自动暂停等人工（stop_on_failure）", _fail_reason)
+
 
     # 2026-09-30：托管路径同样登记 last_run（成功/失败都记），与 run-once 口径一致。
     try:
@@ -1312,7 +1506,20 @@ def purge_project(project_name: str) -> dict:
 
     线程安全：先撤任务再清状态，避免「撤任务期间 current 又被写回」。
     """
-    _A().schedule_cancel(project_name)
+    # 线程安全：先撤任务再清状态，避免「撤任务期间 current 又被写回」。
+    # ⚠️ 2026-10-05 修复（用户报「删旧项目重建后为什么从第2集续跑」）：
+    #    旧写法 `_A().schedule_cancel(project_name)` 是**写死的坏引用** —— app.py 里
+    #    从未定义 `schedule_cancel`，此行必抛 AttributeError，导致**整个 purge_project
+    #    第一行就中断**，后面清 current/attempts/last_run/死信 的逻辑**一条都没跑成**，
+    #    于是重建同名项目时 autopilot 读旧台账（current 指向第2集、attempts 记第1集
+    #    已完成）→ 自动从第2集续跑。改成安全调用：方法不存在则跳过（不影响后续清理）。
+    try:
+        _sched_cancel = getattr(_A(), "schedule_cancel", None)
+        if callable(_sched_cancel):
+            _sched_cancel(project_name)
+    except Exception:  # noqa: BLE001
+        # 撤任务失败不阻断台账清理（主流程下方继续清 current/attempts/last_run/死信）
+        logger.warning("删除项目 %s 时撤销托管任务失败（忽略，继续清台账）", project_name)
     try:
         import pipeline
         n_dead = 0
@@ -1442,13 +1649,21 @@ def status(project: str = "", brief: bool = False) -> dict:
                               and d.get("exists")),
         "delivered_total": len(deliveries),
         "exceptions": len([e for e in exceptions if not e.get("resolved")]),
+        # 2026-10-08：单集失败「自动暂停」提醒（stop_on_failure）——
+        # failure_pause 非空 = 因失败被自动暂停（前端醒目横幅 + 总控提醒用），
+        # needs_user = failure_pause 或 未处理异常 > 0（供前端一键「查看/重跑」）。
         "curve": production_curve(24, project=project),
+        # failure_pause：单集失败自动暂停的标记（含 project/episode/reason/error/at）
+        "failure_pause": st.get("failure_pause") or {},
+        # needs_user：需要人工介入（failure_pause 非空 或 未处理异常 > 0）
+        "needs_user": bool(st.get("failure_pause")) or len([e for e in exceptions if not e.get("resolved")]) > 0,
     })
     # 2026-09-30：AI 总控读的是本接口 JSON 的**前 1600 字符**（agent_core._trim 是
     # 头部截断，不是省略中间）。所以「当前在跑什么 / 上一集成没成 / 有没有异常」
     # 必须排在最前面 —— 否则 last_run 落在 payload 尾部会被整段切掉，总控就又回到
     # 「只知道空闲、不知道上一集失败了」的老毛病。
-    _front = ("running", "paused", "current", "last_run", "last_error",
+    _front = ("running", "paused", "failure_pause", "needs_user", "current",
+              "last_run", "last_error",
               "other_project_running", "exceptions", "pending_review",
               "project", "scoped", "enabled_count", "plan_count")
     _ordered = {k: st[k] for k in _front if k in st}
@@ -1456,7 +1671,8 @@ def status(project: str = "", brief: bool = False) -> dict:
     if brief:
         _brief_keys = ("running", "paused", "current", "last_run", "last_error",
                        "other_project_running", "exceptions", "pending_review",
-                       "enabled_count", "plan_count", "project", "scoped", "pause_reason")
+                       "enabled_count", "plan_count", "project", "scoped", "pause_reason",
+                       "failure_pause", "needs_user")
         return {k: _ordered[k] for k in _brief_keys if k in _ordered}
     return _ordered
 
@@ -1520,7 +1736,7 @@ def ready(plan: dict = None) -> dict:
         ff_hint = "" if ff else "；".join(env.get("reasons") or [])
     except Exception as e:  # noqa: BLE001
         ff, ff_hint = False, str(e)
-    checks.append({"key": "ffmpeg", "label": "FFmpeg（成片/混音）", "ok": ff, "hint": ff_hint})
+    checks.append({"key": "ffmpeg", "label": "FFmpeg（成片合成/探测）", "ok": ff, "hint": ff_hint})
     try:
         st = A.comfyui_client.get_status()
         cok = st.get("status") == "online"

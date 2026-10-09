@@ -33,16 +33,15 @@ import re
 import time
 from datetime import datetime
 
-from config import CONTINUITY_DIR
+from config import CONTINUITY_DIR, COVERAGE_THRESHOLD
 from llm_client import LLMError, LLMTruncatedError
 
-import novel_to_script as nts
 
 logger = logging.getLogger(__name__)
 
 COVERAGE_VERSION = "coverage_v2"
-DEFAULT_THRESHOLD = float(getattr(nts, "COVERAGE_THRESHOLD", 0.95) or 0.95)
-DETAIL_THRESHOLD = DEFAULT_THRESHOLD   # 细节级（字级）覆盖率阈值，默认与情节级同为 95%
+DEFAULT_THRESHOLD = float(COVERAGE_THRESHOLD or 0.70)   # 2026-10-08 解耦：阈值取 config 唯一事实源，不再 import 期依赖 novel_to_script
+DETAIL_THRESHOLD = DEFAULT_THRESHOLD   # 细节级（字级）覆盖率阈值，默认与情节级同为 70%
 LITERAL_GRAM = 4                       # 字面措辞保留度：gram 字滑窗粒度
 MAX_EXCLUDED_LISTED = 60               # 报告中「非正文行（章节标题等）」最多列出条数
 UNIT_MIN_CHARS = 4            # 短于此长度的句片并入上一单元（"他说。"这类不作为独立单元）
@@ -462,6 +461,8 @@ def supplement_missing(client, chapter_text, script, missing_ids, episode_no=Non
     existing = list((script or {}).get("shots") or [])
     start_id = max([int(s.get("shot_id") or 0) for s in existing if isinstance(s, dict)] + [0]) + 1
 
+    import novel_to_script as nts  # 惰性导入（2026-10-08 解耦）：本模块只在覆盖率补生成时用到它，
+    # 模块级 import 会让 coverage → novel_to_script → coverage 形成静态环。
     raw_new = []
     for gi, (texts, g_ids) in enumerate(groups, 1):
         chunk = {"index": gi, "total": len(groups), "title": f"覆盖率补生成-{gi}",
@@ -550,8 +551,15 @@ def save_coverage_report(report: dict, continuity_dir: str = None, project_key: 
 def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=None,
                        max_rounds: int = 1, use_llm: bool = True, events=None,
                        continuity_dir: str = None, project_key: str = None,
-                       save: bool = True, detail_threshold=None) -> dict:
+                       save: bool = True, detail_threshold=None,
+                       progress_cb=None) -> dict:
     """覆盖率校验主流程：校验 → 情节级不足才补生成 → 复检 → 落盘 + 写回剧本 metadata
+
+    :param progress_cb: fn(message)（2026-10-06 新增）。整个校验（初检 + N 轮补生成 +
+        复检）此前**零进度回报**，托管侧 step_stalled_sec 与 step_elapsed_sec 恒相等，
+        「卡住」与「慢」无法区分（2026-10-06 第2集 coverage 静默 34 分钟实录）。现在
+        每次初检/补生成/复检前后都回调一次，调用方（continuity.report）透传给流水线
+        进度条；不传则行为与旧版完全一致。
 
     v3 压缩提炼口径：触发补生成的条件是「情节级覆盖率低于阈值」（而非「遗漏清单非空」）。
     纯背景补叙/环境描写已由判定层判 covered=true（不算遗漏），少量漏掉的次要单元不会
@@ -563,10 +571,24 @@ def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=
     ep = int(episode_no or (script or {}).get("episode_no")
              or ((script or {}).get("metadata") or {}).get("episode_no") or 1)
     rounds = max(0, int(max_rounds or 0))
-    rounds_cap = rounds if rounds > 0 else 1
+    # 0 = 关闭补生成：rounds_cap 保持 0，下方 while 的 `supplement_rounds < rounds_cap`
+    # 恒为 False，补生成循环自然整体跳过（旧写法把 0 强转成 1，「0=关闭」从未生效）
+    rounds_cap = max(int(rounds or 0), 0)
 
     history, supplement_rounds = [], 0
+    if progress_cb:
+        try:
+            progress_cb("覆盖率初检：逐句核对原文是否被镜头承载…")
+        except Exception:  # noqa: BLE001
+            pass
     report = check_coverage(client, chapter_text, script, threshold=thr, use_llm=use_llm, events=events)
+    if progress_cb:
+        try:
+            progress_cb(f"覆盖率初检完成：情节 {report.get('plot_coverage_percent')}% / "
+                        f"细节 {report.get('detail_coverage_percent')}%，遗漏 "
+                        f"{len(report.get('missing_ids') or [])} 条")
+        except Exception:  # noqa: BLE001
+            pass
 
     while (report.get("missing_ids")
            and report.get("plot_coverage", 0) < thr
@@ -579,12 +601,24 @@ def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=
                            "note": f"第{ep}集覆盖率：情节级 {report.get('plot_coverage_percent')}% / "
                                      f"细节级 {report.get('detail_coverage_percent')}%，"
                                      f"遗漏 {prev_missing} 条，触发第 {supplement_rounds} 轮补生成"})
+        if progress_cb:
+            try:
+                progress_cb(f"覆盖率不足，第 {supplement_rounds}/{rounds_cap} 轮补生成中"
+                            f"（遗漏 {prev_missing} 条，只增不删）…")
+            except Exception:  # noqa: BLE001
+                pass
         sup = supplement_missing(client, chapter_text, script, report.get("missing_ids"),
                                  episode_no=ep, events=events,
                                  main_unit_ids=report.get("body_unit_ids"))
         sup["round"] = supplement_rounds
         sup["missing_before"] = prev_missing
         history.append(sup)
+        if progress_cb:
+            try:
+                progress_cb(f"第 {supplement_rounds} 轮补生成结束：新增 {sup.get('added_shots', 0)} 镜，"
+                            f"复检中…")
+            except Exception:  # noqa: BLE001
+                pass
         if not sup.get("added_shots"):
             logger.warning(f"第{ep}集覆盖率补生成第 {supplement_rounds} 轮未产出新镜头，停止补生成")
             break

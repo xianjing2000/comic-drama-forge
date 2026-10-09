@@ -10,13 +10,15 @@ AI 成片是起点而不是终点，专业创作者需要在自己的时间线�
 支持的导出格式
 --------------
 ① **剪映草稿**（P2-1）：生成 draft_content.json + draft_meta_info.json，
-   把视频轨（逐镜片段）、音轨（配音）、字幕轨（台词）一次性铺好，
+   把视频轨（逐镜片段，素材自带原生音轨）、字幕轨（台词）一次性铺好，
+   音轨仅在显式传入 audio 时挂载（tts 整集配音已下线），
    导入剪映后可直接在轨道上继续编辑。
    ⚠ 剪映的草稿格式为私有格式且随版本演进，本实现按通用字段构造；
      若某版本无法识别，主要需调整 draft_content.json 的 `version` 字段。
 
 ② **FCPXML**（P2-2）：Premiere Pro / Final Cut Pro 可直接导入的 XML，
-   逐镜作为独立 clip 放在视频轨，配音放音频轨。
+   逐镜作为独立 clip 放在视频轨（视频自带音轨随 clip 走；
+   仅显式传入 audio 时另挂音频轨）。
 
 ③ **SRT 字幕**：通用字幕文件，任何播放器/剪辑软件都能挂载。
 
@@ -25,7 +27,7 @@ AI 成片是起点而不是终点，专业创作者需要在自己的时间线�
 
 设计约束
 --------
-- 只读既有产物（剧本 + 视频片段 + 配音），不修改任何原始文件；
+- 只读既有产物（剧本 + 视频片段 + 显式传入的音频），不修改任何原始文件；
 - 导出结果统一落在 output/export/<项目>/；
 - 所有时间单位内部用秒，输出时按各格式要求换算（剪映用微秒）。
 """
@@ -45,11 +47,12 @@ logger = logging.getLogger(__name__)
 _ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 EXPORT_DIR = os.path.join(_ROOT_DIR, "output", "export")
 VIDEOS_DIR = os.path.join(_ROOT_DIR, "output", "videos")
+# 历史遗留：tts 整集配音下线后，output/dub 不再新增整集配音轨（仅存 voice_bank 参考音色库）
 DUB_DIR = os.path.join(_ROOT_DIR, "output", "dub")
 STORYBOARDS_DIR = os.path.join(_ROOT_DIR, "output", "storyboards")
 
-# 剪映工程 FPS / 画布（竖屏漫剧默认）
-JY_FPS = 30
+# 剪映工程 FPS / 画布（竖屏漫剧默认；H3 成片 24fps）
+JY_FPS = 24
 JY_CANVAS = {"width": 1080, "height": 1920}
 # 剪映草稿版本号：不同剪映版本识别的版本号不同，无法识别时优先调这里
 JY_VERSION = 360000
@@ -166,8 +169,8 @@ def _scan_videos(project: str, script: dict = None, episode: int = None) -> list
 def _probe_duration(path: str) -> Optional[float]:
     """ffprobe 取视频时长（失败返回 None）"""
     try:
-        import dub_mix
-        return float((dub_mix.probe_media(path) or {}).get("duration") or 0) or None
+        import video_probe
+        return float((video_probe.probe_video(path) or {}).get("duration") or 0) or None
     except Exception:  # noqa: BLE001
         try:
             import subprocess
@@ -178,25 +181,6 @@ def _probe_duration(path: str) -> Optional[float]:
             return float(out.stdout.strip()) or None
         except Exception:  # noqa: BLE001
             return None
-
-
-def _find_dub_audio(project: str) -> str:
-    """查找配音合并音轨（output/dub/<项目>/*.wav）"""
-    d = os.path.join(DUB_DIR, project)
-    if not os.path.isdir(d):
-        return ""
-    try:
-        cands = [os.path.join(d, f) for f in os.listdir(d)
-                 if f.lower().endswith((".wav", ".mp3", ".m4a", ".aac"))
-                 and os.path.isfile(os.path.join(d, f))]
-    except OSError:
-        return ""
-    if not cands:
-        return ""
-    # 优先「配音」命名的合并轨，其次按体积最大（通常是合并轨）
-    named = [p for p in cands if "配音" in os.path.basename(p)]
-    pool = named or cands
-    return max(pool, key=lambda p: os.path.getsize(p))
 
 
 # ===================== ① 剪映草稿（P2-1） =====================
@@ -212,8 +196,8 @@ def export_jianying(project: str, script: dict, videos: list = None,
     """导出剪映草稿（draft_content.json + draft_meta_info.json + 素材引用）
 
     轨道布局：
-      视频轨：逐镜片段顺序排列
-      音频轨：配音合并音轨（若存在）
+      视频轨：逐镜片段顺序排列（素材自带原生音轨）
+      音频轨：仅显式传入 audio 参数时挂载（旧 output/dub 整集配音轨已停止产出）
       字幕轨：每镜台词（若存在）
     B-17 P2-13：episode 参数可选；提供时按集号过滤视频目录。
     """
@@ -235,7 +219,8 @@ def export_jianying(project: str, script: dict, videos: list = None,
             "material_name": os.path.basename(r["video"]) if r["video"] else f"shot_{i+1}",
             "duration": _sec_to_us(r["duration"]),
             "width": JY_CANVAS["width"], "height": JY_CANVAS["height"],
-            "has_audio": False,
+            # 2026-10-05 口径：H3 成片自带原生音轨（成片即带配音），素材按有音轨声明
+            "has_audio": True,
         }
         materials_videos.append(mats)
         video_segments.append({
@@ -251,9 +236,9 @@ def export_jianying(project: str, script: dict, videos: list = None,
                      "transform": {"x": 0.0, "y": 0.0}},
         })
 
-    # 音频轨
+    # 音频轨（仅显式传入 audio 时挂载；旧 output/dub 整集配音轨已停止产出）
     materials_audios, audio_segments = [], []
-    audio_path = audio or _find_dub_audio(project)
+    audio_path = audio or ""
     if audio_path and os.path.isfile(audio_path):
         aid = _jy_id("mat-a", 0, project)
         aud_dur = _probe_duration(audio_path) or tl.get("total_sec") or 0
@@ -369,7 +354,7 @@ def export_jianying(project: str, script: dict, videos: list = None,
 
 def export_fcpxml(project: str, script: dict, videos: list = None,
                   audio: str = None, timeline: dict = None,
-                  fps: int = 30, episode: int = None) -> dict:
+                  fps: int = 24, episode: int = None) -> dict:
     """导出 FCPXML（Premiere Pro / Final Cut Pro 可导入）
     B-17 P2-13：episode 参数可选；提供时按集号过滤视频目录。
     """
@@ -380,7 +365,8 @@ def export_fcpxml(project: str, script: dict, videos: list = None,
 
     out_dir = _out_dir(project, "fcpxml")
     out_path = os.path.join(out_dir, f"{_safe_filename(project)}.fcpxml")
-    audio_path = audio or _find_dub_audio(project)
+    # 仅显式传入 audio 时挂音频轨；旧 output/dub 整集配音轨已停止产出
+    audio_path = audio or ""
 
     def _e(s) -> str:
         return saxutils.escape(str(s or ""))

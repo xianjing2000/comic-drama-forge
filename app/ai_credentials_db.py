@@ -249,11 +249,6 @@ def _env_api_key(ns: str) -> str:
     return ""
 
 
-def all_credentials() -> dict:
-    """三模块凭证（脱敏视图），供 /api/ai/config 回显。"""
-    return {m: public_view(m) for m in MODULES}
-
-
 def public_view(module: str) -> dict:
     """单模块脱敏视图（绝不含明文 api_key，仅 has_api_key + mask）。"""
     ep = get_credentials(module)
@@ -308,15 +303,6 @@ def modules_with_key() -> set:
         finally:
             conn.close()
     return {r["module"] for r in rows}
-
-
-def has_credentials() -> bool:
-    """DB 里是否已有**任一**模块密钥。
-
-    ⚠️ 迁移判据已改为按模块判空（见 :func:`modules_with_key`）；本函数只保留给
-    「是否配置过任何 AI 凭证」这类**粗粒度**判断，**不要**再拿它当迁移的整体闸门。
-    """
-    return bool(modules_with_key())
 
 
 # ===================== 一次性迁移（旧 secrets.enc 双槽 → DB） =====================

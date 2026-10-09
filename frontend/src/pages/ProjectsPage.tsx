@@ -4,6 +4,7 @@ import { projectsApi, novelsApi } from '@/api/client';
 import { Button, Input, Modal, Badge, ConfirmDialog, Select, Skeleton, EmptyState, ErrorState } from '@/components/ui';
 import { AlertTriangle, Check, Clapperboard, FileText, FolderOpen, ImageIcon, Pencil, Plus, Trash2 } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
+import { dropAgentSession } from '@/agentSession';
 import type { Project, Novel } from '@/types';
 
 // 风格库缩略图（ComfyUI 真实渲染，与实际成片风格一致；经 Vite 打包进 /assets）。
@@ -84,7 +85,6 @@ const DEFAULT_CONFIG = {
   aspect_ratio: '16:9 \u6a2a\u5c4f',
   fps: 24,
   duration_per_shot: 5,
-  qc_enabled: true,
   episode_duration_sec: 60,
   target_shots: 12,
   voice_map: {},
@@ -420,6 +420,9 @@ export function ProjectsPage() {
     setDeleteError('');
     try {
       await projectsApi.deleteV2(deletingProject.dir_key || deletingProject.id, true);
+      // 同名重建会复用同一 projectKey（dir_key）：不清总控会话缓存，重开面板会命中
+      // 旧缓存，把已删项目的对话（含只有缓存里才有的 run 执行轨迹）原样带回新项目。
+      dropAgentSession(deletingProject.dir_key || deletingProject.id);
       await reload();
       closeDeleteModal();
     } catch (e) {
@@ -655,7 +658,7 @@ export function ProjectsPage() {
                 }`}
               >
                 <Plus className="h-5 w-5" />
-                <span className="px-0.5 text-center text-[11px] leading-tight">
+                <span className="px-0.5 text-center text-xs leading-tight">
                   {t('project.styleCustom')}
                 </span>
               </button>
@@ -681,7 +684,7 @@ export function ProjectsPage() {
                       loading="lazy"
                     />
                     {/* 底部文字遮罩：沿用 Modal 遮罩 slate-900 的例外约定（照片上保证可读） */}
-                    <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-900/85 via-slate-900/30 to-transparent px-1.5 pb-1 pt-5 text-left text-[11px] font-medium leading-tight text-white">
+                    <span className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-slate-900/85 via-slate-900/30 to-transparent px-1.5 pb-1 pt-5 text-left text-xs font-medium leading-tight text-white">
                       {p.label}
                     </span>
                     {stylePreset === p.value && (
@@ -734,7 +737,7 @@ export function ProjectsPage() {
                   <span className={`block text-sm font-medium ${videoMode === opt.value ? 'text-brand' : 'text-ink-2'}`}>
                     {t(opt.labelKey)}
                   </span>
-                  <span className="mt-0.5 block text-[11px] leading-tight text-ink-3">
+                  <span className="mt-0.5 block text-xs leading-tight text-ink-3">
                     {t(opt.descKey)}
                   </span>
                 </button>

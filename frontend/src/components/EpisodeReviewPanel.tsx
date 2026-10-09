@@ -19,7 +19,7 @@ import {
   type ReviewShot,
 } from '@/api/client';
 import { Button, Textarea, Skeleton, ErrorState, Badge } from '@/components/ui';
-import { Eye, Film } from '@/components/ui/icons';
+import { Eye, Film, ChevronRight, ChevronDown } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 
 // ---- helpers ----------------------------------------------------------------
@@ -63,7 +63,7 @@ function StageChip({ stage, label, info, human, t }: {
       title={human ? t('review.layerHuman') : t('review.layerCpu')}
     >
       <span className={cx('h-2.5 w-2.5 rounded-full', STATUS_DOT[st])} />
-      <span className="text-[11px] font-semibold text-ink-3">{stage}</span>
+      <span className="text-xs font-semibold text-ink-3">{stage}</span>
       <span className="text-xs text-ink-1">{label}</span>
       <span className={cx(
         'text-xs font-medium',
@@ -76,7 +76,7 @@ function StageChip({ stage, label, info, human, t }: {
         {t('review.' + statusKey(st))}
       </span>
       {info?.has_binding && (
-        <span className="text-[10px] text-ink-3" title={t('review.bindNote')}>🔒</span>
+        <span className="text-xs text-ink-3" title={t('review.bindNote')}>🔒</span>
       )}
     </div>
   );
@@ -137,7 +137,7 @@ function ShotCard({ shot, t }: { shot: ReviewShot; t: TFunc }) {
               {t('review.noStoryboard')}
             </div>
           )}
-          <div className="px-2 py-1 text-[10px] text-ink-3">{t('review.storyboardSide')}</div>
+          <div className="px-2 py-1 text-xs text-ink-3">{t('review.storyboardSide')}</div>
         </div>
 
         {/* Col 2: Reference assets */}
@@ -160,7 +160,7 @@ function ShotCard({ shot, t }: { shot: ReviewShot; t: TFunc }) {
               {t('review.noRefs')}
             </div>
           )}
-          <div className="px-2 py-1 text-[10px] text-ink-3">{t('review.refSide')}</div>
+          <div className="px-2 py-1 text-xs text-ink-3">{t('review.refSide')}</div>
         </div>
 
         {/* Col 3: Result */}
@@ -177,7 +177,7 @@ function ShotCard({ shot, t }: { shot: ReviewShot; t: TFunc }) {
               {t('review.noVideo')}
             </div>
           )}
-          <div className="px-2 py-1 text-[10px] text-ink-3">{t('review.resultSide')}</div>
+          <div className="px-2 py-1 text-xs text-ink-3">{t('review.resultSide')}</div>
         </div>
       </div>
 
@@ -250,7 +250,7 @@ function StageCard({ stage, info, note, setNote, busy, onAct, artifactExists, re
           </span>
           <Badge variant={variant}>{t('review.' + sk)}</Badge>
           {info?.has_binding && (
-            <span className="text-[10px] text-ink-3" title={t('review.bindNote')}>🔒</span>
+            <span className="text-xs text-ink-3" title={t('review.bindNote')}>🔒</span>
           )}
         </div>
         {info?.at && (
@@ -337,6 +337,19 @@ export function EpisodeReviewPanel({ projectKey, episode, onChanged }: {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+
+  // ⭐ 2026-10-09：场次组折叠。一集 41 镜 × 三列并排会拉出一屏多的长度 →
+  //   默认**只展开第一个场次**，其余收起，点标题行切换。
+  //   sceneToggled 只记录**用户显式切换过**的场次；没记录过的按默认走，
+  //   这样「默认仅首个展开」与「用户点开任意场次」两套语义不打架。
+  const [sceneToggled, setSceneToggled] = useState<Record<string, boolean>>({});
+  const isSceneCollapsed = (nm: string, isFirst: boolean) =>
+    sceneToggled[nm] !== undefined ? sceneToggled[nm] : !isFirst;
+  const toggleScene = (nm: string, isFirst: boolean) =>
+    setSceneToggled((p) => ({
+      ...p,
+      [nm]: !(p[nm] !== undefined ? p[nm] : !isFirst),
+    }));
   const [note, setNote] = useState('');
 
   const load = useCallback(async () => {
@@ -522,12 +535,53 @@ export function EpisodeReviewPanel({ projectKey, episode, onChanged }: {
         </div>
       )}
 
-      {/* Shot cards */}
+      {/* 场次分组 + 镜头卡片
+          ⭐ 2026-10-09：由「41 镜平铺」改为**按场次分组**（用户要求：顶层按整集、点开按场次）。
+          分组键取 shots[].refs 里 kind==="scenes" 的 name —— ⚠️ 是复数 **scenes**，
+          不是 scene（写错就永远匹配不上，退回 location 兜底）。
+          实测第1集 41 镜 → 8 个场次，镜数 10/1/7/7/7/1/3/5 合计 41，
+          与剧本顶层 scenes[] 的 8 个场次一一对应。
+          场次顺序＝该场次首镜的出现顺序（镜头本就是顺序的，等价于剧本场次顺序）。 */}
       {data.shots.length > 0 && (
-        <div className="space-y-3">
-          {data.shots.map((shot) => (
-            <ShotCard key={shot.seq} shot={shot} t={t} />
-          ))}
+        <div className="space-y-5">
+          {(() => {
+            const groups: Array<{ name: string; shots: typeof data.shots }> = [];
+            const idx: Record<string, number> = {};
+            data.shots.forEach((shot) => {
+              const sref = (shot.refs || []).find(
+                (r: { kind?: string; name?: string }) => r.kind === 'scenes' || r.kind === 'scene',
+              );
+              const nm = String(sref?.name || shot.location || '未命名场次');
+              if (!(nm in idx)) { idx[nm] = groups.length; groups.push({ name: nm, shots: [] }); }
+              groups[idx[nm]].shots.push(shot);
+            });
+            return groups.map((g, gi) => (
+              <div key={g.name}>
+                <button
+                  type="button"
+                  onClick={() => toggleScene(g.name, gi === 0)}
+                  className="mb-2 flex w-full flex-wrap items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-2 text-left transition-colors hover:bg-surface-2/70"
+                >
+                  {isSceneCollapsed(g.name, gi === 0)
+                    ? <ChevronRight className="h-3.5 w-3.5 text-ink-3" />
+                    : <ChevronDown className="h-3.5 w-3.5 text-ink-3" />}
+                  <span className="text-sm font-medium text-ink-1">{g.name}</span>
+                  <Badge variant="default">{g.shots.length} 镜</Badge>
+                  <span className="text-xs text-ink-3">
+                    {`镜 ${g.shots[0]?.seq}–${g.shots[g.shots.length - 1]?.seq}`}
+                  </span>
+                  <span className="ml-auto text-xs text-ink-3">
+                    {isSceneCollapsed(g.name, gi === 0) ? '展开' : '收起'}
+                  </span>
+                </button>
+                {!isSceneCollapsed(g.name, gi === 0) && (
+                  <div className="space-y-3">
+                    {g.shots.map((shot) => <ShotCard key={shot.seq} shot={shot} t={t} />)}
+                  </div>
+                )}
+              </div>
+            ));
+          })()}
         </div>
       )}
 

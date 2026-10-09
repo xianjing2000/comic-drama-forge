@@ -45,6 +45,10 @@ import audio_qc
 # ⚠️ asset_prompt_kit 只依赖标准库（re/logging/typing），不会形成循环导入。
 import asset_prompt_kit
 
+# 提示词模板中心（2026-10-07 外置改造）：DEFAULT_SCRIPT_PROMPT 的生效值从这里加载
+# （只依赖标准库、config 延迟导入，不会形成循环导入）。
+import prompt_templates
+
 logger = logging.getLogger(__name__)
 
 # 数据根目录（定位加密密钥库 output/secrets.enc 与主密钥 .secret_key）。
@@ -107,8 +111,11 @@ WATERMARK_EXEMPT_NOTE = (
     "水印、logo、生成标识）。**画面内容本身需要的文字不算违规，一律不得因此扣分或判不通过** —— "
     "器物铭文、卷轴古篆、牌匾刻字、系统面板数值等属于画面内容，设定要求时应正常呈现："
     "既不得因「画面里有文字」判缺陷，也不得因「画面里没有文字」判缺陷（那属于设定问题，"
-    "不是出图质量问题）；文字是否清晰可读、是否有乱码也**不计入缺陷** —— 中文文字属于"
-    "图像模型能力边界，乱码/错字不影响主体判定，请只针对画面本身的崩坏 / 畸变 / 糊化 / "
+    "不是出图质量问题）。⭐ 但**设定要求出现文字时**（提示词给出了确切原文，如工牌抬头、"
+    "告示标题、书名、数字编号），文字若**乱码 / 错字 / 缺笔多笔 / 不可读**，**必须计为缺陷**"
+    "——Qwen-Image 官方已原生支持简体中文与英文的文字渲染（官方明确公布的能力），"
+    "乱码不再是「模型能力边界」，而是必须重画的信号。未要求文字的普通画面里出现文字，"
+    "仍按叠加物口径判。请同时针对画面本身的崩坏 / 畸变 / 糊化 / "
     "闪烁 / 撕裂 / 一致性 / 主体形态 / 风格做判定。"
 )
 
@@ -242,7 +249,32 @@ STORYBOARD_GRID_ANALYSIS_NOTE = (
     "  · 若**多数格子**（≥5/9）包含所需元素 → 判定为「有」，不得因个别格子缺失判「无」；\n"
     "  · 仅当**全部或绝大多数格子**（≥7/9）都缺失某元素时，才判「缺失」。\n"
     "✅ 正确示例：若 9 格中 7 格有角色 → 角色存在（score 不因 2 格无角色而扣大分）。\n"
-    " 错误示例：只看第 1 格无角色 → 判「角色完全缺失」score=0（这是严重误判）。"
+    " 错误示例：只看第 1 格无角色 → 判「角色完全缺失」score=0（这是严重误判）。\n"
+    "⚠️ **面板间变化检查**：逐格对比九宫格的动作与构图；若 ≥4/9 格动作与构图"
+    "基本相同（仅微小位移/表情差），判为「面板雷同」，score 不合格，并在 issues "
+    "中写明『九宫格面板雷同』及涉及格号。"
+    "⚠️ **逐格内容核对**：分镜提示词若已逐格给出画面内容，请逐格核对画面与对应格内容的一致性；"
+    "仍执行面板雷同判据。"
+    # 2026-10-08 新增（用户实测：出现换场景与左右手镜像）：面板雷同之外，再查两项
+    # 九宫格结构性缺陷 —— 它们的根因在规划/渲染提示词，判官必须先"看得见"才能拦住。
+    "⚠️ **场景一致性检查**：逐格确认 9 格的**地点与环境是否为同一处**；若某格出现本镜"
+    "描述之外的场景元素（例：镜头在公寓沙发上，某格却是走廊/电梯/街道），必须在 issues "
+    "中写明『九宫格场景不一致（第N格）』。"
+    "⚠️ **方位 / 镜像检查**：逐格确认同一角色做同一动作时**惯用手与身体朝向是否一致**；"
+    "若出现左手换右手、姿势左右镜像翻转、朝向颠倒，必须在 issues 中写明"
+    "『九宫格左右手镜像（第N格）』。"
+    # ⭐ 2026-10-10（用户实测：视频里手指畸变，追到分镜层就是根因）：
+    #    出图模型在手部大特写下畸变率极高，而远景/中景正常 —— 判官必须先「看得见」
+    #    才能拦住。实测缺陷：shot_07 格4 手指过长/关节缺失；shot_08 格6 指头粘连成块。
+    "⚠️ **手部结构检查**：逐格确认**可见的手**的手指结构，重点看四类畸变："
+    "①**末端形态**——指尖是否异常膨大呈球状（「杵状指/鼓槌指」：从指根到中段渐细，"
+    "指尖反而比中段更粗、软组织鼓出）、指尖是否钝化或形状失真；"
+    "②**数量**——是否多指/少指；③**分离度**——指头是否粘连/融合成一团；"
+    "④**比例**——手指是否过长过细、粗细不均、关节是否反向或缺失。"
+    "若任一格出现上述畸变，必须在 issues 中写明『九宫格手指畸变（第N格）』，"
+    "并**指明是哪一种**（如「指尖膨大呈球状」「指头粘连」）。"
+    "注意：手在画面中占比越小越稳定，故**大特写的手**要格外仔细看 —— "
+    "实测畸变全部出现在手部特写格（shot_05 格5 / shot_07 格4 / shot_08 格6）。"
 )
 
 # 风格一致性硬规则：追加到所有图片/视频质检提示词末尾，保证用户自定义的旧配置
@@ -274,6 +306,10 @@ def build_blocking_note(n_ref_after: int) -> str:
     ⚠️ 判据必须写清「**只比构图、不比外观**」：基准图是无面人偶的预演图，若不说清楚，
     模型会拿人偶的灰彩色身体 / 无面头部去判「角色与设定不符」，整批假红。
 
+    ⚠️ 2026-10-01 起默认改走**文字规格模式**（:func:`build_blocking_spec_note`，不送基准图）；
+    仅当调用方没给文字规格、却真的传了基准图路径时，才使用本段（保留「第 2 张=基准图、
+    设定图从第 3 张起」的旧编号）。
+
     :param n_ref_after: 基准图之后还有几张设定图（用于说明总张数）
     """
     total = 2 + max(0, int(n_ref_after))
@@ -289,6 +325,33 @@ def build_blocking_note(n_ref_after: int) -> str:
         "  · ⚠️ 第 2 张只是构图预演：其人物的**外观、配色、无面头部、体块比例一律不得**"
         "作为判定依据 —— 角色/物品像不像设定，只看后面的设定图，**禁止**因为「画面里的人物"
         "不像人偶」而扣分；\n"
+        "  · 允许人物姿态、动作过程、表情、光影与画面细节不同（那些由画面描述决定）；\n"
+        "  · 仅当出现**明显**构图偏差（人数不符、左右颠倒、前后层次错乱、景别差两档以上、"
+        "机位方向相反）时，在 issues 里写明「构图不符：<具体项>」并扣分。\n"
+        % total
+    )
+
+
+def build_blocking_spec_note(n_ref_after: int) -> str:
+    """生成「构图文字规格核对」段落（2026-10-01 起的默认模式）。
+
+    2026-10-01 定论：无面人偶基准图本身会污染视觉判定（同一张合格图实测 88→35），
+    构图核对改送 ``blocking_spec`` 的**确定性文字规格**（人数/左右顺序/景别/机位），
+    不再随图送基准图 —— 图片序列因此只有「待检图 + 设定图」两类，
+    设定图从第 2 张数起（调用方须配套 ``build_ref_consistency_note(..., start=2)``）。
+
+    :param n_ref_after: 待检图之后还有几张设定图（用于说明总张数）
+    """
+    total = 1 + max(0, int(n_ref_after))
+    return (
+        "\n【构图规格核对·重要】本次按顺序传入 %d 张图：\n"
+        "  第 1 张 = 待检的分镜图（AI 生成结果）；\n"
+        "  其余 = 角色 / 物品 / 场景的设定图（本次**没有**构图基准图）。\n"
+        "构图核对依据是上方给出的**文字规格**（人物数量 / 左右顺序 / 前后层次 / 景别 / 机位），"
+        "请把第 1 张与该规格逐项核对：\n"
+        "  · 画面内**人物数量**是否与规格一致；\n"
+        "  · 各人物的**左右位置**与**前后层次**是否与规格一致；\n"
+        "  · **景别（取景范围）**与**机位角度**（俯拍 / 仰拍 / 平视 / 侧向 / 过肩）是否与规格一致；\n"
         "  · 允许人物姿态、动作过程、表情、光影与画面细节不同（那些由画面描述决定）；\n"
         "  · 仅当出现**明显**构图偏差（人数不符、左右颠倒、前后层次错乱、景别差两档以上、"
         "机位方向相反）时，在 issues 里写明「构图不符：<具体项>」并扣分。\n"
@@ -344,6 +407,35 @@ CRITICAL_ISSUE_KEYWORDS = (
     # 覆盖「画面崩坏 / 拼接 / 人物重复」三类高频漏检表述（更宽的表达形态）。
     "拼接", "画面异常", "人物重复", "重复人物", "人物多出", "多出人物", "多余人物",
     "人物多余", "人物重叠", "人物数量异常", "多个人物", "分身",
+    # 九宫格面板重复（2026-10-07 加入；**2026-10-09 按用户决策降级为 warning**）。
+    #
+    # 降级原因：实跑 2 集实测，9 格对当前 7B 模型的「格间差异」要求过高，
+    #   分镜首轮通过率长期只有 1/7，且「面板雷同」反复成为唯一 critical ——
+    #   既拖住整条链路，又没有可操作的改进信号（提示词已用逐格写死 + 格间差异段 + 严禁雷同）。
+    # 现改为：判官仍会把它写进 issues（**信息量保留**，可在前端与教训库里看到），
+    #   但**不再进 critical_issues**，因此不触发硬阻断、也不再阻止 storyboard_soft_qc 软放行。
+    #
+    # ⚠️ 与 app._SB_STRUCTURAL_DEFECT_KEYWORDS 是**同一套判据的两处**，两处必须同时改，
+    #    否则「软放行被 _sb_structural_defect 拦住」→ 仍然会重跑，等于没降级。
+    # 回退：把下面这行取消注释即可恢复硬阻断。
+    # "面板雷同", "九宫格面板雷同", "面板重复",
+    # 九宫格场景 / 方位缺陷（2026-10-08，用户实测：出现换场景与左右手镜像）：
+    # 与「面板雷同」同级的**结构性生成失败信号**，判官按 STORYBOARD_GRID_ANALYSIS_NOTE
+    # 写进 issues 后由本词表命中 → _finalize_verdict 硬阻断。
+    # ⚠️ 主判据刻意用**长词**（九宫格场景不一致 / 九宫格左右手镜像）：
+    #    短词（镜像 / 翻转 / 场景）会与正常构图描述撞车，造成大面积误杀。
+    "九宫格场景不一致", "格间换场景",
+    "九宫格左右手镜像", "左右手互换", "左右手颠倒", "镜像翻转", "朝向翻转",
+    # 手部畸变（2026-10-10，用户实测：视频里手指畸变，根因在分镜图）。
+    # 与上述同级的结构性生成失败信号。⚠️ 同样刻意用**长词**：
+    # 「手指畸变」「指头粘连」这类双词组合几乎不会出现在正常构图描述里，
+    # 而「手指」单独成词会与「手指向远方」撞车，故不收。
+    "九宫格手指畸变", "手指粘连", "指头粘连", "手指融合", "六指", "多指畸形",
+    # ⭐ 2026-10-10 补充（用户截图实测：ep01_full.mp4 00:25 的食指呈「杵状指」——
+    #    指尖软组织膨大呈球状、比中段更粗，像鼓槌；而分镜图 shot_05 格5 已写明
+    #    「指尖钝化/球形隆起、指节模糊、手指粗细不均」。这类**末端膨大型**畸变
+    #    与「粘连/多指」不是同一种表现，上面那批词一个都不会命中，故单列。
+    "杵状指", "指尖膨大", "指尖钝化", "指尖球状", "手指粗细不均", "指节模糊",
 )
 
 # 音频关键缺陷词表（供 check_audio 的 AI 层结论做代码侧硬闸）。
@@ -412,6 +504,15 @@ def _has_negative_context(text: str, idx: int, window: int = 6) -> bool:
     for _i, _ch in enumerate(ctx):
         if _ch in _NEG_PREFIX_CHARS and ctx[_i + 1:_i + 2] in _NEG_PREFIX_JUDGE:
             return True
+    # ⭐ 2026-10-08：**紧贴式否定** —— 「非/不」直接落在缺陷词前面（中间没有任何字符），
+    #    本身就是对它的否定。实测 ep01 整片质检的 issues 里有一条
+    #    「…异常睁眼表情，**非崩坏**」（判官在明确说明"这不是缺陷"），却因为上面只认
+    #    「非+判定字（非为/非是）」而被判为命中的关键缺陷 → 成片被硬阻断、无限重画。
+    #    ⚠️ 为什么这样不会误吞真缺陷：构词前缀会把「非/不」与缺陷词隔开 ——
+    #    「不规则畸变」（中间是「规则」）、「不对称扭曲」（中间是「对称」）都**不满足**
+    #    本条件，照常命中；只有「非崩坏 / 不崩坏 / 无畸变」这种真否定才会被放过。
+    if ctx.endswith(tuple(_NEG_PREFIX_CHARS)):
+        return True
     return False
 
 
@@ -672,7 +773,10 @@ DEFAULT_VIDEO_PROMPT = (
 #   item     : name / category / appearance / owner / importance /
 #              reference_prompt_zh / reference_prompt_en
 #   scene    : name / location / appearance / reference_prompt_zh / reference_prompt_en
-DEFAULT_SCRIPT_PROMPT = (
+# 2026-10-07 提示词外置（app/prompts/qc_script_check.txt）：常量改名保留为**代码内兜底**；
+# 实际生效值在常量定义之后由 prompt_templates.load("qc_script_check") 加载。
+# 已核实本常量无任何运行时改写（赋值仅此一处；消费点 = _empty_config 缺省值 + check_script 回落）。
+_DEFAULT_SCRIPT_PROMPT = (
     "你是漫剧剧本质检员。请检查这个 JSON 剧本是否达到可直接进入生产的标准。\n"
     "**只按下面列出的真实字段名判定，不要凭空要求其它字段名**（例如本剧本文档里"
     "镜头画面描述就叫 description，不叫 visual_description）。\n\n"
@@ -693,7 +797,9 @@ DEFAULT_SCRIPT_PROMPT = (
     "10. 画面描述与整体气质必须符合指定创作风格（{style}）\n"
     "11. 角色外观描述应与该风格匹配\n\n"
     "【提示词质量】\n"
-    "12. description 应简洁（建议 20~80 字），只写人物动作与关键构图；"
+    "12. description 建议 100~120 字（下限 100，上限 120）：动作过程写关键动作分解"
+    "（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座），只写关键节点不写琐碎中间步；"
+    "只写人物动作与关键构图；"
     "禁止堆砌背景陈述、世界观解说、来历评述这类「成片会被念成旁白」的内容；\n"
     "13. camera 应为「景别+运镜」写法（如 中景跟拍 / 特写推入）\n\n"
     "【可执行性评估】\n"
@@ -703,7 +809,7 @@ DEFAULT_SCRIPT_PROMPT = (
     "16. 本系统不产出旁白：镜头没有台词是**允许**的（纯画面镜/空镜），"
     "只要该镜的 audio_cues 写了音效或配乐提示即算合格；"
     "但如果某镜既没有台词、又没写 audio_cues，成片到该镜会既无人声也无音效，判为问题。\n"
-    "17. 单个镜头的台词合计不宜超过 30 字（约 6.7 秒配音）：台词过多会溢出到后面几镜，"
+    "17. 单个镜头的台词合计不宜超过 {speech_budget} 字：台词过多会溢出到后面几镜，"
     "成片尾部被截断，应拆成更多镜头\n\n"
     "【短剧叙事节奏】（2026-09-25 新增，按短剧行业通行标准判定；这几项直接决定完播率，"
     "请认真判定，不要因为「结构完整」就放过节奏问题）\n"
@@ -758,6 +864,15 @@ DEFAULT_SCRIPT_PROMPT = (
     '\"prompt_quality\": 0-100, \"feasibility\": 0-100}}'
 )
 
+# 2026-10-07 提示词外置：实际生效 = app/prompts/qc_script_check.txt（可被
+# PROJECT_DATA_DIR/prompt_overrides/qc_script_check.txt 覆盖）；任一级读失败回落上方
+# _DEFAULT_SCRIPT_PROMPT，行为与外置前逐字一致（load 已剥离模板头注释）。
+# ⚠️ 消费机制保持不变：check_script 仍用 str.replace 逐占位符注入
+#    （{style}/{target_duration}/{shot_duration_*}/{speech_budget}/{script_data}）——
+#    模板含 JSON 花括号示例，**绝不能改成 str.format**；loader.render 的安全替换与之同口径。
+DEFAULT_SCRIPT_PROMPT = prompt_templates.load("qc_script_check") or _DEFAULT_SCRIPT_PROMPT
+prompt_templates.register_fallback("qc_script_check", _DEFAULT_SCRIPT_PROMPT)
+
 # ===================== 音频质检 =====================
 # 音频无法像图片那样直接交给视觉模型「听」，因此采用两层判定：
 #   客观层（`audio_qc.py`，ffmpeg 指标，零模型依赖，**始终执行**）负责硬闸：
@@ -785,10 +900,11 @@ CONFIG_KEYS = (
     # 推理模型控制（2026-09-17 新增，确保配置能正确落盘）
     "disable_thinking",
     "min_tokens_when_thinking",
+    # 单次视觉质检请求的 max_tokens（_run_vision 消费；此前是「伪配置键」——代码一直读
+    # cfg.get("image_max_tokens", 8192)，却不在白名单里，用户配置永远落不了盘。转正 2026-10-05）
+    "image_max_tokens",
     # 音频阈值（此前未在白名单，导致配置丢失）
     "audio_min_speech_ratio", "audio_min_mean_db", "audio_max_drift",
-    # 尾帧质检开关
-    "keyframe_qc_enabled",
     # 图片质检是否附带「本镜出现的角色/物品/场景」设定图做一致性核对（2026-09-20 新增）
     "image_ref_compare",
     "image_blocking_ref_compare",
@@ -796,14 +912,30 @@ CONFIG_KEYS = (
     "image_qc_recheck",
     # G9/O1 图片/视频客观层阈值（2026-09-20 新增）
     "image_pixel_std_min", "video_max_drift",
+    # ⭐ 分镜链路**专用**重试轮数（2026-10-07 用户指定「分镜重试 2→1」）。
+    #    为什么单独开一个键而不直接改 max_retries：分镜单镜最坏开销 =
+    #    (1 + 重试) × (一次 GPU 出图 + 一次质检)，而分镜每集 20~30 镜**逐镜串行** ——
+    #    2 轮把最坏开销从 3 倍砍到 2 倍，收益全在分镜；而资产/视频链路不受影响
+    #    （它们重试的性价比不同，用户没要求改）。
+    #    ⚠️ 消费侧以通用 max_retries 作**上限**：用户把 max_retries 调到 0（全局不重试）时，
+    #       分镜也随之 0，尊重更严的总开关。
+    "storyboard_max_retries",
     # 提示词预检（生成前质检，见 prompt_qc.py）。⚠️ 它不依赖质检接口，默认开启
     "prompt_enabled", "prompt_mode",
+    # 存量迁移标记（2026-10-XX 新增，见 migrate_enabled_default）：
+    # 质检总开关默认值由「关」改「开」后，老配置需**一次性**幂等补成开启。
+    # 本键默认 True（新建 / 清空即视为已迁移），仅当文件存在且缺此键时才触发迁移。
+    "_qc_migrated",
 )
 
 
 def _empty_config() -> dict:
     return {
-        "enabled": False,            # 质检总开关
+        # ⭐ 2026-10-XX：质检总开关默认值由 False 改 True —— 需求「质检默认开启」。
+        # ⚠️ 存量老配置（文件里没有该键）不会被这里改变：load_config 只在「键存在且非 None」
+        #    时覆盖，缺失则回落本默认值 → 老配置会**自然**读到 True；但为了让用户配置
+        #    文件本身也显式写上 True（且只做一次），由 migrate_enabled_default 幂等补写。
+        "enabled": True,             # 质检总开关（默认开启）
         "image_enabled": True,       # 图片质检开关
         "video_enabled": True,       # 视频质检开关
         "audio_enabled": True,       # 音频质检开关（客观层零模型依赖；AI 层复用质检接口）
@@ -823,6 +955,15 @@ def _empty_config() -> dict:
         "audio_max_drift": 0.50,          # 与预期时长偏差上限（比例，超限扣分）
         "pass_score": 70,            # 合格线（0-100），score >= pass_score 且 pass != false 视为达标
         "max_retries": 2,            # 不达标最大重试次数
+        # ⭐ 分镜链路专用重试轮数（2026-10-07 用户指定 2→1）。未配置时取本默认值 1
+        #    （存量配置没有这个键 → 自然读到 1，无需迁移）；消费侧再与 max_retries 取 min。
+        "storyboard_max_retries": 1,
+        # ⭐ 2026-10-08（用户拍板 A 方案）：分镜图质检「软放行」—— 质检不达标只记录、
+        #    仍写入正式目录。动机（实测）：同一项目内已通过的镜3 九宫格雷同度 0.831，
+        #    而信息量更大的镜4/28/37（边缘密度 8.29/11.83/8.55，均高于已通过镜1 的
+        #    6.58）却被判「主体缺失/内容错误」硬阻断 —— VLM 判官双标，把可用图长期挡在
+        #    门外。False = 回到旧的「关键缺陷硬阻断」。仅作用于分镜图，资产/视频不受影响。
+        "storyboard_soft_qc": True,
         # best-of-N 分镜候选数（借 ViMax best_image_selector）：固定生成 N 张候选，
         # 按质检分选**最佳**那张入库，替代「第一个通过即停」。1=关闭（默认，保持现行为），
         # 上限 4（N 倍 GPU 渲染，慎调）。仅对**分镜图**生效（视频链路未接入）。
@@ -845,7 +986,12 @@ def _empty_config() -> dict:
         "image_qc_recheck": True,
         # G9/O1 客观层确定性闸门（图片黑图 stddev 下限 / 视频时长偏差上限）
         "image_pixel_std_min": 8.0,  # 像素 stddev < 8 → 黑图/纯色图 fatal
-        "video_max_drift": 0.30,      # 视频 |实测-期望|/期望 > 30% → fatal
+        # ⚠️ 2026-10-08：默认从 0.30 提到 0.60。原因（实测 ep01 场次1）：H3 Director 的
+    #    分段是「17k+5 帧网格对齐」+ 段间连续性重叠，成片时长**系统性长于**剧本名义时长
+    #    —— 场次1 名义 47.67s，实际 66.08s（+38.6%），30% 阈值 100% 触发 → 成片被
+    #    硬阻断并无限重画（画面本身通过了全部内容判据）。0.60 仍能拦住真正的截断
+    #    （成片只剩一半 ≈ -50%）与明显异常，只是不再把 H3 的固有对齐膨胀当缺陷。
+    "video_max_drift": 0.60,      # 视频 |实测-期望|/期望 > 60% → fatal
         "timeout": 180,              # 单次质检请求读超时（秒）
         "api_retries": API_RETRY_ATTEMPTS,   # 网络层额外重试次数（瞬时故障时退避重试，与 max_retries 重画无关）
         "api_backoff": API_RETRY_BACKOFF,    # 网络重试退避基数（秒），按 2 的幂增长、单次上限见 API_RETRY_MAX_SLEEP
@@ -856,6 +1002,8 @@ def _empty_config() -> dict:
         "disable_thinking": False,
         # 允许思考时质检请求的最小 max_tokens（思考本身就要吃几百 token）
         "min_tokens_when_thinking": 1024,
+        # 单次视觉质检请求的 max_tokens（思考型模型要「先想完再吐完整 JSON」，8k 起步不易截断）
+        "image_max_tokens": 8192,
         # 剧本质检各维度权重和合格线
         "script_categories": {
             "structure": {"weight": 0.2, "pass_threshold": 80},
@@ -870,6 +1018,9 @@ def _empty_config() -> dict:
         "prompt_enabled": True,
         # warn=只记录 / repair=确定性自愈后放行（默认）/ block=有问题就拦
         "prompt_mode": "repair",
+        # 存量迁移标记：默认 True —— 新建 / 清空即视为「已迁移」，不走老配置补写分支。
+        # 仅当配置文件**存在但缺此键**时才由 migrate_enabled_default 补写为 True。
+        "_qc_migrated": True,
         "updated_at": None,
     }
 
@@ -981,6 +1132,74 @@ def load_config(config_path: str) -> dict:
     return _normalize(cfg)
 
 
+# 存量迁移备份文件的时间戳格式（本地时间，秒级；同一秒重复迁移由幂等标记兜住）。
+_QC_MIGRATION_BAK_FMT = "%Y%m%d%H%M%S"
+
+
+def migrate_enabled_default(config_path: str) -> bool:
+    """存量迁移（一次性、幂等）：把「质检总开关默认关闭」时期遗留的配置补成默认开启。
+
+    背景
+    ----
+    历史版本 `_empty_config()` 的 `enabled` 为 False，`load_config` 对「文件不存在 /
+    文件里没有该键」一律回落到 False。用户升级到「质检默认开启」版本后，从未显式开过
+    质检的老项目仍是关闭状态。需求要求：默认开启质检，且**存量配置要迁移一次**。
+
+    契约（严格遵守，避免与 `load_config` 的「纯重读、不写盘」契约冲突）
+    -------------------------------------------------------------
+    - 只在「文件存在、可解析、且尚未带迁移标记 `_qc_migrated`」时执行一次；
+    - 执行前用 `shutil.copy2` 备份为 `<config>.bak.<时间戳>`（可回滚；备份失败不阻断迁移）；
+    - **只改两个字段**：`enabled=True`、`_qc_migrated=True`，其余字段逐字保留；
+    - 用 `_atomic_write_json` 原子落盘（唯一临时名 + fsync + 占用退避），全程持写锁；
+    - 返回 True 表示「本次确实做了迁移」，False 表示「无需迁移 / 文件不可用 / 写盘失败」。
+
+    ⚠️ 绝不放进 `load_config`（它有「纯重读、不写盘」契约，verify_qc_bool_parse F5）。
+       迁移必须由调用方**显式触发**（启动段 + GET /api/qc/config），且调用方要吞异常：
+       迁移失败不得影响启动、不得让接口 500。
+    """
+    if not config_path or not os.path.isfile(config_path):
+        return False
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:  # noqa: BLE001  文件损坏时不迁移（保持现状，交给 load_config fail-loud）
+        logger.warning("质检存量迁移：配置解析失败，跳过（不改动文件）：%s", e)
+        return False
+    if not isinstance(data, dict):
+        logger.warning("质检存量迁移：配置顶层不是对象，跳过")
+        return False
+    # 已迁移过 → 幂等返回，不重复备份、不重复写盘（绝大多数调用都会走这里）
+    if _as_bool(data.get("_qc_migrated"), False):
+        return False
+    with _QC_WRITE_LOCK:
+        # 双检：拿到锁后再读一次，防两个线程并发触发时重复迁移 / 重复备份。
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("质检存量迁移：二次读取失败，跳过：%s", e)
+            return False
+        if not isinstance(data, dict) or _as_bool(data.get("_qc_migrated"), False):
+            return False
+        # 备份原文件（copy2 保留元数据）。备份失败仅告警，不阻断迁移本身。
+        try:
+            bak = f"{config_path}.bak.{datetime.now().strftime(_QC_MIGRATION_BAK_FMT)}"
+            shutil.copy2(config_path, bak)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("质检存量迁移：备份失败（继续迁移）：%s", e)
+        # 只改总开关与迁移标记，其余字段逐字保留
+        data["enabled"] = True
+        data["_qc_migrated"] = True
+        try:
+            _atomic_write_json(config_path, data)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("质检存量迁移：写盘失败（保持原文件，下次启动再试）：%s", e)
+            return False
+        logger.info("质检存量迁移：已把 %s 的质检总开关默认值补为「开启」（原文件备份为 .bak.*）",
+                    config_path)
+        return True
+
+
 def _sync_credentials_db(cfg: dict = None, api_key: str = None, source: str = "qc_config",
                          clear: bool = False) -> str:
     """A2（2026-09-23 收口）：把质检端点同步进「AI 凭证单一事实源」（tasks.db 的 qc 模块）。
@@ -1062,7 +1281,8 @@ def _save_config_impl(config_path: str, patch: dict, keep_key_if_blank: bool = T
             continue
         if k in ("enabled", "image_enabled", "video_enabled", "image_ref_compare",
     "image_blocking_ref_compare",
-                 "image_qc_recheck"):
+                 "image_qc_recheck",
+                 "storyboard_soft_qc"):
             # ⚠️ 审计 G2：这里原本是 `bool(v)` —— 字符串 "false"/"0"/"no"/"off"/"none"
             #    都是**非空字符串**，`bool()` 一律判 True。用户在页面或第三方脚本里把开关
             #    存成 "false"，读回来反而是「开」，开关形同虚设。
@@ -1070,7 +1290,7 @@ def _save_config_impl(config_path: str, patch: dict, keep_key_if_blank: bool = T
             #    非法值沿用当前（已归一化的）取值，绝不静默翻转开关。
             cfg[k] = _as_bool(v, bool(cfg.get(k, False)))
         elif k in ("pass_score", "max_retries", "video_frame_count", "image_max_side",
-                   "timeout", "api_retries", "best_of"):
+                   "image_max_tokens", "timeout", "api_retries", "best_of"):
             try:
                 cfg[k] = int(v)
             except Exception:  # noqa: BLE001
@@ -1163,14 +1383,19 @@ def _normalize(cfg: dict) -> dict:
     cfg["enabled"] = _as_bool(cfg.get("enabled"), False)
     cfg["image_enabled"] = _as_bool(cfg.get("image_enabled"), True)
     cfg["video_enabled"] = _as_bool(cfg.get("video_enabled"), True)
-    # ⚠️ 这三个开关此前只出现在 CONFIG_KEYS / _empty_config，_normalize 里没有归一化：
+    # ⚠️ 这两个开关此前只出现在 CONFIG_KEYS / _empty_config，_normalize 里没有归一化：
     #    用户在页面上把 audio_enabled 存成字符串 "false" 或 0，读回来就是真值，
     #    开关形同虚设。补齐布尔归一化（与 image_enabled / video_enabled 同口径）。
     cfg["audio_enabled"] = _as_bool(cfg.get("audio_enabled"), True)
     cfg["script_enabled"] = _as_bool(cfg.get("script_enabled"), True)
-    cfg["keyframe_qc_enabled"] = _as_bool(cfg.get("keyframe_qc_enabled"), True)
+    # keyframe_qc_enabled（尾帧质检开关）已随 keyframe 流水线质检步骤删除（2026-10-05）：
+    # 它自始至终没有任何代码消费（纯配置空壳），CONFIG_KEYS 与本处的归一化一并移除。
     # 提示词预检：默认开启；模式非法时回落到 repair（与 prompt_qc.prompt_qc_mode 同语义）
     cfg["prompt_enabled"] = _as_bool(cfg.get("prompt_enabled"), True)
+    # 存量迁移标记：默认 True（新建 / 清空即视为已迁移）。老配置缺此键时读到 True，
+    # 真正把它**写回文件**由 migrate_enabled_default 负责 —— _normalize 只归一化、
+    # 不写盘（load_config 的「纯重读」契约不可破）。
+    cfg["_qc_migrated"] = _as_bool(cfg.get("_qc_migrated"), True)
     # 图片质检是否附带设定图（save_config 的布尔组里也有它，读取侧必须同口径归一化）
     cfg["image_ref_compare"] = _as_bool(cfg.get("image_ref_compare"), True)
     # 3D 构图基准核对：2026-10-01 起**不再送无面人偶预演图**（会污染判定，实测 88→35），
@@ -1190,9 +1415,14 @@ def _normalize(cfg: dict) -> dict:
     try:
         cfg["video_max_drift"] = max(0.0, min(5.0, float(cfg.get("video_max_drift", 0.30))))
     except Exception:  # noqa: BLE001
-        cfg["video_max_drift"] = 0.30
+        cfg["video_max_drift"] = 0.60   # 2026-10-08：见 _DEFAULT_QC 上方说明（H3 对齐膨胀）
     for key, default, lo, hi in (("pass_score", 70, 0, 100), ("max_retries", 2, 0, 10),
+                                 # ⭐ 分镜专用重试（2026-10-07）：必须在此归一化，否则又是
+                                 #    「伪配置键」——CONFIG_KEYS 有、_empty_config 有，但字符串
+                                 #    "3" 或越界值原样生效（项目反复踩的坑）。范围与 max_retries 同。
+                                 ("storyboard_max_retries", 1, 0, 10),
                                  ("video_frame_count", 3, 1, 6), ("image_max_side", 1024, 256, 2048),
+                                 ("image_max_tokens", 8192, 256, 131072),
                                  ("timeout", 180, 10, 900),
                                  ("api_retries", API_RETRY_ATTEMPTS, 0, 5),
                                  # best-of-N 候选数：1=关闭（默认），上限 4（N 倍 GPU 渲染）
@@ -2161,7 +2391,7 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
     if _should_check_gender(shot_desc):
         prompt = prompt + GENDER_CHECK_NOTE
     # ---- 构图基准图（3D 导演台站位/机位）：不占设定图名额，单独一条口径 ----
-    # ⚠️⚠️ 2026-09-30 实测紧急关闭（默认 False，需显式 image_blocking_ref_compare=true 才开）：
+    # ⚠️⚠️ 2026-09-30 实测紧急关闭（注：2026-10-01 起该开关默认 True；此处 fallback False 仅防御配置键缺失）：
     #     把 3D 基准图（灰/蓝色**无面人偶**预演图）与成品图一起送进视觉模型，会**严重污染**
     #     判定 —— 同一张合格图实测：不传基准图 score=88 通过；传了基准图 score=35 拒绝，
     #     且模型开始**凭空捏造**缺陷（「白色双眼」「彩色球体水系法术」「逻辑自相矛盾」）。
@@ -2176,21 +2406,29 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
     # 污染来自**图像本身**（灰蓝人偶、纯色底被当成画面内容），怎么加强提示词口径都压不住。
     # 解法：改送 `blocking_spec`（te_3d_director.blocking_spec_text 生成的**确定性**文字规格：
     # 人数 / 左右顺序 / 景别 / 机位），既保住「有没有照构图出图」的核对能力，又零视觉污染。
-    blocking_used = False
+    # 模式二分（2026-10-05）：blocking_spec 非空 → **文字规格模式**（不送任何基准图，
+    # 图片序列 = 待检图 + 设定图，设定图从第 2 张数起）；仅当没给文字规格、却真的传了
+    # 基准图路径时，才走旧「第 2 张=基准图」模式（build_blocking_note，设定图从第 3 张起）。
+    blocking_used = False       # 本镜启用「构图核对」（文字规格或基准图二选一）
+    blocking_img_used = False   # True = 真的把基准图作为第 2 张图送检（旧模式）
     if _blk_cmp_on and str(blocking_spec or "").strip():
         prompt = prompt + "\n" + str(blocking_spec).strip()
         blocking_used = True
+    elif _blk_cmp_on and str(blocking_ref or "").strip() and os.path.isfile(blocking_ref):
+        # 兼容旧调用（只传基准图路径、无文字规格）
+        blocking_used = True
+        blocking_img_used = True
     # ---- 设定一致性核对：把生成时用的参考图一并送检 ----
     # ⚠️ 2026-10-02 修复：这里曾被写成三参 cfg.get("image_ref_compare",
     #    "image_blocking_ref_compare", True) → dict.get 最多 2 个参数，只要
     #    ref_images 非空就抛 TypeError（而生产三处调用都在传 ref_images），
     #    导致有设定图的分镜质检 100% 失败。回落到两参原口径。
     # ⚠️ 本开关与上面 :2130 的 image_blocking_ref_compare 是**两件事**，别混：
-    #    那个只控制 3D 基准图的「文字规格」是否入提示词，默认 False。
+    #    那个只控制 3D 构图核对（文字规格 / 旧基准图）是否生效，默认 True（2026-10-01 起）。
     ref_list = []
     if ref_images and cfg.get("image_ref_compare", True):
         seen = {os.path.abspath(image_path)}
-        if blocking_used:
+        if blocking_img_used and blocking_ref:
             seen.add(os.path.abspath(blocking_ref))
         for item in ref_images:
             if isinstance(item, dict):
@@ -2223,12 +2461,18 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
             _prev_used = True
         if _prev_lines:
             prompt = prompt + "\n" + "\n".join(_prev_lines) + "\n"
-    if blocking_used:
+    if blocking_img_used:
         prompt = prompt + build_blocking_note(len(ref_list))
+    elif blocking_used:
+        # 文字规格模式：本次没送基准图，文案不得再提「第 2 张=构图基准图」，
+        # 设定图从第 2 张数起（与下方 build_ref_consistency_note(start=2) 编号一致）
+        prompt = prompt + build_blocking_spec_note(len(ref_list))
     if ref_list:
-        prompt = prompt + build_ref_consistency_note(ref_list, start=3 if blocking_used else 2)
+        prompt = prompt + build_ref_consistency_note(ref_list, start=3 if blocking_img_used else 2)
     image_paths = [image_path]
-    if blocking_used:
+    if blocking_img_used and blocking_ref:
+        # 判空防护（2026-10-05）：空字符串路径进 encode_image_data_url 会抛
+        # FileNotFoundError，让整次质检变成 interface_fault（而非「跳过基准图」）
         image_paths.append(blocking_ref)
     image_paths.extend(p for _l, p in ref_list)
     if _prev_used:
@@ -2249,7 +2493,8 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
     # 把「带了几张设定图」透出来，便于前端/体检确认该能力真的生效（而不是静默没带）
     verdict["ref_images_used"] = len(ref_list)
     if blocking_used:
-        # 同上：透出「本镜确实带了 3D 构图基准图」，便于确认开关/渲染链路真的生效
+        # 透出「本镜构图核对已启用」（键名沿用旧名；2026-10-01 起文字规格模式下
+        # 并不随图送基准图，仅旧基准图模式才是真的带图），便于确认开关/渲染链路真的生效
         verdict["blocking_ref_used"] = True
     if ref_list:
         verdict["ref_labels"] = [str(l)[:60] for l, _p in ref_list]
@@ -3340,10 +3585,10 @@ def _validate_script_prompts(script: dict) -> list:
 
         if not visual_desc:
             issues.append(f"镜头 {shot_id} 缺少画面描述")
-        elif len(visual_desc) < 20:
-            issues.append(f"镜头 {shot_id} 画面描述过短（{len(visual_desc)}字），建议 20~80 字")
+        elif len(visual_desc) < 100:
+            issues.append(f"镜头 {shot_id} 画面描述过短（{len(visual_desc)}字），建议 100~120 字（下限 100，上限 120），并写关键动作分解（用→连接的 2~4 步）")
         elif len(visual_desc) > 120:
-            issues.append(f"镜头 {shot_id} 画面描述过长（{len(visual_desc)}字），疑似背景铺陈堆砌，建议 ≤80 字且只写动作与构图")
+            issues.append(f"镜头 {shot_id} 画面描述过长（{len(visual_desc)}字），疑似背景铺陈堆砌，建议 100~120 字（上限 120）且只写关键动作与构图")
 
     # 检查角色外貌描述（真实字段：appearance）
     for i, char in enumerate(script.get("characters", [])):
@@ -3870,6 +4115,11 @@ def check_script(script_path: str = None, script_data: dict = None,
     #    改成占位符后，改 config 就自动同步，杜绝再次漂移。
     #    ⚠️ 用户若在配置里自定义了 script_prompt（旧文本仍含「3-12 秒」），
     #    replace 不会命中占位符 → 保持用户原文，属预期（用户口径优先）。
+    # 台词预算（第 17 条）同样从 config 单一来源注入（2026-10-05）：旧文案写死
+    # 「30 字（约 6.7 秒配音）」，而生成端台词预算（SHOT_SPEECH_BUDGET_CHARS，默认 16 字）
+    # 早已收紧 —— 质检口径与生成端必须同源，改 config 即自动同步，杜绝再次漂移。
+    # ⚠️ 与上面时长占位符同一机制：用户自定义的旧 script_prompt 不含该占位符 → 保持原文。
+    speech_budget = getattr(config, "SHOT_SPEECH_BUDGET_CHARS", 16)
     prompt = prompt_template.replace(
         "{style}", style or "国漫古风"
     ).replace(
@@ -3880,6 +4130,8 @@ def check_script(script_path: str = None, script_data: dict = None,
         "{shot_duration_max}", f"{SHOT_DURATION_MAX_OK:g}"
     ).replace(
         "{shot_duration_silent}", f"{config.SHOT_DURATION_SILENT:g}"
+    ).replace(
+        "{speech_budget}", str(speech_budget)
     ).replace(
         "{script_data}", script_json[:8000]  # 限制长度，避免超出上下文
     )

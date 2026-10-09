@@ -3,7 +3,7 @@ ComfyUI API 客户端（v2 / 2026-09 修复版）
 - 角色：Qwen 2512 生成基础图 → Qwen Edit 2511 生成多视图（正面/左侧/右侧/背面）
 - 物品：Qwen 2512 生成基础图 → Qwen Edit 2511 生成 3D 多视角（正面/左45°/右45°/俯视）
 - 场景：Qwen 2512 生成基础图 → Qwen Edit 2511 生成 3D 多视角（正面/左45°/右45°/俯视）
-- 视频：MiniMax H3（Ref2VA）10 段无缝生成
+- 视频：MiniMax H3（Ref2VA）按分镜段数动态生成（一个分镜一段）
 
 v2 关键修复：
 1. UI(node-graph) → API 转换改为「节点自带 widgets_values_named 优先」，
@@ -13,8 +13,8 @@ v2 关键修复：
    抽取为 API 节点，并把 SetNode/GetNode/Reroute 走通为「值来源重定向」。
 3. 过滤 MarkdownNote / Note / Label / Reroute / PrimitiveNode 等虚拟节点。
 4. 多视角：3 个 LoadImageOutput 参考图全部替换（原实现只改第一个）。
-5. 视频：前端 HTTP 资源路径解析为本地绝对路径；H3 的 10 段 Text Multiline
-   全部替换（原实现只改第一段），并按 clip 序号一一对应。
+5. 视频：前端 HTTP 资源路径解析为本地绝对路径；H3 的 Text Multiline 分镜段
+   按分镜段数动态全部替换（原实现只改第一段），并按 clip 序号一一对应。
 """
 import os
 import re
@@ -37,7 +37,7 @@ from typing import Dict, List, Optional, Any, Tuple, Sequence
 # NameError: name 'Sequence' is not defined（实测）。别删这个导入。
 
 from config import (
-    COMFYUI_URL, COMFYUI_OUTPUT_DIR, COMFYUI_TEMP_DIR,
+    COMFYUI_URL, COMFYUI_OUTPUT_DIR, COMFYUI_TEMP_DIR, MJSCXT_COMFYUI_DIR,
     resolve_workflow_path,
     PROJECT_OUTPUT_DIR, WORKFLOW_TEMPLATE, MULTIVIEW_CONFIG,
     SCENE_VIEW_ANGLE_ZH, SCENE_VIEW_KEYS, SCENE_VIEW_LABELS,
@@ -63,9 +63,48 @@ import h3_director_builder
 import comfyui_models
 import style_kit
 import h3_prompt_kit
+# 提示词模板中心（2026-10-07）：九宫格「逐格写死」中文版主模板（storyboard_grid_main）从
+# 这里加载（该模块只依赖标准库 + 延迟 import config，与本模块无循环依赖）。
+import prompt_templates
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+#: 场景九宫格「单次出图」提示词的**代码内兜底正文**（模板文件缺失/渲染失败时用）。
+#: ⚠️ 与 app/prompts/scene_grid_main.txt 剥离头注释后的正文**逐字一致**，改任一处都要同步
+#:    另一处（渲染差异会改变 prompt 内容指纹）。占位符与 REGISTRY["scene_grid_main"] 一致。
+#: 九宫格逐格版的「画面内文字」段（2026-10-09 起**按需注入**）。
+#: 官方原话：「若不需要可读文字，一句都不要提『文字』（提了会诱发凭空画字）」——
+#: 原先该段无条件注入（197 字），等于每镜都在提「文字」，既撑长提示词又与该建议相悖。
+TEXT_SECTION_ZH = (
+    "**画面内文字（关键 · 依 Qwen-Image 官方用法）：**\n"
+    "需要可读文字时，**把确切原文放进引号**并写明载体与字体颜色，例：\n"
+    "「守则顶部居中为黑色粗体字 \"楼层安全守则\"」。引号内必须是确切原文、逐字正确，\n"
+    "**不得**只说「小字 / 文字 / 标题」而不给原文（那必然乱码）。文字尽量不超过 8 个字。\n"
+)
+#: 「本镜需要可读文字」的判定词（与 comfyui_client._ensure_item_white_bg 的 _text_markers 同源口径）
+TEXT_HINT_WORDS = ("文字", "汉字", "书名", "告示", "卡片", "标签", "手写",
+                   "守则", "屏幕", "字样", "字迹", "招牌", "标语", "牌匾")
+
+_SCENE_GRID_MAIN_FALLBACK = """生成一张3x3的九宫格场景设定图，呈现同一个场地的9个不同机位与景别。
+
+{style}
+
+**场景设定：**
+{scene_prompt}
+
+**画面布局与内容：**
+单张图像内均匀排列9个画面（3行3列），每个画面的左上角分别标注白色数字"1"至"9"。
+9个画面是**同一个场地**在不同机位与景别下的取景：空间结构、建筑布局、材质纹理、家具陈设、光影色调必须完全一致，只有相机的位置、朝向与取景范围不同。
+
+{panel_plans}
+
+**视觉要求：**
+*   **风格：** 整张图（含全部9个画面）必须是统一的风格化 CG 渲染，不是真人实拍照片；画面之间不画分隔边框，以画面内容自然分区。
+*   **一致性：** 9格的墙面、地面、门窗、陈设位置必须对得上，是同一空间的不同视角，不要变成9个互不相关的场地。
+*   **禁忌：** 除左上角的数字1-9外，画面中严禁出现任何文字、水印或标题；画面内不要有人。
+"""
+prompt_templates.register_fallback("scene_grid_main", _SCENE_GRID_MAIN_FALLBACK)
 
 
 # ===================== 调用统计（P2-3 成本看板数据源） =====================
@@ -108,6 +147,10 @@ def _bump(key: str, delta=1) -> None:
 PSEUDO_WIDGETS = {
     "upload", "refresh", "Constant",
     "Auto-refresh after generation", "control_after_generate_widget",
+    # 2026-10-09 修复真实遗漏：名单里只有 ..._widget 变体，而 ComfyUI 前端真名是
+    # control_after_generate（不带头/尾缀）→ LoadImageOutput 等节点上的它没被剥掉，
+    # 提交时被校验器报成 unexpected_inputs（verify_qwen21_migration 的 B14 长期红）。
+    "control_after_generate",
 }
 # 位置兜底时需要剔除的「执行后动作」取值（跟随在 seed 之后）
 PSEUDO_VALUES = {"fixed", "increment", "decrement", "randomize"}
@@ -172,6 +215,108 @@ PROMPT_NODE_TYPES = ("CLIPTextEncode", "TextEncodeQwenImageEditPlus",
                      "TextEncodeQwenImage21")
 
 
+# ===================== TE_MAN 提示词增强节点（运行时注入，2026-10-06） =====================
+# 给全部「图片生成」工作流在提交前挂上 TE_MAN 插件的提示词增强节点：
+# TextEncodeQwenImage21 的正向 prompt 改接增强节点输出 0，原始提示词全文交给它
+# 用「AI 设置 · 文本分析模型」先增强一遍再编码。**运行时注入，不改模板 JSON**；
+# 注入点在 ComfyUIClient.queue_prompt（提交唯一收口），判定与回落见该方法。
+# 开关：env MJSCXT_PROMPT_ENHANCER（默认开；0/false/off/no 关，config._env_bool 口径）。
+# ⚠️ 与 config 层的 MJSCXT_PROMPT_ENHANCE（prompt_qc.preflight 的 LLM 文本增强）
+#    是两道不同的工序，名字相近勿混：那道改的是「提示词文本」，本节点改的是
+#    「提交给 ComfyUI 的工作流图」。
+PROMPT_ENHANCER_CLASS = "TE_Qwen_Image_2_1_Prompt_Enhancer"
+#: 增强节点承载原始提示词全文的输入名（字段名即中文串，与插件声明逐字一致）
+PROMPT_ENHANCER_PROMPT_FIELD = "输入提示词"
+#: 任务模式取值：有参考图 → 图生图（走 i2i PE），无参考图 → 文生图（走 t2i PE）
+PROMPT_ENHANCER_MODE_I2I = "图生图"
+PROMPT_ENHANCER_MODE_T2I = "文生图"
+#: 8 路可选参考图输入名（第 1 路无序号后缀）；只接前 8 路，多余参考图不接
+PROMPT_ENHANCER_IMAGE_FIELDS = ("图片", "图片2", "图片3", "图片4",
+                                "图片5", "图片6", "图片7", "图片8")
+#: 本地推理参数（增强方式=API 时不参与推理；按用户实测工作流的取值填死，便于人工对照）
+PROMPT_ENHANCER_LOCAL_DEFAULTS = {
+    "输出语言": "中文",
+    "增强方式": "API",
+    "文生图PE模型": "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
+    "图生图PE模型": "qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors",
+    "主模型": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+    "mmproj": "qwen3.5mmproj-BF16.gguf",
+    "最大生成token": 4096,
+    "上下文长度": 8192,
+    # ⭐ 2026-10-07：改为 False（模型常驻）。
+    # 此前硬编码 True：每次生成都让增强节点把 9B PE 模型卸回磁盘，下一镜再
+    # 从磁盘重读（实测每次 30~60 秒）——与系统级「KEEP_MODEL_LOADED=True
+    # 不向 ComfyUI 发 /free」的常驻策略自相矛盾。显存由 ComfyUI 自己的
+    # offload 管理兜底（下一个任务需要显存时自动把暂不用的模型挪到 RAM），
+    # 不卸载不会导致 OOM；34GB 系统内存 + 33GB RAM 余量充足。
+    "生成后自动卸载模型": False,
+    "启用思考": False,
+}
+#: 增强节点注入开关的 env 名（读法走 config._env_bool 白名单口径）
+PROMPT_ENHANCER_ENV = "MJSCXT_PROMPT_ENHANCER"
+
+#: 「确切文字」硬约束的**幂等标记**（单一来源，勿另造一份）。
+#: 与 :meth:`_ensure_scene_text_render` / :meth:`_ensure_item_white_bg` 追加的「确切文字」
+#: 硬约束段用同一串做幂等判据；也是「确切文字硬约束保护」（2026-10-07）的检出串。
+#: 该串是 :meth:`_ensure_scene_text_render` 幂等检测的字面子串（先拼串、再回读，见其注释）。
+# ⚠️ 2026-10-09：marker 必须与下方追加串**字面一致**（旧值含 markdown `**确切**`，
+# 已在官方写法改写中移除 → 必须同步更新，否则幂等判定永假、提示词无限膨胀）。
+SCENE_EXACT_TEXT_MARKER = "必须呈现文字：居中印有"
+
+
+def _prompt_enhancer_node_enabled() -> bool:
+    """增强节点注入的运行时开关（默认**关**；1/true/yes/on 显式开启）。
+
+    ⭐ 2026-10-09 用户决策：提示词已按官方文档产出（H3 六段 + Qwen-Image 官方文字用法），
+    **不再需要增强节点改写** —— 改写会破坏官方写法（尤其引号内的确切文字与硬约束段），
+    且与「生成前提示词质检」职责重叠。生成前质检保留（见 h3_prompt_kit/prompt_qc 预检）。
+
+    读法对齐 config._env_bool 白名单口径（1/true/yes/on 为真，其余显式取值为假，
+    未设置/空串取默认）。每次提交即时读取，改 env 不用改代码。
+    """
+    try:
+        import config as _cfg
+        return bool(_cfg._env_bool(PROMPT_ENHANCER_ENV, False))
+    except Exception:  # noqa: BLE001  配置模块异常不阻断生成（fail-closed 于"增强"，
+        # 2026-10-09 用户决策：增强已停用 → 异常时也保持停用（返回 False），不再 fail-open 到开。
+        return False
+
+
+def _enhancer_text_credentials() -> Tuple[str, str, str]:
+    """读本系统「AI 设置 · 文本分析模型」模块的 base_url / api_key / model。
+
+    与 prompt_enhance._client_for 同一读取口径：ai_config 单一事实源
+    （tasks.db 凭证表优先，回落 env > 加密库 > json）。任一项缺失返回空串，
+    由调用方整体跳过注入（fail-open，走原提示词提交）。
+    """
+    import ai_config
+    from config import AI_CONFIG_PATH, LLM_CONFIG_PATH
+    cfg = ai_config.get_module(
+        ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH), "text")
+    if not isinstance(cfg, dict):
+        return "", "", ""
+    return (str(cfg.get("base_url") or "").strip(),
+            str(cfg.get("api_key") or "").strip(),
+            str(cfg.get("model") or "").strip())
+
+
+def _linked_enhancer_text(api_prompt: dict, link) -> Optional[str]:
+    """连线若指向「提示词增强节点」，返回它保存的原始提示词全文（否则 None）。
+
+    注入后编码节点的 prompt 输入从「文本控件」变成连线 [enhancer_id, 0]，
+    原文全文保存在增强节点的「输入提示词」里 —— 注入之后任何想读「正向提示词
+    文本」的代码（极性判定 / 审计 / 校验器）都经这里穿透取原文，读侧看到的
+    仍是文本，与注入前同形。
+    """
+    if not (isinstance(link, (list, tuple)) and len(link) == 2):
+        return None
+    src = (api_prompt or {}).get(str(link[0])) or {}
+    if str(src.get("class_type") or "") != PROMPT_ENHANCER_CLASS:
+        return None
+    text = (src.get("inputs") or {}).get(PROMPT_ENHANCER_PROMPT_FIELD)
+    return text if isinstance(text, str) else None
+
+
 def _node_sort_key(nid) -> int:
     """节点 id 排序键（数字 id 按数值，非数字 id 视作 0 —— 与历史行为一致）"""
     return int(nid) if str(nid).isdigit() else 0
@@ -203,9 +348,12 @@ def _prompt_slot_polarity(class_type: str, field: str, value) -> str:
 
     - 正负同体节点：按**字段名**判（prompt=正向、negative_prompt=负向），
       空串也算（负向槽位默认就是空的，必须能被加固写入）；
-    - 老模板：空槽位返回 ""（无可判内容，跳过），否则走 `_is_negative_slot` 启发式。
+      ⚠️ 字段名判定**不依赖值类型**：注入增强节点后 prompt 会从文本控件变成
+      连线 [enhancer_id, 0]，正向槽位极性必须仍然成立（文本经 `_linked_enhancer_text`
+      穿透读取），否则已注入的 prompt 再次被处理时会漏判正向槽位；
+    - 老模板：空槽位/连线返回 ""（无可判内容，跳过），否则走 `_is_negative_slot` 启发式。
     """
-    if field not in PROMPT_TEXT_FIELDS or not isinstance(value, str):
+    if field not in PROMPT_TEXT_FIELDS:
         return ""
     if class_type in COMBINED_PROMPT_NODE_TYPES:
         if field == COMBINED_POSITIVE_FIELD:
@@ -213,7 +361,7 @@ def _prompt_slot_polarity(class_type: str, field: str, value) -> str:
         if field == COMBINED_NEGATIVE_FIELD:
             return "neg"
         return ""
-    if not value.strip():
+    if not isinstance(value, str) or not value.strip():
         return ""
     return "neg" if _is_negative_slot(value) else "pos"
 
@@ -222,6 +370,10 @@ def _iter_prompt_slots(api_prompt: dict, class_types=PROMPT_NODE_TYPES):
     """遍历提示词槽位，产出 ``(节点id, 字段名, 取值, 极性)``。
 
     判断单一来源：极性一律经 `_prompt_slot_polarity`，调用方不再各写一套启发式。
+    取值契约：**只产出字符串**。注入后正向 prompt 是连线 → 穿透到增强节点的
+    「输入提示词」取原文（读侧与注入前同形）；穿透不到的连线（如老工作流把
+    negative_prompt 接到文本节点）→ 视为无可判文本跳过 —— 与旧行为一致，
+    避免把连线对象当文本消费（clean_conflict_negative_tokens 会对取值 .strip()）。
     """
     for nid, node in (api_prompt or {}).items():
         if not isinstance(node, dict):
@@ -233,8 +385,14 @@ def _iter_prompt_slots(api_prompt: dict, class_types=PROMPT_NODE_TYPES):
         for field in PROMPT_TEXT_FIELDS:
             value = inputs.get(field)
             polarity = _prompt_slot_polarity(ctype, field, value)
-            if polarity:
-                yield nid, field, value, polarity
+            if not polarity:
+                continue
+            if not isinstance(value, str):
+                text = _linked_enhancer_text(api_prompt, value)
+                if text is None:
+                    continue
+                value = text
+            yield nid, field, value, polarity
 
 
 # ===================== 参考图槽位键名 =====================
@@ -250,160 +408,13 @@ def _slot_index(key) -> int:
     return int(m.group(1)) if (m and m.group(1)) else 0
 
 
-# 分镜图景别强约束：仅写「特写」二字时模型容易退化为中景/近景，这里给出显式构图规范。
-#
-# ⚠️ 键集合必须与 config.SHOT_TYPES（景别唯一权威表）**逐字对齐**：少一个景别 =
-#    生成端没有构图规范（模型自由发挥）+ 质检端没有判定标准（判「不符」也没依据），
-#    正是历史「景别判定把 43% 镜头误判为不合格」的土壤。下方 _MISSING_SPECS 会在
-#    两表漂移时打 error 日志，配套守卫 .workbuddy/test/verify_shot_type_registry.py
-#    会直接断言两表相等。
-SHOT_CAMERA_SPECS = {
-    "大特写": ("大特写镜头（extreme close-up）：只拍眼睛/手指/道具的一个点，该局部占据画面 85% 以上，"
-               "背景完全虚化；**严禁退为特写、近景或中景**"),
-    "特写": ("特写镜头（close-up）：镜头极贴近主体，人物面部（或手部、道具局部）占据画面 70% 以上面积，"
-             "背景明显虚化，只呈现局部，严禁退为近景、中景或全景"),
-    "近景": ("近景镜头（medium close-up）：取景自人物胸部以上至头顶，面部细节清晰，"
-             "严禁退为中景或全景"),
-    "中近景": ("中近景镜头（medium close-up，略松）：取景自人物腰部以上至头顶，比近景多带一点身体与手势，"
-               "**严禁退为中景/全景**（不得出现腰部以下部位或大片地面）"),
-    "局部": ("局部镜头（detail / insert shot）：只拍手部、道具或身体局部，**画面中不出现完整人脸**、"
-             "不交代人物全身与所处环境；用于把叙事重心压到道具上（如递出的手绘纸币、电子秤、抽屉里的纸），"
-             "**严禁退为近景/中景**"),
-    "中景": ("中景镜头（medium shot）：取景自人物腰部或膝部以上至头顶，人物占画面一半左右，"
-             "可带入部分环境；**严禁退为全景/远景**（不得出现膝盖以下部位、脚部或大片地面）"),
-    "全景": "全景镜头（wide shot）：完整呈现人物全身及其所处环境，人物占画面高度的大半；**不得退为远景色块**",
-    "远景": "远景镜头（long shot）：人物在画面中较小、环境为主体，强调空间感与氛围；**不得推成中景/近景**",
-    "大远景": ("大远景镜头（extreme long shot）：人物在画面中极小（可为剪影或色点），"
-               "环境与空间关系为主体；**不得推成中景/近景**"),
-}
-
-#: 景别权威表与生成端规范的一致性检查（漂移必须**可见**：error 日志 + 守卫断言）
-_MISSING_SPECS = [k for k in SHOT_TYPES if k not in SHOT_CAMERA_SPECS]
-_EXTRA_SPECS = [k for k in SHOT_CAMERA_SPECS if k not in SHOT_TYPES]
-if _MISSING_SPECS or _EXTRA_SPECS:
-    logger.error("景别权威表 config.SHOT_TYPES 与 SHOT_CAMERA_SPECS 不一致：缺规范=%s 多出=%s",
-                 _MISSING_SPECS, _EXTRA_SPECS)
-
-#: 景别关键字的解析顺序（**长词优先**）：剧本里 camera 字段常是「景别+运镜」的复合写法
-#: （如「特写推入」「全景升降」「中景跟拍」「中近景轻推」），必须按关键字解析，不能只做精确匹配。
-#: ⚠️ 必须长词优先：否则「中近景」会被「近景」抢先命中、「大特写」会被「特写」抢先命中。
-#: 由权威表派生，杜绝手写顺序漏词（历史缺陷：手写顺序里没有新景别 → 永远解析不出来）。
-_CAMERA_KEY_ORDER = tuple(sorted(SHOT_TYPES, key=len, reverse=True))
-
-#: 机位/视角关键字。与景别**正交**：剧本 camera 字段里既有景别（中景/特写）也有机位（俯拍/仰拍）。
-#: ⚠️ 历史缺陷：机位以前完全没人解析，等于白写在剧本里 —— 生成端不知道要俯拍，
-#: 质检端也没有依据判机位，于是「要求俯拍却给了平视」既没被约束也没被检出。
-_CAMERA_ANGLE_SPECS = {
-    "俯拍": "俯拍（高角度）：镜头高于主体自上向下俯视，画面能看到主体顶部/脚前的地面",
-    "仰拍": "仰拍（低角度）：镜头低于主体自下向上仰视，主体显得高大压迫",
-    "平视": "平视：镜头与主体视线同高",
-    "环绕": "环绕：镜头绕主体转动（在静帧里体现为明显的侧向机位）",
-    "过肩": "过肩：越过前景人物肩部拍向主体",
-    "斜侧": "斜侧机位：镜头相对主体明显偏斜（非正面）",
-}
-_CAMERA_ANGLE_ORDER = ("俯拍", "仰拍", "平视", "环绕", "过肩", "斜侧")
-
-#: 机位**同义词**：剧本写法很自由，只认「俯拍」不认「俯视」等于漏掉一半机位标注
-#: （漏掉的后果与「机位没人解析」一样：生成端不约束、质检端不判定）。
-#: 解析顺序：先用 _CAMERA_ANGLE_ORDER 的正式词（具体优先），再回落到本表。
-_CAMERA_ANGLE_ALIASES = {"俯视": "俯拍", "高角度": "俯拍", "高机位": "俯拍",
-                         "仰视": "仰拍", "低角度": "仰拍", "低机位": "仰拍",
-                         "平角": "平视", "水平视角": "平视",
-                         "环摇": "环绕", "绕拍": "环绕"}
-
-def shot_framing(shot) -> str:
-    """本镜**景别**的权威取值（A1）：优先读 ``shot_type``，缺失回退解析 ``camera`` 复合串。
-
-    为什么要有这个统一入口：``camera`` 是「景别+运镜」复合字符串（「特写推入」），十余处
-    消费点各自调 ``camera_key()`` 解析，一旦口径漂移就会**同时**污染生成端与质检端
-    （历史坑：猜错景别曾让分镜质检通过率掉到 57%）。新剧本写入 ``shot_type`` 作单一权威，
-    这里优先读它；旧剧本该字段为空 → 回退 ``camera_key(camera)``，与改动前**逐字一致**。
-    """
-    if not isinstance(shot, dict):
-        return ""
-    st = str(shot.get("shot_type") or "").strip()
-    if st:
-        return st if st in SHOT_CAMERA_SPECS else camera_key(st)
-    return camera_key(str(shot.get("camera") or "").strip())
-
-
-def shot_motion(shot) -> str:
-    """本镜**运镜**的权威取值（A1）：优先读 ``camera_motion``；缺失返回空串（宁可不说）。
-
-    ⚠️ 不回退解析 camera：运镜表在 ``h3_prompt_kit._CAMERA_MOVE_EN``，这里不跨模块反向
-    依赖；且下游 ``_camera_move_en(camera)`` 本来就是吃整个 camera 串，旧剧本走原路径即可。
-    """
-    if not isinstance(shot, dict):
-        return ""
-    return str(shot.get("camera_motion") or "").strip()
-
-
-#: 景别未指定时的判定标准（camera 只给了机位/运镜）。
-#: 这段文字会被同时注入**生成端**与**质检端**，因此措辞必须两边都说得通。
-CAMERA_UNSPECIFIED_SPEC = (
-    "本镜未指定景别（camera 字段只给了机位/运镜，如「俯拍缓推」「环绕慢摇」）："
-    "取景范围以「动作与画面内容」的描述为准，**不要按某个固定景别去套**，"
-    "也**不得据此判定景别不符**；只判「机位/构图/主体清晰度/是否崩坏」"
-)
-
-
-def camera_key(camera) -> str:
-    """从复合写法里解析出景别关键字（``特写推入`` → ``特写``；``全景升降`` → ``全景``）
-
-    ⚠️ 这修的是一个**双向错位**的根因：
-    剧本的 camera 字段是「景别+运镜」（特写推入 / 中景跟拍 / 全景升降），而
-    ``SHOT_CAMERA_SPECS`` 只有精确键。原实现 ``SPECS.get(camera) or SPECS["中景"]``
-    对任何复合写法都回落到**中景规格** —— 于是生成端给「特写推入」的镜头写的是
-    「中景：腰部以上至头顶」，而质检端读的是字面「特写」，两端同时错位，
-    实测分镜图质检通过率仅 57%、失败原因几乎全是「景别不符」。
-
-    ⚠️ **2026-09-20 再修：只给机位/运镜、没有景别词时不再猜「中景」，改返回空串（未指定）。**
-    实测《蛊真人》ep02 shot_13：``camera = "俯拍缓推"``，description 是
-    「镜头自方源脚面俯拍：灰白山石上积了一大滩血水…他清瘦的靴底半浸其中」——
-    本质是**脚部俯拍特写**。猜成「中景」会同时污染两端：
-      · 生成端 → 注入「中景：取景自腰部或膝部以上」与 description 的脚部俯拍
-        **直接互斥**，模型在两条矛盾指令间摇摆，6 次重试出的全是「全景 + 平视」；
-      · 质检端 → 拿「中景（腰部或膝部以上）」去判一张脚部俯拍图，必然判「景别不符」，
-        该镜**永远不可能通过**，白烧 6 次 GPU（max_retries=5）。
-    返回空串后：生成端不注入景别硬约束、质检端不做景别判定 ——
-    「宁可不说，也不要拿一个猜错的标准去判」。
-    """
-    s = str(camera or "").strip()
-    if not s:
-        return "中景"
-    if s in SHOT_CAMERA_SPECS:
-        return s
-    for k in _CAMERA_KEY_ORDER:
-        if k in s:
-            return k
-    # 只有机位/运镜词（俯拍缓推 / 环绕慢摇 / 拉远）→ **不猜**，交回上层按「未指定」处理
-    return ""
-
-
-def camera_angle(camera) -> str:
-    """解析机位/视角（``俯拍缓推`` → ``俯拍``）；没有机位词时返回空串。
-
-    与 :func:`camera_key`（景别）正交：两者都要各自注入生成端与质检端，
-    否则「要求俯拍却给了平视」这类偏差既没人约束也没人检出。
-    """
-    s = str(camera or "").strip()
-    for k in _CAMERA_ANGLE_ORDER:
-        if k in s:
-            return k
-    for alias, key in _CAMERA_ANGLE_ALIASES.items():
-        if alias in s:
-            return key
-    return ""
-
-
-def camera_spec(camera) -> str:
-    """取景别（镜头类型）的**权威判定标准**（生成端与质检端共用同一份）
-
-    见 :func:`camera_key` 说明：必须能解析复合写法，否则两端标准会错位；
-    景别确实未给时返回 :data:`CAMERA_UNSPECIFIED_SPEC`（而不是编一个中景）。
-    """
-    k = camera_key(camera)
-    return SHOT_CAMERA_SPECS[k] if k else CAMERA_UNSPECIFIED_SPEC
+# ---- 景别/机位解析已下沉到叶子模块 shot_camera（2026-10-08 解耦）----
+# 这里保留同名再导出：app.py / te_3d_director.py / 守卫脚本的既有 import 全部照旧可用，
+# 而新的解析点应当直接 from shot_camera import ...（不再经过 ComfyUI 客户端）。
+from shot_camera import (  # noqa: F401
+    CAMERA_UNSPECIFIED_SPEC, SHOT_CAMERA_SPECS, _CAMERA_ANGLE_ALIASES, _CAMERA_ANGLE_ORDER,
+    _CAMERA_ANGLE_SPECS, _CAMERA_KEY_ORDER, camera_angle, camera_key, camera_spec,
+    shot_framing, shot_motion)
 
 
 SHOT_ACTION_SUFFIX = ("；上述动作必须完整、明确地表现出来（动作结果一眼可辨，如道具已收起、已离开手部），"
@@ -484,6 +495,22 @@ COMPOSITION_BASELINE_SECTION = (
     "environment, and never reproduce them as black bars, letterbox borders, frames or "
     "flat colour blocks."
 )
+
+#: 「角色身份基准网格」参考图标记（2026-10-06）：app._storyboard_worker 把角色基准图
+#: PIL 拼成 3×3 参考网格后插进 refs，其 label 必须含本标记 —— build_storyboard_prompt
+#: 靠它在 REFERENCE ROLES 里豁免该图并追加 IDENTITY BASELINE GRID 段。
+#: ⚠️ 与 BLOCKING_REF_MARK 同一纪律：禁止在调用方写裸字面量，统一引用本常量。
+IDENTITY_GRID_REF_MARK = "角色身份基准网格"
+
+#: 身份基准网格的提示词段（{pos} 由 build_storyboard_prompt 按实际槽位号填充）
+IDENTITY_BASELINE_GRID_SECTION = (
+    "IDENTITY BASELINE GRID (critical): <image{pos}> is a 3x3 grid of nine cells "
+    "showing the canonical appearance (facial identity, hairstyle, outfit and "
+    "colour palette) of the character(s) of this shot, taken from their character "
+    "baseline assets. It is the appearance ground truth: every character rendered "
+    "in the output must replicate EXACTLY the face, hairstyle and outfit shown in "
+    "the cell(s) of that same character in <image{pos}>. Do not add, remove or "
+    "recolor any clothing element relative to the baseline grid.")
 
 #: 分镜图光学/材质段（2026-09-28 画质提升）。
 #: 背景：分镜提示词此前**系统性缺画质/光学/材质词** —— 无景深、无次表面散射、
@@ -580,18 +607,32 @@ def scene_view_prompt_suffix(view_key: str) -> str:
     # ⭐ 2026-10-05 场景九宫格：机位句/标签查表支持 4 档（旧逐档）与 9 档（九宫格）两套口径，
     #   单一来源都在 config（SCENE_VIEW_* 与 SCENE_GRID_*）。
     #   ⚠️ SCENE_GRID_* 在 config 里**晚于**本文件 import 的 SCENE_VIEW_* 定义，故这里**函数内**
-    #   延迟 import（避免 import 顺序依赖 / 循环），只取三张表。
+    #   延迟 import（避免 import 顺序依赖 / 循环），只取四张表。
+    # ⭐ 2026-10-06 修正查表优先级：`front/left45/right45/top` 四档在两张表里**都有**，
+    #   旧写法 `SCENE_VIEW_*.get(key) or SCENE_GRID_*.get(key)` 让**旧表恒胜** —— 于是
+    #   九宫格模式下的标签一直显示旧的「正面全景 / 左前 45° / 顶部鸟瞰」，用户新定义的
+    #   「全景（主视角）/ 左45°侧视全景 / 俯视鸟瞰」永远出不来。现改为：**九宫格模式打开
+    #   时，凡在 SCENE_GRID_* 里有定义的键一律以九宫格表为准**（机位句对那 4 档是逐字复用
+    #   旧表的，故本改动只影响标签口径，不动机位句）。
     try:
-        from config import SCENE_GRID_VIEW_KEYS, SCENE_GRID_ANGLE_ZH, SCENE_GRID_LABELS
+        from config import (SCENE_GRID_VIEW_KEYS, SCENE_GRID_ANGLE_ZH,
+                            SCENE_GRID_LABELS, SCENE_GRID_MODE)
     except ImportError:
         SCENE_GRID_VIEW_KEYS, SCENE_GRID_ANGLE_ZH, SCENE_GRID_LABELS = (), {}, {}
+        SCENE_GRID_MODE = False
     valid_keys = tuple(SCENE_VIEW_KEYS) + tuple(SCENE_GRID_VIEW_KEYS)
     if not key or key not in valid_keys:
         return ""
-    angle = SCENE_VIEW_ANGLE_ZH.get(key) or SCENE_GRID_ANGLE_ZH.get(key)
+    _prefer_grid = bool(SCENE_GRID_MODE) and (
+        key in SCENE_GRID_ANGLE_ZH or key in SCENE_GRID_LABELS)
+    if _prefer_grid:
+        angle = SCENE_GRID_ANGLE_ZH.get(key) or SCENE_VIEW_ANGLE_ZH.get(key)
+        label = SCENE_GRID_LABELS.get(key) or SCENE_VIEW_LABELS.get(key) or key
+    else:
+        angle = SCENE_VIEW_ANGLE_ZH.get(key) or SCENE_GRID_ANGLE_ZH.get(key)
+        label = SCENE_VIEW_LABELS.get(key) or SCENE_GRID_LABELS.get(key) or key
     if not angle:
         return ""
-    label = SCENE_VIEW_LABELS.get(key) or SCENE_GRID_LABELS.get(key) or key
     # 与 base 同空间、只换机位：显式声明「同一场地」是防止模型把多档理解成多个场地
     # （一旦理解错，分镜换机位就等于换场景，比没有机位档更糟）。
     # ⚠️ 2026-10-03（B 方案）：旧句尾「建筑形制、空间关系、陈设与光照方向保持不变」里的
@@ -618,11 +659,12 @@ MEDIA_INPUT_KEYS = {"image", "images", "audio", "video", "file", "filename", "pa
                     "image_path", "audio_path", "video_path"}
 
 
-# ===================== P2-2 RefMod PoC：节点探测 + UI→API 兼容自检 =====================
+# ===================== RefMod 节点探测（运维探针，供 /api/comfyui/refmod-status） =====================
 # 背景：RefMod（ComfyUI-MiniMaxH3Mod）把角色参考图打包成 .safetensors，像 LoRA 一样
-# 直接喂 H3。社区节点多为 UI 模式工作流，「能否过本模块的 UI→API 转换 + validate_api_prompt
-# 自检」是唯一集成风险 —— 下面两个函数把这件事变成可探测、可报告的自动化自检，
-# 供 /api/comfyui/refmod-status 消费。口径与 get_status / get_object_info 一致：**fail-open**，
+# 直接喂 H3。probe_refmod_nodes 探测节点是否在 ComfyUI 侧生效及其输入声明，
+# 供 /api/comfyui/refmod-status 消费。早期的 UI→API 兼容自检 PoC
+# （refmod_ui_to_api_poc / _refmod_widget_default）已退役删除（2026-10-05）。
+# 口径与 get_status / get_object_info 一致：**fail-open**，
 # ComfyUI 不可达 / 节点不存在 / 任何异常都返回结构化结果，绝不抛错、绝不影响生成链路。
 
 #: RefMod / MiniMaxH3Mod 节点类名匹配（大小写不敏感；``.?`` 兼容 MiniMax-H3 等连字符变体）
@@ -630,11 +672,10 @@ _REFMOD_NODE_RE = re.compile(r"(refmod|minimax.?h3)", re.IGNORECASE)
 
 
 def _compact_refmod_spec(raw) -> dict:
-    """把 object_info 的一组输入声明压成 PoC 需要的紧凑形态（输入名 → [类型, options]）。
+    """把 object_info 的一组输入声明压成状态端点需要的紧凑形态（输入名 → [类型, options]）。
 
-    combo 候选只留前 8 个（PoC 只用第一个当默认值，也避免数百个模型文件名把
-    状态端点响应撑爆）；options 只留 default / forceInput（后者决定该输入是
-    「控件」还是「连线槽位」）。
+    combo 候选只留前 8 个（避免数百个模型文件名把状态端点响应撑爆）；
+    options 只留 default / forceInput（后者决定该输入是「控件」还是「连线槽位」）。
     """
     out: dict = {}
     for name, spec in (raw or {}).items():
@@ -688,128 +729,6 @@ def probe_refmod_nodes(timeout: int = 5) -> dict:
     return result
 
 
-def _refmod_widget_default(spec) -> Tuple[str, dict, bool, Any]:
-    """按 object_info 单条输入声明判定「控件 or 连线槽位」并给合成默认值。
-
-    返回 ``(类型名, options, 是否widget, 默认值)``：
-    - combo（spec[0] 是候选列表）→ widget，默认取第一个候选；
-    - INT / FLOAT / STRING / BOOLEAN → widget，默认取 options.default（缺省给安全值）；
-    - options.forceInput=True 或其它类型名（MODEL / CLIP / IMAGE …）→ 连线槽位（无默认值）。
-    """
-    if not isinstance(spec, (list, tuple)) or not spec:
-        return "", {}, False, None
-    t = spec[0]
-    opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
-    if opts.get("forceInput"):
-        return str(t), opts, False, None
-    if isinstance(t, (list, tuple)):
-        choices = [c for c in t if c not in (None, "")]
-        return "COMBO", opts, True, (choices[0] if choices else "")
-    if t == "INT":
-        try:
-            return t, opts, True, int(opts.get("default", 1))
-        except (TypeError, ValueError):
-            return t, opts, True, 1
-    if t == "FLOAT":
-        try:
-            return t, opts, True, float(opts.get("default", 1.0))
-        except (TypeError, ValueError):
-            return t, opts, True, 1.0
-    if t == "STRING":
-        return t, opts, True, str(opts.get("default") or "")
-    if t == "BOOLEAN":
-        return t, opts, True, bool(opts.get("default", False))
-    return str(t), opts, False, None
-
-
-def refmod_ui_to_api_poc(node_class: str, input_spec: dict, timeout: int = 5) -> dict:
-    """合成一张最小 UI 格式图，喂给本模块 UI→API 转换 + validate_api_prompt 自检（P2-2 PoC）。
-
-    做法：按 ``input_spec``（:func:`probe_refmod_nodes` 记录的紧凑声明）合成一个只含
-    该节点的 UI 图 —— ``widgets_values`` 按声明顺序填默认值、连接型输入留空连线
-    （与 UI 里新建一个未连线的节点同构），然后走与生产**完全相同**的入口
-    :meth:`ComfyUIClient.to_api` → :meth:`ComfyUIClient.validate_api_prompt`，
-    把「社区 UI 模式节点能否过本项目转换」变成结构化报告。
-
-    返回 ``{"node_class", "ui_to_api_ok": bool, "api_nodes": int, "missing_inputs": [...],
-    "error": str?}``（另附 ``validate`` 明细与 ``unresolved_inputs`` 便于排查）：
-
-    - ``ui_to_api_ok``：转换零异常 + 节点类完整进入 API 结果 + object_info 认识该类；
-    - ``missing_inputs``：required 输入在转换结果里缺失 —— 连接型输入在无连线合成图里
-      **必然缺失，属预期**，如实上报、不算崩溃；
-    - 任何异常 → ``ui_to_api_ok=False + error``（fail-open）。
-    """
-    out: dict = {"node_class": node_class, "ui_to_api_ok": False, "api_nodes": 0,
-                 "missing_inputs": []}
-    if not str(node_class or "").strip():
-        out["error"] = "node_class 为空，跳过 PoC"
-        return out
-    try:
-        widget_names: List[str] = []
-        widget_values: List[Any] = []
-        conn_inputs: List[dict] = []
-        for group in ("required", "optional"):
-            for name, spec in ((input_spec or {}).get(group) or {}).items():
-                _t, _o, is_widget, default = _refmod_widget_default(spec)
-                if is_widget:
-                    widget_names.append(str(name))
-                    widget_values.append(default)
-                else:
-                    conn_inputs.append({"name": str(name), "type": str(_t), "link": None})
-        # 最小 UI 格式图：nodes / links / version 是 UI 格式必备键（_is_api_format 靠
-        # 「含 nodes 键」判为 UI 格式）；widget 项带 "widget" 键、连接项带 "link"，
-        # 转换器据此做「位置兜底控件名 vs 连线槽位」的区分（见 fallback_widgets）。
-        ui_node = {
-            "id": 1, "type": node_class, "mode": 0,
-            "inputs": [{"name": n, "widget": {"name": n}} for n in widget_names] + conn_inputs,
-            "outputs": [], "properties": {},
-            "widgets_values": widget_values,
-        }
-        ui_workflow = {"nodes": [ui_node], "links": [], "version": 0.4,
-                       "extra": {}, "groups": []}
-        client = ComfyUIClient()
-        # 预取 object_info 并种进该 client 的缓存：让 validate_api_prompt 遵守调用方的
-        # timeout（其内部 _get 固定 60s），且 PoC 内不重复下载整份 object_info。
-        try:
-            resp = requests.get(f"{COMFYUI_URL}/object_info",
-                                timeout=(min(3, timeout), timeout))
-            resp.raise_for_status()
-            oi = resp.json()
-        except Exception as e:  # noqa: BLE001
-            out["error"] = f"object_info 获取失败（无法自检）: {type(e).__name__}: {e}"
-            return out
-        if not isinstance(oi, dict) or not oi:
-            out["error"] = "object_info 为空，无法自检"
-            return out
-        client._object_info = oi
-        client._object_info_ts = time.time()
-        api, meta = client.to_api(ui_workflow, return_meta=True)
-        out["api_nodes"] = len(api or {})
-        entry = (api or {}).get("1")
-        ok = bool(entry) and entry.get("class_type") == node_class and len(api) == 1
-        report = client.validate_api_prompt(api)
-        out["validate"] = {k: report.get(k) for k in
-                           ("node_count", "unknown_types", "missing_required",
-                            "dangling_links", "unexpected_inputs")}
-        out["unresolved_inputs"] = list((meta or {}).get("unresolved_inputs") or [])
-        # 「1(类名).输入名」→ 输入名（nid/类名不含点，切第一段即剥前缀）
-        out["missing_inputs"] = [str(m).split(".", 1)[1] if "." in str(m) else str(m)
-                                 for m in (report.get("missing_required") or [])]
-        if report.get("unknown_types"):
-            out["error"] = (f"object_info 不认识节点类 {node_class}"
-                            "（插件未生效？请重启 ComfyUI 后重试）")
-        else:
-            out["ui_to_api_ok"] = ok
-            if not ok:
-                out["error"] = (f"转换结果异常：期望 1 个 API 节点({node_class})，"
-                                f"实际 {out['api_nodes']} 个"
-                                + (f"，class_type={entry.get('class_type')}" if entry else ""))
-    except Exception as e:  # noqa: BLE001
-        out["ui_to_api_ok"] = False
-        out["error"] = f"{type(e).__name__}: {e}"
-    return out
-
-
 class ComfyUIClient:
     """ComfyUI API 客户端"""
 
@@ -819,6 +738,89 @@ class ComfyUIClient:
         self._object_info = None
         self._object_info_ts = 0.0
         self.last_convert_meta: Dict[str, Any] = {}
+
+    # ===================== 自愈重启（2026-10-08：分镜跑着 ComfyUI 被全局中断后 8188 连接被拒）=====================
+    # ComfyUI 在「后端超时→全局 /interrupt」后可能进入半死状态（webserver 仍监听但执行器被打断），
+    # 后续镜头 /upload/image 全部 10061 拒连。提供「重启 ComfyUI 进程并等它重新就绪」的能力，
+    # 让上层（分镜 worker / 资产 worker）在连续拒连时能自愈，而非让整集镜头全挂。
+
+    def comfy_online(self, timeout: int = 3) -> bool:
+        """快速探测 ComfyUI 是否在线（/system/status，短超时）。"""
+        try:
+            self.get_status(timeout=timeout)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+    def restart_comfyui(self, wait_sec: int = 120, poll_sec: float = 2.0) -> bool:
+        """重启 ComfyUI（杀现有 python 进程 + 重新拉起 run_nvidia_gpu_fixed.bat + 等 /system/status 就绪）。
+
+        全程 fail-open：任何环节失败都返回 False，不抛异常。
+        wait_sec：等 ComfyUI 就绪的总超时（默认 120s，便携版冷启动约 60-90s）。
+
+        ⚠️ 重启会清掉 ComfyUI 侧未完成的队列任务——调用方应在「确认当前任务已超时/失败」后才调用，
+        不要在正常出图中途调（会杀掉正在跑的图）。
+        """
+        import subprocess
+        comfy_dir = MJSCXT_COMFYUI_DIR
+        bat = os.path.join(comfy_dir, "run_nvidia_gpu_fixed.bat")
+        if not os.path.isfile(bat):
+            logger.warning("ComfyUI 重启失败：找不到启动脚本 %s（请设 MJSCXT_COMFYUI_DIR）", bat)
+            return False
+        # ① 杀掉现有 ComfyUI python 进程
+        # ⚠️⚠️ 2026-10-09 严重缺陷修复：原实现是
+        #       subprocess.run(["taskkill", "/F", "/IM", "python.exe"], …)
+        #     —— 它会杀掉**机器上全部 python.exe**，包括**本服务自己**
+        #    （后端的 serve.py 也是 python.exe）。实跑复现：心跳探测到 ComfyUI 掉线
+        #    → 调本函数 → 后端被自己杀死 → 5211 与 8188 同时消失、生产中断。
+        #    现在改为**只杀命令行里含 ComfyUI main.py 的进程**，并在日志里记录杀掉了谁；
+        #    匹配不到时**不杀任何进程**（宁可重启失败，也不能误杀后端）。
+        killed = []
+        try:
+            ps_cmd = (
+                "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                "Where-Object { $_.CommandLine -like '*main.py*' -and "
+                "$_.CommandLine -like '*ComfyUI*' } | "
+                "ForEach-Object { Write-Output $_.ProcessId; "
+                "Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            proc = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd],
+                                  capture_output=True, timeout=20, check=False,
+                                  text=True, encoding="utf-8", errors="replace")
+            killed = [ln.strip() for ln in (proc.stdout or "").splitlines() if ln.strip().isdigit()]
+            if killed:
+                logger.info("ComfyUI 重启：已终止 ComfyUI 进程 %s", killed)
+            else:
+                logger.info("ComfyUI 重启：未发现运行中的 ComfyUI 进程（不杀任何进程）")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("终止 ComfyUI 进程时忽略：%s", e)
+        # ② 重新拉起（后台，不阻塞）
+        try:
+            subprocess.Popen(["cmd.exe", "/c", bat], cwd=comfy_dir,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+            logger.info("ComfyUI 重启：已拉起 %s", bat)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("ComfyUI 重启：拉起失败：%s", e)
+            return False
+        # ③ 等 /system/status 就绪
+        t0 = time.time()
+        while time.time() - t0 < wait_sec:
+            time.sleep(poll_sec)
+            if self.comfy_online(timeout=3):
+                logger.info("ComfyUI 重启：已就绪（耗时 %.0fs）", time.time() - t0)
+                return True
+        logger.warning("ComfyUI 重启：%ds 内未就绪（仍离线）", wait_sec)
+        return False
+
+    def wait_comfy_online(self, wait_sec: int = 120, poll_sec: float = 2.0) -> bool:
+        """只等 ComfyUI 就绪（不重启）。ComfyUI 自愈/冷启动后等待可用。fail-open。"""
+        t0 = time.time()
+        while time.time() - t0 < wait_sec:
+            time.sleep(poll_sec)
+            if self.comfy_online(timeout=3):
+                return True
+        return False
+
 
     def _generate_client_id(self) -> str:
         import uuid
@@ -1273,7 +1275,406 @@ class ComfyUIClient:
             sub = result.get("subfolder") or ""
             return f"{sub}/{uploaded}" if sub else uploaded
 
+    # ===================== TE_MAN 提示词增强节点运行时注入（2026-10-06） =====================
+    #
+    # 给全部「图片生成」提交路径统一挂 TE_MAN 的 ``TE_Qwen_Image_2_1_Prompt_Enhancer``：
+    # 正向编码节点（TextEncodeQwenImage21）的 prompt 改接增强节点输出 0，原始提示词
+    # 全文交给它先用「AI 设置 · 文本分析模型」增强一遍再编码。**只改本次提交的
+    # API prompt（内存对象），不修改磁盘上的工作流文件。**
+    #
+    # 为什么挂在 queue_prompt：本类所有图片提交（generate_storyboard /
+    # _generate_base_image / _run_multiview_workflow）都在这里收口，且此刻
+    # prompt_qc.preflight、风格拼接、clean_conflict_negative_tokens 等文本工序
+    # 已全部完成 —— 注入的必然是**最终文本**。H3 视频走 submit_resumable →
+    # queue_prompt，但其工作流不含 TextEncodeQwenImage21，被适用判定天然排除。
+    #
+    # fail-open 纪律（与 prompt_enhance 同口径）：开关关闭 / 不含编码节点 / 已注入 /
+    # 文本模块凭据不全 / object_info 查不到该节点 / 必填输入对不上 / 任何异常 ——
+    # 一律跳过注入，按原提示词原样提交，只打日志，绝不阻断生成。
+
+    @staticmethod
+    def _next_node_id(api_prompt: dict) -> str:
+        """取一个未占用的数字节点 id（API prompt 的键是字符串 id）。
+
+        子图展开可能产生 ``"5:3"`` 这类复合 id，求 max 时只认纯数字 id；
+        结果仍与现有键冲突则继续自增（防御性兜底，理论到不了）。
+        """
+        nums = [int(k) for k in api_prompt if str(k).isdigit()]
+        nid = (max(nums) + 1) if nums else 1
+        while str(nid) in api_prompt:
+            nid += 1
+        return str(nid)
+
+    def _collect_enhancer_ref_sources(self, api_prompt: dict,
+                                      encoder_id: str) -> List[str]:
+        """收集正向编码节点已连接的参考图源节点 id（按槽位序、去重、≤8 路）。
+
+        只认「该路真的持有图片」的 LoadImage* 节点：沿连线回溯（兼容中间隔一层
+        缩放节点的老接法），且其 image 值非空（generate_storyboard 会把多余槽位
+        整节点摘除，这里再兜一道空文件名）。8 路满后多余的参考图不接 ——
+        增强节点只见前 8 张，提示词照常增强。
+        """
+        node = api_prompt.get(encoder_id) or {}
+        inputs = node.get("inputs") or {}
+        keys = sorted((k for k in inputs if _IMAGE_SLOT_RE.match(str(k))),
+                      key=lambda k: _slot_index(k))
+        sources: List[str] = []
+        seen: set = set()
+        for key in keys:
+            value = inputs.get(key)
+            if not (isinstance(value, list) and len(value) == 2):
+                continue
+            load_id = self._trace_load_image(api_prompt, value, depth=2)
+            if not load_id or load_id in seen:
+                continue
+            src = api_prompt.get(load_id) or {}
+            if not str((src.get("inputs") or {}).get("image") or "").strip():
+                continue        # 空文件名：该路不产出 IMAGE（「槽位留空」语义）
+            seen.add(load_id)
+            sources.append(load_id)
+            if len(sources) >= len(PROMPT_ENHANCER_IMAGE_FIELDS):
+                break
+        return sources
+
+    def _detach_prompt_enhancer(self, api_prompt: dict, encoder_id: str = None,
+                                pos_field: str = None,
+                                fallback_text: str = None) -> dict:
+        """把模板里**固化**的增强节点从本次提交中摘掉，恢复正向提示词为纯文本。
+
+        背景（2026-10-07）：增强节点已写进 5 个 QwenImage2.1 图片链路模板，并且
+        **硬连线**到编码节点的 prompt 输入。因此当运行时判定「本次不增强」时
+        （开关关闭 / 凭据缺失 / 「确切文字」硬约束保护 / 插件不可用），绝不能原样
+        提交——那样 ComfyUI 会拿**空的**「输入提示词」和空 api_key 去跑增强节点，
+        轻则空提示词出图，重则整单失败。fail-open 必须连带摘除节点：
+
+          1. 编码节点 prompt 若仍指向增强节点输出 → 改回 fallback_text 纯文本；
+          2. 从 API 图里删掉增强节点本身；
+          3. 删节点后自然不再有它的参考图输入（无悬空连线）。
+
+        返回就地修改后的 api_prompt（永不抛异常，摘除失败也返回原图）。
+        """
+        try:
+            if not isinstance(api_prompt, dict) or not api_prompt:
+                return api_prompt
+            enh_id = next((nid for nid, n in api_prompt.items()
+                           if isinstance(n, dict)
+                           and str(n.get("class_type") or "") == PROMPT_ENHANCER_CLASS), None)
+            if enh_id is None:
+                return api_prompt
+            if not encoder_id or encoder_id not in api_prompt:
+                encoder_id = self._find_positive_text_node(api_prompt)
+            if encoder_id and not pos_field:
+                pos_field = self._positive_field(api_prompt, encoder_id)
+            # 恢复纯文本：优先用调用方给的 fallback_text；否则用编码节点已有的字面量；
+            # 再否则用增强节点「输入提示词」里的值（模板默认值）。
+            text = fallback_text
+            if (not isinstance(text, str) or not text.strip()) and encoder_id and pos_field:
+                cur = (api_prompt[encoder_id].get("inputs") or {}).get(pos_field)
+                if isinstance(cur, str) and cur.strip():
+                    text = cur
+            if not isinstance(text, str) or not text.strip():
+                enh_in = (api_prompt.get(enh_id) or {}).get("inputs") or {}
+                tv = enh_in.get(PROMPT_ENHANCER_PROMPT_FIELD)
+                if isinstance(tv, str) and tv.strip():
+                    text = tv
+            if encoder_id and pos_field:
+                if isinstance(text, str) and text.strip():
+                    api_prompt[encoder_id]["inputs"][pos_field] = text
+                else:
+                    # 无可用原文（调用方未填提示词）→ 置空，绝不能留悬空连线
+                    logger.warning("[提示词增强] 摘除固化节点时未取到原文提示词，"
+                                   "正向字段已置空（该次生成本就缺提示词）")
+                    api_prompt[encoder_id]["inputs"][pos_field] = ""
+            api_prompt.pop(enh_id, None)
+            logger.info("[提示词增强] 本次不增强，已摘除模板固化节点 %s，"
+                        "正向提示词按原文提交（%d 字）",
+                        enh_id, len(text) if isinstance(text, str) else 0)
+            return api_prompt
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[提示词增强] 摘除固化节点失败（原样提交）：%s", e)
+            return api_prompt
+
+    def _inject_prompt_enhancer(self, api_prompt: dict) -> dict:
+        """按需把「提示词增强节点」插进本次提交的 API prompt（就地修改并返回）。
+
+        设计演进（2026-10-07 用户反馈：增强节点只在运行时 API 图里、模板画布
+        看不到，用户误以为没开增强）→ 增强节点已**固化**进 5 个 QwenImage2.1
+        图片链路模板（角色/物品/场景/物品_参考图/分镜生成_Qwen21.json），
+        本方法改为「检测模板里已有增强节点 → 只填输入」：
+
+        - 模板已有增强节点：填「输入提示词」（原提示词全文）+「任务模式」
+          （有参考图→图生图 / 无→文生图）+ api_key/api_base_url/model + 本地
+          PE/主模型/mmproj + seed（按提示词 md5 派生），**不**新增节点 id；
+          参考图连线保持模板原样（编码 images.image_N 的 Load* 源已在 graph 里
+          接好），仅把本次「实际有图」的参考图路径写进 Load* 节点 inputs。
+        - 模板无增强节点（外部 / 旧模板 / H3 视频 / 超分 / TTS）：保持原动态
+          注入路径（new_id = max+1），与历史行为兼容。
+
+        判定链（任一不满足即原样返回，零侵入）：
+          1. 运行时开关 MJSCXT_PROMPT_ENHANCER（默认开）；
+          2. 工作流含 TextEncodeQwenImage21 或已有 TE_Qwen_Image_2_1_Prompt_Enhancer；
+          3. 幂等：本次提交尚未填充（增强节点「输入提示词」为空）；
+          4. 凭据齐全；
+          5. object_info 核对（插件已装、必填无缺口）。
+        """
+        try:
+            if not isinstance(api_prompt, dict) or not api_prompt:
+                return api_prompt
+            if not _prompt_enhancer_node_enabled():
+                # 模板固化节点：开关关闭时也必须摘除，否则 ComfyUI 会拿空的
+                # 「输入提示词」+ 空 api_key 跑增强节点（空提示词出图/整单失败）
+                _enc0 = self._find_positive_text_node(api_prompt)
+                _pos0 = self._positive_field(api_prompt, _enc0) if _enc0 else None
+                _txt0 = None
+                if _enc0 and _pos0:
+                    _cur0 = (api_prompt[_enc0].get("inputs") or {}).get(_pos0)
+                    if isinstance(_cur0, str):
+                        _txt0 = _cur0
+                return self._detach_prompt_enhancer(api_prompt, _enc0, _pos0, _txt0)
+
+            existing_enh = next(
+                (nid for nid, n in api_prompt.items()
+                 if isinstance(n, dict)
+                 and str(n.get("class_type") or "") == PROMPT_ENHANCER_CLASS),
+                None)
+
+            # ② 适用判定
+            has_encoder = any(
+                isinstance(n, dict)
+                and str(n.get("class_type") or "") in COMBINED_PROMPT_NODE_TYPES
+                for n in api_prompt.values())
+            if not (has_encoder or existing_enh):
+                return api_prompt
+
+            # ③ 幂等：模板里已有增强节点 → 只填参数；否则走动态注入
+            encoder_id = self._find_positive_text_node(api_prompt)
+            pos_field = self._positive_field(api_prompt, encoder_id) if encoder_id else None
+            original_text = None
+            if encoder_id and pos_field:
+                original_text = ((api_prompt[encoder_id].get("inputs") or {})
+                                 .get(pos_field))
+
+            if existing_enh:
+                # ===== 模板已有增强节点：只填输入，不新增节点 =====
+                enh = api_prompt[existing_enh]
+                enh_inputs = enh.get("inputs") or {}
+                # 原提示词可能在编码节点（模板 prompt 是 widget 控件，_ui_to_api
+                # 会把它写进编码节点 inputs）——若编码节点 prompt 已是增强节点
+                # 连线（[enh_id, 0]），原提示词在增强节点「输入提示词」控件里
+                src_text = None
+                if isinstance(original_text, str) and original_text.strip():
+                    src_text = original_text
+                elif isinstance(enh_inputs.get(PROMPT_ENHANCER_PROMPT_FIELD), str) \
+                        and enh_inputs[PROMPT_ENHANCER_PROMPT_FIELD].strip():
+                    src_text = enh_inputs[PROMPT_ENHANCER_PROMPT_FIELD]
+                if not src_text:
+                    return self._detach_prompt_enhancer(
+                        api_prompt, encoder_id, pos_field, None)
+                if SCENE_EXACT_TEXT_MARKER in src_text:
+                    logger.info("[提示词增强] 检测到「确切文字」硬约束（surface_text），"
+                                "跳过增强注入以保证硬约束逐字保留，按原提示词提交")
+                    return self._detach_prompt_enhancer(
+                        api_prompt, encoder_id, pos_field, src_text)
+                # 任务模式判定：优先看模板固化增强节点自身连了几路参考图（graph 里
+                # 接的是 LoadImage* 源 → API 里表现为输入值是 2 元素 list）；
+                # 增强节点没连任何参考图时，再退回看编码节点 image_N 槽位的
+                # Load* 源是否真有图（兼容老 3 槽紧凑模板）。
+                enh_conn_refs = [
+                    k for k, v in (enh_inputs.items()
+                                   if isinstance(enh_inputs, dict) else [])
+                    if k in PROMPT_ENHANCER_IMAGE_FIELDS
+                    and isinstance(v, list) and len(v) == 2]
+                has_ref = bool(enh_conn_refs)
+                if not has_ref and encoder_id and encoder_id in api_prompt:
+                    for k, v in (api_prompt[encoder_id].get("inputs") or {}).items():
+                        if _IMAGE_SLOT_RE.match(str(k)) and isinstance(v, list) and len(v) == 2:
+                            load = api_prompt.get(str(v[0]))
+                            if isinstance(load, dict):
+                                ctype = str(load.get("class_type") or "")
+                                im = (load.get("inputs") or {}).get("image", "")
+                                if ctype.startswith("LoadImage"):
+                                    if im and str(im).strip():
+                                        has_ref = True
+                                        break
+                                elif ctype.startswith("ImageScale") or ctype.startswith("FluxKontext"):
+                                    inner = load.get("inputs") or {}
+                                    for iv in inner.values():
+                                        if isinstance(iv, list) and len(iv) == 2:
+                                            load2 = api_prompt.get(str(iv[0]))
+                                            if isinstance(load2, dict) and str(load2.get("class_type") or "").startswith("LoadImage"):
+                                                im2 = (load2.get("inputs") or {}).get("image", "")
+                                                if im2 and str(im2).strip():
+                                                    has_ref = True
+                                                    break
+                                        if has_ref:
+                                            break
+                                    break
+                if has_ref:
+                    logger.info("[提示词增强] 模板含参考图连线（%d 路），任务模式=图生图",
+                                len(enh_conn_refs))
+                base_url, api_key, model = _enhancer_text_credentials()
+                if not (base_url and api_key and model):
+                    logger.warning("[提示词增强] AI 设置·文本分析模型未配置齐全"
+                                   "（base_url/api_key/model），本次按原提示词提交")
+                    return self._detach_prompt_enhancer(
+                        api_prompt, encoder_id, pos_field, src_text)
+                # 填增强节点输入（保留模板里已连的参考图连线 —— 参考图是 graph 层
+                # 固化连线，运行时**不重建**，只覆盖本次要改的 widget 值）
+                enh_inputs[PROMPT_ENHANCER_PROMPT_FIELD] = src_text
+                enh_inputs["任务模式"] = (PROMPT_ENHANCER_MODE_I2I if has_ref
+                                       else PROMPT_ENHANCER_MODE_T2I)
+                enh_inputs["api_key"] = api_key
+                enh_inputs["api_base_url"] = base_url
+                enh_inputs["model"] = model
+                enh_inputs.update(dict(PROMPT_ENHANCER_LOCAL_DEFAULTS))
+                # seed：按提示词内容派生（同一条提示词增强结果稳定 —— 质检重试/换种子
+                # 重试时增强文本不变，便于对照；不同镜头互不相同）
+                try:
+                    enh_inputs["seed"] = int(
+                        hashlib.md5(src_text.encode("utf-8", "ignore")).hexdigest()[:8], 16)
+                except Exception:  # noqa: BLE001
+                    enh_inputs["seed"] = 0
+                enh["inputs"] = enh_inputs
+                # 确认编码节点 prompt 已指向增强节点（模板固化连线）
+                if encoder_id and pos_field and encoder_id in api_prompt:
+                    cur = (api_prompt[encoder_id].get("inputs") or {}).get(pos_field)
+                    if not (isinstance(cur, list) and len(cur) == 2 and str(cur[0]) == existing_enh):
+                        api_prompt[encoder_id]["inputs"][pos_field] = [existing_enh, 0]
+                logger.info("[提示词增强] 使用模板固化节点 %s：任务模式=%s，"
+                            "原提示词 %d 字先增强后编码",
+                            existing_enh,
+                            "图生图" if has_ref else "文生图",
+                            len(src_text))
+                return api_prompt
+
+            # ===== 模板无增强节点：原动态注入路径（兼容旧/外部模板）=====
+            # ③ 幂等（旧版口径）：正向字段仍是文本控件
+            if not encoder_id or not pos_field:
+                return api_prompt
+            if not isinstance(original_text, str) or not original_text.strip():
+                return api_prompt
+            if SCENE_EXACT_TEXT_MARKER in original_text:
+                logger.info("[提示词增强] 检测到「确切文字」硬约束（surface_text），"
+                            "跳过增强注入以保证硬约束逐字保留，按原提示词提交")
+                return api_prompt
+            base_url, api_key, model = _enhancer_text_credentials()
+            if not (base_url and api_key and model):
+                logger.warning("[提示词增强] AI 设置·文本分析模型未配置齐全"
+                               "（base_url/api_key/model），本次按原提示词提交")
+                return api_prompt
+            oi = self.get_object_info() or {}
+            spec = oi.get(PROMPT_ENHANCER_CLASS)
+            if not isinstance(spec, dict) or not spec:
+                logger.warning("[提示词增强] object_info 中无 %s（插件未安装或 "
+                               "object_info 不可用），本次按原提示词提交",
+                               PROMPT_ENHANCER_CLASS)
+                return api_prompt
+            decl = spec.get("input") or {}
+            declared_spec = {**(decl.get("required") or {}),
+                             **(decl.get("optional") or {})}
+            ref_sources = self._collect_enhancer_ref_sources(api_prompt, encoder_id)
+            mode = PROMPT_ENHANCER_MODE_I2I if ref_sources else PROMPT_ENHANCER_MODE_T2I
+            enh_inputs: Dict[str, Any] = {
+                PROMPT_ENHANCER_PROMPT_FIELD: original_text,
+                "任务模式": mode,
+            }
+            for field, src_id in zip(PROMPT_ENHANCER_IMAGE_FIELDS, ref_sources):
+                enh_inputs[field] = [src_id, 0]
+            enh_inputs["api_key"] = api_key
+            enh_inputs["api_base_url"] = base_url
+            enh_inputs["model"] = model
+            enh_inputs.update(dict(PROMPT_ENHANCER_LOCAL_DEFAULTS))
+            try:
+                enh_inputs["seed"] = int(
+                    hashlib.md5(original_text.encode("utf-8", "ignore")).hexdigest()[:8], 16)
+            except Exception:  # noqa: BLE001
+                enh_inputs["seed"] = 0
+            dropped_ref: List[str] = []
+            dropped_core: List[str] = []
+            for k in list(enh_inputs):
+                if k in declared_spec or _is_dynamic_child(declared_spec, k):
+                    continue
+                (dropped_ref if k in PROMPT_ENHANCER_IMAGE_FIELDS
+                 else dropped_core).append(k)
+                enh_inputs.pop(k, None)
+            if dropped_core:
+                logger.warning("[提示词增强] 增强节点未声明以下输入 %s（插件版本可能与"
+                               "预期不符），本次按原提示词提交", dropped_core)
+                return api_prompt
+            if dropped_ref:
+                logger.warning("[提示词增强] 增强节点未声明以下参考图槽位，已丢弃这些路"
+                               "（其余参考图与提示词增强不受影响）：%s", dropped_ref)
+            missing = [k for k, v in (decl.get("required") or {}).items()
+                       if k not in enh_inputs
+                       and not (isinstance(v, (list, tuple)) and v
+                                and v[0] == "COMFY_AUTOGROW_V3")]
+            if missing:
+                logger.warning("[提示词增强] 增强节点缺少必填输入 %s"
+                               "（插件版本可能与预期不符），本次按原提示词提交", missing)
+                return api_prompt
+            new_id = self._next_node_id(api_prompt)
+            api_prompt[new_id] = {"class_type": PROMPT_ENHANCER_CLASS, "inputs": enh_inputs}
+            api_prompt[encoder_id]["inputs"][pos_field] = [new_id, 0]
+            logger.info("[提示词增强] 已注入 %s（节点 %s）：任务模式=%s，参考图 %d 路，"
+                        "文本模型=%s，原提示词 %d 字先增强后编码",
+                        PROMPT_ENHANCER_CLASS, new_id, mode, len(ref_sources),
+                        model, len(original_text))
+            return api_prompt
+        except Exception as e:  # noqa: BLE001  fail-open：注入失败绝不阻断生成
+            logger.warning("[提示词增强] 注入失败（按原提示词提交）：%s", e)
+            # ⭐ 2026-10-08 兜底加固：模板已把编码 prompt **硬连线**到增强节点，
+            #   上面任何一步中途抛错（半填充状态）时若原样提交，ComfyUI 会拿
+            #   空的「输入提示词」+ 空 api_key 去跑增强节点 —— 正是本次要消灭的
+            #   「空提示词出图 / 整单失败」形态。这里再兜一层：编码 prompt 仍指向
+            #   增强节点时，还原为文本并摘除节点（本兜底自身异常也忽略）。
+            try:
+                _enhs = [k for k, n in (api_prompt or {}).items()
+                         if isinstance(n, dict)
+                         and str(n.get("class_type") or "") == PROMPT_ENHANCER_CLASS]
+                if _enhs:
+                    _enc = self._find_positive_text_node(api_prompt)
+                    _pos = self._positive_field(api_prompt, _enc) if _enc else None
+                    _cur = (((api_prompt.get(_enc) or {}).get("inputs") or {}).get(_pos)
+                            if (_enc and _pos) else None)
+                    _wired = (isinstance(_cur, list) and len(_cur) == 2
+                              and str(_cur[0]) in {str(x) for x in _enhs})
+                    if _wired:
+                        _txt = next(
+                            (v for v in (
+                                ((api_prompt.get(x) or {}).get("inputs") or {})
+                                .get(PROMPT_ENHANCER_PROMPT_FIELD) for x in _enhs)
+                             if isinstance(v, str) and v.strip()), None)
+                        api_prompt = self._detach_prompt_enhancer(
+                            api_prompt, _enc, _pos, _txt)
+                        logger.warning("[提示词增强] 已兜底摘除增强节点（编码 prompt 仍指向它），"
+                                       "避免空提示词/空 api_key 提交")
+                    else:
+                        # 编码 prompt 已是字面量（异常发生在上一步）→ 增强节点是**孤儿**，
+                        # 虽然 ComfyUI 从输出节点遍历不会执行它，但仍摘掉，避免把
+                        # 「空输入提示词 + 空 api_key」的半成品节点带进提交图。
+                        for _x in _enhs:
+                            api_prompt.pop(_x, None)
+                        logger.warning("[提示词增强] 已兜底摘除未被引用的增强节点 %s（异常中断残留）",
+                                       ",".join(str(x) for x in _enhs))
+            except Exception as e2:  # noqa: BLE001
+                logger.warning("[提示词增强] 兜底摘除失败（忽略，按原图提交）：%s", e2)
+            return api_prompt
+
     def queue_prompt(self, api_prompt: dict) -> str:
+        # TE_MAN 提示词增强节点运行时注入（2026-10-06）：所有图片提交路径在此收口，
+        # 预检/风格清理等文本工序都已完成，注入的是最终文本；条件不满足时原样返回
+        # （判定链与 fail-open 口径见 _inject_prompt_enhancer）。
+        api_prompt = self._inject_prompt_enhancer(api_prompt)
+        # 提交前「模型名对齐」（2026-10-08）：模板 / 代码默认值 / 用户选定里写死的模型名
+        # 会因目录改名而失效（实测 VAELoader 86 的 vae_name、增强节点的 mmproj 各炸一次：
+        # /prompt 400 → 整集视频被丢弃）。这里用 object_info（ComfyUI 自己校验用的权威
+        # 列表）把模型名改写成当前布局下的真实地址；匹配不上只告警、不阻断（fail-open）。
+        try:
+            import comfyui_models  # 函数内导入：与本模块无环依赖，也规避导入顺序问题
+            comfyui_models.align_prompt_models(
+                api_prompt, object_info=self.get_object_info(), tag="提交前")
+        except Exception as _ma_err:  # noqa: BLE001
+            logger.warning("模型名对齐调用失败（按原样提交）：%s", _ma_err)
         payload = {"prompt": api_prompt, "client_id": self.client_id}
         try:
             result = self._post("/prompt", payload)
@@ -1356,7 +1757,7 @@ class ComfyUIClient:
                 "pending": len(d.get("queue_pending") or []),
                 "ok": True}
 
-    def wait_for_completion(self, prompt_id: str, timeout: int = 1800) -> dict:
+    def wait_for_completion(self, prompt_id: str, timeout: int = 3600) -> dict:
         """轮询远端任务直到完成。
 
         S9 增强（不改变返回契约——超时仍返回 `{}`，避免 ripple 到 6 处调用方）：
@@ -1372,12 +1773,16 @@ class ComfyUIClient:
         超时和 error 的 interrupt 都传 prompt_id（不再打断队列中正在执行的其他任务）。
         """
         start = time.time()
+        # ⭐ 2026-10-08：存活检测计数器。旧实现只轮询 history —— 一旦 ComfyUI 重启、
+        #    历史被清、或提交被丢，这个 prompt_id 就**永远不会出现在 history 里**，
+        #    于是死等满 timeout（默认 3600s = 1 小时！实测整集卡死 6~25 分钟无日志、
+        #    队列为空、GPU 空闲）。连续 _MISS_LIMIT 次（≈15s）既不在 history 也不在
+        #    队列 → 判定远端已丢失，立即返回 {}（调用方按「没拿到结果」重试）。
+        _miss = 0
+        _MISS_LIMIT = 5
         while time.time() - start < timeout:
-            # ⓪ temp 看门狗（2026-10-01）：DLSS 补帧节点在 ComfyUI temp 下建工作目录，
-            # 若整个 temp 被外部清理（TE 启动器/磁盘清理），mkdtemp 报 WinError 3 →
-            # 收尾文件不存在 → 整集成片丢失（实测连续 18 次提交全死于此）。
-            # 每次轮询顺手确保 temp 存在（exist_ok 幂等、零开销），把「被删」窗口
-            # 压到一个轮询间隔（3s）内。
+            # ⓪ 轮询顺手确保 temp 目录存在（exist_ok 幂等、零开销）——ComfyUI 侧节点
+            # 仍可能在 temp 下建工作目录，此为通用防御。
             try:
                 os.makedirs(COMFYUI_TEMP_DIR, exist_ok=True)
             except OSError:
@@ -1390,6 +1795,7 @@ class ComfyUIClient:
             try:
                 history = self.get_history(prompt_id)
                 if prompt_id in history:
+                    _miss = 0
                     entry = history[prompt_id]
                     status = entry.get("status", {}) or {}
                     if status.get("completed") or status.get("status_str") == "success":
@@ -1402,6 +1808,28 @@ class ComfyUIClient:
                         # B-21 P1-13：error 态也定向 interrupt（清理本 prompt 的残留队列项）
                         self.interrupt(prompt_id)
                         return entry
+                else:
+                    # ⭐ 2026-10-08 存活检测：history 里没有 → 再看队列里在不在。
+                    try:
+                        _q = self._get("/queue") or {}
+                        _qids = [x[1] for x in (_q.get("queue_running") or [])
+                                 if isinstance(x, (list, tuple)) and len(x) > 1]
+                        _qids += [x[1] for x in (_q.get("queue_pending") or [])
+                                  if isinstance(x, (list, tuple)) and len(x) > 1]
+                    except Exception:  # noqa: BLE001
+                        _qids = [prompt_id]   # 查询失败 → 保守当作还在跑，绝不误杀
+                    if prompt_id in _qids:
+                        _miss = 0
+                    else:
+                        _miss += 1
+                        if _miss >= _MISS_LIMIT:
+                            logger.warning(
+                                "等待中的任务在 ComfyUI 已不存在（history/queue 均无 %s，"
+                                "连续 %d 次）→ 判定远端丢失，放弃等待交调用方重试",
+                                prompt_id, _miss)
+                            _bump("lost", 1)
+                            _bump("waited_seconds", round(time.time() - start, 2))
+                            return {}
             except cancellation.Cancelled:
                 raise  # 中止信号必须穿透，不能被轮询的通用 except 吞掉
             except Exception as e:
@@ -1493,7 +1921,7 @@ class ComfyUIClient:
         fail-open 口径：台账或远端 history 查询任何异常都只降级为「本次不复用」，
         绝不阻断生产 —— 缓存是加速器，不是依赖。
         """
-        timeout = timeout or 1800
+        timeout = timeout or 3600
         if not job_key:
             pid = self.queue_prompt(api_prompt)
             return self.wait_for_completion(pid, timeout=timeout), pid, False
@@ -1741,12 +2169,6 @@ class ComfyUIClient:
             return None
         return sorted(neg, key=lambda t: _node_sort_key(t[0]))[-1]
 
-    def _find_negative_text_node(self, api_prompt: dict,
-                                 class_types=PROMPT_NODE_TYPES) -> Optional[str]:
-        """定位负向节点 id（`_find_negative_slot` 的兼容包装，仅回节点 id）"""
-        hit = self._find_negative_slot(api_prompt, class_types)
-        return hit[0] if hit else None
-
     def _generate_base_image(self, workflow_file: str, prompt_zh: str,
                              asset_type: str = None, seed: int = None,
                              style: str = "", size=None,
@@ -1782,7 +2204,9 @@ class ComfyUIClient:
             logger.error(f"{workflow_file} 中未找到正向提示词节点，转换元信息: {meta}")
             return []
         # 风格注入：必须在场景去人之前拼好，保证风格词不被 sanitize 丢掉
-        prompt_zh = style_kit.with_style(prompt_zh, style) if style else prompt_zh
+        # 参考图口径（2026-10-07）：剥离「色调/光影」token + 颜色保真条款，
+        # 否则「色调灰蓝压抑」会把角色三视图的皮肤整体染蓝（用户实测反馈）。
+        prompt_zh = style_kit.with_reference_style(prompt_zh, style) if style else prompt_zh
         if prompt_extra:
             prompt_zh = f"{str(prompt_zh).rstrip('。;； ')}{prompt_extra}"
         # 场景资产去人
@@ -1924,9 +2348,40 @@ class ComfyUIClient:
         # 不注入则模型默认半身/胸像构图且三格版式不可控，多视角与分镜一致性都会崩坏
         # （2026-09-19 实测：三视图出成半身，且同图内人物身高比例不一致）。
         prompt_zh = self._ensure_fullbody_prompt(prompt_zh, style)
+        # ⭐ 2026-10-06（用户指定）：角色未明说国籍/人种时，**一律默认中国人（亚洲面孔）**。
+        # 扩散模型在"没写国籍"时会按自身偏置默认出欧美面孔；这里确定性补默认约束，
+        # 仅当提示词未出现「外国/西方/欧美/黑人/白人/混血」等明说非华人词时才追加，避免误伤。
+        prompt_zh = self._ensure_cn_default_ethnicity(prompt_zh)
         return self._generate_base_image(WORKFLOW_TEMPLATE["character_gen"], prompt_zh,
                                          asset_type="character", seed=seed, style=style, size=size,
                                          filename_prefix=filename_prefix)
+
+    @staticmethod
+    def _ensure_cn_default_ethnicity(prompt_zh: str) -> str:
+        """角色提示词补「未明说国籍则默认中国人（亚洲面孔）」约束（幂等）。
+
+        扩散模型在角色提示词**未写国籍/人种**时，会按自身偏置默认出欧美面孔。
+        用户 2026-10-06 明确：角色没有明说是外国人的情况下，都默认是中国人。
+        故在此确定性追加默认约束，且**仅在提示词未明说非华人种族时**才追加（避免误伤
+        「欧洲贵族」「黑人」「混血儿」等已显式指定人种的角色）。
+        """
+        text = (prompt_zh or "").strip()
+        if not text:
+            return text
+        # 已明说非华人种族 / 外国 → 不追加，尊重显式指定
+        _foreign_markers = ("外国", "外籍", "西方", "欧美", "欧式", "欧洲", "西洋",
+                            "白人", "黑人", "金发碧眼", "混血", "高加索", "拉丁",
+                            "阿拉伯", "印度", "日本", "韩国", "高句丽", "棒子",
+                            "欧美面孔", "白人面孔", "外国人", "洋人", "高鼻深目")
+        if any(m in text for m in _foreign_markers):
+            return text
+        # 已显式写了中国人/亚洲面孔 → 不追加（幂等）
+        if any(m in text for m in ("中国人", "中华", "东亚面孔", "亚洲面孔", "黄皮肤", "汉族",
+                                    "中国面孔", "东方面孔")):
+            return text
+        return (text.rstrip("。，,.;； ")
+                + "；该角色为中国人，东亚面孔、亚洲五官特征、中国人种肤色，"
+                  "除非另有说明否则默认中国文化背景")
 
     @staticmethod
     def _ensure_fullbody_prompt(prompt_zh: str, style: str = "") -> str:
@@ -1952,7 +2407,8 @@ class ComfyUIClient:
         # 字符串被再叠一层（宁可保持原样，也不出现双层版式）。
         if marker in text or "character sheet" in text:
             return text
-        base = style_kit.with_style(text, style) if style else text
+        # 角色设定表属参考图 → 参考图口径（剥离色调/光影 token，防肤色染偏）
+        base = style_kit.with_reference_style(text, style) if style else text
         if marker in base or "character sheet" in base:
             return base
         labels = ComfyUIClient._extract_trait_labels(text)
@@ -2043,7 +2499,7 @@ class ComfyUIClient:
         return cleaned
 
     @staticmethod
-    def _ensure_item_white_bg(prompt_zh: str, style: str = "") -> str:
+    def _ensure_item_white_bg(prompt_zh: str, style: str = "", surface_text: str = "") -> str:
         """给物品参考图提示词确定性地补「只呈现本体 + 纯白背景」约束（幂等）。
 
         物品/道具参考图与角色设定图同理：后续要拿来做参考图编辑（多视角/分镜），
@@ -2051,32 +2507,131 @@ class ComfyUIClient:
 
         2026-10-01 补「本体之外一律不要」：此前只约束了**背景**，没约束**承托物**，
         于是「丹药置于玉盒中」这种提示词照画不误，还会被质检判通过（图符提示词）。
+
+        2026-10-06 补「带文字物品的文字渲染规范」：扩散模型**无法写出正确可读的汉字**
+        （实测出「形似汉字的乱码」，笔画对但字错、不可读）。若物品提示词**含可读
+        文字**（书名/告示/卡片/标签/守则/手机屏幕等），追加约束让模型把文字画得
+        规整、横排、清晰、占版面一致，**降低乱码概率**（治标——真正根治是后处理
+        贴图，见 config ITEM_TEXT_POSTPROCESS；此处只改提示词、不做合成，属零风险
+        确定性改进）。
+
+        surface_text（2026-10-06 新增，带默认值以**兼容所有既有调用**）：
+          · 非空 → 追加**确切文字**硬约束（**替代**下方 text_render_rule 的软约束）：
+            把「要写什么字」逐字写进提示词。这是「带文字物品乱码」的根因修法——
+            旧软约束只要求「写 2-6 个常见词」，从没告诉模型**写哪几个字**，
+            模型只能瞎编 → 形似汉字的乱码。幂等标记「物品表面必须呈现」。
+          · 空（默认）→ 与加参数前**逐字一致**（沿用 text_render_rule 软约束，
+            「未明确指出的文字一律留白不写」）。
         """
         text = ComfyUIClient._strip_item_placement(str(prompt_zh or "").strip())
         marker = "纯白背景"
-        base = text if marker in text else style_kit.with_style(text, style) if style else text
+        # 物品参考图同样走参考图口径（固有色不得被整体色调污染）
+        base = text if marker in text else style_kit.with_reference_style(text, style) if style else text
         body_rule = ("，画面中只呈现该物品本体，不要任何容器、托盘、底座、支架、展示台、盒子、"
-                     "碗碟、绸布等承托物，不要手或人物，不得把物品放进另一个物体内部或上面")
+                     "碗碟、绸布等承托物，不要手或人形生物，不得把物品放进另一个物体内部或上面")
+        # ⭐ 2026-10-06 强约束版「带文字物品」的文字渲染规范（参考角色 sheet 的成功范式）。
+        # 旧版只写"写清可读简体字"（软约束）——扩散模型对**小字**仍会乱码（实测告示/手写
+        # 卡片出形似汉字的错字）。角色 sheet 能写清是因为用了「固定枚举的大字标签」。
+        # 故此处升级：① 文字内容限定为**简短、通用、高频**的中文（避免剧情长句）；
+        # ② 字号**放大、笔画粗、高对比**（小字→中/大字才写得清）；③ 版面**简洁、少行**，
+        # 未指定的文字一律**留白不写**（不要塞满字）。仍仅当提示词含文字语义时追加（幂等），
+        # 且措辞避开 CHARACTER_WORDS（"人物/人影…"），否则被场景清洗整句丢弃。
+        # ⭐ 2026-10-09 对齐 Qwen-Image 官方用法：原文放引号 + 载体 + 字体；
+        #    去掉 markdown `**`、书名号「」与「不要乱码」负向句（负向句会诱发乱码）。
+        text_render_rule = ("，若物品表面需呈现文字（书名/告示/卡片/标签/手写/打印/屏幕等）："
+                            "把确切原文写进描述，格式为：物品表面居中印有黑色粗体字 “原文”；"
+                            "文字简短（不超过 8 个字），字体清晰、笔画完整、高对比、横排，"
+                            "排版规整，字形与常用印刷体一致；未指出的文字一律留白不写")
         if marker in base:
-            return base if "只呈现该物品本体" in base else base + body_rule
-        suffix = (body_rule + "，纯白背景，无任何场景、地面、桌面、阴影与背景纹理，"
-                  "物品完整孤立居中、边缘清晰")
-        base = base.rstrip("。，,.;； ")
-        return (base + suffix) if base else suffix.lstrip("，")
-
+            out = base if "只呈现该物品本体" in base else base + body_rule
+        else:
+            out = base.rstrip("。，,.;； ")
+            out = out + body_rule + "，纯白背景，无任何场景、地面、桌面、阴影与背景纹理，" \
+                        "物品完整孤立居中、边缘清晰" if out else body_rule.lstrip("，") + "，纯白背景，" \
+                        "无任何场景、地面、桌面、阴影与背景纹理，物品完整孤立居中、边缘清晰"
+        # ⭐ 2026-10-06（T02）：给出了**确切文字** → 用硬约束替代软约束（幂等）。
+        #    根因：旧软约束从未告诉模型"写哪几个字"，汉字只能瞎编 → 乱码。
+        #    固定文字（工牌/告示/证件的抬头等）写进提示词后，模型照抄即可大幅降低乱码。
+        _surface = str(surface_text or "").strip()
+        if _surface:
+            if "物品表面必须呈现" not in out:
+                out = out.rstrip("。，,.;； ") + (
+                    f"，物品表面必须呈现文字：物品正面居中印有黑色粗体字 \"{_surface}\","
+                    "字体清晰、笔画完整、高对比、横排"
+                    "排版规整，字形与常用印刷体一致")
+            return out
+        # 未给出确切文字 → 沿用既有软约束（与加参数前逐字一致）
+        _text_markers = ("文字", "汉字", "书名", "告示", "卡片", "标签", "手写", "守则", "屏幕", "字样", "字迹")
+        if any(m in out for m in _text_markers) and "字形与常用印刷体一致" not in out:
+            out = out.rstrip("。，,.;； ") + text_render_rule
+        return out
     def generate_item_base(self, prompt_zh: str, seed: int = None,
                            style: str = "", size=None,
-                           filename_prefix: str = None) -> List[str]:
+                           filename_prefix: str = None,
+                           surface_text: str = "") -> List[str]:
+        """生成物品基础图（纯 T2I）。
+
+        surface_text（2026-10-06 新增，**带默认值以兼容所有既有调用**）：
+          物品表面**确切**要呈现的文字（如工牌抬头「安保部」）。非空时由
+          :meth:`_ensure_item_white_bg` 把它作为硬约束写进提示词（替代原来的
+          「写 2-6 个常见词」软约束），从根因上降低汉字乱码；空字符串时与
+          加参数前**逐字一致**。
+        """
         logger.info(f"生成物品基础图: {prompt_zh[:50]}...")
-        prompt_zh = self._ensure_item_white_bg(prompt_zh, style)
+        # ⭐ 2026-10-06：_ensure_item_white_bg 内含「带文字物品的中文文字渲染规范」
+        #    （降低扩散模型写乱码汉字的概率，治标；根治需后处理贴图）。
+        prompt_zh = self._ensure_item_white_bg(prompt_zh, style, surface_text)
         return self._generate_base_image(WORKFLOW_TEMPLATE["item_gen"], prompt_zh,
                                          asset_type="item", seed=seed, style=style, size=size,
                                          filename_prefix=filename_prefix)
 
+    def generate_item_base_with_ref(self, prompt_zh: str, ref_image_path: str,
+                                    seed: int = None, style: str = "",
+                                    size=None, filename_prefix: str = None,
+                                    surface_text: str = "") -> List[str]:
+        """生成物品基础图（**主人形象参考图**链路，2026-10-06 新增）。
+
+        与 :meth:`generate_item_base` 行为一致（同样走 :meth:`_ensure_item_white_bg`
+        的纯白底 + 本体约束、同样保持物品 **1:1 画幅不变量**、同样按 filename_prefix
+        落项目专属输出桶），**差别只在于**：把 ``ref_image_path`` 作为**参考图**送进
+        ``item_ref_gen`` 工作流做图生图。
+
+        用途：「工牌 / 证件照 / 告示人像 / 屏幕人像」这类物品表面承载某角色肖像、
+        且该肖像应是**物品主人本人**的场景（app 层用 ``_item_owner_ref_image``
+        解析主人角色参考图后调用本方法）。
+
+        ⚠️ 走**专用模板** ``item_ref_gen``（= 物品纯 T2I 全节点 + 恰好 1 个参考图槽），
+           而非分镜模板：分镜模板无尺寸节点、出图画幅会**继承参考图**，会破坏
+           「物品图 1:1」不变量。本方法把 ``size``（物品 1:1）传给
+           :meth:`_run_multiview_workflow`，专用模板的 EmptyLatentImage 宽高会被
+           ``style_kit.apply_latent_size`` 覆写为字面量 —— 参考图只提供**形象**，
+           不改变画幅。
+
+        返回：单元素路径列表（与 :meth:`generate_item_base` 返回类型一致）；
+              未产出文件时返回 ``[]``（由 app 层判失败并执行降级）。
+        """
+        logger.info(f"生成物品基础图（主人形象参考图）: {prompt_zh[:50]}...")
+        prompt_zh = self._ensure_item_white_bg(prompt_zh, style, surface_text)
+        local = self.resolve_local_path(ref_image_path) if isinstance(ref_image_path, str) else None
+        if not local or not os.path.exists(local):
+            raise RuntimeError(f"物品主人参考图不可用: {ref_image_path}")
+        # 参考图上传到 ComfyUI output 目录：LoadImageOutput 只认 output 目录 + "名字 [output]" 标注
+        # （_run_multiview_workflow 内部按节点类型补标注）。文件名做安全化处理，避免超长/非法字符。
+        _pfpart = os.path.splitext(os.path.basename(str(filename_prefix or "item")))[0]
+        _safe = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff_.-]", "_",
+                       os.path.basename(local) or "ref")[:48]
+        ref_name = f"item_ref_{_pfpart[:32]}_{_safe}.png"
+        uploaded = self.upload_image(local, ref_name, image_type="output")
+        img_path = self._run_multiview_workflow(
+            uploaded, prompt_zh, seed=seed, size=size, filename_prefix=filename_prefix,
+            wf_name=WORKFLOW_TEMPLATE["item_ref_gen"])
+        return [img_path] if img_path else []
+
     def generate_scene_base(self, prompt_zh: str, seed: int = None,
                             style: str = "", size=None,
                             filename_prefix: str = None,
-                            view_key: str = None) -> List[str]:
+                            view_key: str = None,
+                            surface_text: str = "") -> List[str]:
         """生成场景图（T2I）
 
         view_key（2026-09-29 新增）：场景**机位档**（``config.SCENE_VIEW_KEYS``）。
@@ -2084,6 +2639,12 @@ class ComfyUIClient:
             这就是「基础图 / base.png」的生成路径；
           · 任一档位 → 把该机位的出图指令（见 :func:`scene_view_prompt_suffix`）
             追加进正向提示词后**独立出图**。
+
+        surface_text（2026-10-07 新增，**带默认值以兼容所有既有调用**）：
+          场景里**确切**要呈现的文字（如「楼层安全守则」「禁止通行」）。非空时由
+          :meth:`_ensure_scene_text_render` 把它作为硬约束写进提示词（替代原来的
+          「文字务必简短高频」软约束），从根因上降低场景汉字乱码；空字符串时与
+          加参数前**逐字一致**。所有机位档共用同一份提示词，故各档文字一致。
         ⚠️ 生产链路只对 ``left45`` / ``right45`` / ``top`` 三档传非空 view_key；
         正面档（``front``）**不重新出图**，由 app 层直接复用 base.png
         （base 本就是无角度声明的正拍基准图），故 ``front`` 虽可传、但没人传。
@@ -2107,11 +2668,73 @@ class ComfyUIClient:
         # 这里的判存在只是省一次无用调用；_generate_base_image 内部会再走一遍。
         if SCENE_NO_CHARACTER_SUFFIX not in (prompt_zh or ""):
             prompt_zh = self.sanitize_scene_prompt(prompt_zh)
+        # ⭐ 2026-10-06：带文字场景（告示/标识/招牌/守则/铭牌等）→ 补「中文文字渲染规范」。
+        #    扩散模型写不出可读汉字（实测出乱码）；此句降低乱码概率（治标，根治需后处理贴图）。
+        #    幂等 + 措辞避开 CHARACTER_WORDS（"人物/人影…"），不被 sanitize_scene_prompt 丢弃。
+        #    ⭐ 2026-10-07：传入 surface_text（非空）时改为**确切文字**硬约束（根因修法）。
+        prompt_zh = ComfyUIClient._ensure_scene_text_render(prompt_zh, surface_text)
         return self._generate_base_image(
             WORKFLOW_TEMPLATE["scene_gen"], prompt_zh,
             asset_type="scene", seed=seed, style=style, size=size,
             filename_prefix=filename_prefix,
             prompt_extra=scene_view_prompt_suffix(view_key))
+
+    @staticmethod
+    def _ensure_scene_text_render(prompt_zh: str, surface_text: str = "") -> str:
+        """场景提示词补「带文字的中文渲染规范」（幂等）。
+
+        场景里若出现可读文字（告示 / 标识 / 招牌 / 守则 / 铭牌 / 屏幕等），扩散模型
+        无法写出正确汉字（实测出形似汉字的乱码）。本函数仅在提示词**本身含文字语义**
+        时追加约束，让模型尽量画得规整清晰（**治标**——根治需后处理贴图，不在本仓做）。
+
+        ⭐ surface_text（2026-10-07 新增，带默认值以**兼容所有既有调用**）：
+          · 非空 → 追加**确切文字**硬约束（**替代**下方软约束），把「写哪几个字」逐字
+            写进提示词。这是「带文字场景乱码」的根因修法——场景此前**根本没有**这条
+            通道（bible 的 scenes schema 里没有对应字段），只有「文字务必简短高频…」
+            的软约束，从没告诉模型写哪几个字，模型只能瞎编 → 形似汉字的乱码。
+            与物品 ``_ensure_item_white_bg(surface_text=...)`` / 角色 sheet 的固定标签
+            同一范式（角色 sheet 文字正常正因为它是硬编码枚举的确切字串）。
+            幂等标记「画面文字必须呈现」。
+          · 空（默认）→ 与加参数前**逐字一致**（沿用软约束）。
+
+        ⚠️ 必须避开 :data:`CHARACTER_WORDS`：``sanitize_scene_prompt`` 会把含
+        「人物/人影/人群/士兵」等词的短句整句丢弃，措辞一律用「无生物/无人形」这类
+        不命中词表的写法。
+        """
+        text = (prompt_zh or "").strip()
+        if not text:
+            return text
+        # ⭐ 给了确切文字 → 硬约束（不看 _text_markers：字段非空即代表确有文字要写）
+        _surface = str(surface_text or "").strip()
+        if _surface:
+            # ⚠️ 幂等标记必须是下方追加串的**字面子串**（2026-09-25 教训）：
+            #    这里用「必须呈现以下**确切**文字」（SCENE_EXACT_TEXT_MARKER，单一来源），
+            #    不能用「画面文字必须呈现」——
+            #    实际串是「画面**中出现的**文字（…）必须呈现以下**确切**文字」，
+            #    后者不是子串 → 判定永假 → 反复调用反复追加（提示词无限膨胀）。
+            if SCENE_EXACT_TEXT_MARKER not in text:
+                text = text.rstrip("。，,.;； ") + (
+                    f"，画面中出现的文字（告示/标识/招牌/守则/铭牌/标语/屏幕等）必须呈现"
+                    # ⚠️ 下句必须与 SCENE_EXACT_TEXT_MARKER 字面一致（幂等）
+                    f"文字：居中印有黑色粗体字 \"{_surface}\","
+                    "字体清晰、笔画完整、高对比、横排，排版规整，字形与常用印刷体一致；"
+                    "未指出的文字一律留白不写")
+            return text
+        _text_markers = ("文字", "汉字", "告示", "标识", "招牌", "守则", "铭牌", "标语",
+                         "字样", "字迹", "书法", "标题", "说明", "屏幕")
+        if not any(m in text for m in _text_markers):
+            return text                       # 无文字语义的场景不加，避免误伤
+        if "字形与常用印刷体一致" in text:
+            return text                       # 幂等（新强约束标记）
+        # ⭐ 2026-10-06 强约束版（与物品同款，参考角色 sheet 范式）：把"写清可读简体字"
+        # 升级为「文字简短高频 + 字号放大笔画粗 + 行少留白多 + 未指出的字留白不写」，
+        # 压扩散模型对小字乱码的概率。措辞避开 CHARACTER_WORDS。
+        # ⭐ 2026-10-09 对齐 Qwen-Image 官方用法（同物品口径）。
+        rule = ("，若画面中出现文字（告示/标识/招牌/守则/铭牌/标语/屏幕等）："
+                "把确切原文写进描述，格式为：该处居中印有黑色粗体字 “原文”；"
+                "文字简短（不超过 8 个字），字体清晰、笔画完整、高对比、横排，"
+                "排版规整，字形与常用印刷体一致；未指出的文字一律留白不写")
+        return text.rstrip("。，,.;； ") + rule
 
     # ===================== 第二阶段：多视角生成 =====================
 
@@ -2151,7 +2774,8 @@ class ComfyUIClient:
         logger.info(f"基础图已上传到 ComfyUI output 目录: {output_name}")
 
         # 风格后缀：拼在 base_desc 之后，保证每个视角都带风格
-        styled_desc = style_kit.with_style(base_prompt_zh, style, with_tail=False) if style \
+        # 资产多视角（参考图）→ 参考图口径
+        styled_desc = style_kit.with_reference_style(base_prompt_zh, style, with_tail=False) if style \
             else base_prompt_zh
         # P0：场景多视角同样必须去人（基础图与多视角一致，避免视角转换时"带出"人物）
         if asset_type == "scene":
@@ -2212,9 +2836,19 @@ class ComfyUIClient:
     def _run_multiview_workflow(self, uploaded_image_name: str, prompt_zh: str,
                                 image_dir: str = ANNOTATED_DIR,
                                 seed: int = None, size=None,
-                                filename_prefix: str = None) -> Optional[str]:
-        """运行多视角编辑工作流（分镜生成_Qwen21.json：QwenImage2.1 参考图编辑）"""
-        wf_name = WORKFLOW_TEMPLATE["multiview_gen"]
+                                filename_prefix: str = None,
+                                wf_name: str = None) -> Optional[str]:
+        """运行参考图编辑工作流（默认 分镜生成_Qwen21.json：QwenImage2.1 参考图编辑）
+
+        wf_name（2026-10-06 新增，带默认值以**不改变既有调用方行为**）：
+          显式指定要跑的工作流文件名；缺省（None）时沿用 ``multiview_gen``。
+          「物品主人形象」链路传 ``item_ref_gen``（专用模板：物品 T2I 全节点 +
+          **恰好 1 个** 参考图槽，被下方「填充所有参考图节点」的逻辑命中）。
+          ⚠️ 专用模板保留了尺寸节点（EmptyLatentImage），故 ``size`` 非空时画幅会
+             被覆写为物品 1:1 字面量，**不继承参考图画幅** —— 这是能保证物品画幅
+             不变量的关键（分镜模板无尺寸节点，画幅继承参考图，故不可复用）。
+        """
+        wf_name = wf_name or WORKFLOW_TEMPLATE["multiview_gen"]
         api_prompt, meta = self.load_workflow(wf_name, return_meta=True)
         if seed is not None:
             logger.info(f"多视角采样种子已注入: {self._inject_seed(api_prompt, seed)}")
@@ -2490,81 +3124,12 @@ class ComfyUIClient:
             timeout=timeout,
         )
 
-    def build_story_grid_sequence_prompt(shots: List[dict],
-                                         ref_labels: List[str] = None,
-                                         style: str = "") -> str:
-        """九宫格「**连贯分镜**」提示词（2026-10-02 新增）。
-
-        ⚠️ **与 `build_shot_grid_candidates_prompt` 是两件事，别混**：
-        ┌──────────────────┬──────────────────────────┬──────────────────────────┐
-        │                  │ 候选构图（已有）          │ 连贯分镜（本函数）        │
-        ├──────────────────┼──────────────────────────┼──────────────────────────┤
-        │ 9 格的含义        │ **同一时刻**的 9 个机位    │ **一个连续段落**的 9 个分镜│
-        │ 格间变化          │ 只有取景与角度            │ 机位 + 动作推进 + 情绪递进 │
-        │ 用途              │ 一图九候选，选一格裁切     │ 一次拿到整段故事板         │
-        │ 时间维度          │ 冻结                     │ **推进**（连贯成完整故事）  │
-        └──────────────────┴──────────────────────────┴──────────────────────────┘
-
-        来源：用户提供的业界九宫格分镜范式，其要点（本项目此前的实现缺后两条）：
-        1. 「视觉基底：3D国漫风格」**开篇锚定**；
-        2. 九格是「**不同的分镜，不同景别，能够连贯起来形成一个完整的故事**」；
-        3. 「**保持人物一致性**」+「所有画面角色、场景、光线与色调完全一致」；
-        4. 「画面无文字」；「每个画面左下角标数字 1-9」。
-
-        ⚠️ 第 4 条的**角标数字与「无文字」看似矛盾**，实为不同层级：
-        「无文字」= 画面内不得出现台词/字幕/背景招牌等**内容性文字**；
-        「标数字」= 后期加的制作角标。本函数按原范式**同时声明两者**并显式区分，
-        避免模型把角标当成画面内容（或反过来把内容文字当成角标放过）。
-        ⚠️ 九宫格与「一镜一图」的分辨率换算：3x3 后每格只有整图的 1/9 面积 →
-        **必须放大整图边长**，否则格内细节会低于单镜质量。调用方负责 size。
-        """
-        # 复用单镜提示词拿到完整分节（含 VISUAL BASE / IDENTITY / PRESERVE 等），
-        # 再整体改写 TASK 并把逐镜清单落成 GRID LAYOUT。
-        base_shot = dict(shots[0]) if shots else {}
-        prompt = ComfyUIClient.build_storyboard_prompt(
-            base_shot, ref_labels, has_blocking_image=False)
-        prompt = prompt.replace(
-            "TASK: Generate a single storyboard frame.",
-            "TASK: Generate ONE image laid out as a 3x3 storyboard sheet "
-            "(a nine-panel contact sheet) that tells ONE continuous sequence "
-            "in reading order, left to right, top to bottom.", 1)
-
-        lines = []
-        for i, sh in enumerate(shots[:9], start=1):
-            fr = shot_framing(sh) or ""
-            ang = camera_angle(str(sh.get("camera") or "")) or ""
-            desc = str(sh.get("description") or "").strip()
-            bits = [b for b in (fr, ang) if b]
-            head = " / ".join(bits) if bits else "follow the panel description"
-            lines.append(f"({i}) [{head}] {desc}" if desc else f"({i}) [{head}]")
-        panel_text = "\n".join(lines) if lines else "(1)…(9) follow the scene description"
-
-        prompt += (
-            "\n\nGRID LAYOUT: exactly 3 rows by 3 columns, nine panels in total, "
-            "reading order left-to-right then top-to-bottom.\n"
-            "Each panel is a DIFFERENT shot of the SAME continuous sequence — the "
-            "panels must connect in order to form one complete, coherent story. "
-            "Vary the framing and camera angle between panels; do NOT repeat the "
-            "same framing twice in a row.\n"
-            "Panel by panel:\n" + panel_text + "\n"
-            "CHARACTER CONSISTENCY (critical): the characters, their facial "
-            "identity, hairstyle, costume and props, together with the scene, "
-            "lighting direction and colour grading, must be IDENTICAL in every "
-            "one of the nine panels — only the framing, angle and the progression "
-            "of the action change.\n"
-            "TEXT RULE (important, two different things):\n"
-            "- NO content text anywhere in the artwork: no dialogue, no subtitles, "
-            "no captions, no signage, no watermark.\n"
-            "- DO print a small plain Arabic numeral (1 to 9) in the BOTTOM-LEFT "
-            "corner of each panel, as a production index mark only. The numerals "
-            "are the sole exception to the no-text rule.")
-        if style:
-            prompt += f"\nOverall visual base (must hold across all nine panels): {style}."
-        return prompt
-
     @staticmethod
     def build_shot_grid_keyframes_prompt(shot: dict, ref_labels: List[str] = None,
-                                         style: str = "", has_characters: bool = True) -> str:
+                                         style: str = "", has_characters: bool = True,
+                                         panel_plans: Optional[list] = None,
+                                         characters_section: str = None,
+                                         shot_summary: str = None) -> str:
         """分镜图「**单镜九宫格 · 9 关键帧**」提示词（2026-10-02 用户指定）。
 
         :param has_characters: 本镜画面内是否有出场角色（默认 True = 旧行为逐字不变）。
@@ -2572,28 +3137,52 @@ class ComfyUIClient:
             并**改写**九宫格追加段里的「CHARACTER CONSISTENCY」句 —— 否则
             「the characters … must be IDENTICAL in every one of the nine panels」
             会暗示画面里有角色，与无人物镜自相矛盾（2026-10-05）。
+        :param panel_plans: 可选，单镜 9 关键帧的**逐格规划**（app._grid_panel_plan 的
+            LLM 产出：9 个 ``{"no","framing","tone","content"}``）。非空时改走
+            **中文逐格版**模板 ``storyboard_grid_main``（用户范本「逐格写死」范式，
+            2026-10-07）——不再基于 :meth:`build_storyboard_prompt` 打底；为 None / 空 /
+            格数不足 9 → **回落下方英文版全路径**（一字不动，fail-open：默认行为只有
+            拿到规划才变）。
+        :param characters_section: 可选，「角色设定」段覆盖文本（不传则由
+            :meth:`_grid_characters_section` 按参考图标签自动生成）。
+        :param shot_summary: 可选，「本镜内容一句话」覆盖文本（不传则取 description /
+            storyboard_prompt_zh）。
 
         ⚠️⚠️ **粒度（用户明确纠正，勿再回退）**：「一个 5 秒的分镜就是用的 9 宫格」
           —— 九宫格的 9 个格是**这一个镜头（shot）内随时间推进的 9 个关键帧**：
-            ✗ 不是 9 个不同镜头（那是 `build_story_grid_sequence_prompt` 的**旧错误粒度**）；
+            ✗ 不是 9 个不同镜头（旧的「连贯分镜」九宫格实现因粒度错误已退役删除）；
             ✗ 不是 9 个机位候选（那是 `build_shot_grid_candidates_prompt`，选一格裁切）。
         用途：**九宫格整图 = 分镜图本体**，H3 视频直接拿整图当构图参考
         （用户原话「别人的 9 宫格图片就是一整张啊」——不裁切、不选格）。
 
-        与另两个九宫格函数的对照：
-        ┌─────────────────┬──────────────────────┬─────────────────────┬──────────────────────┐
-        │                 │ 候选构图（已有）       │ 连贯分镜（旧，粒度错）│ 单镜 9 关键帧（本函数）│
-        ├─────────────────┼──────────────────────┼─────────────────────┼──────────────────────┤
-        │ 9 格的含义       │ 同一时刻 9 机位        │ 9 个不同镜头         │ **一个镜头内 9 关键帧** │
-        │ 格间变化         │ 只有取景/角度          │ 镜头切换+动作递进     │ **时间推进（动作/表情/构图）** │
-        │ 时间维度         │ 冻结                  │ 镜头间推进           │ **同一镜头内推进**     │
-        │ 用途             │ 选一格裁单图           │ （错误，未接线）      │ **九宫格整图=分镜图**  │
-        └─────────────────┴──────────────────────┴─────────────────────┴──────────────────────┘
+        与候选构图九宫格的对照：
+        ┌─────────────────┬──────────────────────┬──────────────────────┐
+        │                 │ 候选构图（已有）       │ 单镜 9 关键帧（本函数）│
+        ├─────────────────┼──────────────────────┼──────────────────────┤
+        │ 9 格的含义       │ 同一时刻 9 机位        │ **一个镜头内 9 关键帧** │
+        │ 格间变化         │ 只有取景/角度          │ **时间推进（动作/表情/构图）** │
+        │ 时间维度         │ 冻结                  │ **同一镜头内推进**     │
+        │ 用途             │ 选一格裁单图           │ **九宫格整图=分镜图**  │
+        └─────────────────┴──────────────────────┴──────────────────────┘
 
         来源：用户提供的业界九宫格分镜范式（「单张图像内完整呈现 9 个关键帧，
         保持人物一致性、画面无文字、左下角标 1-9」）+ 用户补充「一个 5 秒分镜用九宫格」。
+        (2026-10-06 起 1-9 编号改由前端叠加——扩散模型画数字实测乱码，见 TEXT RULE。)
         ⚠️ 分辨率：3x3 后每格仅整图 1/9 面积 → **必须放大整图边长**（调用方负责 size）。
         """
+        # ---------- 中文逐格版分支（2026-10-07，用户范本「逐格写死」范式）----------
+        # 拿到 9 格规划（app._grid_panel_plan 的文本 LLM 产出）→ 走 storyboard_grid_main
+        # 模板渲染中文逐格提示词；规划为空 / 不足 9 格 / 模板不可用 → **原样走下方英文版
+        # 全路径**（一字不动，fail-open：默认行为只有拿到规划才变）。
+        if panel_plans:
+            zh = ComfyUIClient._build_grid_keyframes_prompt_zh(
+                shot, ref_labels, style=style, has_characters=has_characters,
+                panel_plans=panel_plans, characters_section=characters_section,
+                shot_summary=shot_summary)
+            if zh:
+                return zh
+            logger.warning("九宫格中文逐格提示词未产出（规划不足 9 格或模板不可用），"
+                           "回落英文版九宫格提示词")
         prompt = ComfyUIClient.build_storyboard_prompt(
             shot, ref_labels, has_blocking_image=False,
             has_characters=has_characters)
@@ -2635,17 +3224,281 @@ class ComfyUIClient:
             "and late panels the completion or reaction. The framing may shift "
             "gradually with the camera movement described for this shot, but every "
             "panel still belongs to this one continuous take.\n"
-            + (f"Shot content to advance through: {shot_desc}\n" if shot_desc else "")
+            "The TASK framing above defines the sheet's DOMINANT shot size; "
+            "individual panels SHOULD still vary shot size and camera angle "
+            "inside this shot (wide establishing panel -> closer emphasis "
+            "panels), and this panel-to-panel variation does NOT violate the "
+            "TASK framing.\n"
+            + (f"Shot content to advance through (result, not step-by-step): {shot_desc}\n"
+               if shot_desc else "")
             + _consistency
-            + "TEXT RULE (important, two different things):\n"
-            "- NO content text anywhere in the artwork: no dialogue, no subtitles, "
-            "no captions, no signage, no watermark.\n"
-            "- DO print a small plain Arabic numeral (1 to 9) in the BOTTOM-LEFT "
-            "corner of each panel, as a production index mark only. The numerals "
-            "are the sole exception to the no-text rule.")
+            + "VARIETY RULE (critical, equally important as identity): the nine "
+            "panels MUST show a CONTINUOUS, VISIBLE progression — no three "
+            "consecutive panels may look essentially the same. Each panel must "
+            "differ from its neighbours in at least one of: character pose or "
+            "body orientation, facial expression, camera framing (tighter vs "
+            "wider) or angle, or the state of the key object/prop. If the shot "
+            "content above is a single frozen moment with little to advance, "
+            "vary the FRAMING and ANGLE between panels (wide to close-up, side "
+            "to front) rather than repeating one identical composition. "
+            "Uniform near-duplicate panels are a generation failure. Nine "
+            "near-identical panels (four or more panels sharing the same pose "
+            "AND the same framing) are a generation failure, exactly as severe "
+            "as wardrobe drift.\n"
+            + "TEXT RULE (important): NO text anywhere in the artwork — no dialogue, "
+            "no subtitles, no captions, no signage, no watermark, and NO panel "
+            "index numerals either. (Panel index numbers 1-9 are overlaid on the "
+            "image by the frontend after generation; model-painted numerals come "
+            "out illegible, so the model must not draw any.)")
+        if any(IDENTITY_GRID_REF_MARK in (lab or "") for lab in (ref_labels or [])):
+            prompt += (
+                "\nPANEL-WISE IDENTITY BINDING (critical): the identity baseline "
+                "grid reference shows the character('s) canonical appearance in a "
+                "3x3 layout that corresponds to the 3x3 layout of the output. "
+                "EVERY one of the nine output panels must show the character(s) "
+                "with exactly the same facial identity, hairstyle and outfit as "
+                "the baseline grid — wardrobe drift between panels (garments "
+                "changing, appearing or disappearing from panel to panel) is a "
+                "generation failure. The baseline grid constrains APPEARANCE "
+                "only: poses, expressions, props in hand and framing must still "
+                "follow the time progression described above. Identity binding "
+                "constrains WHO the characters are and what they wear only — it "
+                "never requires identical poses, expressions or framing between "
+                "panels; the time progression described above is mandatory.")
         if style:
             prompt += f"\nOverall visual base (must hold across all nine panels): {style}."
         return prompt
+
+    # ===================== 九宫格中文逐格版内部件（2026-10-07，用户范本「逐格写死」范式） =====================
+
+    #: 参考图标签「角色「X」的身份锚点（…视图）：<要点>」的匹配
+    #: （生成端 app._allocate_storyboard_refs 的两类角色槽位写法：主角色/次角色）。
+    _GRID_CHAR_LABEL_RE = re.compile(
+        r"^角色「([^」]+)」的身份锚点（([^）]+?)视图）[:：]\s*(.+)$")
+    #: 特写镜头策略把角色标签改写为「已替换为该角色头部特写，…」（app._apply_closeup_ref_strategy），
+    #: 此时标签里已没有角色名，需从 shot 的角色名单按位回补。
+    _GRID_CHAR_CLOSEUP_MARK = "已替换为该角色头部特写"
+
+    @staticmethod
+    def _grid_characters_section(shot: dict, ref_labels: List[str] = None,
+                                 has_characters: bool = True) -> str:
+        """按参考图标签生成九宫格主模板的「角色设定」段（用户范本第 2 段）。
+
+        - 每个出场角色一条：**身份与外观完全参考`<imageN>`** + 服装/气质要点
+          （要点取自标签既有文案的保留句，**不重新臆造外观词** —— 官方协议明确禁止
+          用文字重述五官，重述 =「重新画一个人」，反而降低 likeness）；
+        - ``<imageN>`` 按**最终位置**重新编号（identity grid / 3D 基准图插入 <image1>
+          之后标签里的旧编号会整体错位，位置即真相 —— 与 :meth:`build_storyboard_prompt`
+          的官方协议同口径）；
+        - 无角色镜头（has_characters=False）→ 显式「无出场角色 + 禁人」声明；
+        - 有角色但标签解析不出（特写替换等）→ 用 shot 的角色名单（_char_ref_names →
+          characters_in_shot）回补角色名，仍取不到时给出保守兜底行。永不返回空串。
+        """
+        shot = shot if isinstance(shot, dict) else {}
+        _declared = shot.get("_char_ref_names")
+        if not isinstance(_declared, (list, tuple)):
+            _declared = shot.get("characters_in_shot")
+        queue = [str(n).strip() for n in (_declared or [])
+                 if str(n or "").strip()]
+        used = set()
+        lines = []
+        closeup_no = 0
+        for pos, raw in enumerate(ref_labels or [], start=1):
+            body = _ref_label_body(raw, pos)
+            if not body:
+                continue
+            m = ComfyUIClient._GRID_CHAR_LABEL_RE.match(body)
+            if m:
+                name = m.group(1).strip()
+                used.add(name)
+                lines.append((name,
+                              f"身份与外观完全参考`<image{pos}>`，{m.group(3).strip()}"
+                              f"（{m.group(2).strip()}视图）"))
+                continue
+            if ComfyUIClient._GRID_CHAR_CLOSEUP_MARK in body:
+                closeup_no += 1
+                name = next((n for n in queue if n not in used), "")
+                if name:
+                    used.add(name)
+                lines.append((name or f"出场角色{closeup_no}",
+                              f"身份与外观完全参考`<image{pos}>`；画面取景范围以该角色的"
+                              "头部特写参考为准（仅肩部以上），服装发型与角色设定完全一致"))
+        if not lines:
+            if not has_characters:
+                return ("1. **本镜无出场角色：** 九个分镜画面只呈现场景与物品，"
+                        "任何一格都不得出现人物、面部或人形剪影。")
+            declared = "、".join(dict.fromkeys(queue)) if queue else "画面主体"
+            return (f"1. **{declared}：** 身份外观按画面内容描述呈现"
+                    "（本镜未注入角色身份参考图），九个分镜之间保持完全一致。")
+        return "\n".join(f"{i}. **{name}：** {points}。"
+                         for i, (name, points) in enumerate(lines, start=1))
+
+    @staticmethod
+    def _build_grid_keyframes_prompt_zh(shot: dict, ref_labels: List[str] = None,
+                                        style: str = "", has_characters: bool = True,
+                                        panel_plans: list = None,
+                                        characters_section: str = None,
+                                        shot_summary: str = None) -> str:
+        """渲染九宫格主模板（storyboard_grid_main）为「逐格写死」中文提示词。
+
+        返回空串 = 模板不可用 / 规划不足 9 格，调用方（build_shot_grid_keyframes_prompt）
+        应回落英文版全路径。画幅不写进正文（继承参考图，与英文版同一口径）。
+        """
+        shot = shot if isinstance(shot, dict) else {}
+        # ---- 规划清洗：丢弃缺 content 的格，按 no 排序后**重排 1..9** ----
+        # （LLM 偶发给出 10+ 格或 no 乱序；逐格版必须 9 格齐整，否则 3x3 布局与
+        #   「左下角数字 1-9」标注断档。不足 9 格 → 返回空串走英文版回落。）
+        plans = []
+        for p in (panel_plans or []):
+            if not isinstance(p, dict):
+                continue
+            content = str(p.get("content") or "").strip()
+            if not content:
+                continue
+            framing = str(p.get("framing") or "").strip() or "中景"
+            tone = str(p.get("tone") or "").strip()
+            try:
+                no = int(p.get("no") or 0)
+            except (TypeError, ValueError):
+                no = 0
+            plans.append((no, framing, tone, content))
+        if len(plans) < 9:
+            return ""
+        plans.sort(key=lambda t: t[0] if t[0] > 0 else 99)
+        plans = plans[:9]
+        plan_lines = []
+        for i, (_no, framing, tone, content) in enumerate(plans, start=1):
+            if not content.endswith(("。", "！", "？", "…")):
+                content += "。"
+            plan_lines.append(f"*   **分镜{i}（{framing}" + (f"，{tone}" if tone else "")
+                              + f"）：** {content}")
+
+        # ---- 色彩演进：由规划结果的格序色调确定性拼出（不再调模型）----
+        tones = [t for (_n, _f, t, _c) in plans if t]
+        uniq = list(dict.fromkeys(tones))
+        if not tones:
+            color_arc = ("九个分镜保持统一色调，随本镜情绪自然演化；"
+                         "相邻格过渡平滑，不得突兀跳变。")
+        elif len(uniq) == 1:
+            color_arc = (f"九个分镜统一为「{uniq[0]}」基调，格间保持一致，"
+                         "仅随光影层次产生细腻的明暗变化。")
+        else:
+            color_arc = ("色调自第 1 格至第 9 格按「" + " → ".join(tones)
+                         + "」随情绪平滑演进，相邻格之间不得突兀跳变。")
+
+        # ---- 台词口型提示（与英文版同语义：只给说话状态，严禁台词上屏）----
+        dlg_text = _dlg_text(shot.get("dialogue"))
+        if dlg_text and not has_characters:
+            # 无人物镜 + 台词 = 画外音/旁白（与 build_storyboard_prompt 的 Audio only 口径一致）
+            speech_note = ("本镜无出场角色，台词为画外音：九个分镜画面不画任何人、任何口型，"
+                           "只以环境与物品承载画面。")
+        elif dlg_text:
+            speaker = _dlg_speaker(shot.get("dialogue")) or "说话角色"
+            speech_note = (f"本镜台词由{speaker}说出：在对应分镜中只以自然的开口口型与"
+                           "神态变化体现，九个分镜画面里严禁出现任何台词文字或字幕。")
+        else:
+            speech_note = ("本镜无台词：九个分镜画面均不出现开口说话的口型，"
+                           "情绪靠表情与肢体动作承载。")
+
+        # ---- 风格锚定：剔除画幅/比例词（画幅是 generation parameter，继承参考图）----
+        style_clean = style_kit.normalize_style(style)
+        if style_clean:
+            _toks = [t for t in style_clean.split("，")
+                     if not re.search(r"(比例|画幅|分辨率|竖屏|横屏|竖版|横版|竖向|横向"
+                                      r"|宽屏|方形|超宽|\d{1,2}\s*[:：]\s*\d{1,2})", t)]
+            style_clean = "，".join(_toks) or style_clean
+        style_clean = style_clean or "与参考图一致的画风"
+
+        if not shot_summary:
+            shot_summary = (str(shot.get("description") or "").strip()
+                            or str(shot.get("storyboard_prompt_zh") or "").strip()
+                            or "本镜的画面内容")
+        if not str(characters_section or "").strip():
+            characters_section = ComfyUIClient._grid_characters_section(
+                shot, ref_labels, has_characters=has_characters)
+
+        # ---- 画面内文字段：**按需注入**（2026-10-09）----
+        # 官方：不需要可读文字时「一句都不要提文字」（提了会诱发凭空画字）。
+        # 故仅当本镜确有文字需求（surface_text 有值，或描述含文字语义词）才注入。
+        _surface = str(shot.get("surface_text") or "").strip()
+        _probe = " ".join(str(shot.get(k) or "") for k in
+                          ("description", "storyboard_prompt_zh", "visual_detail"))
+        text_section = (TEXT_SECTION_ZH
+                        if (_surface or any(w in _probe for w in TEXT_HINT_WORDS))
+                        else "")
+
+        try:
+            zh = prompt_templates.render(
+                "storyboard_grid_main",
+                style=style_clean,
+                shot_summary=shot_summary,
+                characters_section=str(characters_section),
+                panel_plans="\n".join(plan_lines),
+                color_arc=color_arc,
+                speech_note=speech_note,
+                text_section=text_section,
+            )
+        except Exception as e:  # noqa: BLE001 —— 模板渲染失败绝不阻断分镜生成
+            logger.warning("九宫格中文逐格模板渲染异常（回落英文版）：%s", e)
+            return ""
+        return str(zh or "").strip()
+
+    @classmethod
+    def build_scene_grid_prompt(cls, scene_prompt, style=""):
+        """场景九宫格「单次出图」版提示词：9 个机位逐格写死（1 次 T2I 出整图）。
+
+        ⚠️ 格号与标签解耦：每行只写「第N格」+ 机位描述，**不得写 SCENE_GRID_LABELS**
+        （其「特写细节A/B」里的 A/B 会让模型把格号标成 A/B —— 实验 B 实测到这个缺陷）。
+
+        范式同 :meth:`_build_grid_keyframes_prompt_zh`（storyboard_grid_main）：
+        把 9 个机位**逐格写死**进一句提示词，一次出图即得 3×3 整图，取代
+        「9 档逐档独立出图 + ``scene_grid.stitch_grid`` 拼接」（实测 57s vs 8m16s）。
+
+        :param scene_prompt: 场景设定串（app 层传 ``prompt_zh``）。
+        :param style: 画面风格锚定串；写进正文前剔除画幅/比例词（画幅是 generation
+            parameter，由调用方 ``size`` 决定，不写进提示词正文——与分镜同口径）。
+        :return: 非空 ``str``；模板不可用/渲染失败时回落内置兜底串。
+        """
+        # 机位表单一来源在 config；函数内延迟 import（同 scene_view_prompt_suffix，
+        # 避免 import 顺序依赖）。SCENE_GRID_* 在 config 里晚于本模块 import 的常量定义。
+        try:
+            from config import SCENE_GRID_VIEW_KEYS, SCENE_GRID_ANGLE_ZH
+        except ImportError:
+            SCENE_GRID_VIEW_KEYS, SCENE_GRID_ANGLE_ZH = (), {}
+
+        # 逐格写死：格号 i 从 1 起，只写「第N格」+ 机位句（**不写标签**——见 docstring）。
+        rows = [f"*   **第{i}格：** {SCENE_GRID_ANGLE_ZH.get(k, '')}"
+                for i, k in enumerate(SCENE_GRID_VIEW_KEYS, start=1)]
+        panel_plans = "\n".join(rows)
+
+        # 风格锚定：剔除画幅/比例词（与 _build_grid_keyframes_prompt_zh 同口径）。
+        style_clean = style_kit.normalize_style(style)
+        if style_clean:
+            _toks = [t for t in style_clean.split("，")
+                     if not re.search(r"(比例|画幅|分辨率|竖屏|横屏|竖版|横版|竖向|横向"
+                                      r"|宽屏|方形|超宽|\d{1,2}\s*[:：]\s*\d{1,2})", t)]
+            style_clean = "，".join(_toks) or style_clean
+        scene_text = str(scene_prompt or "").strip()
+
+        try:
+            text = prompt_templates.render(
+                "scene_grid_main",
+                style=style_clean,
+                scene_prompt=scene_text,
+                panel_plans=panel_plans,
+            )
+        except Exception as e:  # noqa: BLE001 —— 模板渲染失败绝不阻断场景生成
+            logger.warning("场景九宫格单次出图模板渲染异常（回落内置兜底）：%s", e)
+            text = ""
+        text = str(text or "").strip()
+        if not text:
+            logger.warning("场景九宫格单次出图提示词为空（模板缺失/被注释占满），"
+                           "回落内置兜底串")
+            text = (_SCENE_GRID_MAIN_FALLBACK
+                    .replace("{style}", style_clean)
+                    .replace("{scene_prompt}", scene_text)
+                    .replace("{panel_plans}", panel_plans))
+        return text
 
     @staticmethod
     def crop_grid_cell(grid_path: str, cell_index: int, out_path: str,
@@ -2797,6 +3650,7 @@ class ComfyUIClient:
             identity_lines = []
             role_lines = []
             blocking_pos = 0      # <imageN> 里「3D 导演台构图基准图」的位置（0 = 没带）
+            identity_grid_pos = 0  # <imageN> 里「角色身份基准网格」参考图的位置（0 = 没带）
             # ⚠️ **必须按位置重新编号**：官方协议里 ``<imageN>`` 的 N 就是「输入顺序」
             # （``images.image_N`` 槽位序号），不是 label 里写的那个数字。label 由
             # app._allocate_storyboard_refs 生成时可能带「预留槽位号」（例如角色占 1-3、
@@ -2812,6 +3666,11 @@ class ComfyUIClient:
                     # 「照这个构图摆」，用 "use only for X" 的常规句式表达力度不够。
                     blocking_pos = pos
                     continue
+                if IDENTITY_GRID_REF_MARK in lab:
+                    # 身份基准网格单独走 IDENTITY BASELINE GRID 段（见下）：
+                    # 它的职责是「九个面板的外观基准」，不进常规 IDENTITY/ROLES 句式。
+                    identity_grid_pos = pos
+                    continue
                 # 身份锚点：官方句式 “Preserve the exact identity from <imageN>.”
                 if "身份锚点" in lab:
                     identity_lines.append(
@@ -2823,8 +3682,24 @@ class ComfyUIClient:
                 else:
                     role_lines.append(
                         f"Use <image{pos}> only for {_ref_label_purpose(lab)}.")
+            # ⚠️ 2026-10-06 事故修复：身份基准网格会被插到 <image1>（见 app._storyboard_worker），
+            #    而 Qwen-Image-Edit 的 image_1 是**编辑目标/画布**。旧代码无条件写
+            #    "Use <image1> as the primary canvas（and identity anchor）"，于是模型把
+            #    「3×3 身份基准网格」当成要保留的画布；一旦提示词失效（优化器把思考过程
+            #    当正文返回），模型就直接原样返回它 → 分镜图 = 九格几乎同图的角色基准网格。
+            #    这里显式区分三种画布，并在网格当画布时给出「禁止复制参考图」的硬约束。
+            _ig_is_canvas = bool(identity_grid_pos == 1 and not blocking_pos)
             body = [f"PRIMARY CANVAS: Use <image1> as the primary canvas"
-                    f"{' and identity anchor' if identity_lines and not blocking_pos else ''}."]
+                    f"{' and identity anchor' if (identity_lines and not blocking_pos and not _ig_is_canvas) else ''}."]
+            if _ig_is_canvas:
+                body[0] += (
+                    " ⚠️ <image1> here is the APPEARANCE/ASPECT reference only — it is a "
+                    "contact sheet of the character's canonical baseline views, NOT the "
+                    "picture to produce. Do NOT return, copy, trace, re-tile or lightly edit "
+                    "<image1>: the output must be a NEWLY RENDERED image of the SCENE AND "
+                    "ACTION described below, laid out as the same 3x3 grid, where every panel "
+                    "is a DIFFERENT keyframe of this shot. Reproducing the reference sheet as "
+                    "the output is a total generation failure.")
             if blocking_pos:
                 # 构图基准在最前时，<image1> 是**构图基准图**、不是身份锚点 —— 必须显式
                 # 声明，否则模型会把人偶当成「要保留身份的人」。
@@ -2843,6 +3718,8 @@ class ComfyUIClient:
             sections.append("\n".join(body))
             if blocking_pos:
                 sections.append(COMPOSITION_BASELINE_SECTION.format(pos=blocking_pos))
+            if identity_grid_pos:
+                sections.append(IDENTITY_BASELINE_GRID_SECTION.format(pos=identity_grid_pos))
         else:
             sections.append(
                 "PRIMARY CANVAS: No reference image is provided for this shot. "
@@ -3100,7 +3977,7 @@ class ComfyUIClient:
 
     def generate_storyboard(self, prompt_zh: str, ref_images: List[str],
                             filename_prefix: str = "comic_drama_sb/shot",
-                            seed: int = None, timeout: int = 900,
+                            seed: int = None, timeout: int = 3600,
                             size=None) -> dict:
         """使用 分镜生成_Qwen21.json（QwenImage2.1 参考图编辑）生成单张分镜图
 
@@ -3190,11 +4067,42 @@ class ComfyUIClient:
                 #    断连线**：从工作流里拿掉该 LoadImageOutput 节点，并从正向编辑节点
                 #    删除对应的 `images.image_N` 输入键（该键是 autogrow optional，
                 #    删掉不会触发 missing_required）。
-                api_prompt.pop(load_id, None)
-                if node_id and key:
+                # ⭐ 2026-10-07（增强节点固化后新增）三步联动清理，缺一会把
+                # **悬空连线**带进执行路径（ComfyUI 从输出节点遍历校验，引用不存在的
+                # 节点 id 直接 400）：
+                #   ① 摘掉编码节点的 images.image_N 键；
+                #   ② 摘掉模板固化增强节点里**同序**的参考图输入（图片N）——否则
+                #      增强节点仍引用中间缩放层，而缩放层引用了被删的 Load；
+                #   ③ 中间缩放层（ImageScale* / FluxKontext*）若已无任何消费者，
+                #      一并删掉（它的 image 输入指向刚被删的 Load，留它就是悬空）。
+                #   注：增强节点固化前 ②③ 不清理也无害（它们是孤儿节点，ComfyUI
+                #   只从输出节点遍历校验）；固化后增强节点在图上，必须同步清理。
+                _mid_id = None
+                if node_id:
                     _pos_node = api_prompt.get(node_id) or {}
                     _pos_inputs = _pos_node.get("inputs") or {}
+                    _mid_val = _pos_inputs.get(key)
+                    if isinstance(_mid_val, list) and len(_mid_val) == 2:
+                        _mid_id = str(_mid_val[0])
                     _pos_inputs.pop(key, None)
+                _enh_id = next(
+                    (_k for _k, _n in api_prompt.items()
+                     if isinstance(_n, dict)
+                     and str(_n.get("class_type") or "") == PROMPT_ENHANCER_CLASS),
+                    None)
+                if _enh_id is not None and idx < len(PROMPT_ENHANCER_IMAGE_FIELDS):
+                    _enh_in = (api_prompt.get(_enh_id) or {}).get("inputs") or {}
+                    _enh_in.pop(PROMPT_ENHANCER_IMAGE_FIELDS[idx], None)
+                if _mid_id and _mid_id != str(load_id):
+                    _still_used = any(
+                        isinstance(_v, list) and len(_v) == 2
+                        and str(_v[0]) == _mid_id
+                        for _n2 in api_prompt.values()
+                        if isinstance(_n2, dict)
+                        for _v in (_n2.get("inputs") or {}).values())
+                    if not _still_used:
+                        api_prompt.pop(_mid_id, None)
+                api_prompt.pop(load_id, None)
                 slot_cleared.append(key)
                 continue
             ctype = api_prompt[load_id].get("class_type")
@@ -3632,7 +4540,7 @@ class ComfyUIClient:
 
         audio_check = []
         if files:
-            from video_postprocess import probe_media
+            from media_probe import probe_media  # 2026-10-08 解耦：探测走叶子模块，不再依赖后期模块
             for f in files:
                 m = probe_media(f)
                 audio_check.append({"file": f, "has_audio": m.get("has_audio"),
@@ -4227,7 +5135,7 @@ class ComfyUIClient:
 
         audio_check = []
         if files:
-            from video_postprocess import probe_media
+            from media_probe import probe_media  # 2026-10-08 解耦：探测走叶子模块，不再依赖后期模块
             for f in files:
                 m = probe_media(f)
                 audio_check.append({"file": f, "has_audio": m.get("has_audio"),
@@ -4429,7 +5337,8 @@ class ComfyUIClient:
                           scene_refs: List[dict], storyboard_ref: dict = None,
                           end_frame_ref: dict = None,
                           item_refs: List[dict] = None,
-                          common_refs: List[dict] = None) -> str:
+                          common_refs: List[dict] = None,
+                          audio_defs: List[dict] = None) -> str:
         """生成期**权威**的 H3 提示词入口（修「薄英文顶掉结构化构建器」）
 
         择优规则：
@@ -4474,12 +5383,14 @@ class ComfyUIClient:
         return h3_prompt_kit.clamp_h3_prompt(
             h3_prompt_kit.resolve(shot, picture_defs, subjects, style=style,
                                   end_frame_ref=end_label,
-                                  storyboard_ref_label=sb_label))
+                                  storyboard_ref_label=sb_label,
+                                  audio_defs=list(audio_defs or ())))
 
     def _build_h3_prompt(self, shot: dict, char_refs: List[dict], scene_refs: List[dict],
                          storyboard_ref: dict = None, end_frame_ref: dict = None,
                          item_refs: List[dict] = None,
-                         common_refs: List[dict] = None) -> str:
+                         common_refs: List[dict] = None,
+                         audio_defs: List[dict] = None) -> str:
         """构建规范 H3 Ref2VA 提示词（无条件重建，忽略剧本里的既有 prompt_h3）
 
         需要一个「干净重建」的调用点时用它（例如风格纠偏重试）；日常生成请用
@@ -4503,7 +5414,130 @@ class ComfyUIClient:
             #（2057/2068/3715/3733），同一类"超长提示词被服务端静默截断"的口子。
             return h3_prompt_kit.clamp_h3_prompt(
                 h3_prompt_kit.build_base(shot, "T2VA", style=style))
+        # ⭐ 2026-10-09：把「本镜道具参考图的名称」透传给构建器 ——
+        #    retention_analysis 需要据此把**道具**从角色/服装语义里分离出来
+        #    （否则道具会被要求保留「脸型/眉形/鼻形」，而真正的「形态与朝向」无人声明，
+        #     实跑后果：旧哨子被 H3 画反）。
+        _item_labels = [str(r.get("name")) for r in (item_refs or []) if r.get("name")]
         return h3_prompt_kit.clamp_h3_prompt(
             h3_prompt_kit.build_ref2va(shot, picture_defs, subjects, style=style,
                                        end_frame_ref=end_label,
-                                       storyboard_ref_label=sb_label))
+                                       storyboard_ref_label=sb_label,
+                                       audio_defs=list(audio_defs or ()),
+                                       item_labels=_item_labels))
+
+
+# ==================================================================== #
+# ComfyUI 主动心跳（2026-10-09）
+# -------------------------------------------------------------------- #
+# 背景：ComfyUI 可能因为 aimdo/CUDA 故障整进程退出（本机 2026-10-09 实测：
+#   cuMemSetAccess 失败 600 → VRAM Allocation failed (non OOM) → Fault failed: 2）。
+# 已有的自愈 _sb_heal_comfyui 只在「这一镜已经失败」之后才触发，
+# 而该镜的出图请求会一直挂到自己的长超时才返回 —— 期间界面只能显示「重试中」。
+# 本模块增加**只读心跳**：连续探测失败即主动重启，不必等业务超时。
+#
+# 安全边界：
+#   · 只探 /system_stats，不提交任何任务；
+#   · 连续 N 次失败才动作（默认 3 次）；
+#   · 限流：10 分钟内最多重启 2 次，避免「崩溃—重启—再崩」风暴；
+#   · 串行：同一时刻只允许一个重启在跑；
+#   · 可用 MJSCXT_COMFYUI_HEARTBEAT=0 整体关闭。
+# ==================================================================== #
+_ENGINE_STATE = {
+    "online": None,            # None=未知 / True / False
+    "consecutive_fails": 0,
+    "last_ok_ts": 0.0,
+    "last_check_ts": 0.0,
+    "last_error": "",
+    "restarts": [],            # [(ts, ok), …]
+    "restarting": False,
+    "heartbeat_started": False,
+}
+_ENGINE_LOCK = threading.Lock()
+_HEARTBEAT_THREAD = None
+
+
+def get_engine_state() -> dict:
+    """引擎状态快照（给 API / 前端读，只读、永不抛）。"""
+    with _ENGINE_LOCK:
+        s = dict(_ENGINE_STATE)
+    s["restarts"] = list(s.get("restarts") or [])
+    s["restarts_recent"] = sum(1 for ts, _ok in s["restarts"] if time.time() - ts < 600)
+    s["stale_sec"] = (time.time() - s["last_check_ts"]) if s.get("last_check_ts") else None
+    return s
+
+
+def heartbeat_once(fail_threshold: int = 3, max_per_10min: int = 2) -> dict:
+    """探一次并按需重启。返回本次动作摘要，全程 fail-open。"""
+    cli = ComfyUIClient()
+    online, err = False, ""
+    try:
+        st = cli.get_status(timeout=3)
+        online = st.get("status") == "online"
+        if not online:
+            err = str(st.get("error") or "")[:200]
+    except Exception as e:  # noqa: BLE001
+        err = "%s: %s" % (type(e).__name__, e)
+    now = time.time()
+    action = "none"
+    with _ENGINE_LOCK:
+        _ENGINE_STATE["last_check_ts"] = now
+        _ENGINE_STATE["online"] = online
+        _ENGINE_STATE["last_error"] = "" if online else err
+        if online:
+            _ENGINE_STATE["consecutive_fails"] = 0
+            _ENGINE_STATE["last_ok_ts"] = now
+        else:
+            _ENGINE_STATE["consecutive_fails"] += 1
+        fails = _ENGINE_STATE["consecutive_fails"]
+        recent = sum(1 for ts, _ok in _ENGINE_STATE["restarts"] if now - ts < 600)
+        if (not online) and fails >= fail_threshold and recent < max_per_10min \
+                and not _ENGINE_STATE["restarting"]:
+            _ENGINE_STATE["restarting"] = True
+            action = "restart"
+    if action == "restart":
+        logger.warning("[心跳] ComfyUI 连续 %d 次探测失败（%s），主动重启…", fails, err[:120])
+        ok = False
+        try:
+            ok = cli.restart_comfyui(wait_sec=180, poll_sec=3.0)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[心跳] 重启异常：%s", e)
+        with _ENGINE_LOCK:
+            _ENGINE_STATE["restarting"] = False
+            _ENGINE_STATE["restarts"].append((now, bool(ok)))
+            _ENGINE_STATE["restarts"] = _ENGINE_STATE["restarts"][-40:]
+            if ok:
+                _ENGINE_STATE["consecutive_fails"] = 0
+                _ENGINE_STATE["online"] = True
+                _ENGINE_STATE["last_ok_ts"] = time.time()
+                _ENGINE_STATE["last_error"] = ""
+        logger.info("[心跳] ComfyUI 主动重启%s", "成功" if ok else "失败（仍离线，已计入限流）")
+    return {"online": online, "action": action, "fails": fails, "error": err[:200]}
+
+
+def start_comfyui_heartbeat(interval: float = 20.0, fail_threshold: int = 3,
+                            max_per_10min: int = 2) -> bool:
+    """启动只读心跳守护线程（幂等）。MJSCXT_COMFYUI_HEARTBEAT=0 可整体关闭。"""
+    global _HEARTBEAT_THREAD
+    if os.environ.get("MJSCXT_COMFYUI_HEARTBEAT", "1").strip().lower() in ("0", "false", "no"):
+        logger.info("[心跳] 已由 MJSCXT_COMFYUI_HEARTBEAT 关闭")
+        return False
+    with _ENGINE_LOCK:
+        if _ENGINE_STATE.get("heartbeat_started"):
+            return True
+        _ENGINE_STATE["heartbeat_started"] = True
+
+    def _loop():
+        while True:
+            try:
+                heartbeat_once(fail_threshold=fail_threshold, max_per_10min=max_per_10min)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[心跳] 循环异常忽略：%s", e)
+            time.sleep(max(5.0, float(interval)))
+
+    _HEARTBEAT_THREAD = threading.Thread(target=_loop, name="comfyui-heartbeat", daemon=True)
+    _HEARTBEAT_THREAD.start()
+    logger.info("[心跳] 已启动（每 %.0fs 探一次；连续 %d 次失败自动重启；10 分钟最多 %d 次）",
+                interval, fail_threshold, max_per_10min)
+    return True
+

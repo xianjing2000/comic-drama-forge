@@ -133,16 +133,6 @@ class RelationManager:
         del self.data["relations"][rel_id]
         self.save()
 
-    def get_relation(self, rel_id: str) -> Optional[dict]:
-        """获取单个关系"""
-        return self.data["relations"].get(rel_id)
-
-    def get_relations_for_char(self, char_id: str) -> list:
-        """获取某角色的所有关系"""
-        return [
-            r for r in self.data["relations"].values()
-            if r["char_a"] == char_id or r["char_b"] == char_id
-        ]
 
     def get_all_relations(self) -> dict:
         """获取所有关系"""

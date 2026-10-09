@@ -120,7 +120,8 @@ def technical_checks(path: str, *, probe=None, min_duration: float = 2.0) -> Lis
                    "detail": str(info.get("video_codec"))})
     checks.append({"check": "fps", "ok": float(info.get("fps") or 0) > 0,
                    "detail": str(info.get("fps"))})
-    # 音轨只记录、不判失败：生成阶段刻意静音、配音在后续链路补齐。
+    # 音轨只记录、不判失败：H3 视频自带原生音轨（成片即带配音）；此处只记录无音轨事实
+    # 不判失败 —— 无音轨的硬拦截在 qc_client 视频客观层（B 层）。
     checks.append({"check": "has_audio", "ok": True,
                    "detail": "有音轨" if info.get("has_audio") else "无音轨（生成阶段静音或待配音）"})
     return checks

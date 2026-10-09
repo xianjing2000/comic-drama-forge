@@ -3,7 +3,7 @@
 
 把一张场景 base 图扩展为「9 个机位各一张同场景变体 + 一张 3x3 拼接预览」：
 - 生成走现有 Qwen-Image-Edit 参考图编辑链路（base 图作参考，逐机位出全分辨率图）；
-- 机位句子与 comfyui_client.SCENE_VIEW_ANGLE_ZH 同款中文格式（4 档沿用 + 5 档预览新增）；
+- 机位句子**单一来源 = config**（`SCENE_GRID_VIEW_KEYS/ANGLE_ZH/LABELS`，与自动流水线同源）；
 - 拼接预览仅作选格参考，每张都是全分辨率、可直接「应用」为场景新 base；
 - 「应用」= 选中机位图升级为 base.png（旧 base 移入回收站），后续分镜参考图与
   按机位出图自动沿用新视角。
@@ -17,48 +17,74 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-from typing import Any, Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# 9 个机位档：前 4 档与现有机位口径一致（front/left45/right45/top），后 5 档为预览新增。
-# sentence 为该机位的中文画面描述（与 comfyui_client 场景多视角提示词同款格式）。
-SCENE_GRID_ANGLES: List[Dict[str, str]] = [
-    {"key": "front",   "label": "正面全景",
-     "sentence": "从场景正前方平视拍摄的全景，地面纵深与背景层次完整"},
-    {"key": "left45",  "label": "左前 45°",
-     "sentence": "从场景左前方约 45 度平视拍摄，同时呈现场景正面与左侧面"},
-    {"key": "right45", "label": "右前 45°",
-     "sentence": "从场景右前方约 45 度平视拍摄，同时呈现场景正面与右侧面"},
-    {"key": "top",     "label": "顶部鸟瞰",
-     "sentence": "相机升到场景正上方俯拍（鸟瞰机位），画面以地面布局与陈设的顶面为主"},
-    {"key": "wide",    "label": "大远景",
-     "sentence": "拉远到大远景，整个场景居于画面中央，四周留出大片周围环境"},
-    {"key": "low",     "label": "低角度仰拍",
-     "sentence": "相机贴近地面向上仰拍，前景物件因透视被放大，天空或顶部结构入画"},
-    {"key": "detail",  "label": "细节特写",
-     "sentence": "近距离特写场景中最有辨识度的陈设细节，背景浅景深虚化"},
-    {"key": "depth",   "label": "纵深透视",
-     "sentence": "沿场景主轴纵深拍摄，两侧物件向画面深处汇聚，强调空间透视"},
-    {"key": "back",    "label": "背面反打",
-     "sentence": "从场景背后向入口方向反打拍摄，呈现与正面相反的空间关系"},
-]
+# 9 个机位档：**单一来源 = config**（`SCENE_GRID_VIEW_KEYS` + `SCENE_GRID_ANGLE_ZH` +
+# `SCENE_GRID_LABELS`），本模块不再自己维护一份机位清单 —— 自动流水线（app.py 资产 worker
+# 里的九宫格出图）与这里的手动机位预览必须逐字同源，否则「预览看到的机位」与「生产用的机位」
+# 会静默分叉（旧实现就是两份字面量：预览里还有已废弃的 back/low/detail/depth，
+# 而生产侧 2026-10-06 已按用户定义换成 全景/远景/中景/近景/特写A/特写B/左45/右45/俯视）。
+# `sentence` 为该机位的中文画面描述（与 comfyui_client 场景多视角提示词同款格式）。
+def _build_grid_angles() -> List[Dict[str, str]]:
+    """从 config 派生机位清单（键序即九宫格格序）。"""
+    from config import (SCENE_GRID_VIEW_KEYS, SCENE_GRID_ANGLE_ZH,
+                        SCENE_GRID_LABELS)
+    return [
+        {"key": k,
+         "label": SCENE_GRID_LABELS.get(k) or k,
+         "sentence": SCENE_GRID_ANGLE_ZH.get(k) or ""}
+        for k in SCENE_GRID_VIEW_KEYS
+    ]
 
 
-def stitch_grid(image_paths: List[str], out_path: str,
-                cell_width: int = 640) -> str:
-    """把 9 张（或任意 n 张）图拼成 3 列网格预览图；不足 9 张时按实际数量排布。"""
+SCENE_GRID_ANGLES: List[Dict[str, str]] = _build_grid_angles()
+
+
+def stitch_grid(image_paths: List[Optional[str]], out_path: str,
+                cell_width: int = 640, cols: int = 3,
+                slot_count: Optional[int] = None) -> str:
+    """把机位图拼成 ``cols`` 列（默认 3 列）网格图。两种排布方式：
+
+    · **定长格位模式**（``slot_count=n``，⚠️ 生产拼接**必须**用这种）：
+      ``image_paths`` 被当作**按格序排列的定长槽位表**（长度应为 n），第 i 个元素对应第 i 格；
+      元素为 ``None`` / 空串 / 文件不存在 → **该格留背景色**，**它后面的格不左移**。
+      ⭐ 为什么必须定长：九宫格的格序**就是**用户在「场景 9 宫格多视角」里给的画面编号
+      （第 5 格＝特写细节A、第 9 格＝俯视鸟瞰…）。若按「有几张排几张」紧凑排布，
+      **中间缺一档会让它之后的机位整体错位一格**（内容与标签不符，比缺格更难发现）。
+      （2026-10-06 修复：此前调用方「过滤后 append」+ 本函数紧凑排布，两者叠加会错位。）
+    · **紧凑模式**（``slot_count=None``，默认）：按传入顺序排布、跳过不存在的文件，
+      行数按实际张数算 —— 用于「有几张拼几张」的临时预览。
+
+    返回拼好的图路径。任一张都读不到时抛 ``ValueError``（caller 已在外面兜异常）。
+    """
     from PIL import Image
-    imgs = [Image.open(p).convert("RGB") for p in image_paths if os.path.isfile(p)]
-    if not imgs:
-        raise ValueError("没有可拼接的图片")
-    cell_h = int(cell_width * imgs[0].height / max(1, imgs[0].width))
-    cells = [im.resize((cell_width, cell_h)) for im in imgs]
-    cols = 3
-    rows = (len(cells) + cols - 1) // cols
-    sheet = Image.new("RGB", (cols * cell_width, rows * cell_h), (12, 12, 16))
-    for idx, im in enumerate(cells):
-        sheet.paste(im, ((idx % cols) * cell_width, (idx // cols) * cell_h))
+    if slot_count is not None:
+        n = max(0, int(slot_count))
+        slots: List[Optional[str]] = (list(image_paths) + [None] * n)[:n]
+        avail = [p for p in slots if p and os.path.isfile(p)]
+        if not avail:
+            raise ValueError("没有可拼接的图片")
+        probe = Image.open(avail[0]).convert("RGB")
+        cell_h = int(cell_width * probe.height / max(1, probe.width))
+        rows = max(1, (n + max(1, cols) - 1) // max(1, cols))
+        sheet = Image.new("RGB", (max(1, cols) * cell_width, rows * cell_h), (12, 12, 16))
+        for idx, p in enumerate(slots):
+            if not (p and os.path.isfile(p)):
+                continue                    # 缺格 → 留背景色，**不**左移后续格位
+            im = Image.open(p).convert("RGB").resize((cell_width, cell_h))
+            sheet.paste(im, ((idx % cols) * cell_width, (idx // cols) * cell_h))
+    else:
+        imgs = [Image.open(p).convert("RGB") for p in image_paths if p and os.path.isfile(p)]
+        if not imgs:
+            raise ValueError("没有可拼接的图片")
+        cell_h = int(cell_width * imgs[0].height / max(1, imgs[0].width))
+        cells = [im.resize((cell_width, cell_h)) for im in imgs]
+        rows = max(1, (len(cells) + max(1, cols) - 1) // max(1, cols))
+        sheet = Image.new("RGB", (max(1, cols) * cell_width, rows * cell_h), (12, 12, 16))
+        for idx, im in enumerate(cells):
+            sheet.paste(im, ((idx % cols) * cell_width, (idx // cols) * cell_h))
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     sheet.save(out_path, "PNG")
     return out_path
@@ -83,7 +109,8 @@ def generate_scene_grid(client, project: str, scene_name: str,
         base_image_path,
         f"comic_drama_scenegrid_{project}_{scene_name}_base.png",
         image_type="output")
-    styled = style_kit.with_style(scene_prompt, style, with_tail=False) if style else scene_prompt
+    # 参考图口径（2026-10-07）：场景基准图同样剥离色调/光影 token
+    styled = style_kit.with_reference_style(scene_prompt, style, with_tail=False) if style else scene_prompt
     # 场景图必须去人（与 generate_scene_base 同一口径：人物属于分镜，不属于场景资产）
     styled = client.sanitize_scene_prompt(styled)
 
@@ -118,8 +145,12 @@ def generate_scene_grid(client, project: str, scene_name: str,
     grid_path = ""
     if len(done_paths) >= 2:
         try:
-            grid_path = stitch_grid([d["path"] for d in done_paths],
-                                    os.path.join(grid_dir, "grid_preview.png"))
+            # ⚠️ 按**格序**定长拼接（不是「有几张排几张」）：某机位失败时它后面的格位
+            #    不得左移，否则第 5 格之后的画面与标签不对应。缺格留背景色。
+            _by_key = {d["key"]: d["path"] for d in done_paths}
+            _slots = [_by_key.get(a["key"]) for a in SCENE_GRID_ANGLES]
+            grid_path = stitch_grid(_slots, os.path.join(grid_dir, "grid_preview.png"),
+                                    slot_count=len(SCENE_GRID_ANGLES))
         except Exception as e:  # noqa: BLE001
             logger.warning("场景九宫格预览拼接失败：%s", e)
     return {"grid": grid_path, "angles": done_paths, "failed": failed,

@@ -8,7 +8,6 @@ export interface ProjectConfig {
   episode_duration_sec: number;
   episodes: number;
   fps: number;
-  qc_enabled: boolean;
   resolution: string;
   shots_per_episode: number;
   style: string;
@@ -164,15 +163,7 @@ export interface VoiceBankItem {
   updated_at?: string | null;
 }
 
-// --- Relations ---
-export interface Relation {
-  id: string;
-  project_id: string;
-  char_a: string;
-  char_b: string;
-  type: string;
-  strength: number;
-}
+// 前端「角色关系」标签页（需求 R4）已下线，其关系条目类型一并移除；后端 /api/relations/* 保留。
 
 // --- Memory ---
 /** 后端 ai_memory 实际写入的类型集合（见 app/ai_memory.py 的 mem_type 说明） */
@@ -367,6 +358,8 @@ export interface StoryboardShot {
     generating?: boolean;
     /** 生成中缩略图地址（/api/storyboards/scratch/...）；未生成中时为空串 */
     scratch_url?: string;
+    /** 该图是否为单镜九宫格（3×3）布局：灯箱叠加 1-9 编号覆盖层的判据 */
+    grid?: boolean;
   };
   video?: {
     exists: boolean;
@@ -483,6 +476,8 @@ export interface VideoRetryBatchResponse {
 }
 
 // --- TTS ---
+// TTSPlanLine / TTSPlanResponse / TTSTask（旧「TTS 配音任务」链路）已随后端
+// /api/tts/{plan,generate,status,tasks,list} 一同下线移除；仅保留环境自检类型。
 export interface TTSEnv {
   available: boolean;
   reasons?: string[];
@@ -491,92 +486,9 @@ export interface TTSEnv {
   dub_dir?: string;
 }
 
-export interface TTSPlanLine {
-  shot_id: string;
-  seq: number;
-  text: string;
-  character: string;
-  voice: string;
-  duration?: number;
-  url?: string;
-  exists?: boolean;
-  out_path?: string;
-}
-
-export interface TTSPlanResponse {
-  success: boolean;
-  script_path: string;
-  script_source: string;
-  episode: number;
-  line_count: number;
-  characters: Array<{ name: string; voice: string; line_count: number }>;
-  lines: TTSPlanLine[];
-  voice_map: Record<string, unknown>;
-  out_dir: string;
-}
-
-export interface TTSTask {
-  task_id: string;
-  status: 'running' | 'completed' | 'failed';
-  progress: number;
-  phase: string;
-  message: string;
-  project_name: string;
-  total: number;
-  current: number;
-  plan?: TTSPlanResponse;
-  results?: Array<{ ok: boolean; path?: string; error?: string }>;
-}
-
 // --- Mix ---
-export interface MixEnv {
-  available: boolean;
-  reasons?: string[];
-}
-
-export interface MixPlanResponse {
-  success: boolean;
-  video_count: number;
-  audio_count: number;
-  to_generate: number;
-  lines: Array<{ video: string; audio: string; output: string }>;
-  out_dir: string;
-}
-
-export interface MixTask {
-  task_id: string;
-  status: 'running' | 'completed' | 'failed';
-  progress: number;
-  phase: string;
-  message: string;
-  project_name: string;
-  total: number;
-  current: number;
-  /** 产物路径（完成后才有） */
-  output_path?: string;
-  /** 播放地址（后端用 _mix_audio_url 计算） */
-  url?: string;
-  /** 混音报告路径 */
-  report_path?: string;
-  /** 合成完成后的统计（entry_count / elapsed_sec / warnings…） */
-  result?: { entry_count?: number; elapsed_sec?: number; warnings?: string[] };
-  /**
-   * 后端新增：带配音成片是否已自动进入「成品验收」队列。
-   * registered=false 时看 reason（例如成片过小被判为半成品）。
-   */
-  deliverable?: {
-    registered: boolean;
-    reason: string;
-    episode_no: number;
-    path: string;
-  };
-}
-
-/** ⚠️ /api/mix/status 返回的是信封 {success, task}，不是裸任务对象 */
-export interface MixStatusResponse {
-  success: boolean;
-  task: MixTask;
-}
+// MixEnv / MixPlanResponse / MixTask / MixStatusResponse（旧「音画混音」任务链）
+// 已随后端 /api/mix/* 全部路由一同下线移除。
 
 // --- QC ---
 export interface QCConfig {
@@ -792,6 +704,16 @@ export interface AutopilotStatus {
   exceptions?: unknown;
   last_error?: string;
   checked_at?: string;
+  /** 2026-10-08：单集失败自动暂停（stop_on_failure）详情 —— 非空 = 因失败被自动暂停 */
+  failure_pause?: {
+    project?: string;
+    episode?: number;
+    reason?: string;
+    error?: string;
+    at?: string;
+  } | null;
+  /** 需人工介入（failure_pause 非空 或 未处理异常 > 0） */
+  needs_user?: boolean;
 }
 
 export interface AutopilotProgress {

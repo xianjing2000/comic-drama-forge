@@ -110,7 +110,6 @@ def start_autonomous(project: str, novel_id: str, plan_overrides: dict = None) -
 
     project_key = proj.get("dir_key") or project
     chapters = novel_meta.get("chapters", [])
-    total_episodes = len(chapters)
 
     # 3. 同步 AI 对话设定到 autopilot plan
     state_path = _ensure_state_dir(project_key)
@@ -130,6 +129,9 @@ def start_autonomous(project: str, novel_id: str, plan_overrides: dict = None) -
         **(plan_overrides or {})
     }
     autopilot.set_plan(project_key, plan_patch, novel_id)
+
+    # 真实「集」数由 episode_units 展开（一章可拆多集），state.json 与播报文案都以此为准
+    total_episodes = len(autopilot.episode_units(chapters, plan_patch))
 
     # 5. 记录启动状态
     _write_state(project_key, {
@@ -169,10 +171,10 @@ def start_autonomous(project: str, novel_id: str, plan_overrides: dict = None) -
             f"该项目当前没有待生产的集（{total_episodes} 集均为已打回/待人工处理状态），请先处理异常"
         )
     else:
-        message = f"已启动全自动生产，共 {total_episodes} 集，当前待生产 {pending} 集"
+        message = f"已启动全自动生产，覆盖 {len(chapters)} 章（共 {total_episodes} 集），当前待生产 {pending} 集"
 
-    logger.info("全自动生产启动: project=%s, novel=%s, episodes_total=%d, pending=%d, done=%d",
-                project_key, novel_id, total_episodes, pending, done)
+    logger.info("全自动生产启动: project=%s, novel=%s, chapters=%d, episodes=%d, pending=%d, done=%d",
+                project_key, novel_id, len(chapters), total_episodes, pending, done)
 
     return {
         "success": True,
@@ -265,9 +267,9 @@ def status(project: str = "") -> dict:
             "novel_id": state.get("novel_id", plan.get("novel_id", "")),
             "style_brief": state.get("style_brief", ""),
             "total_episodes": state.get("total_episodes") or len(progress.get("episodes", [])),
-            "episodes_done": progress.get("stats", {}).get("done", 0),
-            "episodes_pending": progress.get("stats", {}).get("pending", 0),
-            "episodes_failed": progress.get("stats", {}).get("failed", 0),
+            "episodes_done": int(progress.get("done") or 0),
+            "episodes_pending": max(int(progress.get("total") or 0) - int(progress.get("done") or 0), 0),
+            "episodes_failed": 0,  # project_progress 暂无失败计数维度
             "enabled": plan.get("enabled", False),
             "started_at": state.get("started_at", ""),
             "stopped_at": state.get("stopped_at", ""),
@@ -344,7 +346,8 @@ def generate_report(project: str, episode_no: int = None) -> dict:
     total = len(history)
     ok_count = sum(1 for h in history if h.get("ok"))
     failed_count = total - ok_count
-    total_retries = sum(h.get("retries", 0) for h in history)
+    # 注意：autopilot 的 history 行（append_history 写入）没有 retries 字段，
+    # 原来的 total_retries = sum(h.get("retries", 0)) 恒为 0、失真，故直接删除该统计。
     total_time = sum(h.get("elapsed_sec", 0) for h in history)
 
     report = {
@@ -355,7 +358,6 @@ def generate_report(project: str, episode_no: int = None) -> dict:
             "total_episodes": total,
             "completed": ok_count,
             "failed": failed_count,
-            "total_retries": total_retries,
             "total_elapsed_sec": round(total_time, 1),
             "avg_elapsed_sec": round(total_time / max(ok_count, 1), 1),
         },
@@ -393,14 +395,13 @@ def export_report(project: str, format: str = "json") -> str:
             f"- 总集数：{report['summary']['total_episodes']}",
             f"- 完成：{report['summary']['completed']}",
             f"- 失败：{report['summary']['failed']}",
-            f"- 总重试：{report['summary']['total_retries']}",
             f"- 总耗时：{report['summary']['total_elapsed_sec']} 秒",
             f"",
             f"## 明细",
         ]
         for ep in report.get("episodes", []):
             lines.append(f"- 第{ep.get('episode_no')}集：{'✅' if ep.get('ok') else '❌'} "
-                         f"重试{ep.get('retries', 0)}次 耗时{ep.get('elapsed_sec', 0):.0f}s")
+                         f"耗时{ep.get('elapsed_sec', 0):.0f}s")
         with open(filepath, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
 

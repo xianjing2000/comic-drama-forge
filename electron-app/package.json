@@ -1,6 +1,6 @@
 {
   "name": "mjscxt-desktop",
-  "version": "1.3.0",
+  "version": "1.4.2",
   "description": "漫剧工坊桌面版：Electron 壳 + 本地 Flask 后端（serve.py）",
   "main": "main.js",
   "private": true,
@@ -11,7 +11,7 @@
     "build:win:local": "electron-builder --win --config.electronDist=C:/Users/liujianghua/mjscxt_desktop/electron"
   },
   "devDependencies": {
-    "electron": "^31.0.0",
+    "electron": "^33.4.11",
     "electron-builder": "^25.0.0"
   },
   "build": {

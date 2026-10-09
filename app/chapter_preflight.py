@@ -193,7 +193,7 @@ def merge_to_bible(continuity_dir: str, project_key: str, preflight: dict) -> di
 
     返回 {"added": [...names], "updated": [...names], "bible": bible}
     """
-    import continuity as cont_mod  # 延迟导入，避免循环
+    import continuity_store as cont_mod  # 2026-10-08 解耦：只需要 bible 读写，不再 import 整个 continuity（切断 chapter_preflight → continuity 环边）
 
     ch_idx = int(preflight.get("chapter_index") or 0)
     bible = cont_mod.load_bible(continuity_dir, project_key)

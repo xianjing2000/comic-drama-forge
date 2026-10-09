@@ -1,2713 +1,2713 @@
 {
- "id": "79e9753c-d7eb-464f-b072-38c26f869748",
- "revision": 0,
- "last_node_id": 67,
- "last_link_id": 143,
- "nodes": [
-  {
-   "id": 8,
-   "type": "PreviewAny",
-   "pos": [
-    1006.1195126617181,
-    90.46763850287226
-   ],
-   "size": [
-    640,
-    200
-   ],
-   "flags": {},
-   "order": 19,
-   "mode": 0,
-   "inputs": [
+  "id": "79e9753c-d7eb-464f-b072-38c26f869748",
+  "revision": 0,
+  "last_node_id": 67,
+  "last_link_id": 143,
+  "nodes": [
     {
-     "label": "source",
-     "localized_name": "源",
-     "name": "source",
-     "type": "*",
-     "link": 20
+      "id": 8,
+      "type": "PreviewAny",
+      "pos": [
+        1006.1195126617181,
+        90.46763850287226
+      ],
+      "size": [
+        640,
+        200
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "source",
+          "localized_name": "源",
+          "name": "source",
+          "type": "*",
+          "link": 20
+        }
+      ],
+      "outputs": [
+        {
+          "label": "STRING",
+          "localized_name": "字符串",
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "Director 运行报告",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "PreviewAny"
+      },
+      "widgets_values": [],
+      "widgets_values_named": {}
+    },
+    {
+      "id": 11,
+      "type": "MarkdownNote",
+      "pos": [
+        -704.0533151012283,
+        333.1976553994068
+      ],
+      "size": [
+        360,
+        320
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "导演台插件地址：",
+      "properties": {},
+      "widgets_values": [
+        "https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director"
+      ],
+      "widgets_values_named": {
+        "text": "https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 48,
+      "type": "MiniMaxH3TRTVAELoader",
+      "pos": [
+        -2261.225432398557,
+        332.289771610145
+      ],
+      "size": [
+        334.2699053454834,
+        82
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "decoder",
+          "name": "decoder",
+          "type": "COMBO",
+          "widget": {
+            "name": "decoder"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "encoder",
+          "name": "encoder",
+          "type": "COMBO",
+          "widget": {
+            "name": "encoder"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "VAE",
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            100
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "ComfyUI-H3VAE_TRT",
+        "ver": "4360e00867eca86ab61b3899216c0ec281367b46",
+        "Node name for S&R": "MiniMaxH3TRTVAELoader",
+        "aux_id": "lihaoyun6/ComfyUI-H3VAE_TRT"
+      },
+      "widgets_values": [
+        "minimax_h3_vae_decoder_w4a16_awq.engine",
+        "minimax_h3_vae_encoder.engine"
+      ],
+      "widgets_values_named": {
+        "decoder": "minimax_h3_vae_decoder_w4a16_awq.engine",
+        "encoder": "minimax_h3_vae_encoder.engine"
+      },
+      "color": "#233",
+      "bgcolor": "#355"
+    },
+    {
+      "id": 2,
+      "type": "CLIPLoader",
+      "pos": [
+        -2257.6723640360447,
+        155.88982891219518
+      ],
+      "size": [
+        360,
+        106
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "CLIP名称",
+          "localized_name": "CLIP名称",
+          "name": "clip_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_name"
+          },
+          "link": null
+        },
+        {
+          "label": "type",
+          "localized_name": "类型",
+          "name": "type",
+          "type": "COMBO",
+          "widget": {
+            "name": "type"
+          },
+          "link": null
+        },
+        {
+          "label": "device",
+          "localized_name": "设备",
+          "name": "device",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "CLIP",
+          "localized_name": "CLIP",
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            16
+          ]
+        }
+      ],
+      "title": "CLIP (minimax / Qwen3-VL)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "CLIPLoader",
+        "models": [
+          {
+            "name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            "directory": "text_encoders"
+          }
+        ]
+      },
+      "widgets_values": [
+        "minimax-h3\\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "minimax",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "minimax-h3\\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [
+        -2258.7036879362863,
+        25.495229493905853
+      ],
+      "size": [
+        360,
+        82
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "UNET名称",
+          "localized_name": "UNET名称",
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        },
+        {
+          "label": "weight_dtype",
+          "localized_name": "数据类型",
+          "name": "weight_dtype",
+          "type": "COMBO",
+          "widget": {
+            "name": "weight_dtype"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "模型",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            24
+          ]
+        }
+      ],
+      "title": "MiniMax H3 UNET",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "minimax-h3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 33,
+      "type": "BasicScheduler",
+      "pos": [
+        -1361.617449554594,
+        828.0237003122592
+      ],
+      "size": [
+        270,
+        106
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 4,
+      "inputs": [
+        {
+          "label": "模型",
+          "localized_name": "模型",
+          "name": "model",
+          "type": "MODEL",
+          "link": 130
+        },
+        {
+          "label": "调度器",
+          "localized_name": "调度器",
+          "name": "scheduler",
+          "type": "COMBO",
+          "widget": {
+            "name": "scheduler"
+          },
+          "link": null
+        },
+        {
+          "label": "步数",
+          "localized_name": "步数",
+          "name": "steps",
+          "type": "INT",
+          "widget": {
+            "name": "steps"
+          },
+          "link": null
+        },
+        {
+          "label": "降噪",
+          "localized_name": "降噪",
+          "name": "denoise",
+          "type": "FLOAT",
+          "widget": {
+            "name": "denoise"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "Sigmas",
+          "localized_name": "Sigmas",
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "links": [
+            68
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "BasicScheduler"
+      },
+      "widgets_values": [
+        "beta",
+        3,
+        0.2
+      ],
+      "widgets_values_named": {
+        "scheduler": "beta",
+        "steps": 3,
+        "denoise": 0.2
+      }
+    },
+    {
+      "id": 16,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        -1678.8314536413761,
+        -30.664963255648406
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "模型",
+          "localized_name": "模型",
+          "name": "model",
+          "type": "MODEL",
+          "link": 24
+        },
+        {
+          "label": "LoRA名称",
+          "localized_name": "LoRA名称",
+          "name": "lora_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "lora_name"
+          },
+          "link": null
+        },
+        {
+          "label": "模型强度",
+          "localized_name": "模型强度",
+          "name": "strength_model",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength_model"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "模型",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            25
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+        1
+      ],
+      "widgets_values_named": {
+        "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+        "strength_model": 1
+      }
+    },
+    {
+      "id": 54,
+      "type": "UNETLoader",
+      "pos": [
+        -2213.1422455064994,
+        837.0905093862161
+      ],
+      "size": [
+        360,
+        82
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 4,
+      "inputs": [
+        {
+          "label": "UNET名称",
+          "localized_name": "UNET名称",
+          "name": "unet_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "unet_name"
+          },
+          "link": null
+        },
+        {
+          "label": "weight_dtype",
+          "localized_name": "数据类型",
+          "name": "weight_dtype",
+          "type": "COMBO",
+          "widget": {
+            "name": "weight_dtype"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "模型",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            117
+          ]
+        }
+      ],
+      "title": "MiniMax H3 UNET",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "minimax-h3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 55,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        -2112.0200059105964,
+        969.7577162558405
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 4,
+      "inputs": [
+        {
+          "label": "模型",
+          "localized_name": "模型",
+          "name": "model",
+          "type": "MODEL",
+          "link": 117
+        },
+        {
+          "label": "LoRA名称",
+          "localized_name": "LoRA名称",
+          "name": "lora_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "lora_name"
+          },
+          "link": null
+        },
+        {
+          "label": "模型强度",
+          "localized_name": "模型强度",
+          "name": "strength_model",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength_model"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "模型",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            123
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "LoraLoaderModelOnly"
+      },
+      "widgets_values": [
+        "minimax_h3\\minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors",
+        1
+      ],
+      "widgets_values_named": {
+        "lora_name": "minimax_h3\\minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors",
+        "strength_model": 1
+      }
+    },
+    {
+      "id": 14,
+      "type": "PathchSageAttentionKJ",
+      "pos": [
+        -1832.1460829101384,
+        182.24277253236446
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "model",
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 25
+        },
+        {
+          "label": "sage_attention",
+          "localized_name": "sage_attention",
+          "name": "sage_attention",
+          "type": "COMBO",
+          "widget": {
+            "name": "sage_attention"
+          },
+          "link": null
+        },
+        {
+          "label": "allow_compile",
+          "localized_name": "allow_compile",
+          "name": "allow_compile",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "allow_compile"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "MODEL",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            72
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "d3cfe21625e5170126ce06fbfcfe1d88108688c3",
+        "Node name for S&R": "PathchSageAttentionKJ"
+      },
+      "widgets_values": [
+        "auto",
+        true
+      ],
+      "widgets_values_named": {
+        "sage_attention": "auto",
+        "allow_compile": true
+      }
+    },
+    {
+      "id": 53,
+      "type": "SolAttnPatch",
+      "pos": [
+        -1824.6978457873506,
+        455.93305516591664
+      ],
+      "size": [
+        250.70571427602363,
+        342
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 106
+        },
+        {
+          "localized_name": "tau_profile",
+          "name": "tau_profile",
+          "shape": 7,
+          "type": "STRING",
+          "link": null
+        },
+        {
+          "localized_name": "tau",
+          "name": "tau",
+          "type": "FLOAT",
+          "widget": {
+            "name": "tau"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "start_percent",
+          "name": "start_percent",
+          "type": "FLOAT",
+          "widget": {
+            "name": "start_percent"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "end_percent",
+          "name": "end_percent",
+          "type": "FLOAT",
+          "widget": {
+            "name": "end_percent"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "min_tokens",
+          "name": "min_tokens",
+          "type": "INT",
+          "widget": {
+            "name": "min_tokens"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "int8_qk",
+          "name": "int8_qk",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "int8_qk"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "sink_conditioning",
+          "name": "sink_conditioning",
+          "type": "COMBO",
+          "widget": {
+            "name": "sink_conditioning"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "morton",
+          "name": "morton",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "morton"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "morton_curve",
+          "name": "morton_curve",
+          "type": "COMBO",
+          "widget": {
+            "name": "morton_curve"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "int8_pv",
+          "name": "int8_pv",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "int8_pv"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "verbose",
+          "name": "verbose",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "verbose"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "use_tma",
+          "name": "use_tma",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "use_tma"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "dense_blocks",
+          "name": "dense_blocks",
+          "type": "STRING",
+          "widget": {
+            "name": "dense_blocks"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            103
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "SolAttnPatch"
+      },
+      "widgets_values": [
+        1.2,
+        0.2,
+        0.9,
+        4096,
+        false,
+        "exact_kv",
+        false,
+        "3d",
+        true,
+        true,
+        false,
+        "0-5"
+      ],
+      "widgets_values_named": {
+        "tau": 1.2,
+        "start_percent": 0.2,
+        "end_percent": 0.9,
+        "min_tokens": 4096,
+        "int8_qk": false,
+        "sink_conditioning": "exact_kv",
+        "morton": false,
+        "morton_curve": "3d",
+        "int8_pv": true,
+        "verbose": true,
+        "use_tma": false,
+        "dense_blocks": "0-5"
+      }
+    },
+    {
+      "id": 41,
+      "type": "EasyCache",
+      "pos": [
+        -1508.9140268869762,
+        464.65997813777824
+      ],
+      "size": [
+        270,
+        130
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "model",
+          "localized_name": "模型",
+          "name": "model",
+          "type": "MODEL",
+          "link": 103
+        },
+        {
+          "label": "reuse_threshold",
+          "localized_name": "重用阈值",
+          "name": "reuse_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "reuse_threshold"
+          },
+          "link": null
+        },
+        {
+          "label": "start_percent",
+          "localized_name": "开始位置",
+          "name": "start_percent",
+          "type": "FLOAT",
+          "widget": {
+            "name": "start_percent"
+          },
+          "link": null
+        },
+        {
+          "label": "end_percent",
+          "localized_name": "结束位置",
+          "name": "end_percent",
+          "type": "FLOAT",
+          "widget": {
+            "name": "end_percent"
+          },
+          "link": null
+        },
+        {
+          "label": "verbose",
+          "localized_name": "调试信息",
+          "name": "verbose",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "verbose"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "MODEL",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            77
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "EasyCache"
+      },
+      "widgets_values": [
+        0.3,
+        0.2,
+        0.9,
+        false
+      ],
+      "widgets_values_named": {
+        "reuse_threshold": 0.3,
+        "start_percent": 0.2,
+        "end_percent": 0.9,
+        "verbose": false
+      }
+    },
+    {
+      "id": 38,
+      "type": "MiniMaxH3DirectorRefine",
+      "pos": [
+        -1058.6972150460283,
+        686.4523052529702
+      ],
+      "size": [
+        281.3873046875,
+        530
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 4,
+      "inputs": [
+        {
+          "label": "refine_model",
+          "localized_name": "refine_model",
+          "name": "refine_model",
+          "shape": 7,
+          "type": "MODEL",
+          "link": 131
+        },
+        {
+          "label": "sigmas",
+          "localized_name": "sigmas",
+          "name": "sigmas",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": 68
+        },
+        {
+          "label": "upscale_model",
+          "localized_name": "upscale_model",
+          "name": "upscale_model",
+          "shape": 7,
+          "type": "UPSCALE_MODEL",
+          "link": null
+        },
+        {
+          "label": "mode",
+          "localized_name": "mode",
+          "name": "mode",
+          "type": "COMBO",
+          "widget": {
+            "name": "mode"
+          },
+          "link": null
+        },
+        {
+          "label": "upscale_method",
+          "localized_name": "upscale_method",
+          "name": "upscale_method",
+          "type": "COMBO",
+          "widget": {
+            "name": "upscale_method"
+          },
+          "link": null
+        },
+        {
+          "label": "latent_upscale_model",
+          "localized_name": "latent_upscale_model",
+          "name": "latent_upscale_model",
+          "type": "COMBO",
+          "widget": {
+            "name": "latent_upscale_model"
+          },
+          "link": null
+        },
+        {
+          "label": "sampler",
+          "localized_name": "sampler",
+          "name": "sampler",
+          "type": "COMBO",
+          "widget": {
+            "name": "sampler"
+          },
+          "link": null
+        },
+        {
+          "label": "passes",
+          "localized_name": "passes",
+          "name": "passes",
+          "type": "INT",
+          "widget": {
+            "name": "passes"
+          },
+          "link": null
+        },
+        {
+          "label": "seed_mode",
+          "localized_name": "seed_mode",
+          "name": "seed_mode",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "seed_mode"
+          },
+          "link": null
+        },
+        {
+          "label": "aspect_ratio",
+          "localized_name": "aspect_ratio",
+          "name": "aspect_ratio",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "aspect_ratio"
+          },
+          "link": null
+        },
+        {
+          "label": "megapixels",
+          "localized_name": "megapixels",
+          "name": "megapixels",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "megapixels"
+          },
+          "link": null
+        },
+        {
+          "label": "width",
+          "localized_name": "width",
+          "name": "width",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": null
+        },
+        {
+          "label": "height",
+          "localized_name": "height",
+          "name": "height",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": null
+        },
+        {
+          "label": "skip_fl2v",
+          "localized_name": "skip_fl2v",
+          "name": "skip_fl2v",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "skip_fl2v"
+          },
+          "link": null
+        },
+        {
+          "label": "confirm_first_pass",
+          "localized_name": "confirm_first_pass",
+          "name": "confirm_first_pass",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "confirm_first_pass"
+          },
+          "link": null
+        },
+        {
+          "label": "enable_latent_chunking",
+          "localized_name": "enable_latent_chunking",
+          "name": "enable_latent_chunking",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enable_latent_chunking"
+          },
+          "link": null
+        },
+        {
+          "label": "enable_tiling",
+          "localized_name": "enable_tiling",
+          "name": "enable_tiling",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enable_tiling"
+          },
+          "link": null
+        },
+        {
+          "label": "tile_count",
+          "localized_name": "tile_count",
+          "name": "tile_count",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "tile_count"
+          },
+          "link": null
+        },
+        {
+          "label": "tile_overlap",
+          "localized_name": "tile_overlap",
+          "name": "tile_overlap",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "tile_overlap"
+          },
+          "link": null
+        },
+        {
+          "label": "seed",
+          "localized_name": "seed",
+          "name": "seed",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "refine",
+          "localized_name": "refine",
+          "name": "refine",
+          "type": "MMX_DIR_REFINE",
+          "links": [
+            70
+          ]
+        },
+        {
+          "label": "width",
+          "localized_name": "width",
+          "name": "width",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "label": "height",
+          "localized_name": "height",
+          "name": "height",
+          "type": "INT",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "minimax-h3-director",
+        "ver": "4b4fe6e1a7e68b17f4a36c8b3e942667defab61f",
+        "Node name for S&R": "MiniMaxH3DirectorRefine",
+        "aux_id": "AIMixer/ComfyUI_MiniMaxH3_Director"
+      },
+      "widgets_values": [
+        "upscale",
+        "h3_latent",
+        "minimax_h3_latent_upscaler_3d_bf16.safetensors",
+        "euler",
+        1,
+        "inherit",
+        0,
+        "fixed",
+        "跟随导演台",
+        1,
+        1088,
+        720,
+        true,
+        false,
+        false,
+        false,
+        2,
+        128
+      ],
+      "widgets_values_named": {
+        "mode": "upscale",
+        "upscale_method": "h3_latent",
+        "latent_upscale_model": "minimax_h3_latent_upscaler_3d_bf16.safetensors",
+        "sampler": "euler",
+        "passes": 1,
+        "seed_mode": "inherit",
+        "seed": 0,
+        "control_after_generate": "fixed",
+        "aspect_ratio": "跟随导演台",
+        "megapixels": 1,
+        "width": 1088,
+        "height": 720,
+        "skip_fl2v": true,
+        "confirm_first_pass": false,
+        "enable_latent_chunking": false,
+        "enable_tiling": false,
+        "tile_count": 2,
+        "tile_overlap": 128
+      }
+    },
+    {
+      "id": 39,
+      "type": "TESpeedMiniMaxH3",
+      "pos": [
+        -1490.449286728965,
+        166.92117743558475
+      ],
+      "size": [
+        306.640625,
+        178
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "model",
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 72
+        },
+        {
+          "label": "processing_control_value",
+          "localized_name": "processing_control_value",
+          "name": "processing_control_value",
+          "type": "FLOAT",
+          "widget": {
+            "name": "processing_control_value"
+          },
+          "link": null
+        },
+        {
+          "label": "processing_percent_1",
+          "localized_name": "processing_percent_1",
+          "name": "processing_percent_1",
+          "type": "FLOAT",
+          "widget": {
+            "name": "processing_percent_1"
+          },
+          "link": null
+        },
+        {
+          "label": "processing_percent_2",
+          "localized_name": "processing_percent_2",
+          "name": "processing_percent_2",
+          "type": "FLOAT",
+          "widget": {
+            "name": "processing_percent_2"
+          },
+          "link": null
+        },
+        {
+          "label": "mcs",
+          "localized_name": "mcs",
+          "name": "mcs",
+          "type": "INT",
+          "widget": {
+            "name": "mcs"
+          },
+          "link": null
+        },
+        {
+          "label": "device",
+          "localized_name": "device",
+          "name": "device",
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "MODEL",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            106
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TESpeedMiniMaxH3"
+      },
+      "widgets_values": [
+        0.08,
+        0.1,
+        0.9,
+        2,
+        "auto"
+      ],
+      "widgets_values_named": {
+        "processing_control_value": 0.08,
+        "processing_percent_1": 0.1,
+        "processing_percent_2": 0.9,
+        "mcs": 2,
+        "device": "auto"
+      }
+    },
+    {
+      "id": 63,
+      "type": "TESpeedMiniMaxH3",
+      "pos": [
+        -2160.4374952823714,
+        1312.1947585929408
+      ],
+      "size": [
+        306.640625,
+        178
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 4,
+      "inputs": [
+        {
+          "label": "model",
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 132
+        },
+        {
+          "label": "processing_control_value",
+          "localized_name": "processing_control_value",
+          "name": "processing_control_value",
+          "type": "FLOAT",
+          "widget": {
+            "name": "processing_control_value"
+          },
+          "link": null
+        },
+        {
+          "label": "processing_percent_1",
+          "localized_name": "processing_percent_1",
+          "name": "processing_percent_1",
+          "type": "FLOAT",
+          "widget": {
+            "name": "processing_percent_1"
+          },
+          "link": null
+        },
+        {
+          "label": "processing_percent_2",
+          "localized_name": "processing_percent_2",
+          "name": "processing_percent_2",
+          "type": "FLOAT",
+          "widget": {
+            "name": "processing_percent_2"
+          },
+          "link": null
+        },
+        {
+          "label": "mcs",
+          "localized_name": "mcs",
+          "name": "mcs",
+          "type": "INT",
+          "widget": {
+            "name": "mcs"
+          },
+          "link": null
+        },
+        {
+          "label": "device",
+          "localized_name": "device",
+          "name": "device",
+          "type": "COMBO",
+          "widget": {
+            "name": "device"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "MODEL",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            134
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "TESpeedMiniMaxH3"
+      },
+      "widgets_values": [
+        0.08,
+        0.1,
+        0.9,
+        2,
+        "auto"
+      ],
+      "widgets_values_named": {
+        "processing_control_value": 0.08,
+        "processing_percent_1": 0.1,
+        "processing_percent_2": 0.9,
+        "mcs": 2,
+        "device": "auto"
+      }
+    },
+    {
+      "id": 62,
+      "type": "EasyCache",
+      "pos": [
+        -1756.9753442541466,
+        870.4995258737991
+      ],
+      "size": [
+        270,
+        130
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 4,
+      "inputs": [
+        {
+          "label": "model",
+          "localized_name": "模型",
+          "name": "model",
+          "type": "MODEL",
+          "link": 134
+        },
+        {
+          "label": "reuse_threshold",
+          "localized_name": "重用阈值",
+          "name": "reuse_threshold",
+          "type": "FLOAT",
+          "widget": {
+            "name": "reuse_threshold"
+          },
+          "link": null
+        },
+        {
+          "label": "start_percent",
+          "localized_name": "开始位置",
+          "name": "start_percent",
+          "type": "FLOAT",
+          "widget": {
+            "name": "start_percent"
+          },
+          "link": null
+        },
+        {
+          "label": "end_percent",
+          "localized_name": "结束位置",
+          "name": "end_percent",
+          "type": "FLOAT",
+          "widget": {
+            "name": "end_percent"
+          },
+          "link": null
+        },
+        {
+          "label": "verbose",
+          "localized_name": "调试信息",
+          "name": "verbose",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "verbose"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "MODEL",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            130,
+            131
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "EasyCache"
+      },
+      "widgets_values": [
+        0.3,
+        0.2,
+        0.9,
+        false
+      ],
+      "widgets_values_named": {
+        "reuse_threshold": 0.3,
+        "start_percent": 0.2,
+        "end_percent": 0.9,
+        "verbose": false
+      }
+    },
+    {
+      "id": 60,
+      "type": "PathchSageAttentionKJ",
+      "pos": [
+        -2109.4630178126404,
+        1138.5153013309969
+      ],
+      "size": [
+        270,
+        82
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 4,
+      "inputs": [
+        {
+          "label": "model",
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 123
+        },
+        {
+          "label": "sage_attention",
+          "localized_name": "sage_attention",
+          "name": "sage_attention",
+          "type": "COMBO",
+          "widget": {
+            "name": "sage_attention"
+          },
+          "link": null
+        },
+        {
+          "label": "allow_compile",
+          "localized_name": "allow_compile",
+          "name": "allow_compile",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "allow_compile"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "MODEL",
+          "localized_name": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            132
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfyui-kjnodes",
+        "ver": "d3cfe21625e5170126ce06fbfcfe1d88108688c3",
+        "Node name for S&R": "PathchSageAttentionKJ"
+      },
+      "widgets_values": [
+        "auto",
+        true
+      ],
+      "widgets_values_named": {
+        "sage_attention": "auto",
+        "allow_compile": true
+      }
+    },
+    {
+      "id": 50,
+      "type": "NvidiaDLSSFrameInterpolation",
+      "pos": [
+        1076.5691141590887,
+        629.4518668821796
+      ],
+      "size": [
+        320,
+        415.77777777777777
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "link": 9
+        },
+        {
+          "localized_name": "output_fps",
+          "name": "output_fps",
+          "type": "COMBO",
+          "widget": {
+            "name": "output_fps"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "dlss_engine",
+          "name": "dlss_engine",
+          "type": "COMBO",
+          "widget": {
+            "name": "dlss_engine"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "encoding_quality",
+          "name": "encoding_quality",
+          "type": "COMBO",
+          "widget": {
+            "name": "encoding_quality"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "video_codec",
+          "name": "video_codec",
+          "type": "COMBO",
+          "widget": {
+            "name": "video_codec"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "container",
+          "name": "container",
+          "type": "COMBO",
+          "widget": {
+            "name": "container"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "rename",
+          "name": "rename",
+          "type": "COMBO",
+          "widget": {
+            "name": "rename"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "custom_suffix",
+          "name": "custom_suffix",
+          "type": "STRING",
+          "widget": {
+            "name": "custom_suffix"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "hdr_mode",
+          "name": "hdr_mode",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "hdr_mode"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "interpolated_video",
+          "name": "interpolated_video",
+          "type": "VIDEO",
+          "links": [
+            143
+          ]
+        },
+        {
+          "localized_name": "report_json",
+          "name": "report_json",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "DLSS 补帧",
+      "properties": {
+        "aux_id": "Konohamaru04/ComfyUI-NVIDIA-DLSS-Frame-Interpolation",
+        "ver": "7765f01b85bdb9342c8048b321650174856a2328",
+        "Node name for S&R": "NvidiaDLSSFrameInterpolation"
+      },
+      "widgets_values": [
+        "50",
+        "Auto",
+        "Max",
+        "H.264",
+        "MP4",
+        "Auto",
+        "_DLSSFG",
+        false
+      ],
+      "widgets_values_named": {
+        "output_fps": "50",
+        "dlss_engine": "Auto",
+        "encoding_quality": "Max",
+        "video_codec": "H.264",
+        "container": "MP4",
+        "rename": "Auto",
+        "custom_suffix": "_DLSSFG",
+        "hdr_mode": false
+      }
+    },
+    {
+      "id": 6,
+      "type": "CreateVideo",
+      "pos": [
+        1027.3503837698922,
+        381.992413827103
+      ],
+      "size": [
+        280,
+        150
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "images",
+          "localized_name": "图像",
+          "name": "images",
+          "type": "IMAGE",
+          "link": 17
+        },
+        {
+          "label": "audio",
+          "localized_name": "音频",
+          "name": "audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 18
+        },
+        {
+          "label": "fps",
+          "localized_name": "帧率",
+          "name": "fps",
+          "type": "FLOAT",
+          "widget": {
+            "name": "fps"
+          },
+          "link": 19
+        },
+        {
+          "label": "bit_depth",
+          "localized_name": "bit_depth",
+          "name": "bit_depth",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "bit_depth"
+          },
+          "link": null
+        },
+        {
+          "label": "color_space",
+          "localized_name": "color_space",
+          "name": "color_space",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "color_space"
+          },
+          "link": null
+        },
+        {
+          "label": "codec",
+          "localized_name": "codec",
+          "name": "codec",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "codec"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "VIDEO",
+          "localized_name": "视频",
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "CreateVideo"
+      },
+      "widgets_values": [
+        24,
+        8,
+        "sRGB",
+        "none"
+      ],
+      "widgets_values_named": {
+        "fps": 24,
+        "bit_depth": 8,
+        "color_space": "sRGB",
+        "codec": "none"
+      }
+    },
+    {
+      "id": 13,
+      "type": "MarkdownNote",
+      "pos": [
+        -690.2600206333096,
+        1018.0250863601956
+      ],
+      "size": [
+        300,
+        512
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "Note: Size Settings Reference",
+      "properties": {},
+      "widgets_values": [
+        "| megapixels | Aspect | Output (multiple=32) |\n|---|---|---|\n| 0.2 | 16:9 | 608 x 352 |\n| 0.3 | 16:9 | 736 x 416 |\n| 0.4 | 16:9 | 864 x 480 |\n| 0.5 | 16:9 | 960 x 544 |\n| 0.6 | 16:9 | 1056 x 608 |\n| 0.7 | 16:9 | 1152 x 640 |\n| 0.8 | 16:9 | 1216 x 672 |\n| 0.9 | 16:9 | 1280 x 736 |\n| 0.98 | 16:9 | 1344 x 768 |\n| 1.0 | 16:9 | 1376 x 768 |\n| 1.2 | 16:9 | 1504 x 832 |\n| 1.5 | 16:9 | 1664 x 928 |\n| 1.8 | 16:9 | 1824 x 1024 |\n| 2.0 | 16:9 | 1920 x 1088 |\n"
+      ],
+      "widgets_values_named": {
+        "text": "| megapixels | Aspect | Output (multiple=32) |\n|---|---|---|\n| 0.2 | 16:9 | 608 x 352 |\n| 0.3 | 16:9 | 736 x 416 |\n| 0.4 | 16:9 | 864 x 480 |\n| 0.5 | 16:9 | 960 x 544 |\n| 0.6 | 16:9 | 1056 x 608 |\n| 0.7 | 16:9 | 1152 x 640 |\n| 0.8 | 16:9 | 1216 x 672 |\n| 0.9 | 16:9 | 1280 x 736 |\n| 0.98 | 16:9 | 1344 x 768 |\n| 1.0 | 16:9 | 1376 x 768 |\n| 1.2 | 16:9 | 1504 x 832 |\n| 1.5 | 16:9 | 1664 x 928 |\n| 1.8 | 16:9 | 1824 x 1024 |\n| 2.0 | 16:9 | 1920 x 1088 |\n"
+      },
+      "color": "#222",
+      "bgcolor": "#000"
+    },
+    {
+      "id": 12,
+      "type": "MiniMaxH3Director",
+      "pos": [
+        -299.91478214648566,
+        103.10439081429395
+      ],
+      "size": [
+        1133.2939441495255,
+        2060.4966356386253
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "model",
+          "localized_name": "model",
+          "name": "model",
+          "type": "MODEL",
+          "link": 77
+        },
+        {
+          "label": "video_vae",
+          "localized_name": "video_vae",
+          "name": "video_vae",
+          "type": "VAE",
+          "link": 100
+        },
+        {
+          "label": "audio_vae",
+          "localized_name": "audio_vae",
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 102
+        },
+        {
+          "label": "clip",
+          "localized_name": "clip",
+          "name": "clip",
+          "type": "CLIP",
+          "link": 16
+        },
+        {
+          "label": "i2v_groups",
+          "localized_name": "i2v_groups",
+          "name": "i2v_groups",
+          "shape": 7,
+          "type": "MMX_DIR_GROUP",
+          "link": null
+        },
+        {
+          "label": "r2v_groups",
+          "localized_name": "r2v_groups",
+          "name": "r2v_groups",
+          "shape": 7,
+          "type": "MMX_DIR_GROUP",
+          "link": null
+        },
+        {
+          "label": "semantic_bridge",
+          "localized_name": "semantic_bridge",
+          "name": "semantic_bridge",
+          "shape": 7,
+          "type": "MMX_DIR_SEMANTIC_BRIDGE",
+          "link": null
+        },
+        {
+          "label": "selflift",
+          "localized_name": "selflift",
+          "name": "selflift",
+          "shape": 7,
+          "type": "MMX_DIR_SELFLIFT",
+          "link": null
+        },
+        {
+          "label": "refine",
+          "localized_name": "refine",
+          "name": "refine",
+          "shape": 7,
+          "type": "MMX_DIR_REFINE",
+          "link": 70
+        },
+        {
+          "label": "face_refine",
+          "localized_name": "face_refine",
+          "name": "face_refine",
+          "shape": 7,
+          "type": "MMX_DIR_FACE_REFINE",
+          "link": null
+        },
+        {
+          "label": "sigmas",
+          "localized_name": "sigmas",
+          "name": "sigmas",
+          "shape": 7,
+          "type": "SIGMAS",
+          "link": null
+        },
+        {
+          "label": "task_type",
+          "localized_name": "task_type",
+          "name": "task_type",
+          "type": "COMBO",
+          "widget": {
+            "name": "task_type"
+          },
+          "link": null
+        },
+        {
+          "label": "global_prompt",
+          "localized_name": "global_prompt",
+          "name": "global_prompt",
+          "type": "STRING",
+          "widget": {
+            "name": "global_prompt"
+          },
+          "link": null
+        },
+        {
+          "label": "bd_grp_sample",
+          "localized_name": "bd_grp_sample",
+          "name": "bd_grp_sample",
+          "type": "BDGROUP",
+          "widget": {
+            "name": "bd_grp_sample"
+          },
+          "link": null
+        },
+        {
+          "label": "cfg",
+          "localized_name": "cfg",
+          "name": "cfg",
+          "type": "FLOAT",
+          "widget": {
+            "name": "cfg"
+          },
+          "link": null
+        },
+        {
+          "label": "seed",
+          "localized_name": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "label": "frame_rate",
+          "localized_name": "frame_rate",
+          "name": "frame_rate",
+          "type": "FLOAT",
+          "widget": {
+            "name": "frame_rate"
+          },
+          "link": null
+        },
+        {
+          "label": "width",
+          "localized_name": "width",
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": null
+        },
+        {
+          "label": "height",
+          "localized_name": "height",
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": null
+        },
+        {
+          "label": "ref_max_size",
+          "localized_name": "ref_max_size",
+          "name": "ref_max_size",
+          "type": "INT",
+          "widget": {
+            "name": "ref_max_size"
+          },
+          "link": null
+        },
+        {
+          "label": "total_frames",
+          "localized_name": "total_frames",
+          "name": "total_frames",
+          "type": "INT",
+          "widget": {
+            "name": "total_frames"
+          },
+          "link": null
+        },
+        {
+          "label": "timeline_data",
+          "localized_name": "timeline_data",
+          "name": "timeline_data",
+          "type": "STRING",
+          "widget": {
+            "name": "timeline_data"
+          },
+          "link": null
+        },
+        {
+          "label": "bd_grp_advanced",
+          "localized_name": "bd_grp_advanced",
+          "name": "bd_grp_advanced",
+          "shape": 7,
+          "type": "BDGROUP",
+          "widget": {
+            "name": "bd_grp_advanced"
+          },
+          "link": null
+        },
+        {
+          "label": "steps",
+          "localized_name": "steps",
+          "name": "steps",
+          "shape": 7,
+          "type": "INT",
+          "widget": {
+            "name": "steps"
+          },
+          "link": null
+        },
+        {
+          "label": "sampler",
+          "localized_name": "sampler",
+          "name": "sampler",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "sampler"
+          },
+          "link": null
+        },
+        {
+          "label": "scheduler",
+          "localized_name": "scheduler",
+          "name": "scheduler",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "scheduler"
+          },
+          "link": null
+        },
+        {
+          "label": "shift_video",
+          "localized_name": "shift_video",
+          "name": "shift_video",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "shift_video"
+          },
+          "link": null
+        },
+        {
+          "label": "shift_audio",
+          "localized_name": "shift_audio",
+          "name": "shift_audio",
+          "shape": 7,
+          "type": "FLOAT",
+          "widget": {
+            "name": "shift_audio"
+          },
+          "link": null
+        },
+        {
+          "label": "bd_grp_perf",
+          "localized_name": "bd_grp_perf",
+          "name": "bd_grp_perf",
+          "shape": 7,
+          "type": "BDGROUP",
+          "widget": {
+            "name": "bd_grp_perf"
+          },
+          "link": null
+        },
+        {
+          "label": "clear_vram_between_segments",
+          "localized_name": "clear_vram_between_segments",
+          "name": "clear_vram_between_segments",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "clear_vram_between_segments"
+          },
+          "link": null
+        },
+        {
+          "label": "clear_vram_before_refine",
+          "localized_name": "clear_vram_before_refine",
+          "name": "clear_vram_before_refine",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "clear_vram_before_refine"
+          },
+          "link": null
+        },
+        {
+          "label": "clear_vram_before_face_refine",
+          "localized_name": "clear_vram_before_face_refine",
+          "name": "clear_vram_before_face_refine",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "clear_vram_before_face_refine"
+          },
+          "link": null
+        },
+        {
+          "label": "cache_frames_codec",
+          "localized_name": "cache_frames_codec",
+          "name": "cache_frames_codec",
+          "shape": 7,
+          "type": "COMBO",
+          "widget": {
+            "name": "cache_frames_codec"
+          },
+          "link": null
+        },
+        {
+          "label": "export_source_images",
+          "localized_name": "export_source_images",
+          "name": "export_source_images",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "export_source_images"
+          },
+          "link": null
+        },
+        {
+          "label": "export_pre_face_refine",
+          "localized_name": "export_pre_face_refine",
+          "name": "export_pre_face_refine",
+          "shape": 7,
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "export_pre_face_refine"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "images",
+          "localized_name": "images",
+          "name": "images",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": [
+            17
+          ]
+        },
+        {
+          "label": "audio",
+          "localized_name": "audio",
+          "name": "audio",
+          "shape": 6,
+          "type": "AUDIO",
+          "links": [
+            18
+          ]
+        },
+        {
+          "label": "fps",
+          "localized_name": "fps",
+          "name": "fps",
+          "type": "FLOAT",
+          "links": [
+            19
+          ]
+        },
+        {
+          "label": "frame_count",
+          "localized_name": "frame_count",
+          "name": "frame_count",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "label": "source_images",
+          "localized_name": "source_images",
+          "name": "source_images",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": null
+        },
+        {
+          "label": "report",
+          "localized_name": "report",
+          "name": "report",
+          "type": "STRING",
+          "links": [
+            20
+          ]
+        },
+        {
+          "label": "images_pre_refine",
+          "localized_name": "images_pre_refine",
+          "name": "images_pre_refine",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": []
+        },
+        {
+          "label": "images_pre_face_refine",
+          "localized_name": "images_pre_face_refine",
+          "name": "images_pre_face_refine",
+          "shape": 6,
+          "type": "IMAGE",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "minimax-h3-director",
+        "ver": "4b4fe6e1a7e68b17f4a36c8b3e942667defab61f",
+        "Node name for S&R": "MiniMaxH3Director",
+        "aux_id": "AIMixer/ComfyUI_MiniMaxH3_Director"
+      },
+      "widgets_values": [
+        "r2v — 参考主体生视频(Reference to Video)",
+        "subject_definitions:\n<Subject 1> 是来自  的棕发紫眸女性，身份与穿着完全锁定参考图：深海军蓝无袖高开衩丝质礼服、金线刺绣立领、黑色薄丝袜、金色尖头高跟鞋、金色耳饰与手镯。\n<Subject 2> 是来自  的可爱立体卡通小猴，浅棕皮毛、米色肚腹、橙色眼罩护目镜、蓝色大眼与细长尾巴，外形完全锁定参考图。\n<Subject 3> 是来自  的金发蓝眸女性，白色挂脖晚礼服、胸前红宝石坠饰、黑色薄丝袜、白色高跟鞋与金色手镯，身份与穿着完全锁定参考图。",
+        "采样设置",
+        1,
+        666,
+        "fixed",
+        24,
+        864,
+        480,
+        864,
+        180,
+        "{\"version\": 5, \"editMode\": \"segment\", \"totalFrames\": 180, \"frameRate\": 24, \"video\": {\"fileName\": \"\", \"videoFile\": \"\", \"subfolder\": \"\", \"type\": \"input\", \"frames\": [], \"frameMap\": [], \"sourceFrameCount\": 734, \"deletedSourceRanges\": []}, \"videoClips\": [], \"global\": {\"taskType\": \"r2v — 参考主体生视频(Reference to Video)\", \"prompt\": \"\", \"refs\": [], \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"continuousReference\": false, \"genImage\": {\"imageFile\": \"\"}, \"sourceWidth\": 768, \"sourceHeight\": 1024, \"refAudios\": [], \"commonEnabled\": false, \"commonCollapsed\": true, \"refVideos\": []}, \"output\": {\"mode\": \"fixed\", \"aspectRatio\": \"16:9 (宽屏)\", \"megapixels\": 0.4, \"multiple\": 32, \"longEdge\": 864, \"width\": 864, \"height\": 480, \"maxExportFrames\": 0, \"exportMode\": \"all\", \"audioMode\": \"source\", \"exportSourceImages\": false, \"exportPreFaceRefine\": true, \"refImageSize\": \"match\", \"continuityEnabled\": true, \"continuityOverlapFrames\": 22, \"continuityMode\": \"guide\", \"continuityRedraw\": 0.1, \"continuityKeepTail\": true}, \"runSelectEnabled\": false, \"runSelection\": [], \"segments\": [{\"id\": \"msmp44em3oasd\", \"start\": 0, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"startImage\": null, \"endImage\": null, \"continuityFromPrev\": false, \"refImageSize\": \"match\"}, {\"id\": \"msyi2qhz5lupx\", \"start\": 90, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频承接上一段露台气氛：先短暂保持 <Subject 1> 的等待姿态，随后 <Subject 2> 俏皮跑入，扯动衣摆并指向画外，引导 <Subject 1> 看向即将出现的方向。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 身份、发型面容、深蓝礼服与配饰完整保留。\\n<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - 橙色眼罩、蓝眼、浅棕皮毛与立体卡通质感完整保留。\\n\\ndetailed_description:\\n目标视频延续电影感二次元写实夜景风格，暖琥珀光与浅景深保持一致。\\n[Shot 1] 中近景先静止约 1.5 秒，保持 <Subject 1> 在露台栏杆旁侧身回望画外的等待姿态，发丝轻动，香槟杯仍在手中。随后 <Subject 2> 从画面下方小跑入画，橙色眼罩反光，尾巴轻甩，伸手轻轻拽住 <Subject 1> 礼服下摆。镜头以小幅度、慢速轻微 Tilt Down 兼顾小猴与她的视线交流。\\n[Shot 2] At 00:02.800, 镜头切到稍低角度的中景双人构图：<Subject 2> 仰头对 <Subject 1> 张开嘴巴做出兴奋表情，小爪指向画面左侧画外；<Subject 1> 低头看它，神情由惊讶转为含笑的娇嗔，再顺着它的指向抬眼望向画外。镜头以慢速、小幅度轻微 Truck Left 暗示视线方向，结束在两人共同看向画外的瞬间。\\n\\noverall_soundscape:\\n延续夜风与远处城市底噪；加入小猴轻快的爪步声、短促可爱气声，以及衣摆被轻扯时的布料细响。\\n\\nnon_diegetic_music:\\n原有慢爵士之上叠入少量轻盈钟琴音符，节奏仍偏慢，音量克制，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"startImage\": null, \"endImage\": null, \"continuityFromPrev\": true, \"refImageSize\": \"match\"}], \"timelineMode\": \"prompt_batch\", \"width\": 864, \"height\": 480, \"refMaxSize\": 864, \"gen\": {\"defaultFrameCount\": 124}, \"keyframes\": [{\"id\": \"msdtx3zi62ktv_s\", \"imageFile\": \"0059.png\", \"width\": 768, \"height\": 1024, \"start\": 0, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"一个猴子在极速奔跑，跑的过程中裤子掉在地上，但他仍然继续奔跑。过程中伴随自然的跑步声\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtx3zi62ktv_e\", \"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682, \"start\": 62, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdtx87njf33g_s\", \"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682, \"start\": 124, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"猴子在快速奔跑，双臂自然摆动，跑到一个岩石旁，慢慢的坐下，随着时间的流逝，沙尘慢慢消失，漏出蓝天背景。过程中伴随自然的跑步、坐下时候产生的声音\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtx87njf33g_e\", \"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024, \"start\": 186, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdtwxyuscavj_s\", \"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024, \"start\": 248, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"猴子从岩石上起身，起身后穿上衣服，背上书包，去教室上课，慢慢走到教室里，过程中伴随穿衣、背书包、走路的背景音\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtwxyuscavj_e\", \"imageFile\": \"0086.png\", \"width\": 768, \"height\": 1024, \"start\": 310, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdx1e2eigp2x\", \"imageFile\": \"\", \"width\": 0, \"height\": 0, \"start\": 372, \"length\": 124, \"frameCount\": 124, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}], \"durationSec\": 20, \"shots\": [{\"id\": \"msdtx3zi62ktv\", \"durationSec\": 5, \"prompt\": \"一个猴子在极速奔跑，跑的过程中裤子掉在地上，但他仍然继续奔跑。过程中伴随自然的跑步声\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0059.png\", \"width\": 768, \"height\": 1024}, \"endImage\": {\"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682}}, {\"id\": \"msdtx87njf33g\", \"durationSec\": 5, \"prompt\": \"猴子在快速奔跑，双臂自然摆动，跑到一个岩石旁，慢慢的坐下，随着时间的流逝，沙尘慢慢消失，漏出蓝天背景。过程中伴随自然的跑步、坐下时候产生的声音\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682}, \"endImage\": {\"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024}}, {\"id\": \"msdtwxyuscavj\", \"durationSec\": 5, \"prompt\": \"猴子从岩石上起身，起身后穿上衣服，背上书包，去教室上课，慢慢走到教室里，过程中伴随穿衣、背书包、走路的背景音\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024}, \"endImage\": {\"imageFile\": \"0086.png\", \"width\": 768, \"height\": 1024}}, {\"id\": \"msdx1e2eigp2x\", \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"startImage\": null, \"endImage\": null}], \"liveTaePreview\": true, \"batchDetailMode\": \"solo\", \"batchWorkspaces\": {\"r2v\": {\"selectedIndex\": 1, \"editMode\": \"segment\", \"runSelectEnabled\": false, \"runSelection\": [], \"segments\": [{\"id\": \"msmp44em3oasd\", \"start\": 0, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"continuityFromPrev\": false, \"refImageSize\": \"match\", \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"_videoFrameCount\": 90, \"previewFps\": 24, \"previewLive\": true, \"previewStep\": 8, \"previewTotalSteps\": 8}, {\"id\": \"msyi2qhz5lupx\", \"start\": 90, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频承接上一段露台气氛：先短暂保持 <Subject 1> 的等待姿态，随后 <Subject 2> 俏皮跑入，扯动衣摆并指向画外，引导 <Subject 1> 看向即将出现的方向。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 身份、发型面容、深蓝礼服与配饰完整保留。\\n<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - 橙色眼罩、蓝眼、浅棕皮毛与立体卡通质感完整保留。\\n\\ndetailed_description:\\n目标视频延续电影感二次元写实夜景风格，暖琥珀光与浅景深保持一致。\\n[Shot 1] 中近景先静止约 1.5 秒，保持 <Subject 1> 在露台栏杆旁侧身回望画外的等待姿态，发丝轻动，香槟杯仍在手中。随后 <Subject 2> 从画面下方小跑入画，橙色眼罩反光，尾巴轻甩，伸手轻轻拽住 <Subject 1> 礼服下摆。镜头以小幅度、慢速轻微 Tilt Down 兼顾小猴与她的视线交流。\\n[Shot 2] At 00:02.800, 镜头切到稍低角度的中景双人构图：<Subject 2> 仰头对 <Subject 1> 张开嘴巴做出兴奋表情，小爪指向画面左侧画外；<Subject 1> 低头看它，神情由惊讶转为含笑的娇嗔，再顺着它的指向抬眼望向画外。镜头以慢速、小幅度轻微 Truck Left 暗示视线方向，结束在两人共同看向画外的瞬间。\\n\\noverall_soundscape:\\n延续夜风与远处城市底噪；加入小猴轻快的爪步声、短促可爱气声，以及衣摆被轻扯时的布料细响。\\n\\nnon_diegetic_music:\\n原有慢爵士之上叠入少量轻盈钟琴音符，节奏仍偏慢，音量克制，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"continuityFromPrev\": true, \"refImageSize\": \"match\", \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"_videoFrameCount\": 90, \"previewFps\": 24, \"previewLive\": true, \"previewStep\": 8, \"previewTotalSteps\": 8}], \"globalCommon\": {\"commonEnabled\": true, \"commonCollapsed\": false, \"prompt\": \"subject_definitions:\\n<Subject 1> 是来自  的棕发紫眸女性，身份与穿着完全锁定参考图：深海军蓝无袖高开衩丝质礼服、金线刺绣立领、黑色薄丝袜、金色尖头高跟鞋、金色耳饰与手镯。\\n<Subject 2> 是来自  的可爱立体卡通小猴，浅棕皮毛、米色肚腹、橙色眼罩护目镜、蓝色大眼与细长尾巴，外形完全锁定参考图。\\n<Subject 3> 是来自  的金发蓝眸女性，白色挂脖晚礼服、胸前红宝石坠饰、黑色薄丝袜、白色高跟鞋与金色手镯，身份与穿着完全锁定参考图。\", \"refs\": [{\"index\": 0, \"imageFile\": \"krea2_identity_edit_00057_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, {\"index\": 1, \"imageFile\": \"krea2_identity_edit_00028_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, {\"index\": 2, \"imageFile\": \"krea2_identity_edit_00058_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}], \"refAudios\": [], \"refVideos\": []}}}}",
+        "高级采样",
+        8,
+        "res_multistep",
+        "simple",
+        12,
+        3,
+        false,
+        true,
+        "性能",
+        false,
+        false,
+        false,
+        "raw",
+        ""
+      ],
+      "widgets_values_named": {
+        "task_type": "r2v — 参考主体生视频(Reference to Video)",
+        "global_prompt": "subject_definitions:\n<Subject 1> 是来自  的棕发紫眸女性，身份与穿着完全锁定参考图：深海军蓝无袖高开衩丝质礼服、金线刺绣立领、黑色薄丝袜、金色尖头高跟鞋、金色耳饰与手镯。\n<Subject 2> 是来自  的可爱立体卡通小猴，浅棕皮毛、米色肚腹、橙色眼罩护目镜、蓝色大眼与细长尾巴，外形完全锁定参考图。\n<Subject 3> 是来自  的金发蓝眸女性，白色挂脖晚礼服、胸前红宝石坠饰、黑色薄丝袜、白色高跟鞋与金色手镯，身份与穿着完全锁定参考图。",
+        "bd_grp_sample": "采样设置",
+        "cfg": 1,
+        "seed": 666,
+        "control_after_generate": "fixed",
+        "frame_rate": 24,
+        "width": 864,
+        "height": 480,
+        "ref_max_size": 864,
+        "total_frames": 180,
+        "timeline_data": "{\"version\": 5, \"editMode\": \"segment\", \"totalFrames\": 180, \"frameRate\": 24, \"video\": {\"fileName\": \"\", \"videoFile\": \"\", \"subfolder\": \"\", \"type\": \"input\", \"frames\": [], \"frameMap\": [], \"sourceFrameCount\": 734, \"deletedSourceRanges\": []}, \"videoClips\": [], \"global\": {\"taskType\": \"r2v — 参考主体生视频(Reference to Video)\", \"prompt\": \"\", \"refs\": [], \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"continuousReference\": false, \"genImage\": {\"imageFile\": \"\"}, \"sourceWidth\": 768, \"sourceHeight\": 1024, \"refAudios\": [], \"commonEnabled\": false, \"commonCollapsed\": true, \"refVideos\": []}, \"output\": {\"mode\": \"fixed\", \"aspectRatio\": \"16:9 (宽屏)\", \"megapixels\": 0.4, \"multiple\": 32, \"longEdge\": 864, \"width\": 864, \"height\": 480, \"maxExportFrames\": 0, \"exportMode\": \"all\", \"audioMode\": \"source\", \"exportSourceImages\": false, \"exportPreFaceRefine\": true, \"refImageSize\": \"match\", \"continuityEnabled\": true, \"continuityOverlapFrames\": 22, \"continuityMode\": \"guide\", \"continuityRedraw\": 0.1, \"continuityKeepTail\": true}, \"runSelectEnabled\": false, \"runSelection\": [], \"segments\": [{\"id\": \"msmp44em3oasd\", \"start\": 0, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"startImage\": null, \"endImage\": null, \"continuityFromPrev\": false, \"refImageSize\": \"match\"}, {\"id\": \"msyi2qhz5lupx\", \"start\": 90, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频承接上一段露台气氛：先短暂保持 <Subject 1> 的等待姿态，随后 <Subject 2> 俏皮跑入，扯动衣摆并指向画外，引导 <Subject 1> 看向即将出现的方向。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 身份、发型面容、深蓝礼服与配饰完整保留。\\n<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - 橙色眼罩、蓝眼、浅棕皮毛与立体卡通质感完整保留。\\n\\ndetailed_description:\\n目标视频延续电影感二次元写实夜景风格，暖琥珀光与浅景深保持一致。\\n[Shot 1] 中近景先静止约 1.5 秒，保持 <Subject 1> 在露台栏杆旁侧身回望画外的等待姿态，发丝轻动，香槟杯仍在手中。随后 <Subject 2> 从画面下方小跑入画，橙色眼罩反光，尾巴轻甩，伸手轻轻拽住 <Subject 1> 礼服下摆。镜头以小幅度、慢速轻微 Tilt Down 兼顾小猴与她的视线交流。\\n[Shot 2] At 00:02.800, 镜头切到稍低角度的中景双人构图：<Subject 2> 仰头对 <Subject 1> 张开嘴巴做出兴奋表情，小爪指向画面左侧画外；<Subject 1> 低头看它，神情由惊讶转为含笑的娇嗔，再顺着它的指向抬眼望向画外。镜头以慢速、小幅度轻微 Truck Left 暗示视线方向，结束在两人共同看向画外的瞬间。\\n\\noverall_soundscape:\\n延续夜风与远处城市底噪；加入小猴轻快的爪步声、短促可爱气声，以及衣摆被轻扯时的布料细响。\\n\\nnon_diegetic_music:\\n原有慢爵士之上叠入少量轻盈钟琴音符，节奏仍偏慢，音量克制，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"startImage\": null, \"endImage\": null, \"continuityFromPrev\": true, \"refImageSize\": \"match\"}], \"timelineMode\": \"prompt_batch\", \"width\": 864, \"height\": 480, \"refMaxSize\": 864, \"gen\": {\"defaultFrameCount\": 124}, \"keyframes\": [{\"id\": \"msdtx3zi62ktv_s\", \"imageFile\": \"0059.png\", \"width\": 768, \"height\": 1024, \"start\": 0, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"一个猴子在极速奔跑，跑的过程中裤子掉在地上，但他仍然继续奔跑。过程中伴随自然的跑步声\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtx3zi62ktv_e\", \"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682, \"start\": 62, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdtx87njf33g_s\", \"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682, \"start\": 124, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"猴子在快速奔跑，双臂自然摆动，跑到一个岩石旁，慢慢的坐下，随着时间的流逝，沙尘慢慢消失，漏出蓝天背景。过程中伴随自然的跑步、坐下时候产生的声音\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtx87njf33g_e\", \"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024, \"start\": 186, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdtwxyuscavj_s\", \"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024, \"start\": 248, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"猴子从岩石上起身，起身后穿上衣服，背上书包，去教室上课，慢慢走到教室里，过程中伴随穿衣、背书包、走路的背景音\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtwxyuscavj_e\", \"imageFile\": \"0086.png\", \"width\": 768, \"height\": 1024, \"start\": 310, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdx1e2eigp2x\", \"imageFile\": \"\", \"width\": 0, \"height\": 0, \"start\": 372, \"length\": 124, \"frameCount\": 124, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}], \"durationSec\": 20, \"shots\": [{\"id\": \"msdtx3zi62ktv\", \"durationSec\": 5, \"prompt\": \"一个猴子在极速奔跑，跑的过程中裤子掉在地上，但他仍然继续奔跑。过程中伴随自然的跑步声\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0059.png\", \"width\": 768, \"height\": 1024}, \"endImage\": {\"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682}}, {\"id\": \"msdtx87njf33g\", \"durationSec\": 5, \"prompt\": \"猴子在快速奔跑，双臂自然摆动，跑到一个岩石旁，慢慢的坐下，随着时间的流逝，沙尘慢慢消失，漏出蓝天背景。过程中伴随自然的跑步、坐下时候产生的声音\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682}, \"endImage\": {\"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024}}, {\"id\": \"msdtwxyuscavj\", \"durationSec\": 5, \"prompt\": \"猴子从岩石上起身，起身后穿上衣服，背上书包，去教室上课，慢慢走到教室里，过程中伴随穿衣、背书包、走路的背景音\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024}, \"endImage\": {\"imageFile\": \"0086.png\", \"width\": 768, \"height\": 1024}}, {\"id\": \"msdx1e2eigp2x\", \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"startImage\": null, \"endImage\": null}], \"liveTaePreview\": true, \"batchDetailMode\": \"solo\", \"batchWorkspaces\": {\"r2v\": {\"selectedIndex\": 1, \"editMode\": \"segment\", \"runSelectEnabled\": false, \"runSelection\": [], \"segments\": [{\"id\": \"msmp44em3oasd\", \"start\": 0, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"continuityFromPrev\": false, \"refImageSize\": \"match\", \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"_videoFrameCount\": 90, \"previewFps\": 24, \"previewLive\": true, \"previewStep\": 8, \"previewTotalSteps\": 8}, {\"id\": \"msyi2qhz5lupx\", \"start\": 90, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频承接上一段露台气氛：先短暂保持 <Subject 1> 的等待姿态，随后 <Subject 2> 俏皮跑入，扯动衣摆并指向画外，引导 <Subject 1> 看向即将出现的方向。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 身份、发型面容、深蓝礼服与配饰完整保留。\\n<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - 橙色眼罩、蓝眼、浅棕皮毛与立体卡通质感完整保留。\\n\\ndetailed_description:\\n目标视频延续电影感二次元写实夜景风格，暖琥珀光与浅景深保持一致。\\n[Shot 1] 中近景先静止约 1.5 秒，保持 <Subject 1> 在露台栏杆旁侧身回望画外的等待姿态，发丝轻动，香槟杯仍在手中。随后 <Subject 2> 从画面下方小跑入画，橙色眼罩反光，尾巴轻甩，伸手轻轻拽住 <Subject 1> 礼服下摆。镜头以小幅度、慢速轻微 Tilt Down 兼顾小猴与她的视线交流。\\n[Shot 2] At 00:02.800, 镜头切到稍低角度的中景双人构图：<Subject 2> 仰头对 <Subject 1> 张开嘴巴做出兴奋表情，小爪指向画面左侧画外；<Subject 1> 低头看它，神情由惊讶转为含笑的娇嗔，再顺着它的指向抬眼望向画外。镜头以慢速、小幅度轻微 Truck Left 暗示视线方向，结束在两人共同看向画外的瞬间。\\n\\noverall_soundscape:\\n延续夜风与远处城市底噪；加入小猴轻快的爪步声、短促可爱气声，以及衣摆被轻扯时的布料细响。\\n\\nnon_diegetic_music:\\n原有慢爵士之上叠入少量轻盈钟琴音符，节奏仍偏慢，音量克制，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"continuityFromPrev\": true, \"refImageSize\": \"match\", \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"_videoFrameCount\": 90, \"previewFps\": 24, \"previewLive\": true, \"previewStep\": 8, \"previewTotalSteps\": 8}], \"globalCommon\": {\"commonEnabled\": true, \"commonCollapsed\": false, \"prompt\": \"subject_definitions:\\n<Subject 1> 是来自  的棕发紫眸女性，身份与穿着完全锁定参考图：深海军蓝无袖高开衩丝质礼服、金线刺绣立领、黑色薄丝袜、金色尖头高跟鞋、金色耳饰与手镯。\\n<Subject 2> 是来自  的可爱立体卡通小猴，浅棕皮毛、米色肚腹、橙色眼罩护目镜、蓝色大眼与细长尾巴，外形完全锁定参考图。\\n<Subject 3> 是来自  的金发蓝眸女性，白色挂脖晚礼服、胸前红宝石坠饰、黑色薄丝袜、白色高跟鞋与金色手镯，身份与穿着完全锁定参考图。\", \"refs\": [{\"index\": 0, \"imageFile\": \"krea2_identity_edit_00057_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, {\"index\": 1, \"imageFile\": \"krea2_identity_edit_00028_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, {\"index\": 2, \"imageFile\": \"krea2_identity_edit_00058_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}], \"refAudios\": [], \"refVideos\": []}}}}",
+        "bd_grp_advanced": "高级采样",
+        "steps": 8,
+        "sampler": "res_multistep",
+        "scheduler": "simple",
+        "shift_video": 12,
+        "shift_audio": 3,
+        "export_source_images": false,
+        "export_pre_face_refine": true,
+        "bd_grp_perf": "性能",
+        "clear_vram_between_segments": false,
+        "clear_vram_before_refine": false,
+        "clear_vram_before_face_refine": false,
+        "cache_frames_codec": "raw",
+        "minimax_director_ui": ""
+      }
+    },
+    {
+      "id": 7,
+      "type": "SaveVideo",
+      "pos": [
+        1932.3940604041527,
+        637.7856619797128
+      ],
+      "size": [
+        619.371811810659,
+        442.19504447944
+      ],
+      "flags": {},
+      "order": 22,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "video",
+          "localized_name": "视频",
+          "name": "video",
+          "type": "VIDEO",
+          "link": 143
+        },
+        {
+          "label": "filename_prefix",
+          "localized_name": "文件名前缀",
+          "name": "filename_prefix",
+          "type": "STRING",
+          "widget": {
+            "name": "filename_prefix"
+          },
+          "link": null
+        },
+        {
+          "label": "format",
+          "localized_name": "格式",
+          "name": "format",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "format"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "编解码器",
+          "name": "format.codec",
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "format.codec"
+          },
+          "link": null
+        },
+        {
+          "label": "codec",
+          "localized_name": "编码器",
+          "name": "codec",
+          "shape": 7,
+          "type": "COMFY_DYNAMICCOMBO_V3",
+          "widget": {
+            "name": "codec"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "video",
+          "localized_name": "video",
+          "name": "video",
+          "type": "VIDEO",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.37.2",
+        "Node name for S&R": "SaveVideo"
+      },
+      "widgets_values": [
+        "video/MiniMaxH3_Director",
+        "auto",
+        "auto",
+        "auto"
+      ],
+      "widgets_values_named": {
+        "filename_prefix": "video/MiniMaxH3_Director",
+        "format": "auto",
+        "format.codec": "auto",
+        "codec": "auto"
+      }
+    },
+    {
+      "id": 67,
+      "type": "VAELoader",
+      "pos": [
+        -2261.225432398557,
+        470
+      ],
+      "size": [
+        441.40625,
+        95.4375
+      ],
+      "flags": {},
+      "order": 23,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "vae名称",
+          "localized_name": "vae名称",
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "VAE",
+          "localized_name": "VAE",
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            102
+          ]
+        }
+      ],
+      "title": "Audio VAE",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "Node name for S&R": "VAELoader"
+      },
+      "widgets_values": [
+        "minimax-h3\\minimax_h3_audio_vae_fp32.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax-h3\\minimax_h3_audio_vae_fp32.safetensors"
+      }
     }
-   ],
-   "outputs": [
-    {
-     "label": "STRING",
-     "localized_name": "字符串",
-     "name": "STRING",
-     "type": "STRING",
-     "links": null
-    }
-   ],
-   "title": "Director 运行报告",
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "PreviewAny"
-   },
-   "widgets_values": [],
-   "widgets_values_named": {}
-  },
-  {
-   "id": 11,
-   "type": "MarkdownNote",
-   "pos": [
-    -704.0533151012283,
-    333.1976553994068
-   ],
-   "size": [
-    360,
-    320
-   ],
-   "flags": {},
-   "order": 0,
-   "mode": 0,
-   "inputs": [],
-   "outputs": [],
-   "title": "导演台插件地址：",
-   "properties": {},
-   "widgets_values": [
-    "https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director"
-   ],
-   "widgets_values_named": {
-    "text": "https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director"
-   },
-   "color": "#432",
-   "bgcolor": "#653"
-  },
-  {
-   "id": 48,
-   "type": "MiniMaxH3TRTVAELoader",
-   "pos": [
-    -2261.225432398557,
-    332.289771610145
-   ],
-   "size": [
-    334.2699053454834,
-    82
-   ],
-   "flags": {},
-   "order": 1,
-   "mode": 0,
-   "inputs": [
-    {
-     "localized_name": "decoder",
-     "name": "decoder",
-     "type": "COMBO",
-     "widget": {
-      "name": "decoder"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "encoder",
-     "name": "encoder",
-     "type": "COMBO",
-     "widget": {
-      "name": "encoder"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "localized_name": "VAE",
-     "name": "VAE",
-     "type": "VAE",
-     "links": [
-      100
-     ]
-    }
-   ],
-   "properties": {
-    "cnr_id": "ComfyUI-H3VAE_TRT",
-    "ver": "4360e00867eca86ab61b3899216c0ec281367b46",
-    "Node name for S&R": "MiniMaxH3TRTVAELoader",
-    "aux_id": "lihaoyun6/ComfyUI-H3VAE_TRT"
-   },
-   "widgets_values": [
-    "minimax_h3_vae_decoder_w4a16_awq.engine",
-    "minimax_h3_vae_encoder.engine"
-   ],
-   "widgets_values_named": {
-    "decoder": "minimax_h3_vae_decoder_w4a16_awq.engine",
-    "encoder": "minimax_h3_vae_encoder.engine"
-   },
-   "color": "#233",
-   "bgcolor": "#355"
-  },
-  {
-   "id": 2,
-   "type": "CLIPLoader",
-   "pos": [
-    -2257.6723640360447,
-    155.88982891219518
-   ],
-   "size": [
-    360,
-    106
-   ],
-   "flags": {},
-   "order": 2,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "CLIP名称",
-     "localized_name": "CLIP名称",
-     "name": "clip_name",
-     "type": "COMBO",
-     "widget": {
-      "name": "clip_name"
-     },
-     "link": null
-    },
-    {
-     "label": "type",
-     "localized_name": "类型",
-     "name": "type",
-     "type": "COMBO",
-     "widget": {
-      "name": "type"
-     },
-     "link": null
-    },
-    {
-     "label": "device",
-     "localized_name": "设备",
-     "name": "device",
-     "shape": 7,
-     "type": "COMBO",
-     "widget": {
-      "name": "device"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "CLIP",
-     "localized_name": "CLIP",
-     "name": "CLIP",
-     "type": "CLIP",
-     "links": [
-      16
-     ]
-    }
-   ],
-   "title": "CLIP (minimax / Qwen3-VL)",
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "CLIPLoader",
-    "models": [
-     {
-      "name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-      "directory": "text_encoders"
-     }
-    ]
-   },
-   "widgets_values": [
-    "minimax-h3\\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-    "minimax",
-    "default"
-   ],
-   "widgets_values_named": {
-    "clip_name": "minimax-h3\\qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-    "type": "minimax",
-    "device": "default"
-   }
-  },
-  {
-   "id": 1,
-   "type": "UNETLoader",
-   "pos": [
-    -2258.7036879362863,
-    25.495229493905853
-   ],
-   "size": [
-    360,
-    82
-   ],
-   "flags": {},
-   "order": 3,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "UNET名称",
-     "localized_name": "UNET名称",
-     "name": "unet_name",
-     "type": "COMBO",
-     "widget": {
-      "name": "unet_name"
-     },
-     "link": null
-    },
-    {
-     "label": "weight_dtype",
-     "localized_name": "数据类型",
-     "name": "weight_dtype",
-     "type": "COMBO",
-     "widget": {
-      "name": "weight_dtype"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "模型",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      24
-     ]
-    }
-   ],
-   "title": "MiniMax H3 UNET",
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "UNETLoader",
-    "models": [
-     {
-      "name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-      "directory": "diffusion_models"
-     }
-    ]
-   },
-   "widgets_values": [
-    "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-    "default"
-   ],
-   "widgets_values_named": {
-    "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-    "weight_dtype": "default"
-   }
-  },
-  {
-   "id": 33,
-   "type": "BasicScheduler",
-   "pos": [
-    -1361.617449554594,
-    828.0237003122592
-   ],
-   "size": [
-    270,
-    106
-   ],
-   "flags": {},
-   "order": 15,
-   "mode": 4,
-   "inputs": [
-    {
-     "label": "模型",
-     "localized_name": "模型",
-     "name": "model",
-     "type": "MODEL",
-     "link": 130
-    },
-    {
-     "label": "调度器",
-     "localized_name": "调度器",
-     "name": "scheduler",
-     "type": "COMBO",
-     "widget": {
-      "name": "scheduler"
-     },
-     "link": null
-    },
-    {
-     "label": "步数",
-     "localized_name": "步数",
-     "name": "steps",
-     "type": "INT",
-     "widget": {
-      "name": "steps"
-     },
-     "link": null
-    },
-    {
-     "label": "降噪",
-     "localized_name": "降噪",
-     "name": "denoise",
-     "type": "FLOAT",
-     "widget": {
-      "name": "denoise"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "Sigmas",
-     "localized_name": "Sigmas",
-     "name": "SIGMAS",
-     "type": "SIGMAS",
-     "links": [
-      68
-     ]
-    }
-   ],
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "BasicScheduler"
-   },
-   "widgets_values": [
-    "beta",
-    3,
-    0.2
-   ],
-   "widgets_values_named": {
-    "scheduler": "beta",
-    "steps": 3,
-    "denoise": 0.2
-   }
-  },
-  {
-   "id": 16,
-   "type": "LoraLoaderModelOnly",
-   "pos": [
-    -1678.8314536413761,
-    -30.664963255648406
-   ],
-   "size": [
-    270,
-    82
-   ],
-   "flags": {},
-   "order": 6,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "模型",
-     "localized_name": "模型",
-     "name": "model",
-     "type": "MODEL",
-     "link": 24
-    },
-    {
-     "label": "LoRA名称",
-     "localized_name": "LoRA名称",
-     "name": "lora_name",
-     "type": "COMBO",
-     "widget": {
-      "name": "lora_name"
-     },
-     "link": null
-    },
-    {
-     "label": "模型强度",
-     "localized_name": "模型强度",
-     "name": "strength_model",
-     "type": "FLOAT",
-     "widget": {
-      "name": "strength_model"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "模型",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      25
-     ]
-    }
-   ],
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "LoraLoaderModelOnly"
-   },
-   "widgets_values": [
-    "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
-    1
-   ],
-   "widgets_values_named": {
-    "lora_name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
-    "strength_model": 1
-   }
-  },
-  {
-   "id": 54,
-   "type": "UNETLoader",
-   "pos": [
-    -2213.1422455064994,
-    837.0905093862161
-   ],
-   "size": [
-    360,
-    82
-   ],
-   "flags": {},
-   "order": 4,
-   "mode": 4,
-   "inputs": [
-    {
-     "label": "UNET名称",
-     "localized_name": "UNET名称",
-     "name": "unet_name",
-     "type": "COMBO",
-     "widget": {
-      "name": "unet_name"
-     },
-     "link": null
-    },
-    {
-     "label": "weight_dtype",
-     "localized_name": "数据类型",
-     "name": "weight_dtype",
-     "type": "COMBO",
-     "widget": {
-      "name": "weight_dtype"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "模型",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      117
-     ]
-    }
-   ],
-   "title": "MiniMax H3 UNET",
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "UNETLoader",
-    "models": [
-     {
-      "name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-      "directory": "diffusion_models"
-     }
-    ]
-   },
-   "widgets_values": [
-    "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-    "default"
-   ],
-   "widgets_values_named": {
-    "unet_name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-    "weight_dtype": "default"
-   }
-  },
-  {
-   "id": 55,
-   "type": "LoraLoaderModelOnly",
-   "pos": [
-    -2112.0200059105964,
-    969.7577162558405
-   ],
-   "size": [
-    270,
-    82
-   ],
-   "flags": {},
-   "order": 7,
-   "mode": 4,
-   "inputs": [
-    {
-     "label": "模型",
-     "localized_name": "模型",
-     "name": "model",
-     "type": "MODEL",
-     "link": 117
-    },
-    {
-     "label": "LoRA名称",
-     "localized_name": "LoRA名称",
-     "name": "lora_name",
-     "type": "COMBO",
-     "widget": {
-      "name": "lora_name"
-     },
-     "link": null
-    },
-    {
-     "label": "模型强度",
-     "localized_name": "模型强度",
-     "name": "strength_model",
-     "type": "FLOAT",
-     "widget": {
-      "name": "strength_model"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "模型",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      123
-     ]
-    }
-   ],
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "LoraLoaderModelOnly"
-   },
-   "widgets_values": [
-    "minimax_h3\\minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors",
-    1
-   ],
-   "widgets_values_named": {
-    "lora_name": "minimax_h3\\minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy.safetensors",
-    "strength_model": 1
-   }
-  },
-  {
-   "id": 14,
-   "type": "PathchSageAttentionKJ",
-   "pos": [
-    -1832.1460829101384,
-    182.24277253236446
-   ],
-   "size": [
-    270,
-    82
-   ],
-   "flags": {},
-   "order": 8,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "model",
-     "localized_name": "model",
-     "name": "model",
-     "type": "MODEL",
-     "link": 25
-    },
-    {
-     "label": "sage_attention",
-     "localized_name": "sage_attention",
-     "name": "sage_attention",
-     "type": "COMBO",
-     "widget": {
-      "name": "sage_attention"
-     },
-     "link": null
-    },
-    {
-     "label": "allow_compile",
-     "localized_name": "allow_compile",
-     "name": "allow_compile",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "allow_compile"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "MODEL",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      72
-     ]
-    }
-   ],
-   "properties": {
-    "cnr_id": "comfyui-kjnodes",
-    "ver": "d3cfe21625e5170126ce06fbfcfe1d88108688c3",
-    "Node name for S&R": "PathchSageAttentionKJ"
-   },
-   "widgets_values": [
-    "auto",
-    true
-   ],
-   "widgets_values_named": {
-    "sage_attention": "auto",
-    "allow_compile": true
-   }
-  },
-  {
-   "id": 53,
-   "type": "SolAttnPatch",
-   "pos": [
-    -1824.6978457873506,
-    455.93305516591664
-   ],
-   "size": [
-    250.70571427602363,
-    342
-   ],
-   "flags": {},
-   "order": 12,
-   "mode": 0,
-   "inputs": [
-    {
-     "localized_name": "model",
-     "name": "model",
-     "type": "MODEL",
-     "link": 106
-    },
-    {
-     "localized_name": "tau_profile",
-     "name": "tau_profile",
-     "shape": 7,
-     "type": "STRING",
-     "link": null
-    },
-    {
-     "localized_name": "tau",
-     "name": "tau",
-     "type": "FLOAT",
-     "widget": {
-      "name": "tau"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "start_percent",
-     "name": "start_percent",
-     "type": "FLOAT",
-     "widget": {
-      "name": "start_percent"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "end_percent",
-     "name": "end_percent",
-     "type": "FLOAT",
-     "widget": {
-      "name": "end_percent"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "min_tokens",
-     "name": "min_tokens",
-     "type": "INT",
-     "widget": {
-      "name": "min_tokens"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "int8_qk",
-     "name": "int8_qk",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "int8_qk"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "sink_conditioning",
-     "name": "sink_conditioning",
-     "type": "COMBO",
-     "widget": {
-      "name": "sink_conditioning"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "morton",
-     "name": "morton",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "morton"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "morton_curve",
-     "name": "morton_curve",
-     "type": "COMBO",
-     "widget": {
-      "name": "morton_curve"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "int8_pv",
-     "name": "int8_pv",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "int8_pv"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "verbose",
-     "name": "verbose",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "verbose"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "use_tma",
-     "name": "use_tma",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "use_tma"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "dense_blocks",
-     "name": "dense_blocks",
-     "type": "STRING",
-     "widget": {
-      "name": "dense_blocks"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      103
-     ]
-    }
-   ],
-   "properties": {
-    "Node name for S&R": "SolAttnPatch"
-   },
-   "widgets_values": [
-    1.2,
-    0.2,
-    0.9,
-    4096,
-    false,
-    "exact_kv",
-    false,
-    "3d",
-    true,
-    true,
-    false,
-    "0-5"
-   ],
-   "widgets_values_named": {
-    "tau": 1.2,
-    "start_percent": 0.2,
-    "end_percent": 0.9,
-    "min_tokens": 4096,
-    "int8_qk": false,
-    "sink_conditioning": "exact_kv",
-    "morton": false,
-    "morton_curve": "3d",
-    "int8_pv": true,
-    "verbose": true,
-    "use_tma": false,
-    "dense_blocks": "0-5"
-   }
-  },
-  {
-   "id": 41,
-   "type": "EasyCache",
-   "pos": [
-    -1508.9140268869762,
-    464.65997813777824
-   ],
-   "size": [
-    270,
-    130
-   ],
-   "flags": {},
-   "order": 14,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "model",
-     "localized_name": "模型",
-     "name": "model",
-     "type": "MODEL",
-     "link": 103
-    },
-    {
-     "label": "reuse_threshold",
-     "localized_name": "重用阈值",
-     "name": "reuse_threshold",
-     "type": "FLOAT",
-     "widget": {
-      "name": "reuse_threshold"
-     },
-     "link": null
-    },
-    {
-     "label": "start_percent",
-     "localized_name": "开始位置",
-     "name": "start_percent",
-     "type": "FLOAT",
-     "widget": {
-      "name": "start_percent"
-     },
-     "link": null
-    },
-    {
-     "label": "end_percent",
-     "localized_name": "结束位置",
-     "name": "end_percent",
-     "type": "FLOAT",
-     "widget": {
-      "name": "end_percent"
-     },
-     "link": null
-    },
-    {
-     "label": "verbose",
-     "localized_name": "调试信息",
-     "name": "verbose",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "verbose"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "MODEL",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      77
-     ]
-    }
-   ],
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "EasyCache"
-   },
-   "widgets_values": [
-    0.3,
-    0.2,
-    0.9,
-    false
-   ],
-   "widgets_values_named": {
-    "reuse_threshold": 0.3,
-    "start_percent": 0.2,
-    "end_percent": 0.9,
-    "verbose": false
-   }
-  },
-  {
-   "id": 38,
-   "type": "MiniMaxH3DirectorRefine",
-   "pos": [
-    -1058.6972150460283,
-    686.4523052529702
-   ],
-   "size": [
-    281.3873046875,
-    530
-   ],
-   "flags": {},
-   "order": 16,
-   "mode": 4,
-   "inputs": [
-    {
-     "label": "refine_model",
-     "localized_name": "refine_model",
-     "name": "refine_model",
-     "shape": 7,
-     "type": "MODEL",
-     "link": 131
-    },
-    {
-     "label": "sigmas",
-     "localized_name": "sigmas",
-     "name": "sigmas",
-     "shape": 7,
-     "type": "SIGMAS",
-     "link": 68
-    },
-    {
-     "label": "upscale_model",
-     "localized_name": "upscale_model",
-     "name": "upscale_model",
-     "shape": 7,
-     "type": "UPSCALE_MODEL",
-     "link": null
-    },
-    {
-     "label": "mode",
-     "localized_name": "mode",
-     "name": "mode",
-     "type": "COMBO",
-     "widget": {
-      "name": "mode"
-     },
-     "link": null
-    },
-    {
-     "label": "upscale_method",
-     "localized_name": "upscale_method",
-     "name": "upscale_method",
-     "type": "COMBO",
-     "widget": {
-      "name": "upscale_method"
-     },
-     "link": null
-    },
-    {
-     "label": "latent_upscale_model",
-     "localized_name": "latent_upscale_model",
-     "name": "latent_upscale_model",
-     "type": "COMBO",
-     "widget": {
-      "name": "latent_upscale_model"
-     },
-     "link": null
-    },
-    {
-     "label": "sampler",
-     "localized_name": "sampler",
-     "name": "sampler",
-     "type": "COMBO",
-     "widget": {
-      "name": "sampler"
-     },
-     "link": null
-    },
-    {
-     "label": "passes",
-     "localized_name": "passes",
-     "name": "passes",
-     "type": "INT",
-     "widget": {
-      "name": "passes"
-     },
-     "link": null
-    },
-    {
-     "label": "seed_mode",
-     "localized_name": "seed_mode",
-     "name": "seed_mode",
-     "shape": 7,
-     "type": "COMBO",
-     "widget": {
-      "name": "seed_mode"
-     },
-     "link": null
-    },
-    {
-     "label": "aspect_ratio",
-     "localized_name": "aspect_ratio",
-     "name": "aspect_ratio",
-     "shape": 7,
-     "type": "COMBO",
-     "widget": {
-      "name": "aspect_ratio"
-     },
-     "link": null
-    },
-    {
-     "label": "megapixels",
-     "localized_name": "megapixels",
-     "name": "megapixels",
-     "shape": 7,
-     "type": "FLOAT",
-     "widget": {
-      "name": "megapixels"
-     },
-     "link": null
-    },
-    {
-     "label": "width",
-     "localized_name": "width",
-     "name": "width",
-     "shape": 7,
-     "type": "INT",
-     "widget": {
-      "name": "width"
-     },
-     "link": null
-    },
-    {
-     "label": "height",
-     "localized_name": "height",
-     "name": "height",
-     "shape": 7,
-     "type": "INT",
-     "widget": {
-      "name": "height"
-     },
-     "link": null
-    },
-    {
-     "label": "skip_fl2v",
-     "localized_name": "skip_fl2v",
-     "name": "skip_fl2v",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "skip_fl2v"
-     },
-     "link": null
-    },
-    {
-     "label": "confirm_first_pass",
-     "localized_name": "confirm_first_pass",
-     "name": "confirm_first_pass",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "confirm_first_pass"
-     },
-     "link": null
-    },
-    {
-     "label": "enable_latent_chunking",
-     "localized_name": "enable_latent_chunking",
-     "name": "enable_latent_chunking",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "enable_latent_chunking"
-     },
-     "link": null
-    },
-    {
-     "label": "enable_tiling",
-     "localized_name": "enable_tiling",
-     "name": "enable_tiling",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "enable_tiling"
-     },
-     "link": null
-    },
-    {
-     "label": "tile_count",
-     "localized_name": "tile_count",
-     "name": "tile_count",
-     "shape": 7,
-     "type": "INT",
-     "widget": {
-      "name": "tile_count"
-     },
-     "link": null
-    },
-    {
-     "label": "tile_overlap",
-     "localized_name": "tile_overlap",
-     "name": "tile_overlap",
-     "shape": 7,
-     "type": "INT",
-     "widget": {
-      "name": "tile_overlap"
-     },
-     "link": null
-    },
-    {
-     "label": "seed",
-     "localized_name": "seed",
-     "name": "seed",
-     "shape": 7,
-     "type": "INT",
-     "widget": {
-      "name": "seed"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "refine",
-     "localized_name": "refine",
-     "name": "refine",
-     "type": "MMX_DIR_REFINE",
-     "links": [
-      70
-     ]
-    },
-    {
-     "label": "width",
-     "localized_name": "width",
-     "name": "width",
-     "type": "INT",
-     "links": null
-    },
-    {
-     "label": "height",
-     "localized_name": "height",
-     "name": "height",
-     "type": "INT",
-     "links": null
-    }
-   ],
-   "properties": {
-    "cnr_id": "minimax-h3-director",
-    "ver": "4b4fe6e1a7e68b17f4a36c8b3e942667defab61f",
-    "Node name for S&R": "MiniMaxH3DirectorRefine",
-    "aux_id": "AIMixer/ComfyUI_MiniMaxH3_Director"
-   },
-   "widgets_values": [
-    "upscale",
-    "h3_latent",
-    "minimax_h3_latent_upscaler_3d_bf16.safetensors",
-    "euler",
-    1,
-    "inherit",
-    0,
-    "fixed",
-    "跟随导演台",
-    1,
-    1088,
-    720,
-    true,
-    false,
-    false,
-    false,
-    2,
-    128
-   ],
-   "widgets_values_named": {
-    "mode": "upscale",
-    "upscale_method": "h3_latent",
-    "latent_upscale_model": "minimax_h3_latent_upscaler_3d_bf16.safetensors",
-    "sampler": "euler",
-    "passes": 1,
-    "seed_mode": "inherit",
-    "seed": 0,
-    "control_after_generate": "fixed",
-    "aspect_ratio": "跟随导演台",
-    "megapixels": 1,
-    "width": 1088,
-    "height": 720,
-    "skip_fl2v": true,
-    "confirm_first_pass": false,
-    "enable_latent_chunking": false,
-    "enable_tiling": false,
-    "tile_count": 2,
-    "tile_overlap": 128
-   }
-  },
-  {
-   "id": 39,
-   "type": "TESpeedMiniMaxH3",
-   "pos": [
-    -1490.449286728965,
-    166.92117743558475
-   ],
-   "size": [
-    306.640625,
-    178
-   ],
-   "flags": {},
-   "order": 10,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "model",
-     "localized_name": "model",
-     "name": "model",
-     "type": "MODEL",
-     "link": 72
-    },
-    {
-     "label": "processing_control_value",
-     "localized_name": "processing_control_value",
-     "name": "processing_control_value",
-     "type": "FLOAT",
-     "widget": {
-      "name": "processing_control_value"
-     },
-     "link": null
-    },
-    {
-     "label": "processing_percent_1",
-     "localized_name": "processing_percent_1",
-     "name": "processing_percent_1",
-     "type": "FLOAT",
-     "widget": {
-      "name": "processing_percent_1"
-     },
-     "link": null
-    },
-    {
-     "label": "processing_percent_2",
-     "localized_name": "processing_percent_2",
-     "name": "processing_percent_2",
-     "type": "FLOAT",
-     "widget": {
-      "name": "processing_percent_2"
-     },
-     "link": null
-    },
-    {
-     "label": "mcs",
-     "localized_name": "mcs",
-     "name": "mcs",
-     "type": "INT",
-     "widget": {
-      "name": "mcs"
-     },
-     "link": null
-    },
-    {
-     "label": "device",
-     "localized_name": "device",
-     "name": "device",
-     "type": "COMBO",
-     "widget": {
-      "name": "device"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "MODEL",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      106
-     ]
-    }
-   ],
-   "properties": {
-    "Node name for S&R": "TESpeedMiniMaxH3"
-   },
-   "widgets_values": [
-    0.08,
-    0.1,
-    0.9,
-    2,
-    "auto"
-   ],
-   "widgets_values_named": {
-    "processing_control_value": 0.08,
-    "processing_percent_1": 0.1,
-    "processing_percent_2": 0.9,
-    "mcs": 2,
-    "device": "auto"
-   }
-  },
-  {
-   "id": 63,
-   "type": "TESpeedMiniMaxH3",
-   "pos": [
-    -2160.4374952823714,
-    1312.1947585929408
-   ],
-   "size": [
-    306.640625,
-    178
-   ],
-   "flags": {},
-   "order": 11,
-   "mode": 4,
-   "inputs": [
-    {
-     "label": "model",
-     "localized_name": "model",
-     "name": "model",
-     "type": "MODEL",
-     "link": 132
-    },
-    {
-     "label": "processing_control_value",
-     "localized_name": "processing_control_value",
-     "name": "processing_control_value",
-     "type": "FLOAT",
-     "widget": {
-      "name": "processing_control_value"
-     },
-     "link": null
-    },
-    {
-     "label": "processing_percent_1",
-     "localized_name": "processing_percent_1",
-     "name": "processing_percent_1",
-     "type": "FLOAT",
-     "widget": {
-      "name": "processing_percent_1"
-     },
-     "link": null
-    },
-    {
-     "label": "processing_percent_2",
-     "localized_name": "processing_percent_2",
-     "name": "processing_percent_2",
-     "type": "FLOAT",
-     "widget": {
-      "name": "processing_percent_2"
-     },
-     "link": null
-    },
-    {
-     "label": "mcs",
-     "localized_name": "mcs",
-     "name": "mcs",
-     "type": "INT",
-     "widget": {
-      "name": "mcs"
-     },
-     "link": null
-    },
-    {
-     "label": "device",
-     "localized_name": "device",
-     "name": "device",
-     "type": "COMBO",
-     "widget": {
-      "name": "device"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "MODEL",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      134
-     ]
-    }
-   ],
-   "properties": {
-    "Node name for S&R": "TESpeedMiniMaxH3"
-   },
-   "widgets_values": [
-    0.08,
-    0.1,
-    0.9,
-    2,
-    "auto"
-   ],
-   "widgets_values_named": {
-    "processing_control_value": 0.08,
-    "processing_percent_1": 0.1,
-    "processing_percent_2": 0.9,
-    "mcs": 2,
-    "device": "auto"
-   }
-  },
-  {
-   "id": 62,
-   "type": "EasyCache",
-   "pos": [
-    -1756.9753442541466,
-    870.4995258737991
-   ],
-   "size": [
-    270,
-    130
-   ],
-   "flags": {},
-   "order": 13,
-   "mode": 4,
-   "inputs": [
-    {
-     "label": "model",
-     "localized_name": "模型",
-     "name": "model",
-     "type": "MODEL",
-     "link": 134
-    },
-    {
-     "label": "reuse_threshold",
-     "localized_name": "重用阈值",
-     "name": "reuse_threshold",
-     "type": "FLOAT",
-     "widget": {
-      "name": "reuse_threshold"
-     },
-     "link": null
-    },
-    {
-     "label": "start_percent",
-     "localized_name": "开始位置",
-     "name": "start_percent",
-     "type": "FLOAT",
-     "widget": {
-      "name": "start_percent"
-     },
-     "link": null
-    },
-    {
-     "label": "end_percent",
-     "localized_name": "结束位置",
-     "name": "end_percent",
-     "type": "FLOAT",
-     "widget": {
-      "name": "end_percent"
-     },
-     "link": null
-    },
-    {
-     "label": "verbose",
-     "localized_name": "调试信息",
-     "name": "verbose",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "verbose"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "MODEL",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
+  ],
+  "links": [
+    [
+      9,
+      6,
+      0,
+      50,
+      0,
+      "VIDEO"
+    ],
+    [
+      16,
+      2,
+      0,
+      12,
+      3,
+      "CLIP"
+    ],
+    [
+      17,
+      12,
+      0,
+      6,
+      0,
+      "IMAGE"
+    ],
+    [
+      18,
+      12,
+      1,
+      6,
+      1,
+      "AUDIO"
+    ],
+    [
+      19,
+      12,
+      2,
+      6,
+      2,
+      "FLOAT"
+    ],
+    [
+      20,
+      12,
+      5,
+      8,
+      0,
+      "STRING"
+    ],
+    [
+      24,
+      1,
+      0,
+      16,
+      0,
+      "MODEL"
+    ],
+    [
+      25,
+      16,
+      0,
+      14,
+      0,
+      "MODEL"
+    ],
+    [
+      68,
+      33,
+      0,
+      38,
+      1,
+      "SIGMAS"
+    ],
+    [
+      70,
+      38,
+      0,
+      12,
+      8,
+      "MMX_DIR_REFINE"
+    ],
+    [
+      72,
+      14,
+      0,
+      39,
+      0,
+      "MODEL"
+    ],
+    [
+      77,
+      41,
+      0,
+      12,
+      0,
+      "MODEL"
+    ],
+    [
+      100,
+      48,
+      0,
+      12,
+      1,
+      "VAE"
+    ],
+    [
+      103,
+      53,
+      0,
+      41,
+      0,
+      "MODEL"
+    ],
+    [
+      106,
+      39,
+      0,
+      53,
+      0,
+      "MODEL"
+    ],
+    [
+      117,
+      54,
+      0,
+      55,
+      0,
+      "MODEL"
+    ],
+    [
+      123,
+      55,
+      0,
+      60,
+      0,
+      "MODEL"
+    ],
+    [
       130,
-      131
-     ]
+      62,
+      0,
+      33,
+      0,
+      "MODEL"
+    ],
+    [
+      131,
+      62,
+      0,
+      38,
+      0,
+      "MODEL"
+    ],
+    [
+      132,
+      60,
+      0,
+      63,
+      0,
+      "MODEL"
+    ],
+    [
+      134,
+      63,
+      0,
+      62,
+      0,
+      "MODEL"
+    ],
+    [
+      102,
+      67,
+      0,
+      12,
+      2,
+      "VAE"
+    ],
+    [
+      143,
+      50,
+      0,
+      7,
+      0,
+      "VIDEO"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 1,
+      "title": "模型加载 (MiniMax H3)",
+      "bounding": [
+        -2298.1146397249845,
+        -44.01257709011762,
+        440,
+        560
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "MiniMax H3 Director",
+      "bounding": [
+        -320,
+        40,
+        1120,
+        960
+      ],
+      "color": "#8A8",
+      "flags": {}
+    },
+    {
+      "id": 3,
+      "title": "输出",
+      "bounding": [
+        959.7884550354713,
+        38.736816353831586,
+        760,
+        760
+      ],
+      "color": "#b58",
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "加速模块（用就开启，不用可以关掉）",
+      "bounding": [
+        -1830.776041482021,
+        119.5864313127729,
+        696.8626780790273,
+        222.74509026022088
+      ],
+      "color": "#3f789e",
+      "flags": {}
     }
-   ],
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "EasyCache"
-   },
-   "widgets_values": [
-    0.3,
-    0.2,
-    0.9,
-    false
-   ],
-   "widgets_values_named": {
-    "reuse_threshold": 0.3,
-    "start_percent": 0.2,
-    "end_percent": 0.9,
-    "verbose": false
-   }
+  ],
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.23.0",
+    "note": "MiniMax H3 Director · t2v",
+    "ds": {
+      "scale": 0.720434845681465,
+      "offset": [
+        -291.0448311664124,
+        364.65763245543883
+      ]
+    }
   },
-  {
-   "id": 60,
-   "type": "PathchSageAttentionKJ",
-   "pos": [
-    -2109.4630178126404,
-    1138.5153013309969
-   ],
-   "size": [
-    270,
-    82
-   ],
-   "flags": {},
-   "order": 9,
-   "mode": 4,
-   "inputs": [
-    {
-     "label": "model",
-     "localized_name": "model",
-     "name": "model",
-     "type": "MODEL",
-     "link": 123
-    },
-    {
-     "label": "sage_attention",
-     "localized_name": "sage_attention",
-     "name": "sage_attention",
-     "type": "COMBO",
-     "widget": {
-      "name": "sage_attention"
-     },
-     "link": null
-    },
-    {
-     "label": "allow_compile",
-     "localized_name": "allow_compile",
-     "name": "allow_compile",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "allow_compile"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "MODEL",
-     "localized_name": "模型",
-     "name": "MODEL",
-     "type": "MODEL",
-     "links": [
-      132
-     ]
-    }
-   ],
-   "properties": {
-    "cnr_id": "comfyui-kjnodes",
-    "ver": "d3cfe21625e5170126ce06fbfcfe1d88108688c3",
-    "Node name for S&R": "PathchSageAttentionKJ"
-   },
-   "widgets_values": [
-    "auto",
-    true
-   ],
-   "widgets_values_named": {
-    "sage_attention": "auto",
-    "allow_compile": true
-   }
-  },
-  {
-   "id": 50,
-   "type": "NvidiaDLSSFrameInterpolation",
-   "pos": [
-    1076.5691141590887,
-    629.4518668821796
-   ],
-   "size": [
-    320,
-    415.77777777777777
-   ],
-   "flags": {},
-   "order": 20,
-   "mode": 0,
-   "inputs": [
-    {
-     "localized_name": "video",
-     "name": "video",
-     "type": "VIDEO",
-     "link": 9
-    },
-    {
-     "localized_name": "output_fps",
-     "name": "output_fps",
-     "type": "COMBO",
-     "widget": {
-      "name": "output_fps"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "dlss_engine",
-     "name": "dlss_engine",
-     "type": "COMBO",
-     "widget": {
-      "name": "dlss_engine"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "encoding_quality",
-     "name": "encoding_quality",
-     "type": "COMBO",
-     "widget": {
-      "name": "encoding_quality"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "video_codec",
-     "name": "video_codec",
-     "type": "COMBO",
-     "widget": {
-      "name": "video_codec"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "container",
-     "name": "container",
-     "type": "COMBO",
-     "widget": {
-      "name": "container"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "rename",
-     "name": "rename",
-     "type": "COMBO",
-     "widget": {
-      "name": "rename"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "custom_suffix",
-     "name": "custom_suffix",
-     "type": "STRING",
-     "widget": {
-      "name": "custom_suffix"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "hdr_mode",
-     "name": "hdr_mode",
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "hdr_mode"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "localized_name": "interpolated_video",
-     "name": "interpolated_video",
-     "type": "VIDEO",
-     "links": [
-      143
-     ]
-    },
-    {
-     "localized_name": "report_json",
-     "name": "report_json",
-     "type": "STRING",
-     "links": null
-    }
-   ],
-   "title": "DLSS 补帧",
-   "properties": {
-    "aux_id": "Konohamaru04/ComfyUI-NVIDIA-DLSS-Frame-Interpolation",
-    "ver": "7765f01b85bdb9342c8048b321650174856a2328",
-    "Node name for S&R": "NvidiaDLSSFrameInterpolation"
-   },
-   "widgets_values": [
-    "50",
-    "Auto",
-    "Max",
-    "H.264",
-    "MP4",
-    "Auto",
-    "_DLSSFG",
-    false
-   ],
-   "widgets_values_named": {
-    "output_fps": "50",
-    "dlss_engine": "Auto",
-    "encoding_quality": "Max",
-    "video_codec": "H.264",
-    "container": "MP4",
-    "rename": "Auto",
-    "custom_suffix": "_DLSSFG",
-    "hdr_mode": false
-   }
-  },
-  {
-   "id": 6,
-   "type": "CreateVideo",
-   "pos": [
-    1027.3503837698922,
-    381.992413827103
-   ],
-   "size": [
-    280,
-    150
-   ],
-   "flags": {},
-   "order": 18,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "images",
-     "localized_name": "图像",
-     "name": "images",
-     "type": "IMAGE",
-     "link": 17
-    },
-    {
-     "label": "audio",
-     "localized_name": "音频",
-     "name": "audio",
-     "shape": 7,
-     "type": "AUDIO",
-     "link": 18
-    },
-    {
-     "label": "fps",
-     "localized_name": "帧率",
-     "name": "fps",
-     "type": "FLOAT",
-     "widget": {
-      "name": "fps"
-     },
-     "link": 19
-    },
-    {
-     "label": "bit_depth",
-     "localized_name": "bit_depth",
-     "name": "bit_depth",
-     "shape": 7,
-     "type": "COMBO",
-     "widget": {
-      "name": "bit_depth"
-     },
-     "link": null
-    },
-    {
-     "label": "color_space",
-     "localized_name": "color_space",
-     "name": "color_space",
-     "shape": 7,
-     "type": "COMBO",
-     "widget": {
-      "name": "color_space"
-     },
-     "link": null
-    },
-    {
-     "label": "codec",
-     "localized_name": "codec",
-     "name": "codec",
-     "shape": 7,
-     "type": "COMBO",
-     "widget": {
-      "name": "codec"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "VIDEO",
-     "localized_name": "视频",
-     "name": "VIDEO",
-     "type": "VIDEO",
-     "links": [
-      9
-     ]
-    }
-   ],
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "CreateVideo"
-   },
-   "widgets_values": [
-    24,
-    8,
-    "sRGB",
-    "none"
-   ],
-   "widgets_values_named": {
-    "fps": 24,
-    "bit_depth": 8,
-    "color_space": "sRGB",
-    "codec": "none"
-   }
-  },
-  {
-   "id": 13,
-   "type": "MarkdownNote",
-   "pos": [
-    -690.2600206333096,
-    1018.0250863601956
-   ],
-   "size": [
-    300,
-    512
-   ],
-   "flags": {},
-   "order": 5,
-   "mode": 0,
-   "inputs": [],
-   "outputs": [],
-   "title": "Note: Size Settings Reference",
-   "properties": {},
-   "widgets_values": [
-    "| megapixels | Aspect | Output (multiple=32) |\n|---|---|---|\n| 0.2 | 16:9 | 608 x 352 |\n| 0.3 | 16:9 | 736 x 416 |\n| 0.4 | 16:9 | 864 x 480 |\n| 0.5 | 16:9 | 960 x 544 |\n| 0.6 | 16:9 | 1056 x 608 |\n| 0.7 | 16:9 | 1152 x 640 |\n| 0.8 | 16:9 | 1216 x 672 |\n| 0.9 | 16:9 | 1280 x 736 |\n| 0.98 | 16:9 | 1344 x 768 |\n| 1.0 | 16:9 | 1376 x 768 |\n| 1.2 | 16:9 | 1504 x 832 |\n| 1.5 | 16:9 | 1664 x 928 |\n| 1.8 | 16:9 | 1824 x 1024 |\n| 2.0 | 16:9 | 1920 x 1088 |\n"
-   ],
-   "widgets_values_named": {
-    "text": "| megapixels | Aspect | Output (multiple=32) |\n|---|---|---|\n| 0.2 | 16:9 | 608 x 352 |\n| 0.3 | 16:9 | 736 x 416 |\n| 0.4 | 16:9 | 864 x 480 |\n| 0.5 | 16:9 | 960 x 544 |\n| 0.6 | 16:9 | 1056 x 608 |\n| 0.7 | 16:9 | 1152 x 640 |\n| 0.8 | 16:9 | 1216 x 672 |\n| 0.9 | 16:9 | 1280 x 736 |\n| 0.98 | 16:9 | 1344 x 768 |\n| 1.0 | 16:9 | 1376 x 768 |\n| 1.2 | 16:9 | 1504 x 832 |\n| 1.5 | 16:9 | 1664 x 928 |\n| 1.8 | 16:9 | 1824 x 1024 |\n| 2.0 | 16:9 | 1920 x 1088 |\n"
-   },
-   "color": "#222",
-   "bgcolor": "#000"
-  },
-  {
-   "id": 12,
-   "type": "MiniMaxH3Director",
-   "pos": [
-    -299.91478214648566,
-    103.10439081429395
-   ],
-   "size": [
-    1133.2939441495255,
-    2060.4966356386253
-   ],
-   "flags": {},
-   "order": 17,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "model",
-     "localized_name": "model",
-     "name": "model",
-     "type": "MODEL",
-     "link": 77
-    },
-    {
-     "label": "video_vae",
-     "localized_name": "video_vae",
-     "name": "video_vae",
-     "type": "VAE",
-     "link": 100
-    },
-    {
-     "label": "audio_vae",
-     "localized_name": "audio_vae",
-     "name": "audio_vae",
-     "type": "VAE",
-     "link": 102
-    },
-    {
-     "label": "clip",
-     "localized_name": "clip",
-     "name": "clip",
-     "type": "CLIP",
-     "link": 16
-    },
-    {
-     "label": "i2v_groups",
-     "localized_name": "i2v_groups",
-     "name": "i2v_groups",
-     "shape": 7,
-     "type": "MMX_DIR_GROUP",
-     "link": null
-    },
-    {
-     "label": "r2v_groups",
-     "localized_name": "r2v_groups",
-     "name": "r2v_groups",
-     "shape": 7,
-     "type": "MMX_DIR_GROUP",
-     "link": null
-    },
-    {
-     "label": "semantic_bridge",
-     "localized_name": "semantic_bridge",
-     "name": "semantic_bridge",
-     "shape": 7,
-     "type": "MMX_DIR_SEMANTIC_BRIDGE",
-     "link": null
-    },
-    {
-     "label": "selflift",
-     "localized_name": "selflift",
-     "name": "selflift",
-     "shape": 7,
-     "type": "MMX_DIR_SELFLIFT",
-     "link": null
-    },
-    {
-     "label": "refine",
-     "localized_name": "refine",
-     "name": "refine",
-     "shape": 7,
-     "type": "MMX_DIR_REFINE",
-     "link": 70
-    },
-    {
-     "label": "face_refine",
-     "localized_name": "face_refine",
-     "name": "face_refine",
-     "shape": 7,
-     "type": "MMX_DIR_FACE_REFINE",
-     "link": null
-    },
-    {
-     "label": "sigmas",
-     "localized_name": "sigmas",
-     "name": "sigmas",
-     "shape": 7,
-     "type": "SIGMAS",
-     "link": null
-    },
-    {
-     "label": "task_type",
-     "localized_name": "task_type",
-     "name": "task_type",
-     "type": "COMBO",
-     "widget": {
-      "name": "task_type"
-     },
-     "link": null
-    },
-    {
-     "label": "global_prompt",
-     "localized_name": "global_prompt",
-     "name": "global_prompt",
-     "type": "STRING",
-     "widget": {
-      "name": "global_prompt"
-     },
-     "link": null
-    },
-    {
-     "label": "bd_grp_sample",
-     "localized_name": "bd_grp_sample",
-     "name": "bd_grp_sample",
-     "type": "BDGROUP",
-     "widget": {
-      "name": "bd_grp_sample"
-     },
-     "link": null
-    },
-    {
-     "label": "cfg",
-     "localized_name": "cfg",
-     "name": "cfg",
-     "type": "FLOAT",
-     "widget": {
-      "name": "cfg"
-     },
-     "link": null
-    },
-    {
-     "label": "seed",
-     "localized_name": "seed",
-     "name": "seed",
-     "type": "INT",
-     "widget": {
-      "name": "seed"
-     },
-     "link": null
-    },
-    {
-     "label": "frame_rate",
-     "localized_name": "frame_rate",
-     "name": "frame_rate",
-     "type": "FLOAT",
-     "widget": {
-      "name": "frame_rate"
-     },
-     "link": null
-    },
-    {
-     "label": "width",
-     "localized_name": "width",
-     "name": "width",
-     "type": "INT",
-     "widget": {
-      "name": "width"
-     },
-     "link": null
-    },
-    {
-     "label": "height",
-     "localized_name": "height",
-     "name": "height",
-     "type": "INT",
-     "widget": {
-      "name": "height"
-     },
-     "link": null
-    },
-    {
-     "label": "ref_max_size",
-     "localized_name": "ref_max_size",
-     "name": "ref_max_size",
-     "type": "INT",
-     "widget": {
-      "name": "ref_max_size"
-     },
-     "link": null
-    },
-    {
-     "label": "total_frames",
-     "localized_name": "total_frames",
-     "name": "total_frames",
-     "type": "INT",
-     "widget": {
-      "name": "total_frames"
-     },
-     "link": null
-    },
-    {
-     "label": "timeline_data",
-     "localized_name": "timeline_data",
-     "name": "timeline_data",
-     "type": "STRING",
-     "widget": {
-      "name": "timeline_data"
-     },
-     "link": null
-    },
-    {
-     "label": "bd_grp_advanced",
-     "localized_name": "bd_grp_advanced",
-     "name": "bd_grp_advanced",
-     "shape": 7,
-     "type": "BDGROUP",
-     "widget": {
-      "name": "bd_grp_advanced"
-     },
-     "link": null
-    },
-    {
-     "label": "steps",
-     "localized_name": "steps",
-     "name": "steps",
-     "shape": 7,
-     "type": "INT",
-     "widget": {
-      "name": "steps"
-     },
-     "link": null
-    },
-    {
-     "label": "sampler",
-     "localized_name": "sampler",
-     "name": "sampler",
-     "shape": 7,
-     "type": "COMBO",
-     "widget": {
-      "name": "sampler"
-     },
-     "link": null
-    },
-    {
-     "label": "scheduler",
-     "localized_name": "scheduler",
-     "name": "scheduler",
-     "shape": 7,
-     "type": "COMBO",
-     "widget": {
-      "name": "scheduler"
-     },
-     "link": null
-    },
-    {
-     "label": "shift_video",
-     "localized_name": "shift_video",
-     "name": "shift_video",
-     "shape": 7,
-     "type": "FLOAT",
-     "widget": {
-      "name": "shift_video"
-     },
-     "link": null
-    },
-    {
-     "label": "shift_audio",
-     "localized_name": "shift_audio",
-     "name": "shift_audio",
-     "shape": 7,
-     "type": "FLOAT",
-     "widget": {
-      "name": "shift_audio"
-     },
-     "link": null
-    },
-    {
-     "label": "bd_grp_perf",
-     "localized_name": "bd_grp_perf",
-     "name": "bd_grp_perf",
-     "shape": 7,
-     "type": "BDGROUP",
-     "widget": {
-      "name": "bd_grp_perf"
-     },
-     "link": null
-    },
-    {
-     "label": "clear_vram_between_segments",
-     "localized_name": "clear_vram_between_segments",
-     "name": "clear_vram_between_segments",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "clear_vram_between_segments"
-     },
-     "link": null
-    },
-    {
-     "label": "clear_vram_before_refine",
-     "localized_name": "clear_vram_before_refine",
-     "name": "clear_vram_before_refine",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "clear_vram_before_refine"
-     },
-     "link": null
-    },
-    {
-     "label": "clear_vram_before_face_refine",
-     "localized_name": "clear_vram_before_face_refine",
-     "name": "clear_vram_before_face_refine",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "clear_vram_before_face_refine"
-     },
-     "link": null
-    },
-    {
-     "label": "cache_frames_codec",
-     "localized_name": "cache_frames_codec",
-     "name": "cache_frames_codec",
-     "shape": 7,
-     "type": "COMBO",
-     "widget": {
-      "name": "cache_frames_codec"
-     },
-     "link": null
-    },
-    {
-     "label": "export_source_images",
-     "localized_name": "export_source_images",
-     "name": "export_source_images",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "export_source_images"
-     },
-     "link": null
-    },
-    {
-     "label": "export_pre_face_refine",
-     "localized_name": "export_pre_face_refine",
-     "name": "export_pre_face_refine",
-     "shape": 7,
-     "type": "BOOLEAN",
-     "widget": {
-      "name": "export_pre_face_refine"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "images",
-     "localized_name": "images",
-     "name": "images",
-     "shape": 6,
-     "type": "IMAGE",
-     "links": [
-      17
-     ]
-    },
-    {
-     "label": "audio",
-     "localized_name": "audio",
-     "name": "audio",
-     "shape": 6,
-     "type": "AUDIO",
-     "links": [
-      18
-     ]
-    },
-    {
-     "label": "fps",
-     "localized_name": "fps",
-     "name": "fps",
-     "type": "FLOAT",
-     "links": [
-      19
-     ]
-    },
-    {
-     "label": "frame_count",
-     "localized_name": "frame_count",
-     "name": "frame_count",
-     "type": "INT",
-     "links": null
-    },
-    {
-     "label": "source_images",
-     "localized_name": "source_images",
-     "name": "source_images",
-     "shape": 6,
-     "type": "IMAGE",
-     "links": null
-    },
-    {
-     "label": "report",
-     "localized_name": "report",
-     "name": "report",
-     "type": "STRING",
-     "links": [
-      20
-     ]
-    },
-    {
-     "label": "images_pre_refine",
-     "localized_name": "images_pre_refine",
-     "name": "images_pre_refine",
-     "shape": 6,
-     "type": "IMAGE",
-     "links": []
-    },
-    {
-     "label": "images_pre_face_refine",
-     "localized_name": "images_pre_face_refine",
-     "name": "images_pre_face_refine",
-     "shape": 6,
-     "type": "IMAGE",
-     "links": null
-    }
-   ],
-   "properties": {
-    "cnr_id": "minimax-h3-director",
-    "ver": "4b4fe6e1a7e68b17f4a36c8b3e942667defab61f",
-    "Node name for S&R": "MiniMaxH3Director",
-    "aux_id": "AIMixer/ComfyUI_MiniMaxH3_Director"
-   },
-   "widgets_values": [
-    "r2v — 参考主体生视频(Reference to Video)",
-    "subject_definitions:\n<Subject 1> 是来自  的棕发紫眸女性，身份与穿着完全锁定参考图：深海军蓝无袖高开衩丝质礼服、金线刺绣立领、黑色薄丝袜、金色尖头高跟鞋、金色耳饰与手镯。\n<Subject 2> 是来自  的可爱立体卡通小猴，浅棕皮毛、米色肚腹、橙色眼罩护目镜、蓝色大眼与细长尾巴，外形完全锁定参考图。\n<Subject 3> 是来自  的金发蓝眸女性，白色挂脖晚礼服、胸前红宝石坠饰、黑色薄丝袜、白色高跟鞋与金色手镯，身份与穿着完全锁定参考图。",
-    "采样设置",
-    1,
-    666,
-    "fixed",
-    24,
-    864,
-    480,
-    864,
-    180,
-    "{\"version\": 5, \"editMode\": \"segment\", \"totalFrames\": 180, \"frameRate\": 24, \"video\": {\"fileName\": \"\", \"videoFile\": \"\", \"subfolder\": \"\", \"type\": \"input\", \"frames\": [], \"frameMap\": [], \"sourceFrameCount\": 734, \"deletedSourceRanges\": []}, \"videoClips\": [], \"global\": {\"taskType\": \"r2v — 参考主体生视频(Reference to Video)\", \"prompt\": \"\", \"refs\": [], \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"continuousReference\": false, \"genImage\": {\"imageFile\": \"\"}, \"sourceWidth\": 768, \"sourceHeight\": 1024, \"refAudios\": [], \"commonEnabled\": false, \"commonCollapsed\": true, \"refVideos\": []}, \"output\": {\"mode\": \"fixed\", \"aspectRatio\": \"16:9 (宽屏)\", \"megapixels\": 0.4, \"multiple\": 32, \"longEdge\": 864, \"width\": 864, \"height\": 480, \"maxExportFrames\": 0, \"exportMode\": \"all\", \"audioMode\": \"source\", \"exportSourceImages\": false, \"exportPreFaceRefine\": true, \"refImageSize\": \"match\", \"continuityEnabled\": true, \"continuityOverlapFrames\": 22, \"continuityMode\": \"guide\", \"continuityRedraw\": 0.1, \"continuityKeepTail\": true}, \"runSelectEnabled\": false, \"runSelection\": [], \"segments\": [{\"id\": \"msmp44em3oasd\", \"start\": 0, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"startImage\": null, \"endImage\": null, \"continuityFromPrev\": false, \"refImageSize\": \"match\"}, {\"id\": \"msyi2qhz5lupx\", \"start\": 90, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频承接上一段露台气氛：先短暂保持 <Subject 1> 的等待姿态，随后 <Subject 2> 俏皮跑入，扯动衣摆并指向画外，引导 <Subject 1> 看向即将出现的方向。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 身份、发型面容、深蓝礼服与配饰完整保留。\\n<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - 橙色眼罩、蓝眼、浅棕皮毛与立体卡通质感完整保留。\\n\\ndetailed_description:\\n目标视频延续电影感二次元写实夜景风格，暖琥珀光与浅景深保持一致。\\n[Shot 1] 中近景先静止约 1.5 秒，保持 <Subject 1> 在露台栏杆旁侧身回望画外的等待姿态，发丝轻动，香槟杯仍在手中。随后 <Subject 2> 从画面下方小跑入画，橙色眼罩反光，尾巴轻甩，伸手轻轻拽住 <Subject 1> 礼服下摆。镜头以小幅度、慢速轻微 Tilt Down 兼顾小猴与她的视线交流。\\n[Shot 2] At 00:02.800, 镜头切到稍低角度的中景双人构图：<Subject 2> 仰头对 <Subject 1> 张开嘴巴做出兴奋表情，小爪指向画面左侧画外；<Subject 1> 低头看它，神情由惊讶转为含笑的娇嗔，再顺着它的指向抬眼望向画外。镜头以慢速、小幅度轻微 Truck Left 暗示视线方向，结束在两人共同看向画外的瞬间。\\n\\noverall_soundscape:\\n延续夜风与远处城市底噪；加入小猴轻快的爪步声、短促可爱气声，以及衣摆被轻扯时的布料细响。\\n\\nnon_diegetic_music:\\n原有慢爵士之上叠入少量轻盈钟琴音符，节奏仍偏慢，音量克制，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"startImage\": null, \"endImage\": null, \"continuityFromPrev\": true, \"refImageSize\": \"match\"}], \"timelineMode\": \"prompt_batch\", \"width\": 864, \"height\": 480, \"refMaxSize\": 864, \"gen\": {\"defaultFrameCount\": 124}, \"keyframes\": [{\"id\": \"msdtx3zi62ktv_s\", \"imageFile\": \"0059.png\", \"width\": 768, \"height\": 1024, \"start\": 0, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"一个猴子在极速奔跑，跑的过程中裤子掉在地上，但他仍然继续奔跑。过程中伴随自然的跑步声\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtx3zi62ktv_e\", \"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682, \"start\": 62, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdtx87njf33g_s\", \"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682, \"start\": 124, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"猴子在快速奔跑，双臂自然摆动，跑到一个岩石旁，慢慢的坐下，随着时间的流逝，沙尘慢慢消失，漏出蓝天背景。过程中伴随自然的跑步、坐下时候产生的声音\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtx87njf33g_e\", \"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024, \"start\": 186, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdtwxyuscavj_s\", \"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024, \"start\": 248, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"猴子从岩石上起身，起身后穿上衣服，背上书包，去教室上课，慢慢走到教室里，过程中伴随穿衣、背书包、走路的背景音\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtwxyuscavj_e\", \"imageFile\": \"0086.png\", \"width\": 768, \"height\": 1024, \"start\": 310, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdx1e2eigp2x\", \"imageFile\": \"\", \"width\": 0, \"height\": 0, \"start\": 372, \"length\": 124, \"frameCount\": 124, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}], \"durationSec\": 20, \"shots\": [{\"id\": \"msdtx3zi62ktv\", \"durationSec\": 5, \"prompt\": \"一个猴子在极速奔跑，跑的过程中裤子掉在地上，但他仍然继续奔跑。过程中伴随自然的跑步声\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0059.png\", \"width\": 768, \"height\": 1024}, \"endImage\": {\"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682}}, {\"id\": \"msdtx87njf33g\", \"durationSec\": 5, \"prompt\": \"猴子在快速奔跑，双臂自然摆动，跑到一个岩石旁，慢慢的坐下，随着时间的流逝，沙尘慢慢消失，漏出蓝天背景。过程中伴随自然的跑步、坐下时候产生的声音\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682}, \"endImage\": {\"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024}}, {\"id\": \"msdtwxyuscavj\", \"durationSec\": 5, \"prompt\": \"猴子从岩石上起身，起身后穿上衣服，背上书包，去教室上课，慢慢走到教室里，过程中伴随穿衣、背书包、走路的背景音\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024}, \"endImage\": {\"imageFile\": \"0086.png\", \"width\": 768, \"height\": 1024}}, {\"id\": \"msdx1e2eigp2x\", \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"startImage\": null, \"endImage\": null}], \"liveTaePreview\": true, \"batchDetailMode\": \"solo\", \"batchWorkspaces\": {\"r2v\": {\"selectedIndex\": 1, \"editMode\": \"segment\", \"runSelectEnabled\": false, \"runSelection\": [], \"segments\": [{\"id\": \"msmp44em3oasd\", \"start\": 0, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"continuityFromPrev\": false, \"refImageSize\": \"match\", \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"_videoFrameCount\": 90, \"previewFps\": 24, \"previewLive\": true, \"previewStep\": 8, \"previewTotalSteps\": 8}, {\"id\": \"msyi2qhz5lupx\", \"start\": 90, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频承接上一段露台气氛：先短暂保持 <Subject 1> 的等待姿态，随后 <Subject 2> 俏皮跑入，扯动衣摆并指向画外，引导 <Subject 1> 看向即将出现的方向。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 身份、发型面容、深蓝礼服与配饰完整保留。\\n<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - 橙色眼罩、蓝眼、浅棕皮毛与立体卡通质感完整保留。\\n\\ndetailed_description:\\n目标视频延续电影感二次元写实夜景风格，暖琥珀光与浅景深保持一致。\\n[Shot 1] 中近景先静止约 1.5 秒，保持 <Subject 1> 在露台栏杆旁侧身回望画外的等待姿态，发丝轻动，香槟杯仍在手中。随后 <Subject 2> 从画面下方小跑入画，橙色眼罩反光，尾巴轻甩，伸手轻轻拽住 <Subject 1> 礼服下摆。镜头以小幅度、慢速轻微 Tilt Down 兼顾小猴与她的视线交流。\\n[Shot 2] At 00:02.800, 镜头切到稍低角度的中景双人构图：<Subject 2> 仰头对 <Subject 1> 张开嘴巴做出兴奋表情，小爪指向画面左侧画外；<Subject 1> 低头看它，神情由惊讶转为含笑的娇嗔，再顺着它的指向抬眼望向画外。镜头以慢速、小幅度轻微 Truck Left 暗示视线方向，结束在两人共同看向画外的瞬间。\\n\\noverall_soundscape:\\n延续夜风与远处城市底噪；加入小猴轻快的爪步声、短促可爱气声，以及衣摆被轻扯时的布料细响。\\n\\nnon_diegetic_music:\\n原有慢爵士之上叠入少量轻盈钟琴音符，节奏仍偏慢，音量克制，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"continuityFromPrev\": true, \"refImageSize\": \"match\", \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"_videoFrameCount\": 90, \"previewFps\": 24, \"previewLive\": true, \"previewStep\": 8, \"previewTotalSteps\": 8}], \"globalCommon\": {\"commonEnabled\": true, \"commonCollapsed\": false, \"prompt\": \"subject_definitions:\\n<Subject 1> 是来自  的棕发紫眸女性，身份与穿着完全锁定参考图：深海军蓝无袖高开衩丝质礼服、金线刺绣立领、黑色薄丝袜、金色尖头高跟鞋、金色耳饰与手镯。\\n<Subject 2> 是来自  的可爱立体卡通小猴，浅棕皮毛、米色肚腹、橙色眼罩护目镜、蓝色大眼与细长尾巴，外形完全锁定参考图。\\n<Subject 3> 是来自  的金发蓝眸女性，白色挂脖晚礼服、胸前红宝石坠饰、黑色薄丝袜、白色高跟鞋与金色手镯，身份与穿着完全锁定参考图。\", \"refs\": [{\"index\": 0, \"imageFile\": \"krea2_identity_edit_00057_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, {\"index\": 1, \"imageFile\": \"krea2_identity_edit_00028_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, {\"index\": 2, \"imageFile\": \"krea2_identity_edit_00058_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}], \"refAudios\": [], \"refVideos\": []}}}}",
-    "高级采样",
-    8,
-    "res_multistep",
-    "simple",
-    12,
-    3,
-    false,
-    true,
-    "性能",
-    false,
-    false,
-    false,
-    "raw",
-    ""
-   ],
-   "widgets_values_named": {
-    "task_type": "r2v — 参考主体生视频(Reference to Video)",
-    "global_prompt": "subject_definitions:\n<Subject 1> 是来自  的棕发紫眸女性，身份与穿着完全锁定参考图：深海军蓝无袖高开衩丝质礼服、金线刺绣立领、黑色薄丝袜、金色尖头高跟鞋、金色耳饰与手镯。\n<Subject 2> 是来自  的可爱立体卡通小猴，浅棕皮毛、米色肚腹、橙色眼罩护目镜、蓝色大眼与细长尾巴，外形完全锁定参考图。\n<Subject 3> 是来自  的金发蓝眸女性，白色挂脖晚礼服、胸前红宝石坠饰、黑色薄丝袜、白色高跟鞋与金色手镯，身份与穿着完全锁定参考图。",
-    "bd_grp_sample": "采样设置",
-    "cfg": 1,
-    "seed": 666,
-    "control_after_generate": "fixed",
-    "frame_rate": 24,
-    "width": 864,
-    "height": 480,
-    "ref_max_size": 864,
-    "total_frames": 180,
-    "timeline_data": "{\"version\": 5, \"editMode\": \"segment\", \"totalFrames\": 180, \"frameRate\": 24, \"video\": {\"fileName\": \"\", \"videoFile\": \"\", \"subfolder\": \"\", \"type\": \"input\", \"frames\": [], \"frameMap\": [], \"sourceFrameCount\": 734, \"deletedSourceRanges\": []}, \"videoClips\": [], \"global\": {\"taskType\": \"r2v — 参考主体生视频(Reference to Video)\", \"prompt\": \"\", \"refs\": [], \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"continuousReference\": false, \"genImage\": {\"imageFile\": \"\"}, \"sourceWidth\": 768, \"sourceHeight\": 1024, \"refAudios\": [], \"commonEnabled\": false, \"commonCollapsed\": true, \"refVideos\": []}, \"output\": {\"mode\": \"fixed\", \"aspectRatio\": \"16:9 (宽屏)\", \"megapixels\": 0.4, \"multiple\": 32, \"longEdge\": 864, \"width\": 864, \"height\": 480, \"maxExportFrames\": 0, \"exportMode\": \"all\", \"audioMode\": \"source\", \"exportSourceImages\": false, \"exportPreFaceRefine\": true, \"refImageSize\": \"match\", \"continuityEnabled\": true, \"continuityOverlapFrames\": 22, \"continuityMode\": \"guide\", \"continuityRedraw\": 0.1, \"continuityKeepTail\": true}, \"runSelectEnabled\": false, \"runSelection\": [], \"segments\": [{\"id\": \"msmp44em3oasd\", \"start\": 0, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"startImage\": null, \"endImage\": null, \"continuityFromPrev\": false, \"refImageSize\": \"match\"}, {\"id\": \"msyi2qhz5lupx\", \"start\": 90, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频承接上一段露台气氛：先短暂保持 <Subject 1> 的等待姿态，随后 <Subject 2> 俏皮跑入，扯动衣摆并指向画外，引导 <Subject 1> 看向即将出现的方向。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 身份、发型面容、深蓝礼服与配饰完整保留。\\n<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - 橙色眼罩、蓝眼、浅棕皮毛与立体卡通质感完整保留。\\n\\ndetailed_description:\\n目标视频延续电影感二次元写实夜景风格，暖琥珀光与浅景深保持一致。\\n[Shot 1] 中近景先静止约 1.5 秒，保持 <Subject 1> 在露台栏杆旁侧身回望画外的等待姿态，发丝轻动，香槟杯仍在手中。随后 <Subject 2> 从画面下方小跑入画，橙色眼罩反光，尾巴轻甩，伸手轻轻拽住 <Subject 1> 礼服下摆。镜头以小幅度、慢速轻微 Tilt Down 兼顾小猴与她的视线交流。\\n[Shot 2] At 00:02.800, 镜头切到稍低角度的中景双人构图：<Subject 2> 仰头对 <Subject 1> 张开嘴巴做出兴奋表情，小爪指向画面左侧画外；<Subject 1> 低头看它，神情由惊讶转为含笑的娇嗔，再顺着它的指向抬眼望向画外。镜头以慢速、小幅度轻微 Truck Left 暗示视线方向，结束在两人共同看向画外的瞬间。\\n\\noverall_soundscape:\\n延续夜风与远处城市底噪；加入小猴轻快的爪步声、短促可爱气声，以及衣摆被轻扯时的布料细响。\\n\\nnon_diegetic_music:\\n原有慢爵士之上叠入少量轻盈钟琴音符，节奏仍偏慢，音量克制，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"startImage\": null, \"endImage\": null, \"continuityFromPrev\": true, \"refImageSize\": \"match\"}], \"timelineMode\": \"prompt_batch\", \"width\": 864, \"height\": 480, \"refMaxSize\": 864, \"gen\": {\"defaultFrameCount\": 124}, \"keyframes\": [{\"id\": \"msdtx3zi62ktv_s\", \"imageFile\": \"0059.png\", \"width\": 768, \"height\": 1024, \"start\": 0, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"一个猴子在极速奔跑，跑的过程中裤子掉在地上，但他仍然继续奔跑。过程中伴随自然的跑步声\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtx3zi62ktv_e\", \"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682, \"start\": 62, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdtx87njf33g_s\", \"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682, \"start\": 124, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"猴子在快速奔跑，双臂自然摆动，跑到一个岩石旁，慢慢的坐下，随着时间的流逝，沙尘慢慢消失，漏出蓝天背景。过程中伴随自然的跑步、坐下时候产生的声音\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtx87njf33g_e\", \"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024, \"start\": 186, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdtwxyuscavj_s\", \"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024, \"start\": 248, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"猴子从岩石上起身，起身后穿上衣服，背上书包，去教室上课，慢慢走到教室里，过程中伴随穿衣、背书包、走路的背景音\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}, {\"id\": \"msdtwxyuscavj_e\", \"imageFile\": \"0086.png\", \"width\": 768, \"height\": 1024, \"start\": 310, \"length\": 62, \"frameCount\": 62, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": false, \"isEndFrame\": true}, {\"id\": \"msdx1e2eigp2x\", \"imageFile\": \"\", \"width\": 0, \"height\": 0, \"start\": 372, \"length\": 124, \"frameCount\": 124, \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"isStartFrame\": true, \"isEndFrame\": false}], \"durationSec\": 20, \"shots\": [{\"id\": \"msdtx3zi62ktv\", \"durationSec\": 5, \"prompt\": \"一个猴子在极速奔跑，跑的过程中裤子掉在地上，但他仍然继续奔跑。过程中伴随自然的跑步声\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0059.png\", \"width\": 768, \"height\": 1024}, \"endImage\": {\"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682}}, {\"id\": \"msdtx87njf33g\", \"durationSec\": 5, \"prompt\": \"猴子在快速奔跑，双臂自然摆动，跑到一个岩石旁，慢慢的坐下，随着时间的流逝，沙尘慢慢消失，漏出蓝天背景。过程中伴随自然的跑步、坐下时候产生的声音\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0060.png\", \"width\": 512, \"height\": 682}, \"endImage\": {\"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024}}, {\"id\": \"msdtwxyuscavj\", \"durationSec\": 5, \"prompt\": \"猴子从岩石上起身，起身后穿上衣服，背上书包，去教室上课，慢慢走到教室里，过程中伴随穿衣、背书包、走路的背景音\", \"negativePrompt\": \"bad video\", \"startImage\": {\"imageFile\": \"0062.png\", \"width\": 768, \"height\": 1024}, \"endImage\": {\"imageFile\": \"0086.png\", \"width\": 768, \"height\": 1024}}, {\"id\": \"msdx1e2eigp2x\", \"durationSec\": 5, \"prompt\": \"\", \"negativePrompt\": \"bad video\", \"startImage\": null, \"endImage\": null}], \"liveTaePreview\": true, \"batchDetailMode\": \"solo\", \"batchWorkspaces\": {\"r2v\": {\"selectedIndex\": 1, \"editMode\": \"segment\", \"runSelectEnabled\": false, \"runSelection\": [], \"segments\": [{\"id\": \"msmp44em3oasd\", \"start\": 0, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。summary:\\n[reference generation] 目标视频表现 <Subject 1> 独自站在豪华酒店夜景露台，缓慢转头、举杯、投出暧昧眼神，镜头由中远景缓推至中近景，建立等待与引诱的气氛。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - 面部身份、长棕发、紫眸、深蓝礼服与金绣、丝袜高跟鞋及饰品均完整保留。\\n\\ndetailed_description:\\n目标视频采用电影感二次元写实风格，暖琥珀夜景侧光，浅景深，浪漫暧昧气质。\\n[Shot 1] 中远景建立豪华酒店夜景露台：玻璃栏杆外城市灯火呈柔和光斑。画面右侧站立 <Subject 1>，侧身面向栏杆，左手轻扶玻璃，右手持香槟杯，长发被夜风轻轻吹动。固定镜头短暂停留后，以小幅度、慢速 Push In 靠近她的上半身。远处隐约传来杯盏轻碰与城市底噪。\\n[Shot 2] At 00:03.500, 镜头不硬切，继续慢速推近至中景：<Subject 1> 缓缓转头看向镜头方向，紫眸半眯，嘴角漾出克制的暧昧浅笑，举杯至唇边却并未真正饮下，只是用杯沿轻触下唇。发丝掠过肩侧，金绣领口在暖光下微微反光。\\n[Shot 3] At 00:07.000, 镜头以小幅度、慢速轻微 Arc Shot 绕至她四分之三正面中近景：<Subject 1> 目光从镜头旁移向画面外一侧，像在等待某人出现，手指在杯壁上缓缓摩挲。镜头稳定停留至结尾，暧昧悬念未解。\\n\\noverall_soundscape:\\n夜风掠过露台的轻柔气流声贯穿全片，远处城市低沉环境底噪与偶尔极轻的杯盏碰击声叠入；衣料与丝袜摩擦的细微声响随人物动作出现。\\n\\nnon_diegetic_music:\\n低音量慢速爵士钢琴与柔和刷鼓点贯穿，节奏舒缓，动态平稳，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"continuityFromPrev\": false, \"refImageSize\": \"match\", \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"_videoFrameCount\": 90, \"previewFps\": 24, \"previewLive\": true, \"previewStep\": 8, \"previewTotalSteps\": 8}, {\"id\": \"msyi2qhz5lupx\", \"start\": 90, \"length\": 90, \"frameCount\": 90, \"durationSec\": 3.5, \"prompt\": \"summary:\\n[reference generation] 目标视频承接上一段露台气氛：先短暂保持 <Subject 1> 的等待姿态，随后 <Subject 2> 俏皮跑入，扯动衣摆并指向画外，引导 <Subject 1> 看向即将出现的方向。\\n\\nretention_analysis:\\n<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 身份、发型面容、深蓝礼服与配饰完整保留。\\n<Subject 2> (appears in [Shot 1], [Shot 2]): fully_preserved - 橙色眼罩、蓝眼、浅棕皮毛与立体卡通质感完整保留。\\n\\ndetailed_description:\\n目标视频延续电影感二次元写实夜景风格，暖琥珀光与浅景深保持一致。\\n[Shot 1] 中近景先静止约 1.5 秒，保持 <Subject 1> 在露台栏杆旁侧身回望画外的等待姿态，发丝轻动，香槟杯仍在手中。随后 <Subject 2> 从画面下方小跑入画，橙色眼罩反光，尾巴轻甩，伸手轻轻拽住 <Subject 1> 礼服下摆。镜头以小幅度、慢速轻微 Tilt Down 兼顾小猴与她的视线交流。\\n[Shot 2] At 00:02.800, 镜头切到稍低角度的中景双人构图：<Subject 2> 仰头对 <Subject 1> 张开嘴巴做出兴奋表情，小爪指向画面左侧画外；<Subject 1> 低头看它，神情由惊讶转为含笑的娇嗔，再顺着它的指向抬眼望向画外。镜头以慢速、小幅度轻微 Truck Left 暗示视线方向，结束在两人共同看向画外的瞬间。\\n\\noverall_soundscape:\\n延续夜风与远处城市底噪；加入小猴轻快的爪步声、短促可爱气声，以及衣摆被轻扯时的布料细响。\\n\\nnon_diegetic_music:\\n原有慢爵士之上叠入少量轻盈钟琴音符，节奏仍偏慢，音量克制，无歌词。\", \"negativePrompt\": \"\", \"taskType\": \"\", \"refs\": [], \"refAudios\": [], \"refVideos\": [], \"genImage\": {\"imageFile\": \"\", \"fileName\": \"\"}, \"continuityFromPrev\": true, \"refImageSize\": \"match\", \"referenceVideo\": {\"videoFile\": \"\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, \"_videoFrameCount\": 90, \"previewFps\": 24, \"previewLive\": true, \"previewStep\": 8, \"previewTotalSteps\": 8}], \"globalCommon\": {\"commonEnabled\": true, \"commonCollapsed\": false, \"prompt\": \"subject_definitions:\\n<Subject 1> 是来自  的棕发紫眸女性，身份与穿着完全锁定参考图：深海军蓝无袖高开衩丝质礼服、金线刺绣立领、黑色薄丝袜、金色尖头高跟鞋、金色耳饰与手镯。\\n<Subject 2> 是来自  的可爱立体卡通小猴，浅棕皮毛、米色肚腹、橙色眼罩护目镜、蓝色大眼与细长尾巴，外形完全锁定参考图。\\n<Subject 3> 是来自  的金发蓝眸女性，白色挂脖晚礼服、胸前红宝石坠饰、黑色薄丝袜、白色高跟鞋与金色手镯，身份与穿着完全锁定参考图。\", \"refs\": [{\"index\": 0, \"imageFile\": \"krea2_identity_edit_00057_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, {\"index\": 1, \"imageFile\": \"krea2_identity_edit_00028_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}, {\"index\": 2, \"imageFile\": \"krea2_identity_edit_00058_.png\", \"fileName\": \"\", \"type\": \"input\", \"subfolder\": \"\"}], \"refAudios\": [], \"refVideos\": []}}}}",
-    "bd_grp_advanced": "高级采样",
-    "steps": 8,
-    "sampler": "res_multistep",
-    "scheduler": "simple",
-    "shift_video": 12,
-    "shift_audio": 3,
-    "export_source_images": false,
-    "export_pre_face_refine": true,
-    "bd_grp_perf": "性能",
-    "clear_vram_between_segments": false,
-    "clear_vram_before_refine": false,
-    "clear_vram_before_face_refine": false,
-    "cache_frames_codec": "raw",
-    "minimax_director_ui": ""
-   }
-  },
-  {
-   "id": 7,
-   "type": "SaveVideo",
-   "pos": [
-    1932.3940604041527,
-    637.7856619797128
-   ],
-   "size": [
-    619.371811810659,
-    442.19504447944
-   ],
-   "flags": {},
-   "order": 22,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "video",
-     "localized_name": "视频",
-     "name": "video",
-     "type": "VIDEO",
-     "link": 143
-    },
-    {
-     "label": "filename_prefix",
-     "localized_name": "文件名前缀",
-     "name": "filename_prefix",
-     "type": "STRING",
-     "widget": {
-      "name": "filename_prefix"
-     },
-     "link": null
-    },
-    {
-     "label": "format",
-     "localized_name": "格式",
-     "name": "format",
-     "type": "COMFY_DYNAMICCOMBO_V3",
-     "widget": {
-      "name": "format"
-     },
-     "link": null
-    },
-    {
-     "localized_name": "编解码器",
-     "name": "format.codec",
-     "type": "COMFY_DYNAMICCOMBO_V3",
-     "widget": {
-      "name": "format.codec"
-     },
-     "link": null
-    },
-    {
-     "label": "codec",
-     "localized_name": "编码器",
-     "name": "codec",
-     "shape": 7,
-     "type": "COMFY_DYNAMICCOMBO_V3",
-     "widget": {
-      "name": "codec"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "video",
-     "localized_name": "video",
-     "name": "video",
-     "type": "VIDEO",
-     "links": []
-    }
-   ],
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.37.2",
-    "Node name for S&R": "SaveVideo"
-   },
-   "widgets_values": [
-    "video/MiniMaxH3_Director",
-    "auto",
-    "auto",
-    "auto"
-   ],
-   "widgets_values_named": {
-    "filename_prefix": "video/MiniMaxH3_Director",
-    "format": "auto",
-    "format.codec": "auto",
-    "codec": "auto"
-   }
-  },
-  {
-   "id": 67,
-   "type": "VAELoader",
-   "pos": [
-    -2261.225432398557,
-    470.0
-   ],
-   "size": [
-    441.40625,
-    95.4375
-   ],
-   "flags": {},
-   "order": 23,
-   "mode": 0,
-   "inputs": [
-    {
-     "label": "vae名称",
-     "localized_name": "vae名称",
-     "name": "vae_name",
-     "type": "COMBO",
-     "widget": {
-      "name": "vae_name"
-     },
-     "link": null
-    }
-   ],
-   "outputs": [
-    {
-     "label": "VAE",
-     "localized_name": "VAE",
-     "name": "VAE",
-     "type": "VAE",
-     "links": [
-      102
-     ]
-    }
-   ],
-   "title": "Audio VAE",
-   "properties": {
-    "cnr_id": "comfy-core",
-    "ver": "0.30.0",
-    "Node name for S&R": "VAELoader"
-   },
-   "widgets_values": [
-    "minimax-h3\\minimax_h3_audio_vae_fp32.safetensors"
-   ],
-   "widgets_values_named": {
-    "vae_name": "minimax-h3\\minimax_h3_audio_vae_fp32.safetensors"
-   }
-  }
- ],
- "links": [
-  [
-   9,
-   6,
-   0,
-   50,
-   0,
-   "VIDEO"
-  ],
-  [
-   16,
-   2,
-   0,
-   12,
-   3,
-   "CLIP"
-  ],
-  [
-   17,
-   12,
-   0,
-   6,
-   0,
-   "IMAGE"
-  ],
-  [
-   18,
-   12,
-   1,
-   6,
-   1,
-   "AUDIO"
-  ],
-  [
-   19,
-   12,
-   2,
-   6,
-   2,
-   "FLOAT"
-  ],
-  [
-   20,
-   12,
-   5,
-   8,
-   0,
-   "STRING"
-  ],
-  [
-   24,
-   1,
-   0,
-   16,
-   0,
-   "MODEL"
-  ],
-  [
-   25,
-   16,
-   0,
-   14,
-   0,
-   "MODEL"
-  ],
-  [
-   68,
-   33,
-   0,
-   38,
-   1,
-   "SIGMAS"
-  ],
-  [
-   70,
-   38,
-   0,
-   12,
-   8,
-   "MMX_DIR_REFINE"
-  ],
-  [
-   72,
-   14,
-   0,
-   39,
-   0,
-   "MODEL"
-  ],
-  [
-   77,
-   41,
-   0,
-   12,
-   0,
-   "MODEL"
-  ],
-  [
-   100,
-   48,
-   0,
-   12,
-   1,
-   "VAE"
-  ],
-  [
-   103,
-   53,
-   0,
-   41,
-   0,
-   "MODEL"
-  ],
-  [
-   106,
-   39,
-   0,
-   53,
-   0,
-   "MODEL"
-  ],
-  [
-   117,
-   54,
-   0,
-   55,
-   0,
-   "MODEL"
-  ],
-  [
-   123,
-   55,
-   0,
-   60,
-   0,
-   "MODEL"
-  ],
-  [
-   130,
-   62,
-   0,
-   33,
-   0,
-   "MODEL"
-  ],
-  [
-   131,
-   62,
-   0,
-   38,
-   0,
-   "MODEL"
-  ],
-  [
-   132,
-   60,
-   0,
-   63,
-   0,
-   "MODEL"
-  ],
-  [
-   134,
-   63,
-   0,
-   62,
-   0,
-   "MODEL"
-  ],
-  [
-   102,
-   67,
-   0,
-   12,
-   2,
-   "VAE"
-  ],
-  [
-   143,
-   50,
-   0,
-   7,
-   0,
-   "VIDEO"
-  ]
- ],
- "groups": [
-  {
-   "id": 1,
-   "title": "模型加载 (MiniMax H3)",
-   "bounding": [
-    -2298.1146397249845,
-    -44.01257709011762,
-    440,
-    560
-   ],
-   "color": "#3f789e",
-   "flags": {}
-  },
-  {
-   "id": 2,
-   "title": "MiniMax H3 Director",
-   "bounding": [
-    -320,
-    40,
-    1120,
-    960
-   ],
-   "color": "#8A8",
-   "flags": {}
-  },
-  {
-   "id": 3,
-   "title": "输出",
-   "bounding": [
-    959.7884550354713,
-    38.736816353831586,
-    760,
-    760
-   ],
-   "color": "#b58",
-   "flags": {}
-  },
-  {
-   "id": 4,
-   "title": "加速模块（用就开启，不用可以关掉）",
-   "bounding": [
-    -1830.776041482021,
-    119.5864313127729,
-    696.8626780790273,
-    222.74509026022088
-   ],
-   "color": "#3f789e",
-   "flags": {}
-  }
- ],
- "config": {},
- "extra": {
-  "frontendVersion": "1.23.0",
-  "note": "MiniMax H3 Director · t2v",
-  "ds": {
-   "scale": 0.720434845681465,
-   "offset": [
-    -291.0448311664124,
-    364.65763245543883
-   ]
-  }
- },
- "version": 0.4
+  "version": 0.4
 }

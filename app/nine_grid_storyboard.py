@@ -79,20 +79,4 @@ class NineGridStoryboard:
 
         return selected_shot
 
-    def save_nine_grid(self, nine_grid: Dict[str, Any]) -> str:
-        """保存九宫格数据"""
-        filename = f"nine_grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        filepath = self.base_dir / filename
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(nine_grid, f, ensure_ascii=False, indent=2)
-        return str(filepath)
 
-    def load_nine_grid(self, filepath: str) -> Dict[str, Any]:
-        """加载九宫格数据"""
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
-
-    def get_shot_preview_url(self, shot: Dict[str, Any], project_key: str, shot_index: int) -> str:
-        """获取镜头预览URL"""
-        # 假设图片存储在 output/storyboards/{project}/shots/{index}.png
-        return f"/output/storyboards/{project_key}/shots/{shot_index}.png"

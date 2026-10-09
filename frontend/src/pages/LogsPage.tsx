@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp } from '@/context/AppContext';
 import { Badge, Button, Card, Input, Select } from '@/components/ui';
 import { logsApi } from '@/api/client';
+import LiveExecutionFeed from '@/components/LiveExecutionFeed';
 import type { LogSource, LogsResponse } from '@/types';
 
 /** 内存中最多保留多少行（防止长时间挂着拖垮浏览器） */
@@ -17,10 +18,10 @@ function fmtSize(n: number): string {
 
 function lineClass(line: string): string {
   if (line.startsWith('ERROR') || line.includes('ERROR:')) {
-    return 'text-red-600 dark:text-red-400';
+    return 'text-danger';
   }
   if (line.startsWith('WARNING') || line.includes('WARNING:')) {
-    return 'text-amber-600 dark:text-amber-400';
+    return 'text-warning-strong';
   }
   if (line.startsWith('DEBUG')) return 'text-ink-3';
   return 'text-ink-2';
@@ -47,6 +48,52 @@ export function LogsPage() {
   const [meta, setMeta] = useState<LogsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+
+  // ⭐ 2026-10-09：执行流并入日志页（它本质就是结构化日志；概览页不再重复渲染）。
+
+  //   日志页是全局页面、AppContext 里没有项目上下文 → 这里自带项目选择器，
+
+  //   并记住上次选择（localStorage），下次进来直接看同一个项目。
+
+  const [projList, setProjList] = useState<Array<{ key: string; name: string }>>([]);
+
+  const [feedProject, setFeedProject] = useState<string>(
+
+    () => localStorage.getItem('mjscxt.logs.feedProject') || '');
+
+  useEffect(() => {
+
+    void (async () => {
+
+      try {
+
+        const r = await fetch('/api/projects');
+
+        const j = await r.json();
+
+        const arr = (j?.projects || []).map((p: Record<string, unknown>) => ({
+
+          key: String(p.dir_key || p.name || p.id || ''),
+
+          name: String(p.name || p.dir_key || ''),
+
+        })).filter((x: { key: string }) => x.key);
+
+        setProjList(arr);
+
+        setFeedProject((cur: string) => cur || arr[0]?.key || '');
+
+      } catch { /* 拉不到项目不影响原始日志 */ }
+
+    })();
+
+  }, []);
+
+  useEffect(() => {
+
+    if (feedProject) localStorage.setItem('mjscxt.logs.feedProject', feedProject);
+
+  }, [feedProject]);
 
   const offsetRef = useRef(0);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -138,6 +185,23 @@ export function LogsPage() {
         </div>
       </div>
 
+      {/* ===== 结构化执行流（原概览页的「执行流」，并入日志页）===== */}
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-sm font-medium text-ink-1">执行流 · 所属项目</span>
+        <Select
+          value={feedProject}
+          onChange={setFeedProject}
+          options={projList.length ? projList.map(p => ({ value: p.key, label: p.name }))
+                                   : [{ value: '', label: '（暂无项目）' }]}
+          className="min-w-[220px]"
+        />
+        <span className="text-xs text-ink-3">
+          下方是结构化的生产事件（步骤开始/完成/失败/跳过 + 耗时 + 判断依据）；
+          最下面的「日志正文」是服务进程的原始输出。
+        </span>
+      </div>
+      {feedProject ? <LiveExecutionFeed project={feedProject} /> : null}
+
       {/* 控制条 */}
       <Card bodyClassName="p-4">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
@@ -196,7 +260,7 @@ export function LogsPage() {
       </div>
 
       {error && (
-        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-400">
+        <div className="rounded-lg border border-danger/40 bg-danger/5 p-3 text-sm text-danger">
           {error}
         </div>
       )}
@@ -206,7 +270,7 @@ export function LogsPage() {
         <div
           ref={boxRef}
           onScroll={onScroll}
-          className="max-h-[60vh] min-h-[320px] overflow-auto bg-black/40 p-4 font-mono text-[12px] leading-relaxed"
+          className="max-h-[60vh] min-h-[320px] overflow-auto bg-black/40 p-4 font-mono text-xs leading-relaxed"
         >
           {lines.length === 0 && !loading && (
             <p className="text-ink-3">{t('wb.logs.empty')}</p>

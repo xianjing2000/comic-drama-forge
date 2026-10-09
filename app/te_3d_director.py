@@ -477,7 +477,7 @@ def build_scene_json(
 
     # 景别/机位判定：复用 comfyui_client 的权威解析（避免重复造、避免两端标准错位）
     try:
-        from comfyui_client import camera_key, camera_angle  # noqa: PLC0415
+        from shot_camera import camera_key, camera_angle  # noqa: PLC0415  2026-10-08 解耦
         _cam_key = camera_key(camera)
         _cam_angle = camera_angle(camera)
     except Exception:  # noqa: BLE001 - 离线/独立测试时降级
@@ -657,11 +657,6 @@ def validate_render_plan(plan: dict) -> dict:
     return plan
 
 
-def _camera_position(cam_key: str, cam_angle: str) -> Tuple[float, float, float]:
-    """（兼容保留）由景别 + 机位角度推导机位世界坐标。"""
-    return build_camera(cam_key, cam_angle)[0]
-
-
 def _camera_rotation(cam_angle: str) -> Tuple[float, float, float]:
     """机位朝向：默认平视主体（y 轴 0）。俯拍略低头、仰拍略抬头。"""
     pitch = {"俯拍": -0.5, "仰拍": 0.5}.get(cam_angle, 0.0)
@@ -680,7 +675,7 @@ def build_composition_prompt(shot: dict, characters: Optional[List[str]] = None)
     desc = str(shot.get("description") or "").strip()
 
     try:
-        from comfyui_client import camera_key, camera_angle  # noqa: PLC0415
+        from shot_camera import camera_key, camera_angle  # noqa: PLC0415  2026-10-08 解耦
         cam_key = camera_key(camera)
         cam_angle = camera_angle(camera)
     except Exception:  # noqa: BLE001
@@ -813,7 +808,7 @@ def build_render_plan(shot: dict, aspect: str = "9:16", width: int = 768,
     _override = bool(cam_key or cam_angle)
     if not _override:
         try:
-            from comfyui_client import camera_key, camera_angle  # noqa: PLC0415
+            from shot_camera import camera_key, camera_angle  # noqa: PLC0415  2026-10-08 解耦
             cam_key = camera_key(camera_str)
             cam_angle = camera_angle(camera_str)
         except Exception:  # noqa: BLE001
@@ -903,7 +898,7 @@ def block_annotation(shot: dict, characters: Optional[List[str]] = None) -> str:
     camera = str(shot.get("camera") or "").strip()
 
     try:
-        from comfyui_client import camera_key, camera_angle  # noqa: PLC0415
+        from shot_camera import camera_key, camera_angle  # noqa: PLC0415  2026-10-08 解耦
         cam_key = camera_key(camera)
         cam_angle = camera_angle(camera)
     except Exception:  # noqa: BLE001

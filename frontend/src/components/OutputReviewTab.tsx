@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useApp } from '@/context/AppContext';
-import { exportApi, autopilotApi, qualityApi, type QualityEpisodeRow } from '@/api/client';
+import { autopilotApi, qualityApi, type QualityEpisodeRow } from '@/api/client';
 import { Button, Textarea, Skeleton, EmptyState, ErrorState } from '@/components/ui';
 import { ChevronDown, ChevronRight, ClipboardCheck, FileText, Film, FolderOpen } from '@/components/ui/icons';
 import { EpisodeReviewPanel, STATUS_DOT } from '@/components/EpisodeReviewPanel';
@@ -22,13 +22,10 @@ interface OutputReviewTabProps {
 
 export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
   const { t } = useApp();
-  const [exportFiles, setExportFiles] = useState<any[]>([]);
   const [deliverables, setDeliverables] = useState<Deliverable[]>([]);
   const [pending, setPending] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState<number | null>(null);
   const [rejecting, setRejecting] = useState<number | null>(null);
   const [reason, setReason] = useState('');
@@ -43,11 +40,8 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
     if (!projectKey) return;
     setLoading(true);
     try {
-      const [exportRes, deliverRes] = await Promise.all([
-        exportApi.listFiles(projectKey),
-        autopilotApi.deliverables(projectKey),
-      ]);
-      setExportFiles(exportRes?.files || []);
+      // 项目级导出（/api/export/*）已下线：剪辑工程文件列表已移除，不再查询 exportApi
+      const deliverRes = await autopilotApi.deliverables(projectKey);
       setDeliverables(deliverRes?.items || []);
       setPending(deliverRes?.pending || 0);
       // 审片数据是「增补」：取不到时成片验收照常可用，不把整页打成硬错误态
@@ -65,27 +59,6 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
   }, [projectKey]);
 
   useEffect(() => { void loadAll(); }, [loadAll]);
-
-  const handleGenerate = async () => {
-    setGenerating(true);
-    setError('');
-    setNotice('');
-    try {
-      const data = await exportApi.generate(projectKey, ['fcpml', 'edl', 'json']);
-      setExportFiles(data.files || []);
-      if (typeof data.shot_count === 'number' && data.shot_count === 0) {
-        setNotice(t('deliver.exportNoShots'));
-      } else if (typeof data.shot_count === 'number') {
-        setNotice(t('deliver.exportGeneratedShots', { count: data.shot_count, sec: data.total_sec ?? 0 }));
-      } else {
-        setNotice(t('deliver.exportGenerated'));
-      }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : t('deliver.exportFailed'));
-    } finally {
-      setGenerating(false);
-    }
-  };
 
   const review = async (episodeNo: number, verdict: 'accepted' | 'rejected', note = '') => {
     setBusy(episodeNo);
@@ -149,7 +122,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
     return [...byEp.values()].sort((a, b) => a.episode_no - b.episode_no);
   }, [quality, deliverables]);
   /** 是否还有任何数据可展示：决定 error 走「硬失败 ErrorState」还是「软失败行内提示条」 */
-  const hasContent = finals.length > 0 || exportFiles.some((f) => f.exists)
+  const hasContent = finals.length > 0
     || deliverables.length > 0 || reviewRows.length > 0;
 
   // 加载态：沿用标题 + 两个区块卡片的形态
@@ -195,18 +168,6 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
         <h4 className="font-semibold text-ink-1 mb-3 flex items-center gap-2">
           <Film className="h-4 w-4" /> {t('deliver.exportConfig')}
         </h4>
-        
-        <div className="flex gap-2 mb-4">
-          <Button onClick={handleGenerate} disabled={generating}>
-            {generating ? t('common.generating') : t('export.generate')}
-          </Button>
-        </div>
-
-        {notice && (
-          <div className="p-3 bg-success/10 border border-success/30 rounded-lg text-success-strong text-sm mb-4">
-            {notice}
-          </div>
-        )}
 
         {/* 成片下载 */}
         <div className="mb-4">
@@ -237,32 +198,14 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
           )}
         </div>
 
-        {/* 剪辑工程文件 */}
+        {/* 剪辑工程文件（/api/export/* 已下线） */}
         <div>
           <h5 className="text-sm font-medium text-ink-1 mb-2 flex items-center gap-1.5">
-            <FileText className="h-4 w-4" /> {t('deliver.projectFiles', { n: exportFiles.filter(f => f.exists).length })}
+            <FileText className="h-4 w-4" /> {t('deliver.projectFiles', { n: 0 })}
           </h5>
-          {exportFiles.filter(f => f.exists).length > 0 ? (
-            <div className="space-y-2">
-              {exportFiles.filter(f => f.exists).map((file: any, idx: number) => (
-                <div key={idx} className="flex items-center justify-between p-2 bg-surface-2 rounded">
-                  <div className="min-w-0">
-                    <p className="font-medium text-ink-1 truncate text-sm">{file.filename}</p>
-                    <p className="text-xs text-ink-2">{String(file.format || '').toUpperCase()}</p>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => triggerDownload(`/api/export/${encodeURIComponent(projectKey)}/${file.format}`, file.filename)}
-                  >
-                    {t('common.download')}
-                  </Button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-ink-2 py-2">{t('deliver.noExportFiles')}</p>
-          )}
+          <p className="text-sm text-ink-2 py-2">
+            导出项目打包接口已移除，请在「成片验收」列表中下载已生成的成片/剧本/字幕文件。
+          </p>
         </div>
       </div>
 

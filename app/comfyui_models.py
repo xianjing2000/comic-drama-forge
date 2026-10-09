@@ -19,6 +19,9 @@
     overrides_for(workflow_key)  -> WORKFLOW_TEMPLATE 的 key → 节点级覆盖表
     overrides_for_template(name) -> 模板文件名 → 节点级覆盖表
 
+    align_prompt_models(prompt)  -> 提交前把工作流里的模型名对齐到本机 ComfyUI 的
+                                    真实可用值（object_info 为准，见文末「运行时模型名对齐」）
+
 设计要点：
     - 只读为主：scan 不修改任何工作流/模板，只上报。
     - 向前兼容：未选择任何槽位时 load_selection() 返回空 dict，
@@ -28,6 +31,7 @@
       禁止图片链路 LoRA 进视频生成。判据见 ``h3_segment_loras.is_h3_family_lora``。
 """
 
+import json
 import logging
 import os
 import time
@@ -397,3 +401,250 @@ def overrides_for(workflow_key="h3_video"):
     """
     tpl_name = _template_file_for(workflow_key) or str(workflow_key or "")
     return overrides_for_template(tpl_name)
+
+
+# ---------------------------------------------------------------- 运行时模型名对齐
+#
+# 背景（2026-10-08 实测事故，两起同源）：
+#   ① H3 单采模板 id=86 VAELoader 的 vae_name 写死为
+#      MiniMax\minimax_h3_audio_vae_fp32.safetensors，而本机 ComfyUI 的合法列表是
+#      minimax-h3\minimax_h3_audio_vae_fp32.safetensors（删掉重复模型后目录名变了）
+#      → /prompt 400：「节点 86(VAELoader): Value not in list[输入 vae_name]」
+#      → 整集 18 段视频全部被丢弃；
+#   ② 分镜模板里 TE_MAN 增强节点的 mmproj 同理 → 该镜分镜图生成失败。
+#
+# 根因是同一句话：模型名 = 目录布局 + 文件名。把它写死在模板 / 代码默认值 / 用户选定里，
+# 换一台机器（或同一台机器换了目录布局）就会失效。
+#
+# 因此提交前统一做一次「权威对齐」——以 ComfyUI 的 object_info（它自己 /prompt 校验
+# 用的那份列表）为准，把工作流里所有「模型文件型」控件值与当前布局对齐：
+#     值仍在列表 → 原样不动；
+#     不在列表   → 按「唯一候选 → 同名文件 → 同名+目录归一化 → 归一化同名 → 关键词打分」
+#                  自动改写成本机真实地址；
+#     匹配不上   → 原样保留 + WARNING 指明哪个节点哪个字段（fail-open：自动对齐本身
+#                  绝不阻断生成，更不会「猜」一个模型塞进去）。
+#
+# ⚠️ 只碰「模型文件型」控件：候选值里出现模型扩展名（.safetensors/.gguf/.engine…）才算。
+#    sampler_name / scheduler / precision 这类无扩展名枚举天然不会被误改。
+
+#: 模型文件扩展名白名单（判定「这个控件是不是模型文件型」的唯一依据，与字段名语言无关）
+MODEL_FILE_EXTS = (".safetensors", ".ckpt", ".pt", ".pth", ".bin", ".gguf", ".engine",
+                   ".trt", ".onnx", ".sft", ".patch", ".pkl")
+
+#: 关键词打分的「语义词」——命中权重高于普通 token（数字 / 量化标签等）
+_MODEL_SEMANTIC_TOKENS = (
+    "audio", "video", "vision", "encoder", "decoder", "mmproj", "vae", "unet", "clip",
+    "llm", "pe", "engine", "turbo", "fl2v", "ref2v", "t2v", "i2v", "hybrid", "lora",
+)
+
+#: 反斜杠（用 chr 取，避免源码里出现转义序列造成歧义）
+_BS = chr(92)
+#: token 切分占位符（Windows 文件名不允许 |，不会与真实文件名冲突）
+_SEP = "|"
+
+#: object_info 的 TTL 缓存（供不经 ComfyUIClient 的提交路径复用，如 tts_client）
+_OBJECT_INFO_CACHE = {"url": "", "ts": 0.0, "data": None}
+
+
+def _leaf(name) -> str:
+    """取「文件名」部分（同时兼容 Windows 反斜杠与 / 两种分隔符）。"""
+    return str(name or "").replace("/", _BS).split(_BS)[-1]
+
+
+def _dirname(name) -> str:
+    """取「目录前缀」部分（无分隔符时返回空串）。"""
+    s = str(name or "").replace("/", _BS)
+    return s.rsplit(_BS, 1)[0] if _BS in s else ""
+
+
+def _strip_ext(name) -> str:
+    """去掉已知模型扩展名（不认识的后缀原样返回）。"""
+    s = _leaf(name)
+    low = s.lower()
+    for ext in MODEL_FILE_EXTS:
+        if low.endswith(ext):
+            return s[: -len(ext)]
+    return s
+
+
+def _norm(s) -> str:
+    """归一化：小写 + 去掉 - _ . 与空格，用于「同一模型的不同写法」比较。"""
+    out = str(s or "").lower()
+    for ch in ("-", "_", ".", " ", "　"):
+        out = out.replace(ch, "")
+    return out
+
+
+def _tokens(name):
+    """把文件名切成 token（丢掉扩展名、纯数字与单字符）。"""
+    raw = _strip_ext(name).lower()
+    for ch in ("-", "_", ".", " ", "　"):
+        raw = raw.replace(ch, _SEP)
+    return [t for t in raw.split(_SEP) if t and not t.isdigit() and len(t) > 1]
+
+
+def _has_model_ext(v) -> bool:
+    """值是否长得像模型文件（只看扩展名，与语言/字段名无关）。"""
+    s = str(v or "").lower()
+    return any(s.endswith(e) for e in MODEL_FILE_EXTS)
+
+
+def _score_tokens(cur_leaf, cand_leaf) -> int:
+    """关键词打分：语义词命中 3 分、普通 token 命中 1 分。"""
+    a, b = set(_tokens(cur_leaf)), set(_tokens(cand_leaf))
+    common = a & b
+    return len(common) + 3 * len([t for t in common if t in _MODEL_SEMANTIC_TOKENS])
+
+
+def resolve_model_value(current, candidates):
+    """把 current 对齐到 candidates 里的真实可用值，返回 (值, 说明)。
+
+    说明为空串 = 无需改动或**无法可靠改动**（调用方据此决定是否告警）。
+    匹配优先级（越前越可信）：唯一候选 → 同名文件 → 同名+目录名归一化 → 归一化同名
+    → 关键词打分（唯一最优且明显领先）。
+
+    ⚠️ 宁可不改也不猜：同名多命中且无法用目录名区分、或打分不够领先时一律返回空，
+    交回原值让 ComfyUI 自己报错 —— 猜错模型（例如给音频 VAE 塞一个视频 VAE）比失败更糟。
+    """
+    cur = str(current or "")
+    cands = [str(c) for c in (candidates or []) if str(c).strip()]
+    if not cur.strip() or not cands:
+        return "", ""
+    if cur in cands:
+        return "", ""
+    if len(cands) == 1:
+        return cands[0], "候选唯一"
+    leaf = _leaf(cur).lower()
+    # ① 同名文件（只差目录前缀）—— 「模型被挪了目录」场景命中率最高，证据也最强
+    same = [c for c in cands if _leaf(c).lower() == leaf]
+    if len(same) == 1:
+        return same[0], "同名文件（仅目录前缀不同）"
+    if len(same) > 1:
+        cur_dir = _norm(_dirname(cur))
+        narrowed = [c for c in same if _norm(_dirname(c)) == cur_dir] if cur_dir else []
+        if len(narrowed) == 1:
+            return narrowed[0], "同名文件 + 目录名归一化一致"
+        return "", ""       # 同名多份且分不清 → 不猜
+    # ② 归一化同名（大小写 / 分隔符 / 扩展名写法不同）
+    key = _norm(_strip_ext(cur))
+    near = [c for c in cands if _norm(_strip_ext(c)) == key]
+    if len(near) == 1:
+        return near[0], "归一化同名"
+    if len(near) > 1:
+        return "", ""
+    # ③ 关键词打分：必须「唯一最优且明显领先」，否则一律不动
+    scored = sorted(((_score_tokens(cur, c), c) for c in cands), key=lambda x: -x[0])
+    best, best_v = scored[0]
+    second = scored[1][0] if len(scored) > 1 else 0
+    if best >= 3 and (best - second) >= 2:
+        return best_v, "关键词匹配（%d 分，次优 %d 分）" % (best, second)
+    return "", ""
+
+
+def normalize_prompt_models(api_prompt, object_info):
+    """提交前把工作流里所有模型文件型控件值与 object_info 对齐（**就地修改**）。
+
+    返回 {"model_fields": 扫描到的模型控件数, "changed": [...], "unresolved": [...]}。
+    object_info 为空（ComfyUI 离线 / 未取到）时直接返回空报告 → 调用方 fail-open。
+    """
+    report = {"model_fields": 0, "changed": [], "unresolved": []}
+    if not isinstance(api_prompt, dict) or not api_prompt:
+        return report
+    if not isinstance(object_info, dict) or not object_info:
+        return report
+    for nid, node in list(api_prompt.items()):
+        if not isinstance(node, dict):
+            continue
+        cls = str(node.get("class_type") or "")
+        inputs = node.get("inputs")
+        if not cls or not isinstance(inputs, dict):
+            continue
+        blob = object_info.get(cls)
+        if not isinstance(blob, dict):
+            continue        # 未知节点类型：交给 ComfyUI 自己报错，本层不动它
+        raw = blob.get("input") or {}
+        decl = {}
+        for sect in ("required", "optional"):
+            part = raw.get(sect)
+            if isinstance(part, dict):
+                decl.update(part)
+        for field, val in list(inputs.items()):
+            if not isinstance(val, str) or not val.strip():
+                continue
+            spec = decl.get(str(field))
+            cands = spec[0] if (isinstance(spec, (list, tuple)) and spec
+                                and isinstance(spec[0], list)) else None
+            if not cands or not all(isinstance(c, str) for c in cands):
+                continue
+            # 只认「模型文件型」控件：当前值或候选值里出现模型扩展名
+            if not (_has_model_ext(val) or any(_has_model_ext(c) for c in cands)):
+                continue
+            report["model_fields"] += 1
+            if val in cands:
+                continue
+            new, why = resolve_model_value(val, cands)
+            entry = {"node": str(nid), "class_type": cls, "field": str(field),
+                     "old": val, "candidates": len(cands)}
+            if new:
+                inputs[field] = new
+                entry["new"] = new
+                entry["why"] = why
+                report["changed"].append(entry)
+            else:
+                report["unresolved"].append(entry)
+    return report
+
+
+def fetch_object_info(base_url, ttl=300, timeout=20):
+    """带 TTL 缓存的 /object_info 拉取（供不经 ComfyUIClient 的提交路径复用）。
+
+    离线 / 异常一律返回 {}（调用方据此跳过对齐，按原样提交）——只 warning，不抛。
+    """
+    import urllib.request
+    url = str(base_url or "").rstrip("/")
+    if not url:
+        return {}
+    now = time.time()
+    cache = _OBJECT_INFO_CACHE
+    if (cache.get("data") is not None and cache.get("url") == url
+            and (now - float(cache.get("ts") or 0)) < max(1, int(ttl))):
+        return cache["data"]
+    try:
+        with urllib.request.urlopen(url + "/object_info", timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        if not isinstance(data, dict):
+            data = {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("拉取 ComfyUI object_info 失败（本次跳过模型名对齐）：%s", e)
+        return {}
+    cache.update({"url": url, "ts": now, "data": data})
+    return data
+
+
+def align_prompt_models(api_prompt, object_info=None, base_url="", tag=""):
+    """提交前「模型名对齐」统一收口：取 object_info → 对齐 → 打日志（永不抛）。
+
+    object_info 缺省时按 base_url 拉取（带 TTL 缓存）。改动与无法解析的项都用 WARNING
+    打出**节点 / 字段 / 原值 / 新值**，运行日志里可直接追溯。
+    """
+    empty = {"model_fields": 0, "changed": [], "unresolved": []}
+    try:
+        if not isinstance(object_info, dict) or not object_info:
+            if not base_url:
+                return empty
+            object_info = fetch_object_info(base_url)
+        rep = normalize_prompt_models(api_prompt, object_info)
+        prefix = ("[模型名对齐] " + tag).rstrip()
+        for ch in rep.get("changed") or []:
+            logger.warning("%s 节点 %s(%s).%s：%r → %r（%s）", prefix, ch["node"],
+                           ch["class_type"], ch["field"], ch["old"], ch["new"], ch["why"])
+        for ur in rep.get("unresolved") or []:
+            logger.warning("%s 节点 %s(%s).%s=%r 不在 ComfyUI 合法列表里且无法自动匹配"
+                           "（该输出大概率会被 ComfyUI 拒绝，请到「模型管理」重选或把模型"
+                           "放回原目录）", prefix, ur["node"], ur["class_type"], ur["field"],
+                           ur["old"])
+        return rep
+    except Exception as e:  # noqa: BLE001
+        logger.warning("模型名对齐失败（按原样提交）：%s", e)
+        return empty
+

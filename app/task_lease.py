@@ -50,7 +50,7 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 __all__ = ["DEFAULT_TTL_SEC", "acquire", "status", "reclaim_stale",
-           "lease_dir", "list_leases", "is_stale"]
+           "lease_dir", "list_leases", "is_stale", "purge_project"]
 
 #: 默认租约存活时长（秒）。心跳停超过它就判 stale。
 DEFAULT_TTL_SEC = 900
@@ -388,3 +388,47 @@ def list_leases() -> list:
         if rec:
             out.append({**rec, "stale": is_stale(rec)})
     return out
+
+
+def purge_project(projects: list) -> int:
+    """项目被删除时，摘除该项目名下的全部租约文件（关联清理，由 project_store 调用）。
+
+    为什么必须做：集级租约 scope 形如 ``episode:<项目>#<集号>``（见
+    pipeline._episode_scope），**项目名是 scope（也是租约文件名）的成分之一**。
+    删项目后若不清：同名重建的头一个 TTL 窗口（默认 900 秒）内，旧租约文件还在，
+    ``pipeline.is_episode_running`` 会把该集误判成「正在运行」而拒绝开跑。
+
+    判据：读租约内容里的 ``scope``，按前缀 ``episode:<别名>#`` **精确匹配**
+    （别名并集 = dir_key + 显示名，覆盖「列里存键或存名」两种落法）；
+    不按文件名猜（``_safe`` 会把特殊字符归一成 ``_``，反向推导不可靠）。
+    归档态的 ``*.json.stale.*`` / ``*.json.reclaimed.*`` 一并扫描（它们已无互斥作用，
+    纯属残留）。删除失败只 warning —— 租约本就 fail-open，绝不让清理阻断删除主流程。
+    返回删除的文件数。
+    """
+    vals = [str(p).strip() for p in (projects or []) if p and str(p).strip()]
+    if not vals:
+        return 0
+    prefixes = tuple("episode:%s#" % v for v in vals)
+    d = lease_dir()
+    try:
+        names = sorted(os.listdir(d)) if os.path.isdir(d) else []
+    except OSError:
+        return 0
+    removed = 0
+    for n in names:
+        # 活跃租约 <scope>_<hash>.json + 归档态 <scope>_<hash>.json.stale.<ts> / .reclaimed.<ts>
+        if not (n.endswith(".json") or ".json." in n):
+            continue
+        path = os.path.join(d, n)
+        rec = _read(path)
+        scope = str((rec or {}).get("scope") or "")
+        if not scope.startswith(prefixes):
+            continue
+        try:
+            os.remove(path)
+            removed += 1
+        except OSError as e:
+            logger.warning("清理项目租约失败（%s）：%s", path, e)
+    if removed:
+        logger.info("已随项目删除摘除 %d 个租约文件（scope 前缀匹配）：%s", removed, vals)
+    return removed

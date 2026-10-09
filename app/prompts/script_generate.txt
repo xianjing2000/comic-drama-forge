@@ -1,0 +1,80 @@
+# 提示词模板：script_generate —— 分镜批量生成（build_shots_for_chunk）
+# 用途：小说→剧本三段式的第③步「逐块写分镜」：把单块原文压缩提炼成 A 版镜头（JSON 输出），
+#       含粒度口径、改写规则、可用资产清单、输出 Schema、站位/台词/字幕/硬性约束等完整指令。
+# 调用位置：novel_to_script.build_shots_for_chunk（剧本生成链，每块一次）。
+# 变量说明（render() 只替换下列 25 个占位符；正文里 JSON 示例等其它花括号一律原样保留）：
+#   rules            — REWRITE_RULES（13 条改写规则全文，生效值来自 script_rewrite_rules 模板）
+#   drama_title      — bible.get('title') or ''（剧名）
+#   chunk_title      — str(chunk.get('title'))（本块标题，如「第3章」「第1子块」）
+#   chunk_index      — chunk['index']（本块序号，1-based）
+#   chunk_total      — chunk['total']（本集总块数）
+#   target_shots     — shots_target（本块目标镜头数；正文出现两处：任务行 + 硬性约束）
+#   shots_cap        — shots_cap（本块镜头数上限；正文出现两处：任务行 + 硬性约束）
+#   style            — bible.get('style') or ''（全剧风格）
+#   style_guide      — 画面风格指南（跨集 ctx 的 style_guide_text，缺省回落 bible.production_notes.style_guide）
+#   prev_block       — _ctx_line(continuity_ctx,'prev_block')（上集摘要卡块，自带尾部换行；空→空串）
+#   bible_block      — _ctx_line(continuity_ctx,'bible_block')（项目级设定库块）
+#   contract_block   — _ctx_line(continuity_ctx,'contract_block')（集间衔接契约块）
+#   style_block      — _ctx_line(continuity_ctx,'style_block')（风格指南块）
+#   camera_block     — _ctx_line(continuity_ctx,'camera_block')（运镜术语表块）
+#   preflight_block  — _ctx_line(continuity_ctx,'preflight_block')（预检清单块）
+#   prev_tail        — prev_tail 参数（上一块结尾上下文，由 _prev_tail_block 预渲染）
+#   char_brief_json  — json.dumps(char_brief, ensure_ascii=False)（可用角色清单）
+#   item_brief_json  — json.dumps(item_brief, ensure_ascii=False)（可用物品清单）
+#   scene_brief_json — json.dumps(scene_brief, ensure_ascii=False)（可用场景清单）
+#   chunk_text       — chunk.get('text') or ''（本段原文全文）
+#   outline_summary  — str(outline.get('summary',''))（本段剧情摘要）
+#   key_beats_json   — json.dumps(outline.get('key_beats') or [], ensure_ascii=False)（本段情节要点）
+#   shot_type_count  — len(SHOT_TYPES)（景别枚举值个数）
+#   shot_type_enum   — _SHOT_TYPE_ENUM_ZH（景别枚举文案，config.SHOT_TYPES 以「/」连接）
+#   speech_budget    — SHOT_SPEECH_BUDGET_CHARS（单镜台词字数预算，config 口径）
+# 加载：app/prompt_templates.py —— 用户覆盖（PROJECT_DATA_DIR/prompt_overrides/script_generate.txt）
+#       > 本文件 > 代码内兜底（prompt_templates._DEFAULT_SCRIPT_GENERATE）；
+#       本文件以 # 开头的头注释块在加载时被剥离，不会进入提示词正文。
+
+【任务】为漫剧《{drama_title}》的「{chunk_title}」（第 {chunk_index}/{chunk_total} 段）编写分镜：至少 {target_shots} 个、上限 {shots_cap} 个。把下方原文**压缩提炼**成可拍摄的镜头，只保留推动剧情的关键情节（冲突/转折/关键动作/金句），纯背景铺陈直接删去、勿逐句照搬。
+【粒度口径（2026-10-06 用户指定，**务必先读**）】本片目标是**每集 20~30 个镜头、每镜 5~6 秒**（不是每镜 2 秒的快切）。
+  · **镜数少了不等于少写情节**：目标镜数变少时，请把相邻的连续情节**合并进同一个镜头**（一个镜头里可以容纳一个完整的动作过程、以及前后两段关键情节），而**不是**把原文情节丢掉。原文里的冲突/转折/关键动作/金句仍必须**全部**落到镜头里 —— 本系统对原文覆盖率有硬校验，漏情节会导致整集重跑。
+  · **不要把一个完整动作拆成几个镜头**：「抬手→握拳→挥出」是**一个**镜头里的连续动作，不是三个镜头。只有当**空间/时间/视角真的发生跳跃**（换了地点、跳了时间、要强调另一个主体）时才切镜。
+  · **不要为同一件事再补一个镜头**：已经拍过的道具/手部，不要为了「规避人脸」再单独切一个几乎同画面的插入镜。
+
+【描述粒度口径（2026-10-06 用户指定：写关键动作分解、只写关键节点，**务必先读**）】
+  · description 写「**起点 → 关键动作节点 → 结果**」：动作过程写**关键动作分解**（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座），只写关键节点、不写琐碎中间步（「拉开窗帘」写「走到窗前→拉开窗帘」即可，不写手指逐片推开的过程）。
+  · 琐碎中间步与逐格推进**由视频/九宫格生成阶段负责**：5~6 秒镜头的 9 宫格就是把关键节点之间的时间自然切片，剧本层只写 2~4 个关键节点即可——把琐碎中间步写满反而让 9 个格全画同一个中间态（九宫格雷同，用户已纠正）。
+  · 每镜 description **100~120 字（下限 100，上限 120）**，写：主体、关键动作分解、关键构图位置、情绪落点。光线/氛围/背景**只在推动剧情或首次出场时写一句**，不逐句铺陈。
+{rules}
+【全剧风格】{style}　【画面风格指南】{style_guide}
+{prev_block}{bible_block}{contract_block}{style_block}{camera_block}{preflight_block}{prev_tail}【可用角色】{char_brief_json}
+【可用物品】{item_brief_json}
+【可用场景】{scene_brief_json}
+【本段原文（先压缩提炼：只保留冲突/转折/关键动作/金句，纯背景铺陈直接删去，勿逐句照搬）】
+{chunk_text}
+【本段剧情摘要】{outline_summary}
+【本段情节要点】{key_beats_json}
+【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字，结构如下：
+{"shots": [{"camera": "景别+运镜（必须取自上方运镜术语表，如 中景跟随/近景轻推，10 字以内）", "shot_type": "景别（只填以下 {shot_type_count} 值之一：{shot_type_enum}；局部=只拍手部/道具的插入镜；与 camera 里的景别词保持一致；本镜确实无法确定景别时写空字符串）", "camera_motion": "运镜（只填运镜词，优先用上方【克制运镜·推荐】的 固定/轻推/轻摇/跟随/轻手持；无运镜的静止镜头填「固定」）", "location": "所属场景名（必须来自可用场景）", "description": "画面内容描述（100~120字，下限100上限120，按「起点→关键动作节点→结果」写：谁做了什么、**动作过程写关键动作分解（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座）**、**做完后画面是什么状态**、在画面什么位置；只写关键节点不写琐碎中间步（琐碎中间步交给九宫格/视频阶段切片）；外貌衣着/环境光线只在推动剧情或首次出场时写一句，不逐句铺陈，禁止写背景陈述/世界观/来历评述）", "visual_detail": "画面补充细节（可选；当 description 之外还有本镜**结果态**里必须交代的关键环境/道具状态时写在这里，≤120字；不要重复动作过程；没有多余细节时写空字符串）", "dialogue": [{"speaker": "说话角色名（必须与可用角色完全一致）", "text": "该角色台词（≤30 字；原文对话尽量原样保留；角色的自语/心声写成该角色本人的台词）"}], "emotion": "情绪（8 字以内）", "edit_reason": "剪辑动机（20~30字，具体说明这一镜为什么切/承担什么叙事功能，禁止写可套用的空话，如：切掉环境只留下他的反应/用空间拉开取代告别对白/物件回环把十年压缩到一张纸上）", "beat": "叙事节拍（本镜所处节拍，只填「开场」「触发」「高潮」「收尾」四值之一；拿不准填「触发」）", "audio_cues": "音效/配乐提示（60 字以内，只写环境音/音效/配乐，不写人声）", "characters_in_shot": ["出场角色名"], "first_frame": "首帧画面（运动开始前那一刻的静态快照：画面主体与构图，40字以内；无明显运动变化写空字符串）", "last_frame": "末帧画面（运动结束后的终态，40字以内；与首帧相同或无运动时写空字符串）", "motion": "运动描述（严格区分【摄影机运动】推拉摇移跟升降 与【画面内运动】人物/物体自身动作；30字以内；静止镜头写空字符串）", "caption": "字幕（**默认写空对象 {}**；仅当本镜承担时空落点交代或集尾悬念时才写，形如 {"text": "字幕文字（≤20字）", "kind": "时间地点/回溯/悬念 三值之一"}。字幕是后期叠加的文字，不进画面描述、不产生人声）", "items_in_shot": ["出场物品名"]}]}
+【禁止输出 prompt_h3 字段】视频提示词由程序在生成阶段按 H3 规范自动构建（它会结合当次实际传入的参考图，生成 subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music 六段）。你在剧本阶段并不知道最终配几张参考图，写出来的英文提示词缺少 <Picture N> 标签，反而会覆盖规范提示词导致出片偏离设定。因此**不要写 prompt_h3、不要写英文提示词**；把画面信息全部写进 description 即可。
+【站位与动作（3D 导演台依赖，逐镜必填）】每一镜都要写：
+
+  ① blocking：本镜出场角色的**站位**，每个出场角色一条，形如 
+
+{"name": 角色名, "x": left/center/right, "depth": front/mid/back, "facing": camera/left/right/back}。
+
+     · x = 画面左右（left=画面左）；depth = 离镜头远近（front=更靠近镜头）；facing = 朝向，留空表示朝内。
+
+     · **左右顺序与前后层次必须与本镜情节一致**（谁在左、谁更靠近镜头），
+禁止所有镜头套用同一套站位；角色互换攻守、走近/退开时，站位要跟着变。
+
+  ② action：本镜的**动作 beat**——谁做了什么、动作从哪到哪（例：「羡进抬头直视赵天霸，右手缓缓握拳」）。
+**不得留空**，纯对话镜也要写神态与小动作。
+
+【台词要求】dialogue 必须是数组，数组元素为 {"speaker": 角色名, "text": 台词}；speaker 必须精确等于「可用角色」中的名字，禁止写“旁白/众人”等未登记角色；无台词的镜头 dialogue 写 []（空数组），禁止写成字符串或 null。角色的心理活动改写成该角色**本人**的自语台词时，speaker 仍写角色名（不要写成「旁白」，本系统没有旁白角色）。dialogue **只承载**：原文对话、以及原文明确心理活动/独白改写的第一人称自语——第三人称叙述与背景补叙**禁止**写成任何角色开口的台词（改写规则 8）。
+【台词预算（防成片截断）】单个镜头的 dialogue **合计不超过 {speech_budget} 字**（≈3.6 秒配音，按 config.CHARS_PER_SECOND=4.5 字/秒）。台词过多时**先精简冗余语气词与重复表述**，仍超预算才拆成相邻镜头——配音是按镜头时间轴铺的，单镜台词超出镜头时长会被成片尾部静默截掉。
+【音轨说明（本系统不产出旁白）】成片没有画外音解说，配音链路**只读 dialogue**：audio_cues 里写「雨声」「风声」这类音效**不会产生人声**。因此：① 有对话或自语的镜头必须写 dialogue，禁止把台词塞进 description / visual_detail / audio_cues；② 纯画面/纯动作镜头允许没有台词（该镜成片留白，由音效与配乐铺底），但**必须**在 audio_cues 写明音效/配乐提示；③ **严禁**凭空编造原文里没有的台词来「凑人声」——宁可留白，也不要无中生有。
+【字幕/转场（caption）】本系统不产出旁白，**时空跳跃靠字幕点明落点**。只在三种情况写 caption：
+①上下集之间时间/地点发生跳变（kind=时间地点，如「一年后」「青茅山·古月山寨」）；
+②本镜是时空回溯的落点（kind=回溯，如「春秋蝉，逆转时光。」）；
+③本集结尾仍有未回收伏笔、需要留住悬念（kind=悬念）。
+**其余镜头一律写空对象**——字幕滥用会打断观感。caption.text ≤20 字，只写交代时空或悬念的短句；**禁止**复述台词、禁止写画面描述、禁止把台词搬进字幕。
+【硬性约束】shots 数组元素个数必须在 {target_shots} ~ {shots_cap} 之间：只把原文里**推动剧情的冲突/转折/关键动作/金句**落到镜头里，纯背景补叙、纯环境描写（不推进剧情）**直接删去、不单独成镜**；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
+【关键情节自检】写完回看上方「剧情摘要/情节要点」，确认每个关键情节都有对应镜头；纯背景补叙、纯环境描写若未推进剧情应当已删去，**不要求逐句覆盖原文**。记住：本系统没有旁白，背景补叙与环境描写靠画面承载、绝不写成台词，心理活动靠神态动作或第一人称角色自语承载。

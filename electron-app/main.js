@@ -3,6 +3,31 @@
 // 职责：管理本地 Flask 后端（serve.py）的生命周期，并把 BrowserWindow 指向运行中的
 //       Flask URL（http://127.0.0.1:<port>）。UI 的唯一事实源仍是 Flask，不复制 app/static。
 
+// ⭐ 2026-10-06：Electron/Chromium 静默崩溃诊断
+// 打包版是 GUI 子系统程序，stdout/stderr 被系统丢弃，whenReady 之前的任何异常
+// 表现就是「双击闪退、无日志」（用户实测 10/6 多次遇到）。这里在**任何 Electron
+// 模块加载之前**（本文件顶部、require 之前）设好环境变量：
+//   · ELECTRON_ENABLE_LOGGING=1        → Chromium 把 bootstrap 阶段日志写到 stderr
+//   · ELECTRON_ENABLE_STACK_DUMPING=1  → 崩溃时生成 .dmp 到 userData/Crashpad
+// 同时再写一个独立的「超早期」日志：连 Electron 启动器本身都崩掉时，desktop.log
+// 不会有任何 bootLog 行，但下面这行会在进程一启动就立刻落盘，至少能区分
+// 「进程根本没起」vs「起了但 main.js 没加载到」。
+if (process.platform === 'win32') {
+  try {
+    process.env.ELECTRON_ENABLE_LOGGING = '1';
+    process.env.ELECTRON_ENABLE_STACK_DUMPING = '1';
+    const fsEarly = require('node:fs');
+    const pathEarly = require('node:path');
+    const osEarly = require('node:os');
+    const dir = pathEarly.join(osEarly.homedir(), 'AppData', 'Roaming', 'mjscxt-desktop');
+    fsEarly.mkdirSync(dir, { recursive: true });
+    fsEarly.appendFileSync(
+      pathEarly.join(dir, 'early_boot.log'),
+      `[${new Date().toISOString()}] early-boot pid=${process.pid} ppid=${process.ppid} argv=${JSON.stringify(process.argv).slice(0, 400)}\n`,
+    );
+  } catch { /* 日志失败绝不影响启动 */ }
+}
+
 const {
   app,
   BrowserWindow,
@@ -239,12 +264,12 @@ function isPortListening(port) {
   });
 }
 
-// 找下一个空闲端口（从 5001 起）
+// 找下一个空闲端口（从 DEFAULT_PORT+1 起，最多扫 999 个）
 async function findFreePort() {
   for (let p = DEFAULT_PORT + 1; p < DEFAULT_PORT + 1000; p += 1) {
     if (!(await isPortListening(p))) return p;
   }
-  throw new Error('5001–5999 端口均被占用，无法启动后端');
+  throw new Error('5212–6210 端口范围内未找到空闲端口（共扫描 999 个），无法启动后端');
 }
 
 // 端口决策：桌面版**永不复用外部后端**。
@@ -288,6 +313,98 @@ function resourceMirrorDir() {
 // （安装区更新了说明换过整包，以安装区为准；资源增量则会把标记同步成资源版本）。
 const MIRROR_VERSION_FILE = '.mirror-version';
 
+// ⭐ 2026-10-07 修复关键缺陷（用户实测：「重新打包了，但桌面版看不到我新加的前端功能」）。
+//   旧实现**只在版本号变化时**重播种。而开发/内测阶段经常「版本号不动、代码变了」
+//   （本次 1.3.9 反复重建即是），于是安装区已是新代码，userData 里的旧镜像仍被
+//   useMirror 命中 → 后端与前端**继续跑老代码**，且无任何报错，极难定位
+//   （排查耗时：靠比对镜像与包内 static 的文件名哈希才确认）。
+//   修法：额外记录「安装区关键文件内容指纹」，在**版本相同的分支**里比对，
+//   不一致则重播种。
+//   ⚠️ 刻意只做增量：完全不改动上面的版本比对逻辑 —— 资源增量更新会把
+//      .mirror-version 写成**远端版本**（≠ 本地安装版本），走原有版本分支，
+//      不会被本逻辑干扰；且该路径会清空内容标记（见 runResourceUpdate），
+//      避免「增量更新后一启动就被本地安装区回滚」。
+const MIRROR_CONTENT_FILE = '.mirror-content';
+
+//: 内容标记的哨兵值：镜像内容来自**远端资源增量**，以镜像为准 ——
+//: 同版本内容检测见到它就跳过重播种（见 runResourceUpdate）。
+const MIRROR_CONTENT_REMOTE = 'remote';
+
+//: 参与指纹的关键文件（相对安装区 resourcesPath）。后端正文 + 前端产物入口。
+//: 只哈希这几个文件（合计约 2MB），启动开销可忽略。
+const MIRROR_FINGERPRINT_FILES = [
+  'backend/app.py',
+  'backend/comfyui_client.py',
+  'backend/style_kit.py',
+  'backend/prompt_qc.py',
+  'backend/serve.py',
+  'backend/config.py',
+];
+
+function computeMirrorFingerprint(res) {
+  try {
+    const crypto = require('crypto');
+    const parts = [];
+    for (const rel of MIRROR_FINGERPRINT_FILES) {
+      try {
+        const p = path.join(res, rel);
+        const buf = fs.readFileSync(p);
+        parts.push(rel + ':' + buf.length + ':' +
+          crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12));
+      } catch {
+        parts.push(rel + ':missing');
+      }
+    }
+    // 前端产物入口（vite 产物名自带内容哈希，重建即变 → 前端改动同样能被发现）
+    try {
+      const dir = path.join(res, 'backend', 'static', 'assets');
+      const names = fs.readdirSync(dir).filter((n) => /^index-.*\.(js|css)$/.test(n)).sort();
+      parts.push('static:' + names.join(','));
+    } catch {
+      parts.push('static:missing');
+    }
+    // ⭐ 2026-10-07：工作流模板纳入指纹。此前只算 backend/*.py —— 只改模板
+    //   （例如把「提示词增强节点」固化进 Qwen21 模板）而没碰 .py 时，镜像内容
+    //   指纹不变 → 永不重播种 → 用户看到的工作流仍然是旧的（节点不出现）。
+    //   这里把 workflows/ 下所有 .json 的名称+大小+内容哈希一起算进去。
+    try {
+      const wfDir = path.join(res, 'workflows');
+      const names = fs.readdirSync(wfDir).filter((n) => n.toLowerCase().endsWith('.json')).sort();
+      for (const n of names) {
+        try {
+          const buf = fs.readFileSync(path.join(wfDir, n));
+          parts.push('wf/' + n + ':' + buf.length + ':' +
+            crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12));
+        } catch {
+          parts.push('wf/' + n + ':unreadable');
+        }
+      }
+    } catch {
+      parts.push('wf:missing');
+    }
+    return crypto.createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 16);
+  } catch (e) {
+    return '';
+  }
+}
+
+function readMirrorContent(mirror) {
+  try {
+    return String(fs.readFileSync(path.join(mirror, MIRROR_CONTENT_FILE), 'utf8') || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function writeMirrorContent(mirror, fp) {
+  try {
+    fs.writeFileSync(path.join(mirror, MIRROR_CONTENT_FILE), String(fp || ''), 'utf8');
+  } catch (e) {
+    console.warn('[更新] 写入镜像内容标记失败（忽略）：', e && e.message);
+  }
+}
+
+
 function readMirrorVersion(mirror) {
   try {
     return String(fs.readFileSync(path.join(mirror, MIRROR_VERSION_FILE), 'utf8') || '').trim();
@@ -313,7 +430,24 @@ function seedResourceMirror() {
   const mirrorExists = fs.existsSync(path.join(mirror, 'app'));
   // 需要（重新）播种的两种情况：镜像还没有；或安装区版本与镜像版本不一致
   // （整包更新替换了安装区 → 安装区为准，必须覆盖旧镜像）。
-  const needSeed = !mirrorExists || mirrorVer !== installed;
+  const needSeedByVersion = !mirrorExists || mirrorVer !== installed;
+  // 同版本内容漂移检测：版本号没变但安装区代码/前端产物变了（重建覆盖安装目录）。
+  // ⚠️ 指纹**缺失**（''）同样判定为漂移并重播种：升级到带本机制的版本时，
+  //    存量用户的镜像可能正是「同版本的老代码」（本次事故形态），
+  //    若把「缺失」当成「已同步」跳过，本机制对存量用户永远不触发 = 修复不生效。
+  //    重播种的来源就是安装区本身，代价是一次拷贝，无数据风险。
+  // ⚠️ 标记值 'remote' = 「镜像来自远端资源增量，以镜像为准」，**绝不**据此重播种
+  //    （否则增量更新会被本地安装区旧代码回滚，见 runResourceUpdate）。
+  let needSeedByContent = false;
+  if (!needSeedByVersion && mirrorExists) {
+    const fpNow = computeMirrorFingerprint(res);
+    const fpMirror = readMirrorContent(mirror);
+    if (fpMirror !== MIRROR_CONTENT_REMOTE && fpNow && fpNow !== fpMirror) {
+      needSeedByContent = true;
+      console.log(`[更新] 同版本内容已变化/未记录（${fpMirror || '(无标记)'} -> ${fpNow}），重新播种资源镜像`);
+    }
+  }
+  const needSeed = needSeedByVersion || needSeedByContent;
   // 安装区目录名 → 镜像目录名：后端源码在安装区叫 backend，镜像内仍叫 app
   // （后端代码里的相对引用不变，只有安装区这层名字避让 .asar / app 冲突）。
   // ⚠️ '.env' 是**文件**（安全子集配置，见 pack_backend.js）：播种时要区分文件/目录，
@@ -345,6 +479,7 @@ function seedResourceMirror() {
     }
   }
   if (needSeed) writeMirrorVersion(mirror, installed);
+  if (needSeed) writeMirrorContent(mirror, computeMirrorFingerprint(res));
   return mirror;
 }
 
@@ -407,6 +542,10 @@ async function runResourceUpdate(info, manual) {
     //   seedResourceMirror 会发现「安装区版本(旧) != 镜像版本」并重新播种安装区旧代码，
     //   把刚更新好的资源增量**回滚掉**（用户表现为「更新成功但一重启就回到老样子」）。
     writeMirrorVersion(mirror, info.latest);
+    // ⭐ 2026-10-07：写入 'remote' 哨兵 —— 资源增量来自远端 zip，与本地安装区内容
+    //   必然不同；标记成「镜像为准」后，同版本内容检测会跳过，**不会**用安装区
+    //   旧代码把刚装好的增量回滚掉（该类回滚事故见本函数开头的注释）。
+    writeMirrorContent(mirror, MIRROR_CONTENT_REMOTE);
     console.log('[更新] 资源增量已覆盖镜像（版本标记 ' + info.latest + '），重启后端生效');
     const status = await stopBackend().then(startBackend).then(() => backendStatus());
     await dialog.showMessageBox(undefined, {
@@ -916,7 +1055,7 @@ function buildMenu() {
           dialog.showMessageBox(win || undefined, {
             type: 'info', title: '关于',
             message: '漫剧工坊',
-            detail: `版本 ${updateConfig.currentVersion()}（zdljh/mjscxt）`,
+            detail: `版本 ${updateConfig.currentVersion()}（xianjing2000/comic-drama-forge）`,
             buttons: ['好'],
           });
         } },

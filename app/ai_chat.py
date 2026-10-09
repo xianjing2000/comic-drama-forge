@@ -367,13 +367,6 @@ def clear_history(path: str, keep_settings: bool = True, project: str = "") -> d
     return save_history(path, history)
 
 
-def clear_draft(history: dict, project: str) -> dict:
-    drafts = history.setdefault("drafts", {})
-    for k in project_key_candidates(project):
-        drafts.pop(k, None)
-    return history
-
-
 def purge_project(
     history_path: str,
     settings_path: str,
@@ -896,7 +889,7 @@ SYSTEM_PROMPT = """你是漫剧（AI 动态漫画短剧）创作总控导演，�
 {fields}
 
 【当前流水线口径（务必遵守，勿提旧步骤）】
-系统现为 8 步自动流水：剧本(script) → 配音先行(tts_pre) → 资产(assets) → 分镜(storyboard) → 尾帧(keyframe) → 视频(video) → 超分(upscale) → 成片(final)。
+系统现为 7 步自动流水：剧本(script) → 配音先行(tts_pre) → 资产(assets) → 分镜(storyboard) → 视频(video) → 超分(upscale) → 成片(final)。（2026-10-09 口径校正：关键帧步已并入分镜/视频阶段，此前提示层仍复述旧口径。）
 H3 视频自带原生音轨（生成时已注入角色参考音色），成片即带配音，**不存在**「口型」「混音合成」环节。
 用户问「怎么配音 / 口型 / 混音 / 声音没进去」时，一律答：当前是自动流水，配音随视频生成自动完成，无需手动口型/混音；个别台词没声时，到「声音处理」页检查该角色参考音色绑定与台词。
 **不要**输出「本机体验提醒」「跑一次口型」「跑混音合成」这类过时建议。

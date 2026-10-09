@@ -86,15 +86,3 @@ def normalize_shots_for_h3(shots: List[Dict[str, Any]]) -> Tuple[List[Dict[str, 
     return out, notes
 
 
-def capability_summary() -> Dict[str, Any]:
-    """返回当前能力表快照（诊断 / 前端展示用）"""
-    return {
-        "model": "MiniMax H3 (Director, Ref2VA)",
-        "max_segment_sec": h3_prompt_kit.H3_SEGMENT_MAX_SEC,
-        "min_segment_sec": h3_prompt_kit.H3_SEGMENT_MIN_SEC,
-        "max_prompt_chars": h3_prompt_kit.MAX_PROMPT_CHARS,
-        "max_shot_refs": MAX_SHOT_REFS,
-        "max_duration_sec": H3_MAX_DURATION_SEC,
-        "shot_duration_floor": SHOT_DURATION_FLOOR,
-        "shot_duration_ceil": SHOT_DURATION_CEIL,
-    }

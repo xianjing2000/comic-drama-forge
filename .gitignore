@@ -177,3 +177,13 @@ electron_dirs.json
 electron_dist_files.txt
 electron_root_dirs.json
 .local/
+
+# ===================== 代码备份快照（2026-10-10 补充） =====================
+# 本会话大量修改都留了 <文件>.bak_<主题>_<日期> / <文件>.rollback_bpNN_<日期> 形式的
+# 回溯快照。它们是本机个人历史，无协作价值，且会随 pack_backend.js 混进桌面安装包
+# （实测入包 3 个共约 710KB），故一律不入库。原有的 _bak_*（下划线前缀）不匹配这些名字。
+*.bak_*
+*.rollback_*
+
+# 视觉路由工具的本机状态目录（随会话生成，非源码）
+.dsh-vision-router/

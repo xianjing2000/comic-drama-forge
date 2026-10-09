@@ -1,15 +1,15 @@
 {
   "id": "18b292b0-9403-459f-a7a6-44ca1ea8816f",
   "revision": 0,
-  "last_node_id": 11,
-  "last_link_id": 12,
+  "last_node_id": 12,
+  "last_link_id": 13,
   "nodes": [
     {
       "id": 1,
       "type": "UNETLoader",
       "pos": [
-        0.0,
-        0.0
+        0,
+        0
       ],
       "size": [
         510,
@@ -70,8 +70,8 @@
       "id": 2,
       "type": "CLIPLoader",
       "pos": [
-        0.0,
-        160.0
+        0,
+        160
       ],
       "size": [
         510,
@@ -143,8 +143,8 @@
       "id": 3,
       "type": "VAELoader",
       "pos": [
-        0.0,
-        360.0
+        0,
+        360
       ],
       "size": [
         510,
@@ -196,8 +196,8 @@
       "id": 4,
       "type": "TESpeedQwenImage21",
       "pos": [
-        620.0,
-        0.0
+        620,
+        0
       ],
       "size": [
         280,
@@ -285,7 +285,7 @@
         {
           "name": "status",
           "type": "STRING",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -479,7 +479,7 @@
           "widget": {
             "name": "prompt"
           },
-          "link": null
+          "link": 13
         },
         {
           "name": "negative_prompt",
@@ -516,7 +516,7 @@
         {
           "name": "latent",
           "type": "LATENT",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -779,7 +779,7 @@
         {
           "name": "images",
           "type": "IMAGE",
-          "links": null
+          "links": []
         }
       ],
       "properties": {
@@ -822,6 +822,275 @@
       "widgets_values": [
         "QwenImage2.1 文生图（TE-Speed 加速链）\n参考母版：TE-Speed-QwenImage21 加速插件-提速30%(1).json 的「纯文生图」子图。\n\n链路：UNETLoader(qwen_image_2.1_int8_convrot) → TESpeedQwenImage21\n     → KSampler(model) ；CLIPLoader(qwen3vl_8b_int8_convrot, qwen_image)\n     → TextEncodeQwenImage21 ；VAELoader(qwen_image_2.1_vae_bf16) → VAEDecode。\n\nTextEncodeQwenImage21 一个节点里同时装正向(prompt)与负向(negative_prompt)，\n输出 positive/negative/latent 三路；本项目只写 prompt / negative_prompt 两个控件。\n\n画幅：ResolutionSelector(百万像素 0.5、倍数 32) → EmptyLatentImage。\n生成代码在提交前会用 style_kit.apply_latent_size 把 width/height 覆写为字面量\n（项目内置资产画幅：角色 3:4 / 物品 1:1 / 场景 16:9），届时 ResolutionSelector 会被剪枝。\n\n采样：40 步 / CFG 1 / euler / simple（与母版一致）。\n⚠️ CFG=1 时负向提示词不参与引导，图像侧的负面压制靠 prompt 里的正向声明兜底。\n\nseed 由生成代码注入（random.randint），文件里的字面量只影响在 ComfyUI 界面手动运行。\n\n本模板内置画幅 1:1（道具 / 物品资产）。"
       ]
+    },
+    {
+      "id": "12",
+      "type": "TE_Qwen_Image_2_1_Prompt_Enhancer",
+      "pos": [
+        490,
+        190.0
+      ],
+      "size": [
+        417,
+        620
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "图片",
+          "name": "图片",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "图片2",
+          "name": "图片2",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "图片3",
+          "name": "图片3",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "图片4",
+          "name": "图片4",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "图片5",
+          "name": "图片5",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "图片6",
+          "name": "图片6",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "图片7",
+          "name": "图片7",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "图片8",
+          "name": "图片8",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "localized_name": "输入提示词",
+          "name": "输入提示词",
+          "type": "STRING",
+          "widget": {
+            "name": "输入提示词"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "任务模式",
+          "name": "任务模式",
+          "type": "COMBO",
+          "widget": {
+            "name": "任务模式"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "输出语言",
+          "name": "输出语言",
+          "type": "COMBO",
+          "widget": {
+            "name": "输出语言"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "增强方式",
+          "name": "增强方式",
+          "type": "COMBO",
+          "widget": {
+            "name": "增强方式"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "api_key",
+          "name": "api_key",
+          "type": "STRING",
+          "widget": {
+            "name": "api_key"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "api_base_url",
+          "name": "api_base_url",
+          "type": "STRING",
+          "widget": {
+            "name": "api_base_url"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "model",
+          "name": "model",
+          "type": "STRING",
+          "widget": {
+            "name": "model"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "文生图PE模型",
+          "name": "文生图PE模型",
+          "type": "COMBO",
+          "widget": {
+            "name": "文生图PE模型"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "图生图PE模型",
+          "name": "图生图PE模型",
+          "type": "COMBO",
+          "widget": {
+            "name": "图生图PE模型"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "主模型",
+          "name": "主模型",
+          "type": "COMBO",
+          "widget": {
+            "name": "主模型"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "mmproj",
+          "name": "mmproj",
+          "type": "COMBO",
+          "widget": {
+            "name": "mmproj"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "最大生成token",
+          "name": "最大生成token",
+          "type": "INT",
+          "widget": {
+            "name": "最大生成token"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "上下文长度",
+          "name": "上下文长度",
+          "type": "INT",
+          "widget": {
+            "name": "上下文长度"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "seed",
+          "name": "seed",
+          "type": "INT",
+          "widget": {
+            "name": "seed"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "生成后自动卸载模型",
+          "name": "生成后自动卸载模型",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "生成后自动卸载模型"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "启用思考",
+          "name": "启用思考",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "启用思考"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "增强提示词",
+          "name": "增强提示词",
+          "type": "STRING",
+          "links": [
+            13
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "tl2012tl/TE_MAN",
+        "Node name for S&R": "TE_Qwen_Image_2_1_Prompt_Enhancer"
+      },
+      "widgets_values": [
+        "",
+        "文生图",
+        "中文",
+        "API",
+        "",
+        "http://127.0.0.1:31415/v1",
+        "auto",
+        "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
+        "qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors",
+        "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+        "qwen3.5mmproj-BF16.gguf",
+        4096,
+        8192,
+        0,
+        "randomize",
+        false,
+        false
+      ],
+      "widgets_values_named": {
+        "输入提示词": "",
+        "任务模式": "文生图",
+        "输出语言": "中文",
+        "增强方式": "API",
+        "api_key": "",
+        "api_base_url": "http://127.0.0.1:31415/v1",
+        "model": "auto",
+        "文生图PE模型": "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
+        "图生图PE模型": "qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors",
+        "主模型": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
+        "mmproj": "qwen3.5mmproj-BF16.gguf",
+        "最大生成token": 4096,
+        "上下文长度": 8192,
+        "seed": 0,
+        "生成后自动卸载模型": false,
+        "启用思考": false,
+        "control_after_generate": "randomize"
+      }
     }
   ],
   "links": [
@@ -920,6 +1189,14 @@
       10,
       0,
       "IMAGE"
+    ],
+    [
+      13,
+      "12",
+      0,
+      "6",
+      5,
+      "STRING"
     ]
   ],
   "groups": [],

@@ -1,0 +1,94 @@
+%% 漫剧生成系统 · 增量时序图（R1–R5b）
+%% 覆盖：R1+R2 物品出图（含失败降级）、R3 迁移、R5a 试听报错、R5b 音频质检
+
+sequenceDiagram
+    autonumber
+    participant W as AssetWorker(app.py)
+    participant M as asset_name_match
+    participant C as ComfyUIClient
+    participant CW as ComfyUI
+    participant QC as qc_client
+
+    %% ---------- R1 + R2：物品出图（含失败降级） ----------
+    Note over W,QC: R1+R2 物品出图（含参考图编辑→T2I 降级）
+    W->>W: asset_type=='item' && importance=='重要'
+    W->>W: surface_text = asset.get('surface_text','')
+    alt owner_photo == true
+        W->>M: match(owner, {目录名:路径}, "character")
+        M-->>W: (canonical_key, level)
+        W->>W: _item_owner_ref_image → front.png / half.png / 首张(非 base.png)
+    else owner_photo false/缺失
+        W-->>W: owner_ref = ""（纯 T2I，老工程零回归）
+    end
+    loop for attempt in 0..max_retries
+        alt owner_ref 存在 且 fail_streak < 2
+            W->>C: generate_item_base_with_ref(prompt_zh, owner_ref, surface_text)
+            C->>C: _ensure_item_white_bg(+白底 +确切文字约束)
+            C->>CW: 上传 owner_ref 到 output 目录
+            C->>CW: LoadImageOutput(image_1) → 物品生成_参考图_Qwen21.json
+            alt 成功
+                CW-->>C: out.png
+                C-->>W: [out.png]
+            else 失败(异常/空)
+                CW--xC: error
+                C--xW: raise
+                W->>W: fail_streak += 1 ; WARNING "[物品主人形象] 参考图编辑失败(第N次)"
+            end
+        else 降级（fail_streak>=2 或 无 owner_ref）
+            opt fail_streak>=2 且 not degraded
+                W->>W: degraded=True ; WARNING "连续2次失败→回落纯文生图 (degraded=true)"
+            end
+            W->>C: generate_item_base(prompt_zh, surface_text)  %% 纯 T2I 物品生成_Qwen21.json
+            C-->>W: [out.png]
+        end
+        alt base_files 为空
+            W->>W: base_attempts += {ok:false} ; 清理 scratch ; break
+        else qc_on
+            W->>QC: check_image(scratch_base, qc_desc, qc_cfg)
+            QC-->>W: verdict
+            alt accept
+                W->>W: base_ok=True ; break（入库 base.png）
+            else 不达标
+                W->>W: 记录教训 ; _qc_retry_hopeless 止损判定 ; 重试
+            end
+        else qc 未开
+            W->>W: base_ok=True ; break
+        end
+    end
+    W->>W: result += {"name":..., "degraded": true?}
+
+    %% ---------- R3：质检默认开启 + 迁移 ----------
+    Note over QC: R3 质检默认开启 + 存量迁移
+    QC->>QC: _empty_config()["enabled"] = True
+    QC->>QC: migrate_enabled_default(QC_CONFIG_PATH)
+    alt 文件存在 且 无 _qc_migrated
+        QC->>QC: 备份 qc_config.json.bak.<ts>
+        QC->>QC: enabled=True ; _qc_migrated=True ; 原子写
+    else 已迁移 / 不存在 / 损坏
+        QC->>QC: 保持（默认即 True）
+    end
+
+    %% ---------- R5a：试听报错可读化 ----------
+    Note over CW,QC: R5a 试听报错可读化
+    participant API as app.py preview
+    participant T as tts_client
+    API->>T: synthesize_one(...)
+    T->>CW: POST /prompt（_http_json → urlopen）
+    alt ComfyUI 400
+        CW--xT: HTTPError(400, body{node_errors})
+        T->>T: _http_error_message 解析 node_errors
+        T--xAPI: raise TTSError("ComfyUI 拒绝了请求（HTTP 400）：…")
+        API-->>API: 502 {"error": "<可读>"}   %% 原为 500 "HTTP Error 400"
+    else 200
+        CW-->>T: {prompt_id}
+        T-->>API: rec
+    end
+
+    %% ---------- R5b：音频质检口径收敛 ----------
+    Note over API,QC: R5b 音频质检前端口径收敛
+    participant FE as AudioTab(前端)
+    FE->>API: POST /api/qc/audio {project_name, source:'final', with_ai}
+    API->>API: _resolve_audio_qc_target(project, 'final') → FINAL_DIR/<项目>/最新mp4
+    API->>QC: audio_qc_ready(cfg) ? check_audio / quick_check
+    QC-->>API: verdict
+    API-->>FE: {success, source, path, passed, blocked, score, reason, metrics, ...}

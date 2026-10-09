@@ -1,0 +1,72 @@
+# 全剧设定集（资产）汇总提示词（漫剧系统 · novel_to_script ②build_bible）
+# 用途：把各分块提炼结果整合成一份可直接生产的「全剧设定集」（characters/items/scenes），含中英文参考图提示词
+# 调用位置：novel_to_script.py - build_bible()
+# 与 Moha 的关键差异：
+#   1) gender 只填中文「男」/「女」，不是 male/female
+#   2) reference_prompt_zh/en 严禁写风格词/画风词/质量词——风格由程序 style_kit 统一追加（幂等），模型写了会重复
+#   3) 角色是「三视图全身（front/side/back 横排从头到脚）」，不是半身定妆照
+#   4) appearance（静态外貌）与 outfit（本集动态服装）解耦
+#   5) 场景必须空场无人、地理优先（前中后景/锚点关系/入口通道）
+# 参数说明：
+#   - {novelTitle}: 小说标题
+#   - {style}: 项目画风（如：国漫2D动漫风）
+#   - {episodes}: 集数
+#   - {targetShots}: 预计总镜头数
+#   - {digest}: 各分块提炼结果 JSON
+#   - {registeredAssets}: 已登记资产名单（跨集锁定，首集为空）
+
+【任务】以下是长篇小说《{novelTitle}》各段落的提炼结果（JSON）。请把它们整合成一份可直接用于漫剧生产的「全剧设定集」。
+【风格要求】{style}
+【集数】{episodes} 集  【预计总镜头数】{targetShots}
+【分段提炼结果】
+{digest}
+{registeredAssets}
+
+【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字，结构如下：
+{
+  "title": "剧名（4-12 字）",
+  "theme": "一句话主题/卖点（30 字以内）",
+  "style": "{style}",
+  "characters": [{
+    "name": "姓名",
+    "gender": "性别，只允许「男」或「女」两个值；必须按原文称谓/代词/姓名线索推断后明确给出，禁止留空或写「未知」",
+    "age": "年龄",
+    "identity": "身份/阵营（15 字以内）",
+    "appearance": "静态外貌定妆（含发色/瞳色/脸型/体格/标志特征等不随剧情变化的特征，必须包含性别如「女性」「男子」，不含会逐集变化的服饰/配饰——那些写进 outfit，60 字以内；若上方设定库已锁定则必须与锁定值逐字一致）",
+    "outfit": "本集服装状态（动态特征：逐集可变的服饰/配饰，与静态 appearance 解耦——appearance 是定妆照约束的静态外貌，outfit 是分镜画面约束的本集服装，20 字以内，与上集结尾一致；若本集确有换装必须体现原因）",
+    "personality": "性格（30 字以内）",
+    "voice_style": "配音风格（15 字以内）",
+    "reference_prompt_zh": "中文参考图提示词：角色三视图设定图，60 字以内，必须写明角色性别（如开头写「女性角色，」「男性角色，」），只写画面可见的具体特征——发色发型、瞳色、脸型、服装款式与材质配色、标志配饰、三视图版式（必须写明「正面、侧面、背面三张全身视图横排，从头到脚完整入画、同一角色身高比例一致」，不要写成半身/胸像）；严禁写任何风格词/画风词/质量词（如「国漫」「3D渲染」「电影级」「高清」「精致」）",
+    "reference_prompt_en": "English prompt for a character reference sheet with three full-body views (front, side, back laid out horizontally, head-to-toe, consistent body proportions), under 45 words, must explicitly state the character's gender (e.g. 'a woman,' / 'a man,'), comma-separated CONCRETE visual keywords (hair color and style, eye color, face shape, outfit material and colors, signature accessories, view layout). It MUST be an accurate translation of reference_prompt_zh. Never romanize Chinese concepts into invented pinyin (「国漫」 must become 'Chinese animated style', NOT pinyin); never write style or quality words — the program appends them"
+  }],
+  "items": [{
+    "name": "物品名",
+    "category": "武器/法宝/道具/服饰",
+    "appearance": "外观（50 字以内）",
+    "owner": "持有人",
+    "owner_photo": "布尔值 true/false：该物品表面是否承载某人的肖像（证件照/悬赏告示上的人像/屏幕里的人像）；物品有归属主人但本体不含人像时填 false",
+    "surface_text": "该物品表面确切要呈现的文字（简短，≤12 字；没有文字则留空字符串）",
+    "importance": "重要/临时。判定三问（任一答案为「是」即判临时）：①删掉它剧情还成立吗？②它只是随手用的日常物品吗？③它只是场景陈设吗？",
+    "reference_prompt_zh": "中文参考图提示词，50 字以内，只写形制、材质、颜色、纹样与磨损状态；严禁写风格词/画风词/质量词",
+    "reference_prompt_en": "English prompt for an item prop sheet, under 40 words, comma-separated concrete visual keywords (shape, material, color, pattern, wear). Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"
+  }],
+  "scenes": [{
+    "name": "场景名",
+    "location": "地点类型（同一个场所的不同机位、朝向或景别一律视作同一个 location，不要重复建场景；只有当边界、入口、功能区或固定结构真的不同时才算新地点）",
+    "appearance": "环境与氛围（70 字以内）：把「压抑/肃杀/温暖」翻译成已有依据的空间选择——通道宽窄、光比强弱、材质反射、空气状态（雾/尘/雪/烟）、色温关系；并点明此空间能承载的戏：谁掌控入口、座位与视线高点，谁会被阻拦、围观或逼入死角，哪件道具可被交接、摔碎或藏匿（撑不起对抗、羞辱、救援、揭露与反转的空间，不要写成核心场景）",
+    "scene_lighting": "该场景的统一光影基调（30 字以内）：整个场景所有镜头共享的主光源/时间/色温（如「黄昏暖调逆光」「冷蓝月光」「正午顶光」），用于消除同场景内逐镜光影漂移；无明确光源倾向时写「自然漫射光」。只写光影，不写风格词/画风词/质量词，也不要出现人物",
+    "int_ext": "本场景内外景（只填「内景」「外景」「内外景」三值之一：封闭空间＝内景、露天＝外景、跨内外＝内外景）",
+    "time_of_day": "本场景时间（8 字以内，如「黄昏」「夜」「清晨」「雨夜」「正午」；必须与 scene_lighting 的时间口径一致）",
+    "reference_prompt_zh": "中文参考图提示词，90 字以内，地理优先：用「从哪个入口看向哪个方向、前中后景分别是什么、锚点在彼此哪一侧」的两两关系来写，不堆装饰清单。必写：①空间身份与功能；②观察方向与可见边界；③入口与通道如何连通；④1-3 个固定锚点及其左右前后相对关系；⑤前景/中景/背景层次与一处尺度参照；⑥墙地顶材质与主次色。最后写时间天气与光源方向。严禁写风格词/画风词/质量词，且不要出现人物（保持空场，才能作为地理参考被后续镜头反复复用）",
+    "reference_prompt_en": "English prompt for an environment concept art sheet, under 60 words, comma-separated concrete visual keywords. Geography-first: state the viewpoint and what falls in foreground, midground and background, then entrance and circulation, then one to three fixed anchors as pairwise relations, then materials and palette, then time, weather and light direction. Spatial layout, architecture, no decoration inventory, no people. Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"
+  }],
+  "production_notes": {"style_guide": "画面与叙事风格说明（60 字以内）"}
+}
+
+【硬性约束】
+- characters / items / scenes 不设数量上限——原文有多少就登记多少，不得为省篇幅合并或丢弃条目；characters 按戏份从大到小排序
+- 纯背景路人（无台词、无独立动作、不推进情节）不登记；但共同推进情节的阵营/敌群/首领/群像必须登记（有具名首领登首领，只有共同称谓的群体登记为一个群像角色，name 用群体称谓如「正道群敌」）
+- items 仍按三问过滤，临时道具不得进 items
+- 若上方提供了「项目级设定库」，则已登记角色的 name/gender/appearance/personality 必须与该库完全一致（禁止改名、改性别、改外观），只允许更新 outfit（当前服装状态）
+- 【风格红线】风格词由程序在生成前统一追加（幂等），characters/items/scenes 每条 reference_prompt_zh 与 reference_prompt_en 都不得自行写风格词、画风词或质量词——自己写了会导致风格在提示词里出现两遍
+- 直接以 { 作为输出第一个字符；严禁输出推理过程、思考草稿、英文说明、markdown 代码块标记或前后缀解释文字

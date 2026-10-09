@@ -240,41 +240,58 @@ def _custom_nodes_dirs(root: str) -> List[str]:
 
 # ---------------- 模型文件核查 ----------------
 
-def _check_models(ref_models: List[str], models_dir: str) -> List[Dict]:
-    """按 MODELS_DIR 逐层核查：ref_models 是 basename，需在各子目录下找。
+def _check_models(ref_models: List[str], models_dir: str,
+                  rel_by_name: Optional[Dict[str, str]] = None) -> List[Dict]:
+    """逐模型核查存在性：先按清单完整相对路径精确匹配，再递归按 basename 兜底。
 
-    返回每个模型 {name, found, path, subdirs}。found=任意子目录命中即 True。
+    ⭐ 2026-10-09 修复（用户实测反馈「我有这个模型啊」）：
+      旧实现只扫 models/ 的**一级**子目录（models/<sub>/<file>，见 `os.listdir(sp)`），
+      但本机实际布局是**两级**：
+          models/diffusion_models/minimax-h3/minimax_h3_ref2va_pruned_int8_convrot.safetensors
+          models/text_encoders/minimax-h3/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors
+          models/vae/minimax-h3/minimax_h3_audio_vae_fp32.safetensors
+      三个**真实存在**的模型因此被误报「缺失」，进而把它们写进 blockers ——
+      用户按报告去补下载只会白费功夫。
+
+    现在两级策略：
+      ① rel_by_name 给出清单里的完整相对路径（如 diffusion_models\\minimax-h3\\x.safetensors）
+         → 直接 os.path.isfile 精确命中；
+      ② 未命中则用**递归**索引 os.walk 按 basename 兜底（兼容自定义布局）。
+
+    返回每个模型 {name, found, path, subdirs}。
     """
+    rel_by_name = rel_by_name or {}
     results: List[Dict] = []
     if not models_dir or not os.path.isdir(models_dir):
         for name in ref_models:
             results.append({"name": name, "found": False, "path": "", "subdirs": []})
         return results
 
-    # 预先索引：models 下各一级子目录里的文件 basename 集合
-    sub_index: Dict[str, set] = {}
+    # 递归索引：basename → 全部命中路径（模型目录只有几百个文件，os.walk 成本可忽略）
+    index: Dict[str, List[str]] = {}
     try:
-        for sub in os.listdir(models_dir):
-            sp = os.path.join(models_dir, sub)
-            if not os.path.isdir(sp):
-                continue
-            sub_index[sub] = set()
-            for fn in os.listdir(sp):
-                if os.path.isfile(os.path.join(sp, fn)):
-                    sub_index[sub].add(fn)
+        for _root, _dirs, _files in os.walk(models_dir):
+            for _fn in _files:
+                index.setdefault(_fn, []).append(os.path.join(_root, _fn))
     except OSError:
         pass
 
     for name in ref_models:
-        hits = []
-        for sub, files in sub_index.items():
-            if name in files:
-                hits.append(os.path.join(models_dir, sub, name))
+        hits: List[str] = []
+        # ① 清单给的完整相对路径（\ 与 / 都兼容）
+        _rel = str(rel_by_name.get(name) or "").strip()
+        if _rel:
+            _exact = os.path.join(models_dir, _rel.replace("\\", os.sep).replace("/", os.sep))
+            if os.path.isfile(_exact):
+                hits.append(_exact)
+        # ② 递归 basename 兜底
+        if not hits:
+            hits = list(index.get(name, []))
         results.append({
             "name": name,
             "found": bool(hits),
             "path": hits[0] if hits else "",
-            "subdirs": [os.path.dirname(h).replace(models_dir + os.sep, "") for h in hits],
+            "subdirs": sorted({os.path.dirname(h).replace(models_dir + os.sep, "") for h in hits}),
         })
     return results
 
@@ -363,7 +380,9 @@ def check_deps(comfyui_url: Optional[str] = None,
     # 若模板 loader 里没提取到模型名（例如模板被改动），回落用 MODEL_CHECKLIST 的 basename
     if not ref_models:
         ref_models = [m["path"].split("\\")[-1] for m in MODEL_CHECKLIST if m.get("required")]
-    model_items = _check_models(ref_models, MODELS_DIR)
+    # 清单里 basename → 完整相对路径（供 _check_models 精确匹配，治两级目录误报）
+    _rel_by_name = {m["path"].split("\\")[-1]: m["path"] for m in MODEL_CHECKLIST if m.get("path")}
+    model_items = _check_models(ref_models, MODELS_DIR, rel_by_name=_rel_by_name)
 
     # 必需模型清单（来自 MODEL_CHECKLIST）
     required_names = {m["path"].split("\\")[-1] for m in MODEL_CHECKLIST if m.get("required")}
