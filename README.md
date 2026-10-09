@@ -31,14 +31,19 @@
 │  └──────────────────────────────────────────────────────────────┘  │
 │                                                                    │
 │  ┌─────────────────────── 视频生成 ────────────────────────────┐   │
-│  │  MiniMax H3 (Ref2VA) 动态段数无缝视频生成                     │   │
-│  │  三种模式：逐镜头 / 整集一次 / 关键帧驱动（首尾帧插值）        │   │
-│  │  参考图（分镜图+角色锚点 / 首帧+尾帧）→ 视频 + 原生音频        │   │
+│  │  MiniMax H3 (Ref2VA) 整集一次生成，动态段数无缝视频            │   │
+│  │  **唯一模式 = episode**（整集按「场景」分组逐场提交、最后拼接） │   │
+│  │    · 逐镜头 per_shot / 关键帧 keyframe 已废弃并移出流程        │   │
+│  │  参考图（分镜图 + 角色锚点 + 道具锚点）→ 视频 + 原生音频        │   │
+│  │  同场内段间引导（尾 22 帧钉进下一段）+ 跨场末镜衔接            │   │
 │  │  Turbo LoRA 8步加速 + H3ContinuousSeamlessJoin 无缝拼接      │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                    │
 │  ┌─────────────────────── 后期处理 ────────────────────────────┐   │
-│  │  FlashVSR 4x 超分（768p → 2K/4K）→ FFmpeg 合并 + 字幕       │   │
+│  │  FlashVSR 超分（2x/3x/4x，默认 2x，逐场先超分再流拼接）      │   │
+│  │  → FFmpeg 合成 + 字幕                                       │   │
+│  │  ⚠️ 8G 显存实测极慢（单场 46s 需数小时），可按需关闭         │   │
+│  │     （enable_upscale=false，成片直接用 H3 原分辨率）         │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 └────────────────────────────────────────────────────────────────────┘
 ```
@@ -103,6 +108,30 @@
 | 配音台词预检 | `prompt_qc`（kind=`audio`） | 送 TTS **之前**检查台词：结构化残留（`(S1) 说：` 这类说话人前缀、`[Chinese]` 语言标记）、舞台指示、零宽字符、emoji、超长、情绪未随 instruct 下发。能确定不是台词的当场剥掉，**语义缺陷不在文本层硬改**（改为提示从剧本重新取台词），空台词绝不自愈 |
 | 音频质检配置 | `qc_config.json` | `audio_enabled` / `audio_min_speech_ratio` / `audio_min_mean_db` / `audio_max_drift`；⚠️ 开关按**字符串语义**解析（`"false"`/`"0"`/`"no"` = 关），否则 `bool("false")` 为真、开关形同虚设。阈值单一事实源在 `audio_qc.py` |
 | 音频质检接口 | `POST /api/qc/audio` | 不传 `path` 时按 `mix`（带配音成片）> `merged`（整集音轨）> `line`（单句）推导；`with_ai=false` 只跑客观层。⚠️ **整轨口径自动关闭有声占比判定** —— 成片/整集天然有留白，按单句口径判会满屏误报「漏句」 |
+
+### 连续性与画面质量（2026-10 深度攻坚，用户实测驱动）
+
+本节记录一轮由「成片实看不合理」倒逼出的系统性修复。核心结论：**连续性与画面细节不能靠事后补**，
+必须在**剧本改写与分镜规划阶段就写进文字**，生成层再补「看得见」的视觉锚点。
+
+| 能力 | 落地位置 | 说明 |
+|------|---------|------|
+| 道具结构三要素 | `app/novel_to_script.py` | 物品模板新增 `structure` 字段（**功能端 / 尾端 / 使用朝向**）。缘由：旧哨子被画成反吹 —— 道具描述只有材质细节，没有「哪端是吹嘴、朝向哪」，分镜阶段有参考图侥幸画对，视频阶段多帧运动就漂了 |
+| 道具从角色语义分离 | `app/h3_prompt_kit.py` | `_retention_analysis` 新增 `item_labels` 通道。缘由：道具参考图原先被塞进 subjects，于是被要求保留「脸型/眉形/鼻形」、写成「costume/palette/hairstyle」，而**真正的形态与朝向无人声明**。现道具单独成行，写明形态结构 + **朝向恒定**（“never flipped or reversed”） |
+| 沉默显式标注 | `app/h3_prompt_kit.py` | `retention_analysis` 对**本镜出场但非说话人**的主体标注 “is silent in this segment — the lips stay closed”。参考官方手跑模板 `H3信号10段测试001.json` 的写法 |
+| 发言显式声明 | `app/h3_prompt_kit.py` | `build_summary` 在有台词时写明 `<Subject N> speaks in this segment, delivering the dialogue in「情绪」; the speaker's mouth opens and moves`。旧实现写的是 `visual content only, not spoken` —— 与「人物确实在说台词」自相矛盾，是口型不同步的高概率成因 |
+| 音色随人设 | `app/app.py` `_ensure_voice_bank_refs` | 参考音色生成原先 `instruct` 硬编码为空、且只传角色名，导致剧本里现成的 `voice_style`（如「清冷低缓，气息沉稳」）**完全没用上**，女角色甚至被分到男声。现读剧本 `characters` 传入 gender/age/personality/voice_style，有音色底稿走 `mode=design` |
+| 音色扩到全角色 | `app/app.py` `_h3_common_ref_audios` | 原先只取「全段共用」的公共池角色 → 只在部分镜出现的角色音色生成了却挂不上（实测 3 个角色只有 1 个生效）。新增 `all_names` 补齐（**参考图仍维持全段共用口径**，避免挤占 9 个图片槽） |
+| 分镜跨镜衔接 | `app/app.py` `_prep_shot` | 复用 `_qc_prev_shot_ref`（同场景 + 已通过质检）把**上一镜成品图**挂进本镜参考，要求服装/道具/光位/陈设接续。满槽时自动放弃，首镜/跨场景不挂 |
+| 视频跨场衔接 | `app/app.py` `_shot_segment(extra_ref=…)` | 换场首镜额外挂**上一场末镜分镜图**，给 H3 一个真实的跨场视觉起点（原先只有 `transition_clause` 的**文字**衔接，画面无锚点）。⚠️ 必须在槽位截断**之前**插入，否则被静默截掉 |
+| 剧本层跨镜承接 | `app/prompts/script_rewrite_rules.txt` | 新增规则 **12.1 跨镜状态承接**（每镜起点必须等于上一镜的结果态；严禁换发型/道具反向/陈设矛盾；状态变化必须在该镜内演出来）与 **12.2 场次切换过渡**（同主体带出 / 同物件同光线桥接 / 必须交代时空关系） |
+| 分镜层首格承接 | `app/prompts/storyboard_grid_plan.txt` | 新增规则 **0**：第 1 格必须承接上一镜的第 9 格（服装/持物/位置朝向/道具形态朝向/光源/陈设）；换场首镜另需保留一处来自上一场的视觉线索作为过渡桥 |
+| 手部质量约束 | `app/prompts/script_rewrite_rules.txt` + `storyboard_grid_plan.txt` | 实测手指畸变（**杵状指/指尖膨大**）全部出现在**手部特写格**，远景中景正常。故规则②把手部特写从「推荐」降为「慎用」（细节优先给物件/表情/姿态），分镜规划新增【手部质量】硬约束（不让手占到大特写比例、九格最多一格以手为主体、以手为主体须写明五指结构完整） |
+| 手部质检 | `app/qc_client.py` | `STORYBOARD_GRID_ANALYSIS_NOTE` 新增【手部结构检查】，按**四类**畸变逐格查（①末端形态：杵状指/指尖膨大/钝化 ②数量：多指少指 ③分离度：粘连融合 ④比例：过长过细/粗细不均/关节反向）；关键词表同步补 `杵状指` / `指尖膨大` / `指尖钝化` / `手指粗细不均` / `指节模糊` 等长词（避免与正常构图描述撞车误杀） |
+
+> **一个方法论教训**（写在这里供后续排查参考）：定位「手部畸变」这类**局部偶发**缺陷时，
+> 按秒均匀抽帧会漏检（畸变集中在很窄的手部特写格）。必须**按镜头/按格**查 ——
+> 正确姿势是先用剧本的 `duration` 累加出时间轴，把观察点映射到具体镜号，再查该镜的九宫格分镜。
 
 ### 生成可控性
 
@@ -215,24 +244,42 @@ output/
 │               ├── left45.png
 │               ├── right45.png
 │               └── top.png
-├── videos/                     # 视频片段
-│   └── {项目名}/shot_01.mp4 ...
+├── videos/                     # 视频片段（按「场」组织）
+│   └── {项目名}/
+│       ├── scene_01.mp4        # 第 1 场（该场各镜由 H3 原生段间衔接）
+│       ├── scene_02.mp4        # 第 2 场
+│       └── ep01_full.mp4       # 整集拼接（各场依次流拼接）
+├── upscale/                    # 超分产物（与源片严格隔离；关闭超分时为空）
+│   └── {项目名}/
+│       ├── ep01_scene01_upscaled.mp4   # 逐场超分产物
+│       └── ep01_upscaled.mp4           # 超分后整集
+├── qc/                         # 质检中间产物（抽帧 / 参考图归一 / 3D 站位）
+│   └── {项目名}/
 └── final/                      # 最终成片
-    └── {项目名}/{项目名}.mp4
+    └── {项目名}/
+        ├── ep01_final.mp4
+        └── ep01_final.mp4.srt
 ```
 
-## 🔄 完整流程（8 步）
+> ⚠️ **一章 = 一集**；**一场 = 一段连续时空**（`scene_no`）。视频按场提交、逐场拼接成整集，
+> 这是「同场内动作连贯、相邻场自然过渡」的结构基础。`shot_NN.mp4` 是旧版逐镜头模式的遗留命名，
+> 当前流程不再产出。
+
+## 🔄 完整流程（7 步）
+
+> 步骤序列的唯一事实源是 `app/pipeline.py` 的 `STEP_SEQUENCE`：
+> `script → tts_pre → assets → storyboard → video → upscale → final`。
+> 历史步骤 `keyframe`（尾帧）与 `mix`（混音）已移出序列（函数保留，仅作回滚与手工端点用）。
 
 | # | 步骤 | 功能 | 技术 | 工作流模板 |
 |---|------|------|------|-----------|
 | 1 | 剧本生成 `script` | 主题 → 结构化 JSON（角色/物品/场景/镜头） | 文本分析模型（OpenAI 兼容·任意厂商） | — |
 | 2 | 配音先行 `tts_pre` | 为**每个角色**生成一段参考音色音频（落 `voice_bank`），供视频生成锁定角色音色 | QwenTTS | — |
 | 3 | 资产 `assets` | 角色/物品/场景的基础图 + 多视角（正/左45/右45/俯视） | QwenImage2.1 + TE-Speed | 角色生成_Qwen21.json / 物品生成_Qwen21.json / 场景生成_Qwen21.json + 分镜生成_Qwen21.json |
-| 4 | 分镜图 `storyboard` | 逐镜出图（带 AI 质检与不合格重生成） | QwenImage2.1 + TE-Speed | 分镜生成_Qwen21.json |
-| 5 | 尾帧 `keyframe` | 关键帧驱动（整集模式下恒关） | — | — |
-| 6 | 视频生成 `video` | 整集一次生成的连续无缝视频，**自带 H3 原生音轨（角色对白）** | MiniMax H3 Director（Ref2VA） | h3_director_r2v_单采.json |
-| 7 | 超分 `upscale` | 对**集级原片**做 FlashVSR 超分（fail-open：环境不可用/失败只记跳过，不拖垮成片） | FlashVSR | — |
-| 8 | 成片合成 `final` | **优先采用超分产物**（落空回退整集原片）+ 字幕，输出到 `final/` | FFmpeg | — |
+| 4 | 分镜图 `storyboard` | 九宫格分镜图逐镜出图（带 AI 质检与不合格重生成；跨镜引入上一镜成品图做衔接） | QwenImage2.1 + TE-Speed | 分镜生成_Qwen21.json |
+| 5 | 视频生成 `video` | 整集一次生成：**按场分组逐场提交**（同场内 H3 原生段间衔接，跨场挂上一场末镜参考），**自带 H3 原生音轨（角色对白）** | MiniMax H3 Director（Ref2VA） | h3_director_r2v_单采.json |
+| 6 | 超分 `upscale` | **逐场先超分 → 流拼接成整集**（`upscale_per_scene`，默认开）；fail-open：环境不可用/超时/失败只记跳过，不拖垮成片 | FlashVSR | TE-Speed-flashVSR 视频超分放大加速工作流.json |
+| 7 | 成片合成 `final` | **优先采用超分产物**（落空回退整集原片）+ 字幕，输出到 `final/` | FFmpeg | — |
 
 > **配音与音画混音不是独立环节**：H3 视频自带角色对白原生音轨，`tts_pre` 只负责备好每角色参考音色
 > （视频生成时以 `audioMode=generate` 用参考音色**锁定音色**、台词由模型按各段**自生成**）。
@@ -283,22 +330,32 @@ output/
 
 ### 1. 启动 ComfyUI（手动）
 ```batch
-cd D:\ComfyUI_portable_TE_v260619
-.\ComfyUI_windows_portable.exe
+cd D:\ComfyUI_portable_TE_v260619\ComfyUI
+.\run_nvidia_gpu_fixed.bat
 ```
 
-### 2. 设置环境变量并启动应用
+> 启动脚本的实测配置（RTX 5060 8G）：`--windows-standalone-build --disable-auto-launch
+> --preview-method auto --fast fp16_accumulation --disable-pinned-memory --lowvram --reserve-vram 1`。
+> ⚠️ **不要加 `--cuda-malloc`**：本机实测与 comfy_aimdo 的显存映射层冲突，会以
+> `cuMemSetAccess failed (600)` → `VRAM Allocation failed` → 进程退出。
+
+### 2. 启动应用（后端）
 ```powershell
-$env:ANTHROPIC_API_KEY = "sk-ant-xxx..."
-cd "C:\Users\liujianghua\WorkBuddy\2026-09-09-16-55-22\漫剧生成系统\app"
+cd "<项目根>\app"
 pip install -r requirements.txt
-python app.py
+python serve.py          # 生产入口（waitress）；python app.py 为开发入口
 ```
 
 或直接双击 `run_app.bat`
 
+> **文本分析模型的密钥不在这里配**：Web 主流程统一走「AI 设置 → 文本分析模型」，
+> 填入 base_url / api_key / model 即生效，任何 OpenAI 兼容厂商均可（DeepSeek / 通义 / GLM / OpenAI…）。
+> `ANTHROPIC_API_KEY` 仅独立 CLI `comic_drama_pipeline.py` 需要，Web 流程不依赖。
+
 ### 3. 访问 Web 界面
-打开 **http://localhost:5210**（默认端口；可用环境变量 `APP_PORT` 覆盖）
+打开 **http://127.0.0.1:5211**（端口由 `APP_PORT` 决定，默认 5211；桌面版由外壳自动注入）
+
+> 桌面版（Electron）会自动拉起后端并在退出时回收，无需手动执行第 2 步。
 
 ### 4. 操作流程
 1. 输入故事主题 → 点击"生成剧本"（云端 LLM）
@@ -312,11 +369,20 @@ python app.py
 
 | 项目 | 要求 |
 |------|------|
-| GPU | RTX 3060 12GB+（推荐 4080 16GB+） |
+| GPU | **8GB 显存可跑通全流程**（本机实测 RTX 5060 Laptop 8G / sm_120 Blackwell）；
+|     | 超分另需余量，8G 下建议关闭（见下）。推荐 16GB+ 以获得可用速度 |
 | 内存 | 32GB+ |
-| 硬盘 | SSD 200GB+ |
-| ComfyUI | ≥ 0.30.0（用户自启动） |
-| Python | 3.10+ |
+| 硬盘 | SSD 200GB+（H3 权重近 20GB，QwenImage2.1 与 FlashVSR 另计） |
+| ComfyUI | ≥ 0.38.0（**用户自启动**；本机实测 0.38.0 + torch 2.14.0+cu132） |
+| Python | 3.10+（本机 3.13） |
+| FFmpeg | 已安装并加入 PATH |
+
+> **8G 显存的两条实测经验**：
+> 1. **H3 视频可用**：走 tiny 档 + `--lowvram --reserve-vram 1`，19.9GB 的 H3 以分块换入方式跑得动；
+>    整集按场提交正是为了控制单次输入规模。
+> 2. **FlashVSR 超分不可用**：960×544 的 46 秒单场会被切成 15 个 spatial tile、每块约 24 分钟，
+>    单场 1 小时超时上限直接击穿并回落整集（更慢）。故 8G 机器建议 `enable_upscale=false`，
+>    成片直接用 H3 原分辨率；换到更大显存后再开启。
 | FFmpeg | 已安装并加入 PATH |
 | 文本分析模型 Key（OpenAI 兼容·任意厂商） | 必需（剧本生成，在「AI 设置」里配置） |
 
@@ -411,7 +477,7 @@ python build_exe.py
 ```
 
 **运行要求**：
-- 双击 `msjcxt.exe`，后端自动起在 `http://127.0.0.1:5210`
+- 双击 `msjcxt.exe`，后端自动起在 `http://127.0.0.1:5211`
 - 浏览器手动打开或脚本自动拉起（策略允许时）
 - 数据根建议设为纯 ASCII（如 `D:\mjscxt_data`），`datadir.txt` 写入该路径
 
@@ -437,23 +503,23 @@ cd D:\build\mjscxt\electron-app
 # 4. 安装依赖
 npm install
 
-# 5. 关键：修改 main.js 端口为 5210（与 PyInstaller 版后端端口一致）
-#    const DEFAULT_PORT = 5210;  (原为 5000)
+# 5. 关键：确认 main.js 端口为 5211（与后端 APP_PORT 一致）
+#    const DEFAULT_PORT = 5211;
 
 # 6. 执行打包
 npm run build:win
 
 # 7. 产物位置（均在 D:\build\mjscxt\dist\）
-# comic-drama-forge-Setup-1.1.0.exe        # NSIS 安装包 (~133 MB)
-# comic-drama-forge-Portable-1.1.0.exe     # 单文件便携版 (~132 MB，双击即用)
+# comic-drama-forge-Setup-1.4.2.exe        # NSIS 安装包 (~133 MB)
+# comic-drama-forge-Portable-1.4.2.exe     # 单文件便携版 (~132 MB，双击即用)
 # win-unpacked/漫剧工坊.exe                # 解压版绿色启动最快 (~180 MB)
 ```
 
 **运行要求**：
 - 首次运行前建议清理残留锁：`Remove-Item -Recurse -Force "$env:APPDATA\mjscxt-desktop"`
-- 双击 `comic-drama-forge-Portable-1.1.0.exe` 或 `win-unpacked/漫剧工坊.exe`
-- 自动检测 5210 端口：若已有后端则复用，否则自动启动内置 Python 后端
-- 主窗口加载 `http://127.0.0.1:5210`，无需浏览器
+- 双击 `comic-drama-forge-Portable-1.4.2.exe` 或 `win-unpacked/漫剧工坊.exe`
+- 自动检测 5211 端口：若已有后端则复用，否则自动启动内置 Python 后端
+- 主窗口加载 `http://127.0.0.1:5211`，无需浏览器
 
 ---
 
@@ -461,10 +527,10 @@ npm run build:win
 
 | 特性 | PyInstaller (msjcxt.exe) | Electron (便携版/安装版) |
 |------|--------------------------|---------------------------|
-| **前端形态** | 浏览器访问 5210 端口 | 自带 Chromium 窗口，无需浏览器 |
+| **前端形态** | 浏览器访问 5211 端口 | 自带 Chromium 窗口，无需浏览器 |
 | **体积** | ~52 MB | ~132 MB (便携) / ~180 MB (解压版) |
 | **启动速度** | ~5 秒 | ~30 秒 (首次自解压/播种资源镜像) |
-| **后端复用** | 固定 5210，单实例 | 复用 5210 或自启内置 Python |
+| **后端复用** | 固定 5211，单实例 | 复用 5211 或自启内置 Python |
 | **适用场景** | 服务器/无人值守/远程桌面 | 本地桌面交互、演示、离线使用 |
 | **更新机制** | 手动替换 EXE | 内置自动更新（资源增量/整包） |
 | **路径要求** | 纯 ASCII 部署目录 + datadir.txt | 纯 ASCII 构建目录 + 输出目录 |
@@ -476,8 +542,8 @@ npm run build:win
 ```bash
 # 1. 完成上述两种打包
 # 2. 创建 tag 并推送
-git tag v1.2.0
-git push origin v1.2.0
+git tag v1.4.2
+git push origin v1.4.2
 
 # 3. GitHub Actions 自动运行 .github/workflows/desktop-release.yml
 #    - 烘焙 Python + 收集后端资源
@@ -491,4 +557,4 @@ git push origin v1.2.0
 ---
 
 
-**版本**: 1.2.0（桌面版） | **日期**: 2026-10-05
+**版本**: 1.4.2（桌面版） | **日期**: 2026-10-10
