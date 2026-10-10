@@ -124,6 +124,382 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
                 '注释写明「留余量给长台词；>6 秒的镜属长尾」。两者不是冲突，是留了余量。',
         'owner': 'config.SHOT_DURATION_MAX',
     },
+
+    # ===== 以下为 2026-10-10 从代码扫描自动登记（用户要求「所有配置字段都进数据库」）=====
+    # 生成方式：扫描 app/*.py 的全部大写常量 → 过滤掉枚举/路径/集合/标注「不可调」者 →
+    # 默认值直接取代码实际值（因此登记即刻与现状一致，零风险）；范围按命名语义推断。
+    # 这些项现在都可以通过 POST /api/config/settings 修改，写入即回写运行时。
+    'poll_interval_sec': {
+        'default': 5, 'type': 'int', 'range': (0, 100), 'group': '其它',
+        'desc': '这里给异步工具补上「派发 → 轮询状态接口到终态 → 如实汇报」的闭环。',
+        'owner': 'agent_core.POLL_INTERVAL_SEC',
+    },
+    'silence_threshold_db': {
+        'default': -35.0, 'type': 'float', 'range': (-100.0, 0.0), 'group': '音频',
+        'desc': ': 静音判定门限（低于该电平视为静音），交给 ffmpeg silencedetect 的 noise 参数',
+        'owner': 'audio_qc.SILENCE_THRESHOLD_DB',
+    },
+    'silence_min_duration': {
+        'default': 0.35, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
+        'desc': ': 最短静音段（秒）：避免把正常换气、句读停顿当成静音',
+        'owner': 'audio_qc.SILENCE_MIN_DURATION',
+    },
+    'clip_max_db': {
+        'default': -0.1, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
+        'desc': ': 峰值电平高于此值 → 削波失真风险（软扣分项，不阻断）',
+        'owner': 'audio_qc.CLIP_MAX_DB',
+    },
+    'min_valid_duration': {
+        'default': 0.15, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
+        'desc': ': 有效音频最短时长（秒），更短视为空文件 / 合成失败（硬闸）',
+        'owner': 'audio_qc.MIN_VALID_DURATION',
+    },
+    'hard_silent_ratio': {
+        'default': 0.15, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
+        'desc': ': 有声占比低于此值 → 视为整段无声（硬闸）',
+        'owner': 'audio_qc.HARD_SILENT_RATIO',
+    },
+    'probe_timeout': {
+        'default': 300, 'type': 'int', 'range': (0, 100000), 'group': '音频',
+        'desc': ': 单次 ffmpeg 指标探测超时（秒）',
+        'owner': 'audio_qc.PROBE_TIMEOUT',
+    },
+    'render_timeout': {
+        'default': 300, 'type': 'int', 'range': (0, 100000), 'group': '音频',
+        'desc': ': 单次可视化渲染超时（秒）',
+        'owner': 'audio_qc.RENDER_TIMEOUT',
+    },
+    'primary_min_chunks': {
+        'default': 3, 'type': 'int', 'range': (0, 100), 'group': '小说解析',
+        'desc': '出现次数相同的按「姓名总出现次数」二次排序（LLM 提炼已按戏份排序）。',
+        'owner': 'book_outline.PRIMARY_MIN_CHUNKS',
+    },
+    'sample_chars': {
+        'default': 6000, 'type': 'int', 'range': (0, 10000000), 'group': '小说解析',
+        'desc': '喂给 LLM 的样本长度（取小说前段，足以观察其章节标记风格）',
+        'owner': 'chapter_llm.SAMPLE_CHARS',
+    },
+    'structure_preview_chars': {
+        'default': 160, 'type': 'int', 'range': (0, 100000), 'group': '小说解析',
+        'desc': '并给出「真正的第一章」——在生成剧本之前完成这次体检（结果缓存进 meta，全书一次）。',
+        'owner': 'chapter_llm.STRUCTURE_PREVIEW_CHARS',
+    },
+    'structure_max_rows': {
+        'default': 200, 'type': 'int', 'range': (0, 100000), 'group': '小说解析',
+        'desc': '并给出「真正的第一章」——在生成剧本之前完成这次体检（结果缓存进 meta，全书一次）。',
+        'owner': 'chapter_llm.STRUCTURE_MAX_ROWS',
+    },
+    'default_max_entries': {
+        'default': 2000, 'type': 'int', 'range': (0, 10000000), 'group': '任务台账',
+        'desc': ': 台账最多保留多少条（超上限按时间淘汰最旧）。',
+        'owner': 'comfyui_job_store.DEFAULT_MAX_ENTRIES',
+    },
+    'novel_default_shots': {
+        'default': 0, 'type': 'int', 'range': (0, 1), 'group': '基础配置',
+        'desc': '显式传 4~40 仍可按题材指定下限（如悬疑推理 18~30）。',
+        'owner': 'config.NOVEL_DEFAULT_SHOTS',
+    },
+    'shot_duration_desc_sec_max': {
+        'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '基础配置',
+        'desc': ': 画面描述带来的时长加成上限（旧值 2.0s）+ 折算系数（每多少字给 1 秒）',
+        'owner': 'config.SHOT_DURATION_DESC_SEC_MAX',
+    },
+    'shot_duration_desc_chars_per_sec': {
+        'default': 150.0, 'type': 'float', 'range': (0.0, 100.0), 'group': '基础配置',
+        'desc': ': 画面描述带来的时长加成上限（旧值 2.0s）+ 折算系数（每多少字给 1 秒）',
+        'owner': 'config.SHOT_DURATION_DESC_CHARS_PER_SEC',
+    },
+    'shot_duration_action_sec_max': {
+        'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '基础配置',
+        'desc': ': 动作复杂度带来的时长加成上限（旧值 1.5s）',
+        'owner': 'config.SHOT_DURATION_ACTION_SEC_MAX',
+    },
+    'shot_speech_budget_chars': {
+        'default': 16, 'type': 'int', 'range': (0, 100000), 'group': '基础配置',
+        'desc': ': 单镜台词字数预算（16 字 ≈ 3.6 秒配音）。配合规则 13 一起约束单镜台词长度。',
+        'owner': 'config.SHOT_SPEECH_BUDGET_CHARS',
+    },
+    'clear_comfyui_history_interval_sec': {
+        'default': 300.0, 'type': 'float', 'range': (0.0, 1000000.0), 'group': '基础配置',
+        'desc': ': 两次清理之间的最小间隔（秒）。太频繁会让「刚跑完那一镜」的现场也被清掉。',
+        'owner': 'config.CLEAR_COMFYUI_HISTORY_INTERVAL_SEC',
+    },
+    'scene_view_dup_phash_max': {
+        'default': 95.0, 'type': 'float', 'range': (0.0, 10000.0), 'group': '基础配置',
+        'desc': ':   （如「对峙空地 right45」≈99.2 这类近重复），80~95 一律放行。',
+        'owner': 'config.SCENE_VIEW_DUP_PHASH_MAX',
+    },
+    'char_surprise_appear_gap': {
+        'default': 3, 'type': 'int', 'range': (0, 100), 'group': '连贯性',
+        'desc': ': 首次出镜序号（0-based）≥ 此值判「突兀出场」（前 3 镜内的首次出镜视为正常开场）。',
+        'owner': 'continuity_contract.CHAR_SURPRISE_APPEAR_GAP',
+    },
+    'char_disappear_gap': {
+        'default': 4, 'type': 'int', 'range': (0, 100), 'group': '连贯性',
+        'desc': ': 末次出镜到集尾剩余镜头数 ≥ 此值判「中途消失」（角色应自然收尾而非断在中间）。',
+        'owner': 'continuity_contract.CHAR_DISAPPEAR_GAP',
+    },
+    'max_contract_issues': {
+        'default': 500, 'type': 'int', 'range': (0, 100000), 'group': '连贯性',
+        'desc': '这些 issue 会被拼进局部重写的提示词，无限增长会把 prompt 撑爆。',
+        'owner': 'continuity_contract.MAX_CONTRACT_ISSUES',
+    },
+    'default_min_age_sec': {
+        'default': 86400, 'type': 'int', 'range': (0, 10000000), 'group': '运维',
+        'desc': ': 回收的最小「年龄」：``mtime`` 距今必须超过该秒数（默认 24 小时）。',
+        'owner': 'disk_reclaim.DEFAULT_MIN_AGE_SEC',
+    },
+    'min_segment_frames': {
+        'default': 5, 'type': 'int', 'range': (0, 100), 'group': 'H3 导演台',
+        'desc': ': 单段最小帧数（源 ``MIN_GEN_VIDEO_FRAMES = 4``，但官方换算下限是 5）',
+        'owner': 'h3_director_builder.MIN_SEGMENT_FRAMES',
+    },
+    'max_segment_loras': {
+        'default': 8, 'type': 'int', 'range': (0, 100), 'group': 'H3 导演台',
+        'desc': ': 段级 LoRA 条数上限（与插件 ``segment_loras.normalize_lora_rows`` 一致，=8）',
+        'owner': 'h3_director_builder.MAX_SEGMENT_LORAS',
+    },
+    'beat_max_sec': {
+        'default': 6.0, 'type': 'float', 'range': (0.0, 60.0), 'group': 'H3 提示词',
+        'desc': ': 单镜最长时长（超过则拆成多个时间码节拍，让时间轴与目标时长对齐）',
+        'owner': 'h3_prompt_kit.BEAT_MAX_SEC',
+    },
+    'h3_segment_max_sec': {
+        'default': 4.0, 'type': 'float', 'range': (0.0, 60.0), 'group': 'H3 提示词',
+        'desc': ': 故生成期必须强制切段。',
+        'owner': 'h3_prompt_kit.H3_SEGMENT_MAX_SEC',
+    },
+    'h3_segment_min_sec': {
+        'default': 1.5, 'type': 'float', 'range': (0.0, 60.0), 'group': 'H3 提示词',
+        'desc': ': ``ceil(duration / H3_SEGMENT_MAX_SEC)`` 的基础上，把余数摊平而非留一个超短尾段。',
+        'owner': 'h3_prompt_kit.H3_SEGMENT_MIN_SEC',
+    },
+    'max_segment_loras': {
+        'default': 8, 'type': 'int', 'range': (0, 100), 'group': 'H3 LoRA',
+        'desc': 'MAX_SEGMENT_LORAS',
+        'owner': 'h3_segment_loras.MAX_SEGMENT_LORAS',
+    },
+    'style_lora_min_strength': {
+        'default': 0.6, 'type': 'float', 'range': (0.0, 1.0), 'group': 'H3 LoRA',
+        'desc': '钳到该区间）；LLM 缺省或规则表兜底时取区间上限 0.8，避免默认 1.0 过冲。',
+        'owner': 'h3_segment_loras.STYLE_LORA_MIN_STRENGTH',
+    },
+    'style_lora_max_strength': {
+        'default': 0.8, 'type': 'float', 'range': (0.0, 1.0), 'group': 'H3 LoRA',
+        'desc': '钳到该区间）；LLM 缺省或规则表兜底时取区间上限 0.8，避免默认 1.0 过冲。',
+        'owner': 'h3_segment_loras.STYLE_LORA_MAX_STRENGTH',
+    },
+    'default_timeout': {
+        'default': 240, 'type': 'int', 'range': (0, 100000), 'group': 'LLM',
+        'desc': 'DEFAULT_TIMEOUT',
+        'owner': 'llm_client.DEFAULT_TIMEOUT',
+    },
+    'timeout_max_attempts': {
+        'default': 2, 'type': 'int', 'range': (0, 100), 'group': 'LLM',
+        'desc': '故最多额外再给 1 次，总等待上界 2×20 分钟，不至于像旧逻辑那样 3 次打满。',
+        'owner': 'llm_client.TIMEOUT_MAX_ATTEMPTS',
+    },
+    'min_tokens_when_thinking': {
+        'default': 1024, 'type': 'int', 'range': (0, 10000000), 'group': 'LLM',
+        'desc': '允许思考时的最小 max_tokens：思考本身就要吃掉几百 token，额度太小必然空正文',
+        'owner': 'llm_client.MIN_TOKENS_WHEN_THINKING',
+    },
+    'max_tail': {
+        'default': 2000, 'type': 'int', 'range': (0, 10000000), 'group': '运维',
+        'desc': 'MAX_TAIL',
+        'owner': 'log_viewer.MAX_TAIL',
+    },
+    'h3_max_duration_sec': {
+        'default': 15.0, 'type': 'float', 'range': (0.0, 100.0), 'group': 'LLM',
+        'desc': ': H3 单次生成的硬能力（官方 README：单次最长 15 秒）',
+        'owner': 'model_capabilities.H3_MAX_DURATION_SEC',
+    },
+    'shot_duration_floor': {
+        'default': 1.0, 'type': 'float', 'range': (0.0, 1.0), 'group': 'LLM',
+        'desc': ': 避免 import config 的重依赖；config 为唯一权威，此处仅作归一时的安全钳位）',
+        'owner': 'model_capabilities.SHOT_DURATION_FLOOR',
+    },
+    'shot_duration_ceil': {
+        'default': 12.0, 'type': 'float', 'range': (0.0, 100.0), 'group': 'LLM',
+        'desc': ': 避免 import config 的重依赖；config 为唯一权威，此处仅作归一时的安全钳位）',
+        'owner': 'model_capabilities.SHOT_DURATION_CEIL',
+    },
+    'max_chapters_kept': {
+        'default': 3000, 'type': 'int', 'range': (0, 10000000), 'group': '小说解析',
+        'desc': 'MAX_CHAPTERS_KEPT',
+        'owner': 'novel_parser.MAX_CHAPTERS_KEPT',
+    },
+    'fallback_chapter_chars': {
+        'default': 3000, 'type': 'int', 'range': (0, 10000000), 'group': '小说解析',
+        'desc': '会导致「未识别到章节，无法自动分集生产」（缺陷 D3）与「待生产 0 集」（缺陷 D2）。',
+        'owner': 'novel_parser.FALLBACK_CHAPTER_CHARS',
+    },
+    'shell_chapter_body_chars': {
+        'default': 60, 'type': 'int', 'range': (0, 100000), 'group': '小说解析',
+        'desc': '这类「只有标题行、正文近空」的壳章必须并入其后的真实章节，不能单独成章。',
+        'owner': 'novel_parser.SHELL_CHAPTER_BODY_CHARS',
+    },
+    'chunk_chars': {
+        'default': 2400, 'type': 'int', 'range': (0, 10000000), 'group': '剧本',
+        'desc': '「预劈半是常态」的前提**已不成立**；`CHUNK_CHARS=2400` 本身保留不动。）',
+        'owner': 'novel_to_script.CHUNK_CHARS',
+    },
+    'min_chunk_chars': {
+        'default': 300, 'type': 'int', 'range': (0, 100000), 'group': '剧本',
+        'desc': '「预劈半是常态」的前提**已不成立**；`CHUNK_CHARS=2400` 本身保留不动。）',
+        'owner': 'novel_to_script.MIN_CHUNK_CHARS',
+    },
+    'max_shots_per_episode': {
+        'default': 78, 'type': 'int', 'range': (0, 100000), 'group': '剧本',
+        'desc': '本常量保留为**诊断参考线**（over_redline 告警仍在用），但**不再是任何截断依据**。',
+        'owner': 'novel_to_script.MAX_SHOTS_PER_EPISODE',
+    },
+    'chapter_split_max_depth': {
+        'default': 3, 'type': 'int', 'range': (0, 100), 'group': '剧本',
+        'desc': '仍失败则把该块再二分（最多 CHAPTER_SPLIT_MAX_DEPTH 层）后分别生成再合并，保证不静默失败。',
+        'owner': 'novel_to_script.CHAPTER_SPLIT_MAX_DEPTH',
+    },
+    'ref_insert_max_growth': {
+        'default': 1.35, 'type': 'float', 'range': (0.0, 60.0), 'group': '剧本',
+        'desc': ': 插入镜最多把镜头数放大到原来的多少倍（防镜数与总时长失控）',
+        'owner': 'novel_to_script.REF_INSERT_MAX_GROWTH',
+    },
+    'ref_dialogue_min_part': {
+        'default': 4, 'type': 'int', 'range': (0, 100), 'group': '剧本',
+        'desc': ': 拆台词后每段的最小字数（低于此值不值得单独成镜，切了也是碎句）',
+        'owner': 'novel_to_script.REF_DIALOGUE_MIN_PART',
+    },
+    'default_preview_scale': {
+        'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
+        'desc': ': 预演分辨率倍率（相对正式）。',
+        'owner': 'preview_gate.DEFAULT_PREVIEW_SCALE',
+    },
+    'default_preview_segment_sec': {
+        'default': 2.0, 'type': 'float', 'range': (0.0, 60.0), 'group': '质检',
+        'desc': ': 预演每段时长上限（秒）。段数不变 → 每镜都看得到，总时长大幅缩短。',
+        'owner': 'preview_gate.DEFAULT_PREVIEW_SEGMENT_SEC',
+    },
+    'min_preview_side': {
+        'default': 256, 'type': 'int', 'range': (0, 100000), 'group': '质检',
+        'desc': ': 预演画幅下限（避免缩到模型根本画不出结构）。',
+        'owner': 'preview_gate.MIN_PREVIEW_SIDE',
+    },
+    'min_preview_segment_sec': {
+        'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
+        'desc': ': 预演每段时长的下限（与 h3_prompt_kit 的段时长下限同量级）。',
+        'owner': 'preview_gate.MIN_PREVIEW_SEGMENT_SEC',
+    },
+    'min_tokens_when_thinking': {
+        'default': 1024, 'type': 'int', 'range': (0, 10000000), 'group': '质检',
+        'desc': 'MIN_TOKENS_WHEN_THINKING',
+        'owner': 'qc_client.MIN_TOKENS_WHEN_THINKING',
+    },
+    'desc_to_dialogue_ratio_max': {
+        'default': 3.0, 'type': 'float', 'range': (0.0, 100.0), 'group': '质检',
+        'desc': ': 与 novel_to_script.REWRITE_RULES 的「description+visual_detail ≤ dialog',
+        'owner': 'qc_client.DESC_TO_DIALOGUE_RATIO_MAX',
+    },
+    'dialogue_shot_ratio_min': {
+        'default': 0.4, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
+        'desc': ': 对白驱动率下限：有台词的镜头占比低于该值，说明剧情靠画面铺陈推进、易退化成「背景描述流水账」。',
+        'owner': 'qc_client.DIALOGUE_SHOT_RATIO_MIN',
+    },
+    'locked_off_ratio_min': {
+        'default': 0.6, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
+        'desc': ': ② 固定机位占比下限：92 镜参照 77% 固定，软告警阈值取 60%（克制口径，防运镜滥用）。',
+        'owner': 'qc_client.LOCKED_OFF_RATIO_MIN',
+    },
+    'anchor_shot_ratio_max': {
+        'default': 0.1, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
+        'desc': ': ② 特写+全景占比上限：参照 92 镜（特写 2 + 全景 3 = 5.4%），软告警阈值取 10%。',
+        'owner': 'qc_client.ANCHOR_SHOT_RATIO_MAX',
+    },
+    'action_beats_max': {
+        'default': 2, 'type': 'int', 'range': (0, 100), 'group': '质检',
+        'desc': ': 1 个动作节拍；description 里可数出的动作节拍 ≥ 此值即视为「一镜多动作」。',
+        'owner': 'qc_client.ACTION_BEATS_MAX',
+    },
+    'action_beats_shot_min': {
+        'default': 3, 'type': 'int', 'range': (0, 100), 'group': '质检',
+        'desc': ': ④ 触发阈值：出现「一镜多动作」的镜头数达到该值（或占比 > 20%）时提示，防单镜误伤。',
+        'owner': 'qc_client.ACTION_BEATS_SHOT_MIN',
+    },
+    'main_shot_ratio_min': {
+        'default': 0.55, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
+        'desc': ': ⑤ 主力景别（参考片 92 镜实测：近景 26% + 中近景 25% + 局部 25% ≈ 76%）。',
+        'owner': 'qc_client.MAIN_SHOT_RATIO_MIN',
+    },
+    'local_shot_ratio_min': {
+        'default': 0.1, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
+        'desc': ': ⑤「局部」插入镜下限：参考片 25%（只拍手部/道具、不出现完整人脸的插入镜）。',
+        'owner': 'qc_client.LOCAL_SHOT_RATIO_MIN',
+    },
+    'shot_duration_tolerance': {
+        'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
+        'desc': ': 改 MIN/MAX 时**必须同批复核本值是否仍 < MIN**。',
+        'owner': 'qc_client.SHOT_DURATION_TOLERANCE',
+    },
+    'episode_duration_tolerance': {
+        'default': 10.0, 'type': 'float', 'range': (0.0, 100.0), 'group': '质检',
+        'desc': ': 本容差因此只兜「四舍五入/台词长度微调」级别的小幅越界，不做百分比缩放。',
+        'owner': 'qc_client.EPISODE_DURATION_TOLERANCE',
+    },
+    'episode_max_frames': {
+        'default': 48, 'type': 'int', 'range': (0, 100000), 'group': '质检',
+        'desc': ': 1~6 上限是**两回事**：后者只约束单镜/默认抽帧路径，整集路径不受它约束。',
+        'owner': 'qc_coverage.EPISODE_MAX_FRAMES',
+    },
+    'default_desc_limit': {
+        'default': 60, 'type': 'int', 'range': (0, 100000), 'group': '质检',
+        'desc': ': 整集镜头摘要默认条数上限（原为 12，导致 40 镜整集中后段对模型完全不可见）。',
+        'owner': 'qc_coverage.DEFAULT_DESC_LIMIT',
+    },
+    'min_occ_px': {
+        'default': 3, 'type': 'int', 'range': (0, 100), 'group': '小说解析',
+        'desc': ': 一列至少要有这么多「内容像素」才算被人物占用（滤掉零星噪声列）。',
+        'owner': 'sheet_split.MIN_OCC_PX',
+    },
+    'min_gap_px': {
+        'default': 5, 'type': 'int', 'range': (0, 100), 'group': '小说解析',
+        'desc': ': 相邻人物之间的最小空隙列数，达到即认为可分。',
+        'owner': 'sheet_split.MIN_GAP_PX',
+    },
+    'min_seg_w': {
+        'default': 8, 'type': 'int', 'range': (0, 100), 'group': '小说解析',
+        'desc': ': 切出的单段最小宽度，过窄视为误检。',
+        'owner': 'sheet_split.MIN_SEG_W',
+    },
+    'video_megapixels_default': {
+        'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '风格',
+        'desc': ': 显式声明 9:16 时才会出现（本注释里 544×960 / 864×480 的尺寸即属此列）。',
+        'owner': 'style_kit.VIDEO_MEGAPIXELS_DEFAULT',
+    },
+    'storyboard_megapixels_default': {
+        'default': 1.5, 'type': 'float', 'range': (0.0, 60.0), 'group': '风格',
+        'desc': ':    或临时 env 覆盖（无需改代码）。',
+        'owner': 'style_kit.STORYBOARD_MEGAPIXELS_DEFAULT',
+    },
+    'asset_megapixels_default': {
+        'default': 1.5, 'type': 'float', 'range': (0.0, 60.0), 'group': '风格',
+        'desc': ': env MJSCXT_ASSET_MEGAPIXELS 可覆盖。',
+        'owner': 'style_kit.ASSET_MEGAPIXELS_DEFAULT',
+    },
+    'default_ttl_sec': {
+        'default': 900, 'type': 'int', 'range': (0, 100000), 'group': '任务台账',
+        'desc': ': 默认租约存活时长（秒）。心跳停超过它就判 stale。',
+        'owner': 'task_lease.DEFAULT_TTL_SEC',
+    },
+    'voice_bank_min_sec': {
+        'default': 1.0, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
+        'desc': ': 参考音频允许的扩展名 / 时长建议区间（秒）',
+        'owner': 'tts_client.VOICE_BANK_MIN_SEC',
+    },
+    'voice_bank_max_sec': {
+        'default': 60.0, 'type': 'float', 'range': (0.0, 10000.0), 'group': '音频',
+        'desc': ': 参考音频允许的扩展名 / 时长建议区间（秒）',
+        'owner': 'tts_client.VOICE_BANK_MAX_SEC',
+    },
+
 }
 
 
