@@ -2252,10 +2252,19 @@ def _extract_numbered_block(novel_text: str, anchor: str, max_lines: int = 16) -
             return ''
         lines = [ln.strip() for ln in novel_text.splitlines()]
         head = anchor.strip()
-        # ① anchor 必须独立成行（允许前后有空白）
+        # ① 锚点行的判定：**独立成行**，或**行尾就是锚点**（原文实测标题写成
+        #    「天合大厦A座 — 楼层安全守则」，锚点是行尾而非独立行）。
+        #    ⚠️ 但不接受「长行内嵌」——「天合大厦A座」虽然在同一行行首，
+        #    其所在行以「楼层安全守则」结尾而**不以它自己结尾**，故不会命中。
         idx = None
         for k, ln in enumerate(lines):
             if ln == head:
+                idx = k
+                break
+            if ln.endswith(head) and len(ln) <= len(head) + 16:
+                idx = k
+                break
+            if ln.startswith(head) and len(ln) <= len(head) + 6:
                 idx = k
                 break
         if idx is None:
