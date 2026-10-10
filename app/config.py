@@ -49,7 +49,16 @@ def _auto_comfyui_dir() -> str:
 MJSCXT_COMFYUI_DIR = _env("MJSCXT_COMFYUI_DIR", "") or _auto_comfyui_dir()
 
 # ComfyUI 安装根目录：其余路径默认基于此推导，只需配置这一项即可换机
-COMFYUI_ROOT = _env("COMFYUI_ROOT", "")
+# ⚠️ 2026-10-11 修复：此前这里是 `_env("COMFYUI_ROOT", "")` —— **没有回退到自动检测结果**。
+#   后果链：用户未显式设 COMFYUI_ROOT → COMFYUI_ROOT='' → _DERIVED 全部为空 →
+#   COMFYUI_OUTPUT_DIR='' → 产物搬移时 src 退化成相对路径（`comic_drama\项目\scene\x.png`），
+#   相对**服务进程的 CWD** 解析必然失败：
+#       WARNING:app:产物搬移失败（已重试 5 次）：... -> ...assets_scratch\scene_x\base_try1.png：
+#       [WinError 3] 系统找不到指定的路径。
+#   而 ComfyUI 侧其实**正常出图**（它自己按相对路径解析到安装目录的 output/），
+#   于是表现为「图生成了却全部入库失败、逐个资产被隔离」，极难从表面定位。
+#   现回退到上面刚自动检测出的 MJSCXT_COMFYUI_DIR，使「只检测不算数」的漏洞闭合。
+COMFYUI_ROOT = _env("COMFYUI_ROOT", "") or MJSCXT_COMFYUI_DIR
 
 # 是否启用路径推导（未显式配置各路径时，按 ComfyUI 根目录推导）
 # 支持两种常见目录结构：
