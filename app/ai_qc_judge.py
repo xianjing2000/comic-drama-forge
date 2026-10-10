@@ -184,7 +184,7 @@ def generate_fix_suggestions(verdict: dict, context: dict = None) -> List[str]:
     # 可执行性修复建议
     if categories.get("feasibility", 100) < 70:
         suggestions.append("调整镜头时长，确保总时长接近目标")
-        suggestions.append("优化镜头数量，建议5-20个镜头")
+        suggestions.append("优化镜头数量，应按「一镜=一个能演满 5~6 秒的完整内容单元」重切（静态画面不单独成镜）")
     
     # 根据具体问题生成建议
     for issue in issues[:5]:  # 只处理前5个问题

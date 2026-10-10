@@ -206,7 +206,11 @@ PLAN_DEFAULTS = {
     # 超分（FlashVSR）：默认开启。必须列进 PLAN_DEFAULTS ——
     # api_autopilot_plan_set 会按 `k in PLAN_DEFAULTS` 过滤入参，
     # 不在此处的字段无法通过接口关闭，等于没有关掉的入口。
-    "enable_upscale": True,
+    # ⭐ 2026-10-10 用户指定「超分改成默认关闭」：超分是画质增强而非出片必需环节，
+    # 且最耗 GPU，默认开着会让每次生产白烧一遍算力。需要时在计划里显式打开。
+    # 必须留在 PLAN_DEFAULTS —— api_autopilot_plan_set 按 k in PLAN_DEFAULTS
+    # 过滤入参，不在此处的字段无法通过接口开关，等于没有入口。
+    "enable_upscale": False,
     "upscale_scale": 2,
     "coverage_min_percent": 95.0,
     "consistency_min_score": 80,

@@ -271,7 +271,7 @@ DEFAULT_CONFIG = {
     # 超分（FlashVSR）：默认开启。⚠️ 这一步是画质增强而非出片必需环节，
     # step_upscale 全程 fail-open——环境不可用或执行失败一律记 skipped，
     # 绝不把已经跑通的成片拖成失败。
-    "enable_upscale": True,
+    "enable_upscale": False,
     "upscale_scale": 2,            # 超分倍率，FlashVSR 支持 2 / 3 / 4
         # 逐场次先超分再拼接（2026-10-08）：True = 各场次独立超分→流拼接成整集；False = 直接超分整集原片
         "upscale_per_scene": True,
