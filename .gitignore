@@ -187,3 +187,17 @@ electron_root_dirs.json
 
 # 视觉路由工具的本机状态目录（随会话生成，非源码）
 .dsh-vision-router/
+
+# ===================== 构建产物与第三方二进制（2026-10-11 从索引移除） =====================
+# 起因：仓库被跟踪文件里混进了 107 个生成件/第三方件（.git 涨到 253MB）：
+#   · resources/whisper/  41 个 exe/dll（whisper.cpp 预编译产物，22MB）
+#   · app/static/         66 个文件（Vite 构建输出：index-<hash>.js/css + assets/*-<hash>.jpg）
+# 二者都不是源码：前者应从上游发布页获取，后者由 `npm run build` 从 frontend/ 生成
+# （app/static/assets/*.jpg 与 frontend/src/assets/styles/*.jpg 一一对应，已逐一核对）。
+# 它们此前在 .gitignore 生效前就被提交，故仅靠 ignore 不会停止跟踪，需 git rm --cached。
+# ⚠️ 运行时依赖：本机开发/部署前请先执行前端构建，否则页面无样式与资源。
+resources/whisper/
+app/static/
+# 前端独立构建输出（frontend/ 内的 dist）
+frontend/dist/
+
