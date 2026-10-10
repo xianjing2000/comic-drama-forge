@@ -2237,39 +2237,61 @@ def _extract_numbered_block(novel_text: str, anchor: str, max_lines: int = 16) -
     这类「规则 / 守则 / 条款 / 公告」是剧情硬信息，必须由程序从原文提取。
 
     策略（保守，找不到就返回空串，绝不猜）：
-      1. 在原文里定位 anchor（如「楼层安全守则」）；
-      2. 从其后开始，收集形如 `1. xxx` / `1、xxx` / `1 xxx` 的连续编号行；
-      3. 需要至少 2 条才算命中（单条多为误匹配）；
-      4. 遇到空行或明显非条目行（连续两行不像条目）则停止；
-      5. 若原文紧跟着还有「手写 / 红笔 / 落款」一类描述行，一并取回（供外观描述用）。
+      1. anchor 必须**独立成行**（允许行首空白），不接受"在文中任意位置出现"——
+         ⚠️ 2026-10-10 实测教训：放宽到"任意出现"时，「天合大厦A座」因为下一行就是
+         《楼层安全守则》标题，把守则整块抢了过去（7 字 → 234 字）；「打印机」
+         「守则纸条」也被误配。
+      2. 编号条目必须在 anchor 之后 **最多 2 行内**开始（跳过空行与最多 1 行说明），
+         形如 `1. xxx` / `1、xxx` / `1 xxx`；
+      3. 需要**至少 3 条**才算命中（2 条仍可能误匹配）；
+      4. 条目须**编号连续**（1,2,3…），中间跳号即停止；
+      5. 遇空行或连续两行不像条目则停止。
     """
     try:
         if not novel_text or not anchor:
             return ''
-        i = novel_text.find(anchor)
-        if i < 0:
+        lines = [ln.strip() for ln in novel_text.splitlines()]
+        head = anchor.strip()
+        # ① anchor 必须独立成行（允许前后有空白）
+        idx = None
+        for k, ln in enumerate(lines):
+            if ln == head:
+                idx = k
+                break
+        if idx is None:
             return ''
-        tail = novel_text[i:i + 4000]
-        lines = [ln.strip() for ln in tail.splitlines()]
-        rules = []
-        started = False
-        miss = 0
-        for ln in lines[1:]:
+        # ② 编号条目须在 anchor 后最多 2 行内开始
+        start = None
+        for k in range(idx + 1, min(idx + 4, len(lines))):
+            ln = lines[k]
             if not ln:
-                if started:
-                    break
+                continue
+            if re.match(r'^([1-9]|1[0-9])[.．、,，:：]?\s*\S', ln):
+                start = k
+                break
+            # 允许跳过 1 行说明文字，但第 3 行还不见编号就判失败
+        if start is None:
+            return ''
+        rules = []
+        miss = 0
+        expect = 1
+        for ln in lines[start:start + max_lines * 2]:
+            if not ln:
                 continue
             m = re.match(r'^([1-9]|1[0-9])[.．、,，:：]?\s*(.+)$', ln)
             if m and len(m.group(2).strip()) >= 4:
+                no = int(m.group(1))
+                if no != expect:      # 编号必须连续，跳号即停止
+                    break
                 rules.append('%s. %s' % (m.group(1), m.group(2).strip()))
-                started = True
+                expect += 1
                 miss = 0
             else:
-                if started:
-                    miss += 1
-                    if miss >= 2 or len(rules) >= max_lines:
-                        break
-        if len(rules) < 2:
+                miss += 1
+                if miss >= 2:
+                    break
+        # ③ 至少 3 条
+        if len(rules) < 3:
             return ''
         return ' '.join(rules)
     except Exception:  # noqa: BLE001
