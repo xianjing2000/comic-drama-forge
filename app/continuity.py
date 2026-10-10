@@ -290,8 +290,15 @@ def merge_bible_from_episode(continuity_dir: str, project_key: str, script: dict
         if not nm:
             continue
         if nm not in scenes:
-            row = {k: str(s.get(k) or "").strip() for k in ("name", "location", "appearance")}
+            # ⭐ 2026-10-10：字段表补上空间关联三字段。此前只留 name/location/appearance，
+            #    导致**剧本即便按新 schema 产出了 fixed_structure / space_group / refs，
+            #    也会在这一步被静默丢弃** —— 关联必须从「剧本提取资产」这一刻就带进设定库。
+            row = {k: str(s.get(k) or "").strip()
+                   for k in ("name", "location", "appearance",
+                             "fixed_structure", "space_group")}
             row["name"] = str(s.get("name") or "").strip()
+            if s.get("refs"):
+                row["refs"] = [str(x).strip() for x in (s.get("refs") or []) if str(x).strip()]
             row["locked"] = True
             row["appearance_locked"] = True
             row["first_episode"] = int(episode_no)
@@ -299,15 +306,64 @@ def merge_bible_from_episode(continuity_dir: str, project_key: str, script: dict
             scenes[nm] = row
             added["scenes"].append(row["name"])
         else:
-            scenes[nm]["last_seen_episode"] = int(episode_no)
+            _row = scenes[nm]
+            # 存量场景补齐关联字段（不覆盖已有值；剧本新给的值优先补空缺）
+            for k in ("fixed_structure", "space_group"):
+                if not str(_row.get(k) or "").strip() and str(s.get(k) or "").strip():
+                    _row[k] = str(s.get(k) or "").strip()
+            if not _row.get("refs") and s.get("refs"):
+                _row["refs"] = [str(x).strip() for x in (s.get("refs") or []) if str(x).strip()]
+            _row["last_seen_episode"] = int(episode_no)
 
     bible["characters"] = list(chars.values())
     bible["items"] = list(items.values())
     bible["scenes"] = list(scenes.values())
     bible["episodes_seen"] = sorted(set(list(bible.get("episodes_seen") or []) + [int(episode_no)]))
     bible["title"] = bible.get("title") or script.get("title") or ""
+    # ⭐ 2026-10-10 场景空间关联（用户明确要求）：**在剧本提取资产时**就完成识别，
+    #    而不是拖到资产生成阶段。这样设定库一落地就带着 refs / fixed_structure，
+    #    资产生成时直接可用（asset_worker 侧只保留兜底）。
+    #    幂等：全部场景都已有字段就直接返回；fail-open：任何异常只记日志。
+    _relate_scenes_in_bible(bible)
     save_bible(continuity_dir, project_key, bible)
     return {"added": added, "conflicts": conflicts, "bible": bible}
+
+
+def _relate_scenes_in_bible(bible: dict) -> None:
+    """剧本入库时补齐**场景空间关联**（用户需求①②③，2026-10-10）。
+
+    为什么放在这里：关联关系到出图的一致性（门框 / 地面 / 墙面材质必须与同空间
+    其他场景接上），它的**权威来源是剧本**——所以要在「剧本提取资产」这一刻就
+    识别并写进设定库，而不是等资产生成时才补。
+
+    幂等：全部场景都已有 refs/fixed_structure 时直接返回，不重复调模型。
+    fail-open：模型不可用 / 调用失败 / 解析失败一律只记日志，**绝不阻断剧本入库**。
+    就地修改 bible（调用方随后 save_bible）。
+    """
+    try:
+        rows = [s for s in (bible.get("scenes") or []) if isinstance(s, dict)]
+        if not rows:
+            return
+        need = [s for s in rows
+                if not str(s.get("fixed_structure") or "").strip()
+                and not (s.get("refs") or [])]
+        if not need:
+            return
+        from shared_ai import _optional_llm_client
+        import scene_relations as _sr
+        _cli = _optional_llm_client()
+        if _cli is None:
+            logger.info("[场景关联] 无可用文本模型，跳过剧本阶段关联识别"
+                        "（资产生成阶段仍会兜底重试）")
+            return
+        rel = _sr.relate_scenes(_cli, rows)
+        stat = _sr.apply_scene_relations(bible, rel)
+        if stat.get("updated"):
+            logger.info("[场景关联] 剧本阶段已识别 %d 个场景（分组 / 参考 / 固定结构）",
+                        stat["updated"])
+    except Exception as e:  # noqa: BLE001  关联是增强，绝不阻断剧本入库
+        logger.warning("[场景关联] 剧本阶段识别失败（不影响入库）：%s: %s",
+                       type(e).__name__, e)
 
 
 def _bible_name_index(bible: dict) -> dict:
