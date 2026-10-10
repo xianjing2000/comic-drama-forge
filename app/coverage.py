@@ -17,9 +17,15 @@
       修饰细节有多少字落入镜头）。正文字符总长 = 各正文单元长度之和，不再用含换行空行的
       原始文本长度做分母（旧口径分子只统计正文单元，分母含空白，即使 100% 承载也只能到 ~90%）。
    另附 literal_ratio（gram 字面措辞保留度）作为「原文措辞是否以画面/旁白原样保留」的诊断证据。
-4. 补生成触发（v3 压缩提炼）：仅当**情节级覆盖率低于阈值**时补生成，且最多 1 轮；
-   纯背景补叙/环境描写由判定层判 covered=true（不算遗漏），不再为凑字面覆盖率补出空镜。
-   阈值默认 0.70（原 0.95），只考核「情节单元」是否被承载，明确不覆盖纯环境描写。
+4. 补生成触发（v3 压缩提炼）：情节级或细节级覆盖率低于阈值即补生成；2026-10-10 起
+   默认最多 **3 轮**（原 1 轮）—— 用户要求「还原小说的所有细节」，一轮补不干净就继续补；
+   ⭐ 2026-10-10（用户要求「还原小说的所有细节」）：**环境描写与背景补叙也算原文内容**，
+   不再由判定层主动判 covered=true 放行 —— 它们同样是小说细节，应当落到镜头里
+   （可并入相邻镜头，不要求单独成镜）。仅为「凑字面覆盖率」补空镜仍然禁止。
+   ⭐ 2026-10-10（用户要求「还原小说的所有细节，不能过度改写」）：阈值默认由 0.70 提到 **0.98**
+   （env MJSCXT_COVERAGE_THRESHOLD 可覆盖），且**环境描写同样计入考核** ——
+   原口径「只考核情节单元、明确不覆盖纯环境描写」会让大量原文细节合法地留在剧本之外
+   （实测 96.5% 覆盖率下仍遗漏 7 条，而 96.5% 远高于旧阈值 0.70，从未触发补生成）。
 5. 结果落盘：output/continuity/<项目键>/episodes/第N集_覆盖率.json，
    同时写回剧本 script["metadata"]["coverage"]，供前端直接展示覆盖率与遗漏清单。
 """
@@ -549,7 +555,7 @@ def save_coverage_report(report: dict, continuity_dir: str = None, project_key: 
 
 
 def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=None,
-                       max_rounds: int = 1, use_llm: bool = True, events=None,
+                       max_rounds: int = 3, use_llm: bool = True, events=None,
                        continuity_dir: str = None, project_key: str = None,
                        save: bool = True, detail_threshold=None,
                        progress_cb=None) -> dict:

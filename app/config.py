@@ -519,7 +519,12 @@ def env_float(name: str, default: float, floor: float = 0.0, ceiling: float = 1.
 
 
 #: 原文覆盖率阈值（低于该值自动补生成缺失片段）；env MJSCXT_COVERAGE_THRESHOLD 可覆盖
-COVERAGE_THRESHOLD = env_float("MJSCXT_COVERAGE_THRESHOLD", 0.70, floor=0.0, ceiling=1.0)
+# ⚠️ 2026-10-10（用户要求「剧本要还原小说的所有细节，不能过度改写」）：
+#    原默认 0.70 —— 实测覆盖率 96.5% 远高于它，于是**从不触发补生成**，
+#    遗漏的 7 条原文单元就此留在剧本之外。改为 0.98：
+#    只有几乎完全覆盖才算过关，剩下的由多轮补生成（coverage.max_rounds）去补。
+#    仍可用 env MJSCXT_COVERAGE_THRESHOLD 覆盖（调低可恢复旧行为）。
+COVERAGE_THRESHOLD = env_float("MJSCXT_COVERAGE_THRESHOLD", 0.98, floor=0.0, ceiling=1.0)
 SCRIPT_DIR = os.path.join(PROJECT_OUTPUT_DIR, "scripts")
 ASSETS_DIR = os.path.join(PROJECT_OUTPUT_DIR, "assets")
 CHARACTERS_DIR = os.path.join(ASSETS_DIR, "characters")   # 角色资产（含多视图）
