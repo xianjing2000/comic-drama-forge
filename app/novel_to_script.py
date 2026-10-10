@@ -1540,6 +1540,65 @@ def estimate_shot_duration(shot: dict) -> float:
                      min(SHOT_DURATION_MAX, required_shot_duration(shot))) * 2) / 2.0
 
 
+def inject_surface_text_into_shots(shots: list, bible: dict) -> int:
+    """把物品 / 场景的 surface_text 回填进引用它们的镜头。
+
+    ⭐⭐ 2026-10-10 用户实测缺陷：「这份规则的内容怎么和物品的不一致」
+    ---------------------------------------------------------------
+    现象：分镜九宫格里那张《楼层安全守则》纸上写的字，与**物品资产**里按小说原文
+    还原的 surface_text 对不上（图上写「3. 请勿进入2704」+ 一堆错字，资产里是
+    「1. 本栋楼共四十七层…」的完整八条）。
+
+    根因是**断链**（已实测确认）：
+        items[].surface_text   → 已由 _restore_surface_text_from_novel 按原文精确还原
+        shots[].surface_text   → **21/21 镜全是 None**
+        comfyui_client:3525    → 出图时读的正是 shot 的 surface_text 字段，拿不到就自由发挥
+    也就是说：资产侧的文字一直是对的，只是**没传给出图那一层**。
+
+    这里按 shots 的 items_in_shot（已归一到 bible 名字）与镜头的场景归属精确回填，
+    让画面文字与资产逐字一致。**只填空缺，不覆盖**模型已给出的值。
+    返回回填的镜头数；任何异常都不影响主流程。
+    """
+    try:
+        item_map = {str(it.get("name") or "").strip(): str(it.get("surface_text") or "").strip()
+                    for it in (bible.get("items") or []) if isinstance(it, dict)}
+        scene_map = {str(sc.get("name") or "").strip(): str(sc.get("surface_text") or "").strip()
+                     for sc in (bible.get("scenes") or []) if isinstance(sc, dict)}
+        n = 0
+        for sh in shots or []:
+            if not isinstance(sh, dict):
+                continue
+            if str(sh.get("surface_text") or "").strip():
+                continue                      # 已有值 → 尊重，不覆盖
+            texts = []
+            for nm in (sh.get("items_in_shot") or []):
+                t = item_map.get(str(nm).strip())
+                if t:
+                    texts.append(t)
+            for key in ("location", "scene", "scene_name"):
+                t = scene_map.get(str(sh.get(key) or "").strip())
+                if t:
+                    texts.append(t)
+                    break
+            if texts:
+                sh["surface_text"] = "\n".join(dict.fromkeys(texts))
+                n += 1
+        if n:
+            logger.info("已把 %d 条物品/场景的确切文字（surface_text）回填进镜头，"
+                        "保证画面文字与资产一致", n)
+        return n
+    except Exception as e:  # noqa: BLE001 - 回填失败不影响出片
+        logger.warning("surface_text 回填镜头失败（忽略，不影响主流程）：%s", e)
+        return 0
+
+
+#: 跨场景合并的「极短镜」门槛（秒）：本镜内容低于它，才允许跨场景并入前一镜。
+#: 依据：无台词镜内容上限约 1.6s、短台词镜约 2~3s，都属「静态细节镜」；
+#: 超过 3s 的镜头已能独立成镜，跨场景合并会破坏叙事节奏。可用 env 覆盖。
+_CROSS_SCENE_MERGE_MAX_SEC = float(
+    __import__("os").environ.get("MJSCXT_CROSS_SCENE_MERGE_MAX_SEC", "3.0") or 3.0)
+
+
 def merge_underfilled_shots(shots: list) -> dict:
     """把「内容撑不满单镜下限」的镜头并入相邻**同场景**镜头（2026-10-10 用户口径 C）。
 
@@ -1577,14 +1636,27 @@ def merge_underfilled_shots(shots: list) -> dict:
         if out:
             prev = out[-1]
             _need = required_shot_duration(s)
-            if _need < SHOT_DURATION_MIN and _norm_loc(prev) == _norm_loc(s):
+            # ⭐⭐ 2026-10-10 用户选方案 A（放宽合并）：「静态画面不许单独成镜，内容不足的必须合并」。
+            #   原实现要求**同 location** 才合并 —— 实测第 1 集 21 镜里 18 镜内容不足 5 秒（86%），
+            #   但因场景切得碎，「同场景」这道闸把绝大多数挡在外面，合并形同虚设。
+            #   现改为分级门槛（既放宽、又不把两场戏黏死）：
+            #     · 同场景：内容不足即合并（只要合并不超 SHOT_DURATION_MAX）；
+            #     · 跨场景：仅当本镜**极短**（< _CROSS_SCENE_MERGE_MAX_SEC，默认 3.0s，
+            #       即「只拍地砖影子 / 纸面特写」这类静态细节镜）才尝试 —— 跨场景只收走
+            #       真正的「细节镜」，并在下方用更严的时长上限兜住。
+            _same_loc = _norm_loc(prev) == _norm_loc(s)
+            _can_try = _need < SHOT_DURATION_MIN and (
+                _same_loc or _need < _CROSS_SCENE_MERGE_MAX_SEC)
+            if _can_try:
                 # 合并后的内容量：把两镜的 description / dialogue 合起来复算
                 probe = dict(prev)
                 _d1 = str(prev.get("description") or "").strip()
                 _d2 = str(s.get("description") or "").strip()
                 probe["description"] = "；".join(x for x in (_d1, _d2) if x)
                 probe["dialogue"] = _merge_dialogue(prev.get("dialogue"), s.get("dialogue"))
-                if required_shot_duration(probe) <= SHOT_DURATION_MAX:
+                # 跨场景用更严的上限（不把两场戏黏成一个长镜）
+                _cap = SHOT_DURATION_MAX if _same_loc else (SHOT_DURATION_MIN + 0.5)
+                if required_shot_duration(probe) <= _cap:
                     prev["description"] = probe["description"]
                     prev["dialogue"] = probe["dialogue"]
                     # 合并侧的高价值字段：高潮节拍 / 角色 / 物品取并集
@@ -3676,6 +3748,9 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
             logger.warning(f"第 {chunk['index']} 子块分镜失败，已兜底 {len(fb)} 镜：{e}")
 
     shots = _norm_shots(all_shots, bible, 1)
+    # ⭐ 2026-10-10：把资产级的确切文字（物品 surface_text / 场景告示）回填进镜头，
+    #   否则出图侧拿不到 shot 的 surface_text 字段 → 模型自己编字（用户实测缺陷）。
+    inject_surface_text_into_shots(shots, bible)
 
     # ---- 单集镜头数：不再截断（2026-10-09 用户口径）----
     # 曾经这里会把超过 MAX_SHOTS_PER_EPISODE(78) 的镜头**硬截断**（丢尾部情节）。

@@ -38,14 +38,36 @@ class TestMergeUnderfilled(unittest.TestCase):
         self.assertIn("门缝光带", r["shots"][0]["description"])
         self.assertIn("抬手敲门", r["shots"][0]["description"])
 
-    def test_does_not_merge_across_scenes(self):
-        """跨场景不合并 —— 会把两场戏黏在一起。"""
+    def test_merges_very_short_across_scenes(self):
+        """⭐ 方案 A（2026-10-10 用户选）：**极短**的细节镜跨场景也要合并。
+
+        原实现要求同 location 才合并 —— 实测第 1 集 21 镜里 18 镜内容不足 5 秒（86%），
+        但场景切得碎，「同场景」这道闸把绝大多数挡在外面，合并形同虚设。
+        现改为分级：极短镜（<3s，即「纸面特写」这类静态细节）跨场景也并掉。
+        """
         shots = [
             _shot(shot_id="1", location="走廊", description="羡进走进走廊"),
             _shot(shot_id="2", location="办公室", description="纸面特写"),
         ]
         r = self.N.merge_underfilled_shots(shots)
-        self.assertEqual(r["merged"], 0)
+        self.assertEqual(r["merged"], 1, "极短的跨场景细节镜应被合并")
+        self.assertEqual(len(r["shots"]), 1)
+
+    def test_does_not_merge_long_shot_across_scenes(self):
+        """跨场景的**长**镜头不合并 —— 它已能独立成镜，硬并会把两场戏黏在一起。"""
+        from novel_to_script import required_shot_duration
+        long_shot = _shot(
+            shot_id="2", location="办公室",
+            description="羡进在办公室里与同事交谈很久，气氛逐渐紧张起来" * 3,
+            dialogue=[{"speaker": "A", "text": "我们得谈谈那件事，关于昨天晚上的情况。"}])
+        self.assertGreaterEqual(required_shot_duration(long_shot), 3.0,
+                                "本用例需要一个内容 >=3s 的跨场景镜")
+        shots = [
+            _shot(shot_id="1", location="走廊", description="羡进走进走廊"),
+            long_shot,
+        ]
+        r = self.N.merge_underfilled_shots(shots)
+        self.assertEqual(r["merged"], 0, "跨场景的长镜头不该被合并")
         self.assertEqual(len(r["shots"]), 2)
 
     def test_does_not_merge_when_result_exceeds_max(self):
