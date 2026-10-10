@@ -14,6 +14,11 @@ ai_chat / project_store / style_kit 均已核对不导入 routes._shared。
 from __future__ import annotations
 
 import json
+# ⭐ 2026-10-10 补：本模块从 routes/_shared.py 抽出时漏了 os ——
+#   _load_legacy_flat_script 用 os.listdir / os.path，而它**在函数内部**，
+#   模块级 import 测试抓不到，只有真正读剧本时才抛 NameError：
+#   「剧本读取失败 → 前端剧本概览显示暂无剧集数据」。
+import os
 
 import novel_to_script
 import pipeline
