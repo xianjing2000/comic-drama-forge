@@ -1471,7 +1471,7 @@
     "update_plan": "Update production plan",
     "upscale_video": "Upscale video"
   },
-  "navComfyUI": "Models",
+  "navComfyUI": "Model Check",
   "navLogs": "Logs",
   "review": {
     "title": "Review Suite",

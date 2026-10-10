@@ -1471,7 +1471,7 @@
     "update_plan": "修改生产计划",
     "upscale_video": "视频超分"
   },
-  "navComfyUI": "生成模型",
+  "navComfyUI": "模型检测",
   "navLogs": "运行日志",
   "review": {
     "title": "审片",

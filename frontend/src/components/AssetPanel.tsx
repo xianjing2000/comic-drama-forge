@@ -72,30 +72,10 @@ export default function AssetPanel({ project, className }: { project: string; cl
 
   return (
     <div className={cx('flex flex-col gap-3', className)}>
-      <Section icon={<Mic className="h-4 w-4" />} title="配音环境自检"
-        right={<Button size="sm" variant="ghost" onClick={() => void load()}><RefreshCw className="h-3.5 w-3.5" /></Button>}>
-        <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-          <span className={cx('flex items-center gap-1.5', env?.comfyui_online ? 'text-success' : 'text-warning')}>
-            {env?.comfyui_online ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
-            ComfyUI {env?.comfyui_online ? '在线' : '离线'}
-          </span>
-          <span className="text-ink-3">模型 {found}/{models.length} 就绪</span>
-          {speakers.length > 0 ? <Badge variant="info">{speakers.length} 个音色</Badge> : null}
-          {env?.available ? <Badge variant="success">可配音</Badge> : <Badge variant="danger">不可用</Badge>}
-        </div>
-        {models.length > 0 ? (
-          <div className="flex flex-col gap-1">
-            {models.map((m, i) => (
-              <div key={i} className="flex items-center gap-2 text-xs">
-                <span className={cx('h-1.5 w-1.5 shrink-0 rounded-full', m.found ? 'bg-success' : 'bg-danger')} />
-                <span className="w-56 shrink-0 truncate text-ink-2">{m.name}</span>
-                <span className="min-w-0 flex-1 truncate text-ink-3">{m.desc}</span>
-                {(m.matched || []).length > 0 ? <span className="shrink-0 text-ink-3">命中 {m.matched!.length}</span> : null}
-              </div>
-            ))}
-          </div>
-        ) : <div className="text-xs text-ink-3">未返回模型清单。</div>}
-      </Section>
+      {/* ⚠️ 2026-10-10：「配音环境自检」区块已**移动**到「模型检测」页
+       *  （用户要求把配音自检与超分自检集中到同一页，作为统一的环境与模型可用性入口）。
+       *  原实现在 ComfyUIPage 的 VoiceEnvCheck 组件里，数据源同样是 /api/tts/env，
+       *  口径未另立一份。此处只保留本面板独有的「关键帧清单」。 */}
 
       {/* ⚠️ 2026-10-09 已删除「可用音色」区块 —— 与 AudioTab 重复：
        *  AudioTab 已完整实现音色库管理（ttsApi.voiceBank / Upload / Preview / Delete）
