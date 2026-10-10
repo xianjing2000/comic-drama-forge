@@ -751,10 +751,33 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
     # 把整个产物根误搬进回收站。
     loose_purge = {"purged": [], "error": None}
     try:
+        # ⭐ 2026-10-10 排查修复：保留名此前是**手工枚举**的 11 个，而 output/ 根下
+        #   实际有 25+ 个系统目录 —— 漏掉的（asset_lib / analytics / caption_verify /
+        #   video / workflows_export）一旦与项目名撞名，本项目删除会把**跨项目共享**
+        #   的资源当产物移进回收站（asset_lib 是跨项目角色资产库，误删会毁掉所有
+        #   项目的复用资产）。改为**动态推导 + 兜底清单**，新增系统目录自动受保护：
+        #     ① project_kind_roots() 里每一类的根目录名；
+        #     ② config 中所有位于 PROJECT_OUTPUT_DIR 之下的目录常量名；
+        #     ③ 少量不在上述两处、但确实直挂 output 根的名字。
         _reserved = {os.path.basename(os.path.normpath(d)) for _, d in project_kind_roots()}
-        _reserved.update({"projects", "novels", "ai_chat", "lessons", "memory",
-                          "assets", "comic_drama", "temp", ".leases",
-                          "_te3d_render", "_trash"})
+        try:
+            _out_root = os.path.abspath(PROJECT_OUTPUT_DIR)
+            for _cn in dir(config):
+                if _cn.startswith('_'):
+                    continue
+                _cv = getattr(config, _cn, None)
+                if not isinstance(_cv, str) or not _cv:
+                    continue
+                _ap = os.path.abspath(_cv)
+                if _ap.startswith(_out_root + os.sep):
+                    _reserved.add(os.path.relpath(_ap, _out_root).split(os.sep)[0])
+        except Exception as _re:  # noqa: BLE001 - 推导失败退回下方兜底清单
+            logger.warning("推导 output 保留目录名失败（回落兜底清单）：%s", _re)
+        _reserved.update({
+            "projects", "novels", "ai_chat", "lessons", "memory", "comic_drama",
+            "assets", "asset_lib", "analytics", "caption_verify", "workflows_export",
+            "video", "temp", ".leases", "_te3d_render", "_trash",
+        })
         _seen_loose = set()
         for _n in _project_alias_names(rec):
             if not _n or _n in _reserved or _n in _seen_loose:
