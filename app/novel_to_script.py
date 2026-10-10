@@ -1135,49 +1135,49 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     # 故可能为 None 的取值（chunk_title / outline_summary）先按 f-string 语义 str() 化，
     # 保证极端输入下两条路径仍逐字一致；其余取值均带 or ''/默认值兜底或恒为 str/int。
     _tpl = prompt_templates.load("script_generate")
-    if _tpl:
-        prompt = prompt_templates.render(
-            "script_generate",
-            rules=REWRITE_RULES,
-            drama_title=bible.get('title') or '',
-            chunk_title=str(chunk.get('title')),
-            chunk_index=chunk['index'],
-            chunk_total=chunk['total'],
-            target_shots=shots_target,
-            shots_cap=shots_cap,
-            shots_min_text=_shots_min_text,
-            shots_range_text=_shots_range_text,
-            shots_targeting_text=_shots_targeting_text,
-            style=bible.get('style') or '',
-            style_guide=(_ctx_block(continuity_ctx, 'style_guide_text')
-                         or (bible.get('production_notes') or {}).get('style_guide') or ''),
-            prev_block=_ctx_line(continuity_ctx, 'prev_block'),
-            bible_block=_ctx_line(continuity_ctx, 'bible_block'),
-            contract_block=_ctx_line(continuity_ctx, 'contract_block'),
-            style_block=_ctx_line(continuity_ctx, 'style_block'),
-            camera_block=_ctx_line(continuity_ctx, 'camera_block'),
-            preflight_block=_ctx_line(continuity_ctx, 'preflight_block'),
-            prev_tail=prev_tail,
-            char_brief_json=json.dumps(char_brief, ensure_ascii=False),
-            item_brief_json=json.dumps(item_brief, ensure_ascii=False),
-            scene_brief_json=json.dumps(scene_brief, ensure_ascii=False),
-            chunk_text=chunk.get('text') or '',
-            outline_summary=str(outline.get('summary', '')),
-            key_beats_json=json.dumps(outline.get('key_beats') or [], ensure_ascii=False),
-            shot_type_count=len(SHOT_TYPES),
-            shot_type_enum=_SHOT_TYPE_ENUM_ZH,
-            speech_budget=speech_budget,
-        )
-        # ⚠️ 2026-10-10（第三步：消除代码兜底副本，用户要求「统一配置」）：
-        #    此处原保留 62 行 f-string，与 app/prompts/script_generate.txt 逐字重复 ——
-        #    它是「改一处漏一处」的最后来源（历史上确实漏改过多次）。
-        #    实测它还是**死代码**：prompt_templates.load() 内部会回落到
-        #    _DEFAULT_SCRIPT_GENERATE，_tpl 永不为空，这个分支从未被执行。
-        #    现直接删除，并改为明确报错 —— 模板不可用时宁可让该集停下来，
-        #    也不要静默用一份可能与外部模板不一致的旧文本继续生产。
+    if not _tpl:
         raise ScriptTemplateError(
             "提示词模板 script_generate 不可用（app/prompts/script_generate.txt "
             "缺失或为空，且代码内兜底未注册）。请检查安装包完整性后重试。")
+    prompt = prompt_templates.render(
+        "script_generate",
+        rules=REWRITE_RULES,
+        drama_title=bible.get('title') or '',
+        chunk_title=str(chunk.get('title')),
+        chunk_index=chunk['index'],
+        chunk_total=chunk['total'],
+        target_shots=shots_target,
+        shots_cap=shots_cap,
+        shots_min_text=_shots_min_text,
+        shots_range_text=_shots_range_text,
+        shots_targeting_text=_shots_targeting_text,
+        style=bible.get('style') or '',
+        style_guide=(_ctx_block(continuity_ctx, 'style_guide_text')
+                     or (bible.get('production_notes') or {}).get('style_guide') or ''),
+        prev_block=_ctx_line(continuity_ctx, 'prev_block'),
+        bible_block=_ctx_line(continuity_ctx, 'bible_block'),
+        contract_block=_ctx_line(continuity_ctx, 'contract_block'),
+        style_block=_ctx_line(continuity_ctx, 'style_block'),
+        camera_block=_ctx_line(continuity_ctx, 'camera_block'),
+        preflight_block=_ctx_line(continuity_ctx, 'preflight_block'),
+        prev_tail=prev_tail,
+        char_brief_json=json.dumps(char_brief, ensure_ascii=False),
+        item_brief_json=json.dumps(item_brief, ensure_ascii=False),
+        scene_brief_json=json.dumps(scene_brief, ensure_ascii=False),
+        chunk_text=chunk.get('text') or '',
+        outline_summary=str(outline.get('summary', '')),
+        key_beats_json=json.dumps(outline.get('key_beats') or [], ensure_ascii=False),
+        shot_type_count=len(SHOT_TYPES),
+        shot_type_enum=_SHOT_TYPE_ENUM_ZH,
+        speech_budget=speech_budget,
+    )
+    # ⚠️ 2026-10-10（第三步：消除代码兜底副本，用户要求「统一配置」）：
+    #    此处原保留 62 行 f-string，与 app/prompts/script_generate.txt 逐字重复 ——
+    #    它是「改一处漏一处」的最后来源（历史上确实漏改过多次）。
+    #    实测它还是**死代码**：prompt_templates.load() 内部会回落到
+    #    _DEFAULT_SCRIPT_GENERATE，_tpl 永不为空，这个分支从未被执行。
+    #    现直接删除，并改为明确报错 —— 模板不可用时宁可让该集停下来，
+    #    也不要静默用一份可能与外部模板不一致的旧文本继续生产。
     label = f"shots#{chunk.get('index')}"
     hit = _cache_get(cache_dir, "shots", prompt, events, label)
     if hit is not None and isinstance(hit.get("shots"), list) and hit["shots"]:
