@@ -11,7 +11,11 @@ sys.path.insert(0, 'app')
 # 自动发现：app/ 下所有 *_helpers.py + workers 包（不再硬编码，避免漏检新模块）
 MODS = sorted(f[:-3] for f in os.listdir('app')
               if f.endswith('_helpers.py') or f == 'asset_refs.py')
-MODS += ['workers', 'workers.audio', 'workers.episodes', 'workers.screenplay']
+# routes/ 下的蓝图也必须检查（2026-10-11 教训：autonomous 蓝图装饰器丢失，
+# 路由从 243 掉到 234，而旧验证器只查 app/*_helpers.py，完全没发现）
+ROUTE_MODS = ['routes.' + f[:-3] for f in sorted(os.listdir('app/routes'))
+              if f.endswith('.py') and not f.startswith('_')]
+MODS = MODS + ROUTE_MODS
 
 print('  ==== ① 真实 import ====')
 fail = []
