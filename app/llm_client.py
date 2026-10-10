@@ -109,7 +109,13 @@ MIN_TOKENS_WHEN_REASONING_EFFORT = 2048
 #   max_tokens 32768 → ✅ finish=stop，正文 7917 字符（思考未复现，走缓存）
 # 即该任务思考水位 ≈16K token。故「只吐思考」自救必须**一步跨到 ≥16K**，
 # 而不是按 2K 阶梯小步试探（每步要耗 2-7 分钟，等于把用户时间烧光）。
-REASONING_ONLY_TOKEN_FLOOR = 16384
+# ⚠️ 2026-10-10 修正为 24576：上方实测表写得清清楚楚 —— 16384 仍然「只有思考、正文为空」，
+#    24576 才是首个成功档（思考 15793 / 正文 14291）。原先把它设成 16384，导致
+#    「只吐思考」自救时抬到这个值就**原地不动**，随后被下游误判成「模型/服务端异常」
+#    并快速失败（用户实测：日志反复出现「max_tokens=19384 已达上限，停止无意义提额」）。
+#    用户明确要求「模型在正常思考，要无视思考内容、不要反复重试」——
+#    所以水位必须一步到位给足，而不是靠一轮轮失败去试探。
+REASONING_ONLY_TOKEN_FLOOR = 24576
 # "chat_template_kwargs"（默认，zai/vLLM 风格）| "top_level"（部分网关）
 REASONING_EFFORT_STYLE = "chat_template_kwargs"
 # 思考档位降级顺序（max → high → low）。
@@ -916,8 +922,16 @@ class LLMClient:
                 downgraded = False
                 if raised <= cur and _next_tokens(cur) <= cur and self.reasoning_effort:
                     downgraded = _downgrade_reasoning_effort()
-                nxt = max(raised, _next_tokens(max(cur, _thinking_floor())) if downgraded or raised > cur
-                          else cur)
+                # ⚠️ 2026-10-10 修复「明明还能提额却判定为异常」：
+                #    原表达式在 raised == cur（已在思考水位之上）且 downgraded 为假时，
+                #    三元表达式走 else 分支 → nxt 回落成 cur → 下游 L923 判「nxt <= cur」
+                #    → 误判「提额到顶」并快速失败。实测：cur=19384 时 _next_tokens 本可
+                #    给到 24576（阶梯里有），却因为这条分支根本没被调用。
+                #    现在改成无条件取三者最大值：水位、阶梯下一档、必要时还叠一次。
+                _candidates = [int(raised or 0), int(_next_tokens(cur) or 0)]
+                if downgraded:
+                    _candidates.append(_next_tokens(max(cur, _thinking_floor())))
+                nxt = max(_candidates + [cur])
                 nxt = min(nxt, MAX_TOKENS_CEILING)
                 # ③ 额度已顶到上限、档位也降无可降 → 才是真的模型/服务端异常，快速失败上浮。
                 if nxt <= cur and not downgraded:
