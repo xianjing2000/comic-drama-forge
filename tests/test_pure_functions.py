@@ -23,6 +23,8 @@ import comfyui_client as CC  # noqa: E402
 import storyboard_helpers as SB  # noqa: E402
 import prompt_qc as Q  # noqa: E402
 import style_kit as S  # noqa: E402  （别名，供新增用例使用）
+import shot_key as SK  # noqa: E402
+import failure_codes as FC  # noqa: E402
 
 
 class TestRoundToMultiple(unittest.TestCase):
@@ -192,6 +194,59 @@ class TestSanitizePromptEn(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(S.sanitize_prompt_en(''), '')
+
+class TestShotKey(unittest.TestCase):
+    """shot_key：镜头标识的归一与序号解析（全项目共用，改坏影响面极大）。"""
+
+    def test_norm_is_case_and_separator_insensitive(self):
+        self.assertEqual(SK.norm_shot_key('shot_01'), '1')
+        self.assertEqual(SK.norm_shot_key('SHOT-1'), '1')
+        self.assertEqual(SK.norm_shot_key('Shot_007'), '7')
+
+    def test_norm_empty(self):
+        self.assertEqual(SK.norm_shot_key(''), '')
+
+    def test_shot_seq_extracts_number(self):
+        self.assertEqual(SK.shot_seq('shot_03'), 3)
+        self.assertEqual(SK.shot_seq('shot_12'), 12)
+
+    def test_shot_seq_falls_back_to_default(self):
+        """解析不出序号时返回调用方给的 fallback（不是 None）。"""
+        self.assertEqual(SK.shot_seq('abc', 9), 9)
+        self.assertEqual(SK.shot_seq('', 9), 9)
+
+    def test_legacy_returns_none_when_unparsable(self):
+        """⚠️ legacy_shot_seq 与 shot_seq 的**语义差异**：解析不出返回 None。
+
+        两者名字相近却行为不同，是最容易被互相替换而改坏的地方，故各锁一条。"""
+        self.assertEqual(SK.legacy_shot_seq('shot_05'), 5)
+        self.assertIsNone(SK.legacy_shot_seq('zz'))
+
+
+class TestFailureCodes(unittest.TestCase):
+    """failure_codes：把异常文本归类成稳定错误码（供前端与统计使用）。"""
+
+    def test_classify_timeout(self):
+        self.assertEqual(FC.classify('TimeoutError: timed out'), 'F-TIMEOUT')
+
+    def test_classify_reference_missing(self):
+        self.assertEqual(FC.classify('ENOENT: no such file'), 'F-REF-MISSING')
+
+    def test_unrecognized_falls_back_to_unknown(self):
+        self.assertEqual(FC.classify(''), 'F-UNKNOWN')
+        self.assertEqual(FC.classify('NameError: name x is not defined'), 'F-UNKNOWN')
+        self.assertEqual(FC.classify('HTTP 401 Unauthorized'), 'F-UNKNOWN')
+
+    def test_is_known_takes_a_code_not_a_keyword(self):
+        """⚠️ is_known 的入参是**错误码**（F-*），不是关键词 ——
+        传 'timeout' 会得到 False，这是设计如此而非缺陷。"""
+        self.assertTrue(FC.is_known('F-TIMEOUT'))
+        self.assertFalse(FC.is_known('timeout'))
+        self.assertFalse(FC.is_known(''))
+
+    def test_unknown_const_is_exported(self):
+        self.assertEqual(FC.UNKNOWN, 'F-UNKNOWN')
+        self.assertIn('F-TIMEOUT', FC.CODES)
 
 if __name__ == '__main__':
     unittest.main()
