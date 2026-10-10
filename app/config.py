@@ -468,7 +468,12 @@ def norm_video_mode(value, default: str = "episode") -> str:
 # 新项目默认配置（每项目一份，落在 output/projects/<项目ID>/config.json）
 PROJECT_DEFAULT_CONFIG = {
     "style": "3D动漫渲染",              # 创作风格
-    "episodes": 1,                      # 目标集数
+    # ⭐ 2026-10-10 用户纠正「一章节对应一集」：本字段的语义是**选中哪几章**，
+    #   与 autopilot.PLAN_DEFAULTS["episodes"]（"all" 或 [1,2,3]）**同一语义**。
+    #   此前这里写成 1 且注释是「目标集数」，于是有人把它当「总集数」设成 10 ——
+    #   而产品口径是**一章 = 一集**（集数 = 选中章节数，14 章就是 14 集），
+    #   根本没有「目标集数」这个概念。默认 "all" = 全部章节。
+    "episodes": "all",
     # ⭐ 2026-10-10 用户指出「同一个值散在 5 处、改一处漏四处」后的统一：
     #   **镜数的唯一正式名是 target_shots**（配置中心 key = novel_default_shots）。
     #   此前这里还有一个 "shots_per_episode": 12 —— 与 target_shots 语义完全相同、值却

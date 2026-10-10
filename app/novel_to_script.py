@@ -3492,7 +3492,12 @@ def episode_project_name(novel_name: str, episode_no) -> str:
 
 
 def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter: dict,
-                              style: str = "3D动漫渲染", target_shots: int = 12,
+                              style: str = "3D动漫渲染",
+                                # ⭐ 2026-10-10：默认值由 12 改为 0（不预设）。
+                                # 调用方（pipeline）会显式传 cfg 里的值，此处只是兜底；
+                                # 留 12 会让「没传值」的路径又回到固定 12 镜，与
+                                # 「按章节内容密度决定」的口径冲突。
+                                target_shots: int = 0,
                               episode_no: int = 1, chunk_chars: int = CHAPTER_CHUNK_CHARS,
                               max_subchunks: int = CHAPTER_MAX_SUBCHUNKS,
                               progress_cb=None, continuity_ctx: dict = None,
