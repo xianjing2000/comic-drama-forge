@@ -8,9 +8,10 @@ import os, sys, io, ast, builtins
 os.environ.setdefault('MJSCXT_DATA_DIR', os.path.join(os.environ['APPDATA'], 'mjscxt-desktop', 'mjscxt-data'))
 sys.path.insert(0, 'app')
 
-MODS = ['asset_refs', 'qc_helpers', 'keyframe_helpers', 'artifact_helpers', 'lesson_helpers',
-        'dub_helpers', 'style_helpers', 'system_helpers',
-        'workers.audio', 'workers.episodes', 'workers.screenplay', 'workers']
+# 自动发现：app/ 下所有 *_helpers.py + workers 包（不再硬编码，避免漏检新模块）
+MODS = sorted(f[:-3] for f in os.listdir('app')
+              if f.endswith('_helpers.py') or f == 'asset_refs.py')
+MODS += ['workers', 'workers.audio', 'workers.episodes', 'workers.screenplay']
 
 print('  ==== ① 真实 import ====')
 fail = []

@@ -231,6 +231,11 @@ app.register_blueprint(scenes_bp)
 from routes.keyframes import keyframes_bp
 app.register_blueprint(keyframes_bp)
 
+# 2026-10-11 助手下沉：混音助手 已迁至 mix_helpers.py。
+from mix_helpers import (  # noqa: F401, E402
+    _mix_manifest, _mix_prepare, _mix_resolve_video,
+    _mix_segments_dir)
+
 # 2026-10-11 助手按域下沉（第六批）：关键帧助手已迁至 keyframe_helpers.py。
 from keyframe_helpers import (  # noqa: F401, E402
     _ep_of_script, _keyframe_prompt_preflight, _keyframe_qc_verifier,
@@ -7649,77 +7654,10 @@ from job_state import mix_tasks  # noqa: F401  2026-10-11 归位到 job_state
 from job_state import mix_lock  # noqa: F401  2026-10-11 归位到 job_state
 
 
-def _mix_resolve_video(data: dict, project_name: str) -> str:
-    """定位待合成的成片：显式 video_path/video_url 优先，否则在项目成片目录自动匹配最新 mp4"""
-    if (data.get("video_path") or "").strip() or (data.get("video_url") or "").strip():
-        return _upscale_resolve_video(data)
-    cands = []
-    for d in project_store.project_dirs(FINAL_DIR, project_name):
-        if not os.path.isdir(d):
-            continue
-        for name in os.listdir(d):
-            if name.lower().endswith(".mp4"):
-                p = os.path.join(d, name)
-                cands.append((os.path.getmtime(p), p))
-    if not cands:
-        raise DubMixError(
-            "未找到成片视频：请先在步骤6完成成片合成，或显式提供 video_path / video_url")
-    cands.sort(reverse=True)
-    return cands[0][1]
 
 
-def _mix_segments_dir(project_name: str, episode: int = 0) -> str:
-    """定位该集（episode 给定）或该项目的镜头分段视频目录（用于按真实分段时长对齐时间轴）
-
-    B-10 P1-6：带集号过滤。第 2 集起不再取到第 1 集素材，避免时间轴/成片源系统性错配。
-    优先匹配该集专属目录（``<key>_第N集`` 或 ``epNN`` 子目录），找不到再回退到项目级目录。
-    """
-    ep_tag = f"ep{int(episode):02d}" if episode else ""
-    best, best_key = "", (-1, 0)
-    # 优先找该集专属目录（第 2 集起视频通常落在 <项目键>_第N集/ 或 epNN/ 子目录）
-    ep_dir = ""
-    if episode:
-        for cand in (os.path.join(VIDEOS_DIR, project_name, ep_tag),
-                     os.path.join(VIDEOS_DIR, f"{project_name}_第{episode}集")):
-            if os.path.isdir(cand):
-                ep_dir = cand
-                break
-    if ep_dir:
-        # 该集目录直接采用
-        vids = [f for f in os.listdir(ep_dir) if f.lower().endswith(".mp4")]
-        if vids:
-            return ep_dir
-    # 回退：项目级目录（第 1 集或整集模式）
-    for d in project_store.project_dirs(VIDEOS_DIR, project_name):
-        if not os.path.isdir(d):
-            continue
-        vids = [f for f in os.listdir(d) if f.lower().endswith(".mp4")]
-        if not vids:
-            continue
-        key = (len(vids), max(os.path.getmtime(os.path.join(d, f)) for f in vids))
-        if key > best_key:
-            best, best_key = d, key
-    return best
 
 
-def _mix_manifest(project_name: str, episode: int = 0) -> dict:
-    """读取配音清单（优先指定集数，其次最新）"""
-    out_dir = os.path.join(DUB_DIR, project_name)
-    if not os.path.isdir(out_dir):
-        raise DubMixError(f"尚未生成配音（目录不存在）：{out_dir}")
-    if episode:
-        p = os.path.join(out_dir, f"ep{int(episode):02d}_dub_manifest.json")
-        if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
-                return {"manifest": json.load(f), "path": p}
-    cands = [os.path.join(out_dir, f) for f in os.listdir(out_dir)
-             if f.endswith("_dub_manifest.json")]
-    if not cands:
-        raise DubMixError("未找到配音清单（*_dub_manifest.json），请先完成配音合成")
-    cands.sort(key=os.path.getmtime, reverse=True)
-    p = cands[0]
-    with open(p, "r", encoding="utf-8") as f:
-        return {"manifest": json.load(f), "path": p}
 
 
 
@@ -7742,83 +7680,6 @@ def _isolate_shot_sfx(video_path: str, project: str, episode, shot_id) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-def _mix_prepare(data: dict) -> dict:
-    """公共准备：解析项目 / 视频 / 剧本 / 配音清单 / 时间轴 / 逐句条目（不合成）"""
-    # P2-T2：mix 的 project 解析唯一事实源在 _mix_prepare（被 /mix/plan 与 /mix/generate 共用）。
-    # 缺省/越界 project_name → 抛 DubMixError（两条路由均已 catch 并回 400），
-    # 不再静默回落共享 'project' 命名空间造成串项目。前端契约必填。
-    project_name, _mix_err = _project_or_400((data.get('project_name') or '').strip())
-    if _mix_err is not None:
-        raise DubMixError("缺少 project_name")
-    video_path = _mix_resolve_video(data, project_name)
-
-    resolved = _dub_resolve_script(dict(data, project_name=project_name))
-    script = resolved["script"]
-    episode = int(data.get('episode') or script.get('episode_no')
-                  or (script.get('metadata') or {}).get('episode_no') or 0)
-
-    mf = _mix_manifest(project_name, episode)
-    manifest = mf["manifest"]
-    episode = episode or int(manifest.get("episode") or 1)
-
-    seg_dir = _mix_segments_dir(project_name, episode)
-    timeline = shot_timeline(script, videos_dir=seg_dir)
-
-    params = dict(MIX_DEFAULT_PARAMS)
-    params.update(data.get('params') or {})
-    mode = (data.get('mode') or params.get("mode") or "timeline").strip()
-
-    lines = [ln for ln in (manifest.get("lines") or []) if ln.get("ok") and ln.get("out_path")]
-    if mode == "concat":
-        merged = manifest.get("merged_audio") or ""
-        if not merged or not os.path.exists(merged):
-            raise DubMixError("concat 模式需要整集合并音轨，但配音清单中没有有效 merged_audio")
-        entries = [{"line_id": "merged", "shot_id": None, "character": "",
-                    "text": "", "audio_path": os.path.abspath(merged),
-                    "audio_dur": float((manifest.get("merged_info") or {}).get("duration") or 0),
-                    "start": 0.0, "fit_ratio": 1.0}]
-        warnings = ["concat 模式：整集音轨从 0 秒顺次铺设，不做逐镜头对齐"]
-    else:
-        built = build_entries(lines, timeline, params, mode=mode)
-        entries, warnings = built["entries"], list(built["warnings"])
-    if not entries:
-        raise DubMixError("没有可用的配音音频：请先完成配音合成，或检查配音文件是否存在")
-
-    # ---- 音效轨：H3 原生音效经人声分离后垫底（2026-09-17 新增）----
-    # 为什么需要：H3 是音视频联合模型，原音轨里既有打斗/雨声等音效，也有它自己生成的
-    # 说话声。直接保留原音轨会让两套人声重叠；完全丢弃又会让成片没有任何音效。
-    # 折中：用 sfx_isolate 分离出「纯音效」，作为独立条目按同一条时间轴垫底。
-    sfx_entries = []
-    if H3_SFX_ISOLATE and mode != "concat":
-        try:
-            import sfx_isolate
-            sfx_entries = sfx_isolate.build_sfx_entries(
-                project_name, episode, timeline,
-                volume=float(params.get("original_audio_volume") or 0.3))
-        except Exception as e:                                  # noqa: BLE001
-            warnings.append(f"音效轨装配失败（本集跳过音效）：{type(e).__name__}: {e}")
-    if sfx_entries:
-        entries = list(entries) + sfx_entries
-        # 已用「分离后的纯音效」→ 关掉视频原音轨，否则人声会回来、音效也会叠双份
-        params["keep_original_audio"] = False
-        warnings.append(f"已叠加 {len(sfx_entries)} 条镜头音效（H3 音轨已做人声分离，"
-                        f"垫底音量 {params.get('original_audio_volume')}）")
-    elif H3_SFX_ISOLATE and params.get("keep_original_audio"):
-        warnings.append("未找到可用的分离音效轨，将直接使用视频原音轨垫底"
-                        "（其中可能含 H3 生成的说话声）")
-
-    vinfo = probe_video_info(video_path)
-    if vinfo.get("duration") and entries[-1].get("end", 0) > float(vinfo["duration"]) + 0.5:
-        warnings.append(
-            f"末句结束 {entries[-1].get('end')}s 超出视频时长 {vinfo.get('duration')}s，超出部分会被截断")
-
-    return {
-        "project_name": project_name, "video_path": video_path, "video_info": vinfo,
-        "script_path": resolved["script_path"], "script_source": resolved["source"],
-        "episode": episode, "manifest_path": mf["path"], "manifest": manifest,
-        "segments_dir": seg_dir, "timeline": timeline,
-        "entries": entries, "warnings": warnings, "mode": mode, "params": params,
-    }
 
 
 
