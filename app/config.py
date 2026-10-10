@@ -26,7 +26,27 @@ def _norm_path(p: str) -> str:
 
 # ===================== ComfyUI 配置 =====================
 COMFYUI_URL = _env("COMFYUI_URL", "http://127.0.0.1:8188")
-MJSCXT_COMFYUI_DIR = _env("MJSCXT_COMFYUI_DIR", "D:\\ComfyUI_portable_TE_v260619\\ComfyUI")
+def _auto_comfyui_dir() -> str:
+    """自动检测 ComfyUI 安装目录（2026-10-10 用户需求：用户安装位置可能与开发机不同）。
+
+    ⚠️ 此前这里写死的是**开发机路径**，在用户机器上通常不存在 —— 于是「心跳重启
+    ComfyUI」必然失败（日志：找不到启动脚本），重启失败又会让生产卡死。改为运行时检测：
+
+      环境变量 MJSCXT_COMFYUI_DIR → 磁盘缓存 → 运行中的 ComfyUI 进程反查
+      （从其 python_embeded/python.exe 上两级定位便携包根）→ 各盘符常见路径扫描
+
+    检测器全程只读、fail-open、有界耗时（实测本机 0.4~0.5 秒，有缓存后近乎瞬时）；
+    找不到就返回空串 —— **绝不猜**：留空会让日志明确报「未配置」，比静默用错路径好。
+    """
+    try:
+        from comfyui_locator import find_comfyui_dir
+        return find_comfyui_dir() or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+#: ComfyUI 安装根目录。显式环境变量优先；否则自动检测（见 _auto_comfyui_dir）。
+MJSCXT_COMFYUI_DIR = _env("MJSCXT_COMFYUI_DIR", "") or _auto_comfyui_dir()
 
 # ComfyUI 安装根目录：其余路径默认基于此推导，只需配置这一项即可换机
 COMFYUI_ROOT = _env("COMFYUI_ROOT", "")
