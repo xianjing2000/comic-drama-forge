@@ -943,6 +943,98 @@ def _auto_screenplay(ctx: dict) -> None:
     except Exception as e:  # noqa: BLE001  文学剧本失败绝不影响主流程
         logger.warning('文学剧本自动生成失败（不影响主流程）：%s', e)
 
+
+
+#: 剧本质检不通过时，按缺陷清单回传重写的最大轮数（2026-10-10 新增闭环）。
+#: 为什么需要：此前 qc_client.check_script 的结果**只记日志/透传前端**，其 issues 与
+#: suggestions 从未回传给 LLM 去改——质检发现了问题却没有闭环修正。
+MAX_QC_SCRIPT_REWRITE_ROUNDS = 2
+
+
+def _qc_script_feedback_rewrite(client, script: dict, ctx: dict, cfg: dict):
+    """剧本质检 → 缺陷回传 LLM 重写 → 复检（2026-10-10 用户要求补上的闭环）。
+
+    背景：`qc_client.check_script` 会返回 issues / suggestions，但原实现只把它记进日志
+    （app.py:2019），从未用于重写；同时 continuity 的局部重写只处理「跨集连贯性问题」，
+    不覆盖「结构/逻辑/风格/可执行性/节奏」这些质检维度。
+    本函数把这两条接起来：质检不过 → 缺陷清单变成问题条目 → continuity 的
+    rewrite_shots_for_issues 做针对性局部重写 → 复检。
+
+    设计要点：
+      · **全程 fail-open**：质检服务不可用、返回异常、重写失败都只记日志，绝不阻断生产；
+      · 质检未启用（qc_config 的 enabled/script_enabled 任一为假）直接返回原剧本；
+      · 最多 MAX_QC_SCRIPT_REWRITE_ROUNDS 轮，且某轮重写未产生变化即停止（防死循环）；
+      · 返回 (script, info)，info 含轮数/得分/问题数，供写进 metadata 与日志。
+    """
+    info = {"rounds": 0, "passed": None, "score": None, "issues": 0, "fixed": 0}
+    try:
+        import config as _config
+        import qc_client as _qcc
+        import continuity as _cont
+    except Exception as e:  # noqa: BLE001
+        logger.debug("剧本质检闭环不可用（导入失败，忽略）：%s", e)
+        return script, info
+    try:
+        qc_cfg = _qcc.load_config(_config.QC_CONFIG_PATH)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("剧本质检配置不可读（忽略）：%s", e)
+        return script, info
+    if not _qcc.script_qc_ready(qc_cfg):
+        return script, info
+    ep = int(ctx.get("episode_no") or 1)
+    style = cfg.get("style") or ""
+    for rnd in range(1, int(MAX_QC_SCRIPT_REWRITE_ROUNDS) + 1):
+        try:
+            r = _qcc.check_script(script_data=script, style=style, cfg=qc_cfg)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("剧本质检第 %d 轮调用失败（忽略）：%s", rnd, e)
+            break
+        if r.get("skipped"):
+            logger.info("剧本质检第 %d 轮跳过：%s", rnd, r.get("reason"))
+            break
+        info.update({"rounds": rnd, "passed": r.get("passed"),
+                     "score": r.get("score"), "issues": len(r.get("issues") or [])})
+        logger.info("剧本质检（第%d轮）：passed=%s score=%s 问题=%d 条",
+                    rnd, r.get("passed"), r.get("score"), len(r.get("issues") or []))
+        if r.get("passed"):
+            break
+        # 把质检的 issues / suggestions 规范成 continuity 能消费的问题条目
+        raw_issues = r.get("issues") or []
+        raw_sugs = r.get("suggestions") or []
+        norm = []
+        for i, it in enumerate(raw_issues[:12]):
+            if isinstance(it, dict):
+                norm.append({"severity": str(it.get("severity") or "high"),
+                             "category": str(it.get("category") or it.get("dimension") or "qc"),
+                             "detail": str(it.get("detail") or it.get("problem") or it.get("message") or it)[:400],
+                             "fix": str(it.get("fix") or it.get("suggestion") or "")[:300],
+                             "shot_ids": list(it.get("shot_ids") or [])})
+            else:
+                norm.append({"severity": "high", "category": "qc",
+                             "detail": str(it)[:400], "fix": "", "shot_ids": []})
+        if raw_sugs and not norm:
+            norm = [{"severity": "high", "category": "qc", "detail": str(s)[:400],
+                     "fix": "", "shot_ids": []} for s in raw_sugs[:12]]
+        if not norm:
+            logger.info("剧本质检未通过但未给出可执行问题，停止重写")
+            break
+        try:
+            rr = _cont.rewrite_shots_for_issues(
+                client, script, norm, ep,
+                continuity_ctx=(ctx.get("continuity_ctx") or {}))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("按剧本质检缺陷重写失败（忽略）：%s", e)
+            break
+        new_script = (rr or {}).get("script") or script
+        changed = rr.get("rewritten_shot_ids") or []
+        info["fixed"] += len(changed)
+        logger.info("按剧本质检缺陷重写：第%d轮改了 %d 个镜头", rnd, len(changed))
+        if not changed:
+            logger.info("重写未产生变化，停止（避免死循环）")
+            break
+        script = new_script
+    return script, info
+
 def step_script(ctx) -> dict:
     """章节正文 → 结构化剧本（含原文覆盖率守门 + 跨集连贯性编排）"""
     A = _A()
@@ -1005,6 +1097,23 @@ def step_script(ctx) -> dict:
             or A.novel_to_script.save_episode_script(
                 script, A.SCRIPT_DIR, ctx["project_key"], ctx["episode_no"], ctx["project_key"]))
 
+    # ⭐ 2026-10-10（用户要求）：剧本质检 → 缺陷回传 LLM 重写 → 复检。
+    #    补上此前的缺口：check_script 的 issues/suggestions 只被记日志，从未用于重写；
+    #    continuity 的局部重写也只处理跨集连贯性，不覆盖质检的结构/逻辑/风格/可执行性维度。
+    _qc_info = {}
+    try:
+        script, _qc_info = _qc_script_feedback_rewrite(client, script, ctx, cfg)
+        if _qc_info.get("rounds"):
+            try:
+                A.novel_to_script.save_episode_script(
+                    script, A.SCRIPT_DIR, ctx["project_key"], ctx["episode_no"],
+                    ctx["project_key"])
+            except Exception as _e2:  # noqa: BLE001
+                logger.warning("质检重写后落盘失败（忽略）：%s", _e2)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("剧本质检闭环异常（忽略，不影响主流程）：%s", _e)
+
+
     detail = {
         "script_path": path,
         "shots": len(script.get("shots") or []),
@@ -1016,6 +1125,12 @@ def step_script(ctx) -> dict:
         "continuity_score": (script.get("metadata") or {}).get("continuity", {}).get("validation_score"),
         "continuity_issues": len(val.get("issues") or []),
         "continuity_rewrite": bool((conv.get("rewrite") or {}).get("triggered")),
+        # ⭐ 2026-10-10：剧本质检 → 缺陷回传重写的闭环结果（前端「剧本是否已质检」用它）
+        "qc_script_rounds": _qc_info.get("rounds"),
+        "qc_script_passed": _qc_info.get("passed"),
+        "qc_script_score": _qc_info.get("score"),
+        "qc_script_issues": _qc_info.get("issues"),
+        "qc_script_fixed_shots": _qc_info.get("fixed"),
     }
     # 覆盖率门禁：不达标即判失败，交由重试层处理（绝不静默放行）
     floor = float(cfg.get("coverage_min_percent") or 0)

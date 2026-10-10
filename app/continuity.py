@@ -109,8 +109,13 @@ TRANSITION_MARKERS = ["转场", "切换", "过渡", "字幕", "旁白", "画外�
 # 六类跨集一致性比对维度（D⑨）
 CROSS_CHECK_CATEGORIES = ["角色一致性", "剧情因果", "时间地点", "台词一致性", "伏笔回收", "风格统一"]
 
-MAX_REWRITE_ROUNDS = 1
-COVERAGE_MAX_ROUNDS = 1   # 原文覆盖率不足时的自动补生成轮次上限（压缩提炼后只补 1 轮，避免补出大量空镜）
+# ⚠️ 2026-10-10（用户要求「剧本要还原小说的所有细节，不能过度改写」）：
+#    MAX_REWRITE_ROUNDS 1 → 2：局部重写只跑 1 轮时，重写后仍有问题的镜头就没人管了；
+#    提到 2 轮，让「校验发现问题 → 重写 → 复检」真正形成闭环。
+#    COVERAGE_MAX_ROUNDS 1 → 3：与 coverage.run_coverage_check 的 max_rounds 默认值对齐
+#    （覆盖率阈值已由 0.70 提到 0.98，一轮补不干净就继续补）。
+MAX_REWRITE_ROUNDS = 2
+COVERAGE_MAX_ROUNDS = 3   # 原文覆盖率不足时的自动补生成轮次上限
 
 
 def _ep_dir(continuity_dir: str, project_key: str) -> str:

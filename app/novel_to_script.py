@@ -59,7 +59,9 @@ logger = logging.getLogger(__name__)
 CHUNK_CHARS = 2400
 MIN_CHUNK_CHARS = 300
 MAX_CHARS_PER_CHUNK_PROMPT = 3400
-COVERAGE_MAX_ROUNDS = 1          # 原文覆盖率不足时自动补生成轮次上限（与 continuity.COVERAGE_MAX_ROUNDS 对齐）
+# ⚠️ 2026-10-10：1 → 3，与 continuity.COVERAGE_MAX_ROUNDS 同步（用户要求「还原所有细节」；
+#    覆盖率阈值已由 0.70 提到 0.98，一轮补不干净就继续补）。**两处必须保持一致**。
+COVERAGE_MAX_ROUNDS = 3          # 原文覆盖率不足时自动补生成轮次上限
 
 # ===================== 每集时长口径（产品需求，2026-09-26） =====================
 # ⚠️ 这是**产品口径**，不是技术红线 —— 与下方两条技术红线（H3 资源红线 / LLM 响应体红线）
