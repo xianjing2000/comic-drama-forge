@@ -40,6 +40,20 @@ ENV_MAP: Dict[str, str] = {
     'coverage_threshold': 'MJSCXT_COVERAGE_THRESHOLD',
 }
 
+#: 键别名 → 正式键（2026-10-10 用户要求「相同的配置字段要统一名称」）。
+#  背景：配置 key 的生成规则统一为「常量名小写化」，据此个别历史手写 key 需要正名；
+#  但旧调用方/旧文档里可能仍在用旧名，故保留别名，读与写都自动映射到正式键。
+#  这比直接删除旧名安全 —— 不会让任何既有调用静默失效。
+ALIASES: Dict[str, str] = {
+    'target_shots': 'novel_default_shots',
+}
+
+
+def canonical_key(key: str) -> str:
+    """把别名解析为正式键（无别名则原样返回）。"""
+    k = str(key or '').strip()
+    return ALIASES.get(k, k)
+
 
 def db_path() -> str:
     """配置库路径（与任务库同一个文件）。"""
@@ -195,8 +209,8 @@ def apply_to_runtime() -> int:
 
 
 def get_value(key: str) -> Any:
-    """读取单个参数的当前生效值（不触发回写）。"""
-    return (resolve_all().get(key) or {}).get('value')
+    """读取单个参数的当前生效值（不触发回写）。自动解析别名。"""
+    return (resolve_all().get(canonical_key(key)) or {}).get('value')
 
 
 def set_value(key: str, value: Any, note: str = '') -> Dict[str, Any]:
@@ -205,6 +219,7 @@ def set_value(key: str, value: Any, note: str = '') -> Dict[str, Any]:
         import config_doctor as CD
     except Exception as e:  # noqa: BLE001
         return {'ok': False, 'error': '登记表不可用：%s' % e}
+    key = canonical_key(key)
     meta = (getattr(CD, 'REGISTRY', {}) or {}).get(key)
     if not meta:
         return {'ok': False, 'error': '未登记的配置键：%s（只有 REGISTRY 里的可调参数才允许修改）' % key}

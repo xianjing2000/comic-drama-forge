@@ -65,7 +65,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'pipeline.MAX_QC_SCRIPT_REWRITE_ROUNDS',
     },
     # ---- 剧本生成 ----
-    'target_shots': {
+    # ⚠️ 2026-10-10 命名统一（用户要求「相同的配置字段要统一名称」）：
+    #    配置 key 的生成规则统一为「常量名小写化」—— 唯一且可逆。
+    #    此前这一项手写成 target_shots，与常量 NOVEL_DEFAULT_SHOTS 反推不一致，
+    #    是全表唯一的不可逆项。现正名为 novel_default_shots；
+    #    target_shots 作为**别名**保留（旧调用方仍可读写，见 config_center.ALIASES）。
+    'novel_default_shots': {
         'default': 0, 'type': 'int', 'range': (0, 500), 'group': '剧本',
         'desc': '每集目标镜数；0 = 不预设（用户口径：上下限都不限制）',
         'owner': 'config.NOVEL_DEFAULT_SHOTS',
@@ -590,6 +595,14 @@ def doctor() -> Dict[str, Any]:
                                           'primary_value': actual, 'other': other,
                                           'other_value': None if o_err else o_actual,
                                           'error': o_err})
+    # 命名一致性（用户要求「相同字段统一名称」）：只报不改 —— 重命名常量要改所有
+    # 引用点，风险大于收益；这里把混用清单显式列出来供逐步收敛。
+    rep['naming'] = naming_report()
+    for _f in (rep['naming'].get('families') or []):
+        if _f.get('mixed'):
+            rep['warnings'].append(
+                '命名不统一【' + _f['family'] + '】前缀式 ' + str(_f['prefix_style']) +
+                ' 个 / 后缀式 ' + str(_f['suffix_style']) + ' 个。建议：' + _f['suggested'])
     rep['prompts'] = prompt_fingerprints()
     for m in (rep['prompts'].get('mismatch') or []):
         rep['ok'] = False
@@ -599,6 +612,66 @@ def doctor() -> Dict[str, Any]:
     if any(not r.get('match') for r in rep['params']):
         rep['ok'] = False
     return rep
+
+
+
+# ===================== 同族命名一致性（2026-10-10 用户要求「相同字段统一名称」）=====================
+# 背景：同一语义在不同模块可能用了不同命名风格 —— 开关既有 ENABLE_XXX 前缀，也有 XXX_ENABLED
+# 后缀；MAX 既有 MAX_ 前缀（32 个）也有 _MAX 后缀（12 个）。这类不一致**无法靠值比对发现**
+# （不同模块的值本来就可以不同），必须靠命名规则检查。
+#
+# 为什么只报不改：重命名常量要改掉所有引用点，风险远大于收益。这里把混用清单显式列出来
+# （供逐步收敛），并把「建议的统一风格」写死在规则里，避免每次讨论重复判断。
+FAMILY_RULES = (
+    ('开关', r'^(ENABLE_|DISABLE_)|(_ENABLED$|_DISABLED$)',
+     '统一为 ENABLE_<特性> / DISABLE_<特性> 前缀式；现有 <特性>_ENABLED 后缀式为历史遗留'),
+    ('最大值', r'^(MAX_|MAXIMUM_)|(_MAX$)',
+     '统一为 MAX_<对象> 前缀式；现有 <对象>_MAX 后缀式为历史遗留'),
+    ('最小值', r'^(MIN_|MINIMUM_)|(_MIN$)',
+     '统一为 MIN_<对象> 前缀式；现有 <对象>_MIN 后缀式为历史遗留'),
+    ('秒数', r'_SEC$|_SECONDS$|_SEC_', '统一为 _SEC 后缀（已基本一致）'),
+    ('字符数', r'_CHARS$|_CHARS_|CHARS_PER_', '统一为 _CHARS / CHARS_PER_（已基本一致）'),
+    ('比率', r'_RATIO$|_RATE$|_PERCENT$', '统一为 _RATIO 后缀（已基本一致）'),
+)
+
+
+def naming_report() -> Dict[str, Any]:
+    """扫描全部大写常量的命名一致性，返回各族的风格分布与混用清单（只读、绝不抛）。"""
+    import re as _re
+    base = os.path.dirname(os.path.abspath(__file__))
+    pat = _re.compile(r'^([A-Z][A-Z0-9_]{2,})\s*(?::\s*[^=]+)?=\s*(.+)$')
+    names: List[Dict[str, str]] = []
+    try:
+        for fn in sorted(os.listdir(base)):
+            if not fn.endswith('.py') or fn.startswith('_'):
+                continue
+            try:
+                src = open(os.path.join(base, fn), encoding='utf-8').read()
+            except Exception:  # noqa: BLE001
+                continue
+            for ln in src.split(chr(10)):
+                m = pat.match(ln)
+                if m and not m.group(1).startswith('_'):
+                    names.append({'module': fn[:-3], 'name': m.group(1)})
+    except Exception as e:  # noqa: BLE001
+        return {'ok': False, 'error': str(e)[:200]}
+    out: Dict[str, Any] = {'ok': True, 'total': len(names), 'families': [], 'mixed_families': []}
+    for label, rx, style in FAMILY_RULES:
+        hit = [n for n in names if _re.search(rx, n['name'])]
+        if len(hit) < 2:
+            continue
+        pre = [n['name'] for n in hit
+               if _re.match(r'^(ENABLE_|DISABLE_|MAX_|MIN_|MAXIMUM_|MINIMUM_)', n['name'])]
+        post = [n['name'] for n in hit
+                if _re.search(r'(_ENABLED|_DISABLED|_MAX|_MIN)$', n['name'])]
+        mixed = bool(pre) and bool(post)
+        out['families'].append({'family': label, 'count': len(hit), 'suggested': style,
+                                'prefix_style': len(pre), 'suffix_style': len(post),
+                                'mixed': mixed,
+                                'examples_prefix': pre[:4], 'examples_suffix': post[:4]})
+        if mixed:
+            out['mixed_families'].append(label)
+    return out
 
 
 def summary_line() -> str:
