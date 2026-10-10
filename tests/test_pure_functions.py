@@ -25,6 +25,7 @@ import prompt_qc as Q  # noqa: E402
 import style_kit as S  # noqa: E402  （别名，供新增用例使用）
 import shot_key as SK  # noqa: E402
 import failure_codes as FC  # noqa: E402
+import shot_camera as SC  # noqa: E402
 
 
 class TestRoundToMultiple(unittest.TestCase):
@@ -247,6 +248,45 @@ class TestFailureCodes(unittest.TestCase):
     def test_unknown_const_is_exported(self):
         self.assertEqual(FC.UNKNOWN, 'F-UNKNOWN')
         self.assertIn('F-TIMEOUT', FC.CODES)
+
+class TestShotCamera(unittest.TestCase):
+    """shot_camera：把自由文本的景别/机位描述归一到标准档位。
+
+    这是镜头契约里的关键一环：出图提示词要按景别取不同的构图说明，
+    归一出错会直接反映到画面（例如把特写退成全景）。"""
+
+    def test_camera_key_normalizes_to_standard_type(self):
+        self.assertEqual(SC.camera_key('近景特写'), '特写')
+        self.assertEqual(SC.camera_key('俯视中景'), '中景')
+
+    def test_camera_key_defaults_when_unspecified(self):
+        """未指定景别时取默认档（保守取景），而不是抛异常或返回空。"""
+        self.assertEqual(SC.camera_key(''), '中景')
+
+    def test_camera_key_result_always_in_shot_types(self):
+        """归一结果必须落在标准档位表内 —— 否则下游查不到构图说明。"""
+        for raw in ('近景特写', '中景', '全景', '远景', '大特写', '俯视中景', '过肩中景', ''):
+            self.assertIn(SC.camera_key(raw), SC.SHOT_TYPES,
+                          'camera_key(%r) 的返回值不在 SHOT_TYPES 内' % raw)
+
+    def test_camera_angle_extracts_orientation(self):
+        self.assertEqual(SC.camera_angle('俯视近景'), '俯拍')
+        self.assertEqual(SC.camera_angle('过肩中景'), '过肩')
+
+    def test_camera_angle_empty_when_not_specified(self):
+        self.assertEqual(SC.camera_angle('中景'), '')
+        self.assertEqual(SC.camera_angle(''), '')
+
+    def test_camera_spec_mentions_its_own_framing(self):
+        """camera_spec 是给图像模型的构图说明，必须包含对应景别的关键词。"""
+        self.assertIn('特写', SC.camera_spec('近景特写'))
+        self.assertIn('中景', SC.camera_spec('俯视中景'))
+
+    def test_camera_spec_covers_every_shot_type(self):
+        """每个标准档位都要有可用说明（缺失会让提示词丢掉构图约束）。"""
+        for t in SC.SHOT_TYPES:
+            spec = SC.camera_spec(t)
+            self.assertTrue(spec and len(str(spec)) > 10, '景别 %s 的 camera_spec 为空/过短' % t)
 
 if __name__ == '__main__':
     unittest.main()
