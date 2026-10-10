@@ -234,8 +234,7 @@ app.register_blueprint(keyframes_bp)
 # 2026-10-11 助手按域下沉（第六批）：关键帧助手已迁至 keyframe_helpers.py。
 from keyframe_helpers import (  # noqa: F401, E402
     _ep_of_script, _keyframe_prompt_preflight, _keyframe_qc_verifier,
-    _keyframe_recall_cb, _keyframe_sb_map, _prompt_preflight,
-    index, static_assets)
+    _keyframe_recall_cb, _keyframe_sb_map, _prompt_preflight)
 
 # 2026-10-11 助手按域下沉（第五批）：质检助手已迁至 qc_helpers.py。
 from qc_helpers import (  # noqa: F401, E402
@@ -648,9 +647,22 @@ _PROJECT_KIND_DIRS = {"characters": CHARACTERS_DIR, "items": ITEMS_DIR,
 
 # ===== 页面（Vite SPA）=====
 @app.route('/')
+def index():
+    """SPA 首页（Vite 构建产物）
+
+    2026-10-11 恢复：搬迁 _resolve_static_dir 时，把它下面紧邻的这个视图整段误删，
+    只留下悬空的 @app.route('/') 装饰器贴在 static_assets 上 ——
+    Flask 于是把 / 注册到 static_assets，访问首页报
+        TypeError: static_assets() missing 1 required positional argument: 'filename'
+    现恢复原实现（与删除前逐字一致），并加 tests/test_route_integrity.py 守护。
+    """
+    return send_from_directory(_STATIC_DIR, 'index.html')
 
 
 @app.route('/assets/<path:filename>')
+def static_assets(filename):
+    """服务 Vite 构建的静态资源"""
+    return send_from_directory(os.path.join(_STATIC_DIR, 'assets'), filename)
 
 
 @app.route('/vite.svg')

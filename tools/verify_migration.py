@@ -59,10 +59,18 @@ import importlib
 m = importlib.import_module('app')
 rules = sorted(str(r) for r in m.app.url_map.iter_rules())
 print('  [OK] app 导入成功，url_map 规则数 =', len(rules))
-print('       / -> %s ｜ /assets/... -> %s' % (
-    next((r for r in rules if r == '/'), '?'),
-    '(见 map)'))
-ep = {str(r): m.app.url_map._rules_by_endpoint for r in []}
+# ★ 关键路由 endpoint 校验（事故回归：index 被误删时 / 会指向 static_assets）
+CRIT = {'/': 'index', '/assets/<path:filename>': 'static_assets', '/api/status': 'api_status'}
+by_url = {str(r): r.endpoint for r in m.app.url_map.iter_rules()}
+probl = []
+for u, want_ep in CRIT.items():
+    got = by_url.get(u)
+    if got != want_ep:
+        probl.append((u, want_ep, got))
+if probl:
+    print('  [XX] 关键路由 endpoint 不符: %s' % probl)
+else:
+    print('  [OK] 关键路由 endpoint 全部正确（/%s）' % ', '.join(CRIT.values()))
 print('       app.py 行数 =', io.open('app/app.py', encoding='utf-8').read().count(chr(10)) + 1)
 
 print()

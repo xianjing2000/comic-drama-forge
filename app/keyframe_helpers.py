@@ -1,9 +1,13 @@
 # -*- coding: utf-8 -*-
 '''关键帧助手（2026-10-11 从 app.py 下沉，助手域第六批）。'''
 
-# 本批 = 全部 _keyframe_* 助手及其依赖闭包。
+# 本批 = _keyframe_* 助手及其依赖闭包。
 # 函数体与下沉前逐字一致（仅 app.logger -> logger）。
 # import 由脚本从 app.py 原始语句原样复制（不猜来源）。
+#
+# 收尾修复记录：首版用纯字符串匹配展开闭包，把通用词 index / static_assets
+# 误当依赖搬走并删除，导致根路径与静态资源路由悬空、首页报 TypeError。
+# 现已把闭包展开限制为「下划线开头或全大写常量」，并从 git 恢复 app.py 后重做。
 import logging
 
 from config import (
@@ -64,7 +68,6 @@ import os
 import prompt_memory
 import prompt_qc
 import qc_client
-from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
 
 logger = logging.getLogger(__name__)
 
@@ -80,23 +83,6 @@ def _ep_of_script(script: dict, fallback=None):
         except (TypeError, ValueError):
             continue
     return fallback
-
-
-def index():
-    """SPA 首页（Vite 构建产物）
-
-    2026-10-11 恢复：搬迁 _resolve_static_dir 时，把它下面紧邻的这个视图整段误删，
-    只留下悬空的 @app.route('/') 装饰器贴在 static_assets 上 ——
-    Flask 于是把 / 注册到 static_assets，访问首页报
-        TypeError: static_assets() missing 1 required positional argument: 'filename'
-    现恢复原实现（与删除前逐字一致），并加 tests/test_route_integrity.py 守护。
-    """
-    return send_from_directory(_STATIC_DIR, 'index.html')
-
-
-def static_assets(filename):
-    """服务 Vite 构建的静态资源"""
-    return send_from_directory(os.path.join(_STATIC_DIR, 'assets'), filename)
 
 
 def _keyframe_sb_map(project_name: str, script: dict = None, storyboards=None,
