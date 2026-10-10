@@ -794,6 +794,36 @@ class ComfyUIClient:
                 logger.info("ComfyUI 重启：未发现运行中的 ComfyUI 进程（不杀任何进程）")
         except Exception as e:  # noqa: BLE001
             logger.debug("终止 ComfyUI 进程时忽略：%s", e)
+        # ①.5 等旧进程**真正退出**再拉新进程
+        #   ⚠️ 2026-10-10 实测缺陷：此前 ① 杀掉后**立即** Popen —— 而 Stop-Process 是
+        #   异步的，旧进程可能还要几百毫秒~数秒才释放 8188，新进程于是报
+        #   "Port 8188 is already in use on address 127.0.0.1"（stderr_crash.log:311）
+        #   然后**自行退出** → 表面「重启成功」实际一个 ComfyUI 都没有；
+        #   更糟的是若旧进程只是被判定「忙/慢」而未真死，就会出现两个实例同时抢 8G 显存。
+        if killed:
+            _wait_t0 = time.time()
+            _deadline = _wait_t0 + 25
+            while time.time() < _deadline:
+                try:
+                    _chk = subprocess.run(
+                        ["powershell", "-NoProfile", "-Command",
+                         "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+                         "Where-Object { $_.CommandLine -like '*main.py*' -and "
+                         "$_.CommandLine -like '*ComfyUI*' } | Measure-Object | "
+                         "-ExpandProperty Count"],
+                        capture_output=True, timeout=15, check=False,
+                        text=True, encoding="utf-8", errors="replace")
+                    _left = int((_chk.stdout or "0").strip() or 0)
+                except Exception:  # noqa: BLE001
+                    _left = 0
+                if _left == 0:
+                    logger.info("ComfyUI 重启：旧进程已全部退出（等待 %.1fs）",
+                                time.time() - _wait_t0)
+                    break
+                time.sleep(1.0)
+            else:
+                logger.warning("ComfyUI 重启：等待 25s 后仍检测到未退出的 ComfyUI 进程，"
+                               "仍尝试拉起（可能出现端口冲突，请关注日志）")
         # ② 重新拉起（后台，不阻塞）
         try:
             subprocess.Popen(["cmd.exe", "/c", bat], cwd=comfy_dir,
@@ -5467,17 +5497,61 @@ def get_engine_state() -> dict:
     return s
 
 
-def heartbeat_once(fail_threshold: int = 3, max_per_10min: int = 2) -> dict:
-    """探一次并按需重启。返回本次动作摘要，全程 fail-open。"""
+#: 探测 /system_stats 的超时（秒）。
+#  ⚠️ 2026-10-10 实测缺陷：原值 3 秒**过短** —— ComfyUI 在 GPU 满载出图时，
+#  HTTP 服务线程会因 GIL/IO 竞争而响应迟缓，/system_stats 经常 >3 秒才回。
+#  心跳因此把它判成「离线」，连续 3 次（60 秒）就**误触发重启**；而旧进程其实还活着
+#  （重启日志里 "Port 8188 is already in use" 即铁证），于是两个 ComfyUI 同时抢 8G 显存
+#  → 真崩溃（comfyui.prev.log 在 10:03:12 戛然而止，无 Traceback、无 OOM 报错＝被强杀）。
+#  放宽到 15 秒：既能让「真的挂了」在合理时间内被发现，又不会把「正忙」误判成「死」。
+_HEARTBEAT_PROBE_TIMEOUT = 15.0
+
+
+def _comfyui_busy(timeout: float = 5.0) -> bool:
+    """ComfyUI 是否**正在出图**（队列里有运行中的任务）。
+
+    这是「忙」与「死」的分界：只要 /queue 的 queue_running 非空，说明进程活着、
+    只是在干活 —— 此时**绝不能**计入「探测失败」，更不能重启。
+    任何异常都返回 False（拿不准就按原逻辑走，绝不因本函数自身出错而改变行为）。
+    """
+    try:
+        import requests as _rq
+        r = _rq.get("http://127.0.0.1:8188/queue", timeout=timeout)
+        if r.status_code != 200:
+            return False
+        q = r.json() or {}
+        return bool(q.get("queue_running"))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def heartbeat_once(fail_threshold: int = 5, max_per_10min: int = 2) -> dict:
+    """探一次并按需重启。返回本次动作摘要，全程 fail-open。
+
+    ⚠️ 2026-10-10 修复「误判忙为死 → 双实例抢 GPU → 真崩」：
+      · 探测超时 3 → 15 秒（见 _HEARTBEAT_PROBE_TIMEOUT 注释）；
+      · **探测失败时先查 /queue**：若有任务在跑，说明只是「忙」不是「死」，
+        直接视为在线（清零失败计数），不重启；
+      · 连续失败阈值 3 → 5（配合 20 秒间隔 = 100 秒），给真故障留出确认窗口。
+    """
     cli = ComfyUIClient()
     online, err = False, ""
     try:
-        st = cli.get_status(timeout=3)
+        st = cli.get_status(timeout=_HEARTBEAT_PROBE_TIMEOUT)
         online = st.get("status") == "online"
         if not online:
             err = str(st.get("error") or "")[:200]
     except Exception as e:  # noqa: BLE001
         err = "%s: %s" % (type(e).__name__, e)
+    # ---- 「忙」不算「死」：GPU 满载时 /system_stats 慢是正常现象 ----
+    if not online:
+        try:
+            if _comfyui_busy():
+                online = True
+                err = ""
+                logger.debug("[心跳] 探测超时但队列有任务在跑 → 判定为「忙」，不计失败")
+        except Exception:  # noqa: BLE001
+            pass
     now = time.time()
     action = "none"
     with _ENGINE_LOCK:
@@ -5515,9 +5589,13 @@ def heartbeat_once(fail_threshold: int = 3, max_per_10min: int = 2) -> dict:
     return {"online": online, "action": action, "fails": fails, "error": err[:200]}
 
 
-def start_comfyui_heartbeat(interval: float = 20.0, fail_threshold: int = 3,
+def start_comfyui_heartbeat(interval: float = 20.0, fail_threshold: int = 5,
                             max_per_10min: int = 2) -> bool:
-    """启动只读心跳守护线程（幂等）。MJSCXT_COMFYUI_HEARTBEAT=0 可整体关闭。"""
+    """启动只读心跳守护线程（幂等）。MJSCXT_COMFYUI_HEARTBEAT=0 可整体关闭。
+
+    ⚠️ fail_threshold 默认由 3 提到 5（2026-10-10）：配合 20 秒间隔 = 100 秒确认窗口。
+    原值 3（60 秒）在 GPU 满载时太容易被「忙」凑满，会误触发重启并造成双实例抢卡。
+    """
     global _HEARTBEAT_THREAD
     if os.environ.get("MJSCXT_COMFYUI_HEARTBEAT", "1").strip().lower() in ("0", "false", "no"):
         logger.info("[心跳] 已由 MJSCXT_COMFYUI_HEARTBEAT 关闭")
