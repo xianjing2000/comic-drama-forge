@@ -862,11 +862,19 @@ upscale_tasks = {}
 
 def _app_logger():
     """上下文安全的日志器：请求内用 Flask 的 app.logger（保留其 handler/格式），
-    请求外（后台线程、离线守卫、单测）回落到标准 logging —— 直接写 _app_logger()
-    会在没有应用上下文时抛 RuntimeError（2026-10-08 verify_qc_fault_open 实测）。"""
+    请求外（后台线程、离线守卫、单测）回落到标准 logging —— 直接写 current_app.logger
+    会在没有应用上下文时抛 RuntimeError（2026-10-08 verify_qc_fault_open 实测）。
+
+    ⚠️ 2026-10-10 修复：此处原写作「return _app_logger()」——**递归调用自己**。
+    它会一路递归到 RecursionError，而 RecursionError 是 RuntimeError 的子类，
+    于是每次都被 except 接住、返回标准 logging：**Flask 的 logger 从未生效过**，
+    注释里写的意图（保留 app.logger 的 handler/格式）与实际行为完全相反；
+    每次调用还要付一次约 1000 层栈展开 + 异常构造的代价。
+    现改为真正取 current_app.logger。
+    """
     try:
-        return _app_logger()
-    except RuntimeError:
+        return current_app.logger
+    except RuntimeError:                 # 没有应用上下文（后台线程 / 离线守卫 / 单测）
         return logging.getLogger("app")
 
 def _wm_load_cfg() -> dict:
