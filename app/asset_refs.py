@@ -48,8 +48,10 @@ from config import (
     PROMPT_ENHANCE_CONFIG_PATH, save_prompt_enhance_config, _prompt_enhance_file_flags,
 )
 from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
-from routes._shared import (_first_existing, _shot_num_key, comfyui_client)  # noqa: F401
-from routes._shared import _ai_gate_or_400, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
+from shared_project import _first_existing, _shot_num_key, comfyui_client  # noqa: F401  再导出
+from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
+from shared_base import _trash_move  # noqa: F401  再导出
+from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
 from routes.tts import (_dub_audio_url, _dub_project_dir)  # noqa: F401
 from tts_client import (
     QwenTTSClient, TTSError, check_environment as tts_env_check,

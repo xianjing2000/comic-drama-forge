@@ -30,8 +30,8 @@ from config import SCENES_DIR
 from config import STORYBOARDS_DIR
 from config import VIDEOS_DIR
 from fs_atomic import atomic_write_json
-from routes._shared import _safe_project
-from routes._shared import comfyui_client
+from shared_project import _safe_project
+from shared_project import comfyui_client
 from routes.projects import _move_with_retry
 import qc_client
 logger = logging.getLogger(__name__)

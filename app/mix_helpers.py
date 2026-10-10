@@ -40,8 +40,11 @@ from dub_mix import (
 )
 from dub_helpers import (_dub_character_desc, _dub_line_speaker_from_script,  # noqa: F401, E402
                         _dub_resolve_script)
-from routes._shared import _ai_gate_or_400, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
-from routes._shared import (COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _serve_safe, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks)  # noqa: F401  该域助手已下沉到共享模块
+from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
+from shared_base import _trash_move  # noqa: F401  再导出
+from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
+from shared_web import _serve_safe  # noqa: F401  再导出
+from routes._shared import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
 import json
 import os
 from upscale_client import (

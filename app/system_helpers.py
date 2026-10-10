@@ -8,7 +8,7 @@ import threading
 import time
 
 from config import CLEAR_COMFYUI_HISTORY, CLEAR_COMFYUI_HISTORY_INTERVAL_SEC
-from routes._shared import comfyui_client
+from shared_project import comfyui_client
 
 logger = logging.getLogger(__name__)
 

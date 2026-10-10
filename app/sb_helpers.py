@@ -5,7 +5,7 @@
 # 函数体与下沉前逐字一致（仅 app.logger -> logger）。
 import logging
 
-from routes._shared import (_first_existing, _shot_num_key, comfyui_client)  # noqa: F401
+from shared_project import _first_existing, _shot_num_key, comfyui_client  # noqa: F401  再导出
 
 logger = logging.getLogger(__name__)
 

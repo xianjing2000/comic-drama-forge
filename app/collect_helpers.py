@@ -42,8 +42,10 @@ from asset_refs import (  # noqa: F401, E402  助手按域下沉（第四批）
                         _norm_shot_key, _normalize_char_alias, _note_ref_warning,
                         _pick_char_view, _pick_scene_view, _resolve_item_names,
                         _resolve_scene_entry, _resolve_static_dir, _scene_view_for_shot)
-from routes._shared import _ai_gate_or_400, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
-from routes._shared import (_first_existing, _shot_num_key, comfyui_client)  # noqa: F401
+from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
+from shared_base import _trash_move  # noqa: F401  再导出
+from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
+from shared_project import _first_existing, _shot_num_key, comfyui_client  # noqa: F401  再导出
 import os
 
 logger = logging.getLogger(__name__)

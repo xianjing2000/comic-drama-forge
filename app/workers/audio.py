@@ -25,7 +25,7 @@ from dub_mix import write_mix_report
 from fs_atomic import atomic_write_json
 from routes._shared import _prune_task_registry
 from routes._shared import _qc_load_cfg
-from routes._shared import _safe_project
+from shared_project import _safe_project
 from routes._shared import register_final_deliverable
 from routes.tts import _dub_audio_url
 from tts_client import QwenTTSClient

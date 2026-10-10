@@ -33,7 +33,9 @@ from config import (
     PROJECT_DEFAULT_CONFIG,
     PROMPT_ENHANCE_CONFIG_PATH, save_prompt_enhance_config, _prompt_enhance_file_flags,
 )
-from routes._shared import _ai_gate_or_400, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
+from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
+from shared_base import _trash_move  # noqa: F401  再导出
+from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
 import autopilot
 import json
 import project_store

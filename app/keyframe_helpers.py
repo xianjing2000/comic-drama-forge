@@ -48,7 +48,8 @@ from asset_refs import (  # noqa: F401, E402  助手按域下沉（第四批）
                         _pick_char_view, _pick_scene_view, _resolve_item_names,
                         _resolve_scene_entry, _resolve_static_dir, _scene_view_for_shot)
 from routes._shared import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_NON_PROJECT_DIRS, _audio_qc_project_key, _ep_dir, _ep_read_dir, _qc_load_cfg  # noqa: F401  再导出
-from routes._shared import (COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _serve_safe, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks)  # noqa: F401  该域助手已下沉到共享模块
+from shared_web import _serve_safe  # noqa: F401  再导出
+from routes._shared import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
 from qc_helpers import (  # noqa: F401, E402
     CLOSEUP_CHAR_CROP_TOP, _OUTFITS_DIRNAME, _allocate_storyboard_refs,
     _apply_closeup_ref_strategy, _cap_storyboard_refs, _closeup_char_crop,
@@ -60,8 +61,10 @@ from qc_helpers import (  # noqa: F401, E402
     _shot_outfit_dir)
 from lesson_helpers import (_apply_audio_hints, _qc_lesson_from_record,  # noqa: F401, E402
                              _record_audio_qc_lesson, _record_preflight_lesson, _record_qc_lesson)
-from routes._shared import _ai_gate_or_400, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
-from routes._shared import (_first_existing, _shot_num_key, comfyui_client)  # noqa: F401
+from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
+from shared_base import _trash_move  # noqa: F401  再导出
+from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
+from shared_project import _first_existing, _shot_num_key, comfyui_client  # noqa: F401  再导出
 import json
 import keyframe
 import os

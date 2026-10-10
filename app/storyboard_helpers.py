@@ -68,18 +68,19 @@ from artifact_helpers import (_COMFYUI_RECLAIM_INTERVAL_SEC, _COMFYUI_RECLAIM_LA
                                _purge_prompt_records, _purge_rejected_artifacts,
                                _purge_rejected_enabled, _purge_sb_refs, _reject_artifact)
 from routes.projects import _collect_project_cast_images, _cover_prompt_from_outline, _move_with_retry, _project_cover_path  # noqa: F401  再导出
-from routes._shared import (  # noqa: F401  再导出
-    AI_MODULE_LABEL, EPISODE_BATCH_LIMIT, UPLOAD_TMP_DIR, _ai_client_for_module,
-    _ai_guide_response,
-    _current_llm_client, _episode_units_for_chapters, _estimate_subchunks,
-    _novels_stats, _optional_llm_client, _resolve_novel_project, _safe_upload_name)
-from routes._shared import _ai_gate_or_400, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
-from routes._shared import (COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _serve_safe, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks)  # noqa: F401  该域助手已下沉到共享模块
+from shared_ai import AI_MODULE_LABEL, _ai_client_for_module, _ai_guide_response, _current_llm_client, _optional_llm_client  # noqa: F401  再导出
+from shared_web import _safe_upload_name  # noqa: F401  再导出
+from routes._shared import EPISODE_BATCH_LIMIT, UPLOAD_TMP_DIR, _episode_units_for_chapters, _estimate_subchunks, _novels_stats, _resolve_novel_project  # noqa: F401  再导出
+from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
+from shared_base import _trash_move  # noqa: F401  再导出
+from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
+from shared_web import _serve_safe  # noqa: F401  再导出
+from routes._shared import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
 from lesson_helpers import (_apply_audio_hints, _qc_lesson_from_record,  # noqa: F401, E402
                              _record_audio_qc_lesson, _record_preflight_lesson, _record_qc_lesson)
 from sb_helpers import (  # noqa: F401, E402
     _SB_STRUCTURAL_DEFECT_KEYWORDS, _sb_heal_comfyui, _sb_structural_defect)
-from routes._shared import (_first_existing, _shot_num_key, comfyui_client)  # noqa: F401
+from shared_project import _first_existing, _shot_num_key, comfyui_client  # noqa: F401  再导出
 from fs_atomic import atomic_write_json, read_json_strict
 import autopilot
 from datetime import datetime

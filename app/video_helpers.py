@@ -59,8 +59,11 @@ from asset_worker import (  # noqa: F401, E402
     _ITEM_OWNER_REF_PRIORITY, _generate_asset_task, _item_owner_ref_image)
 from routes._shared import (_episode_video_stats, _load_legacy_flat_script, _load_script_for, register_final_deliverable)  # noqa: F401
 from routes.projects import _collect_project_cast_images, _cover_prompt_from_outline, _move_with_retry, _project_cover_path  # noqa: F401  再导出
-from routes._shared import _ai_gate_or_400, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
-from routes._shared import (COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _serve_safe, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks)  # noqa: F401  该域助手已下沉到共享模块
+from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
+from shared_base import _trash_move  # noqa: F401  再导出
+from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
+from shared_web import _serve_safe  # noqa: F401  再导出
+from routes._shared import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
 from project_helpers import (  # noqa: F401, E402
     _project_caption_burn_enabled, _project_subtitle_enabled, _project_worldview)
 from artifact_helpers import (_COMFYUI_RECLAIM_INTERVAL_SEC, _COMFYUI_RECLAIM_LAST_TS,  # noqa: F401, E402
@@ -79,7 +82,7 @@ from qc_helpers import (  # noqa: F401, E402
     _shot_outfit_dir)
 from lesson_helpers import (_apply_audio_hints, _qc_lesson_from_record,  # noqa: F401, E402
                              _record_audio_qc_lesson, _record_preflight_lesson, _record_qc_lesson)
-from routes._shared import (_first_existing, _shot_num_key, comfyui_client)  # noqa: F401
+from shared_project import _first_existing, _shot_num_key, comfyui_client  # noqa: F401  再导出
 from fs_atomic import atomic_write_json, read_json_strict
 import cancellation
 import comfyui_job_store  # 崩溃免重渲检查点（2026-09-29）：种子沿用判据 + 台账查询

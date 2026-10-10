@@ -11,7 +11,7 @@ import project_store
 from flask import jsonify
 
 from config import AI_SETTINGS_PATH
-from routes._shared import _safe_project
+from shared_project import _safe_project
 
 logger = logging.getLogger(__name__)
 
