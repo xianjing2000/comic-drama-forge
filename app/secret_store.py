@@ -98,21 +98,36 @@ def _secrets_path(root_dir: str) -> str:
 
 
 def get_or_create_secret_key(root_dir: str) -> Optional[bytes]:
-    """取主密钥：环境变量优先，其次本地文件（不存在则生成）。返回 Fernet 可用的 key bytes。"""
+    """取主密钥：环境变量优先，其次本地文件（不存在则生成）。返回 Fernet 可用的 key bytes。
+
+    ⚠️ 2026-10-11 补诊断（真实故障）：本函数原先在「环境变量 / 本地文件」之间**静默**二选一，
+    日志里看不出到底用了哪一把。而两者值不同时，加密数据只能用其中一个解开，
+    表现就是反复出现「密钥解密失败（主密钥可能已更换）」且极难定位。
+    现在：① 明确打印主密钥来源；② 两者同时存在且不一致时**响亮告警**。
+    """
     if not _CRYPTO_AVAILABLE:
         return None
     env_key = (os.getenv(SECRET_KEY_ENV) or "").strip()
-    if env_key:
-        return env_key.encode("utf-8") if isinstance(env_key, str) else env_key
     path = _secret_key_path(root_dir)
+    file_key = ""
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                key = f.read().strip()
-            if key:
-                return key.encode("utf-8")
+                file_key = f.read().strip()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"主密钥文件读取失败，将重新生成：{e}")
+    if env_key and file_key and env_key != file_key:
+        logger.warning(
+            "⚠️ 主密钥来源不一致：环境变量 %s 与文件 %s 的值不同。"
+            "加密数据只能用其中一把解开 —— 若日志出现「密钥解密失败」，"
+            "请确认二者同源（建议：把 %s 放进数据根 .env，或保证内容一致）。",
+            SECRET_KEY_ENV, path, SECRET_KEY_ENV)
+    if env_key:
+        logger.info("主密钥来源：环境变量 %s", SECRET_KEY_ENV)
+        return env_key.encode("utf-8") if isinstance(env_key, str) else env_key
+    if file_key:
+        logger.info("主密钥来源：文件 %s", path)
+        return file_key.encode("utf-8")
     # 生成新密钥并落盘（文件本身已 gitignore）
     try:
         key = Fernet.generate_key()
