@@ -1225,6 +1225,21 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
             "  · 密度锚点：一镜通常承载原文约 **%d 字**。"
             "若你的切法平均每镜**不足 %d 字**，说明切得太碎，"
             "应把同一动作 / 同一时空间的相邻镜合并。\n"
+            # ⭐ 2026-10-10 用户口径 C：静态画面不许单独成镜 + 内容必须撑得起时长。
+            #    背景（第9集实测）：48 镜里 21 镜无台词（44%），平均内容量仅 1.54 秒，
+            #    却被单镜 5 秒下限硬撑 → 每镜空转 3.5 秒，合计空转 72.7 秒（占总时长
+            #    26%）。根因是**按「画面」切镜**而不是按「能演满 5 秒的内容单元」切：
+            #    「只拍地砖上的影子」「纸面特写填满画面」这类静态描述各占一镜。
+            "  · ⛔ **静态画面不许单独成镜**：一个镜头必须能在 **5~6 秒**里演出"
+            "**完整内容** —— 一段有起止的完整动作过程、一句（或一组连贯的）台词、"
+            "或一次明确的情绪推进。「只拍某物特写」「某个静止画面」「一处空景」这类"
+            "**既无动作过程也无台词**的画面，只能并入相邻镜头作为它的一部分，"
+            "不许自成一镜（它是相邻镜的**画面细节**，不是独立的一镜）。\n"
+            "  · 每个镜头的**内容要撑得起它的时长**：成片单镜 5~6 秒。"
+            "若你切出的某镜只有静态画面、内容演不满 5 秒，那就是切得太碎，"
+            "应把它并回相邻镜。\n"
+            "  · **无台词的纯画面镜头占比不宜超过三成**：连续多个无台词镜会让整集"
+            "变成幻灯片；空镜用于转场或情绪留白即可，不要用它承载信息。\n"
             "既不要为凑数灌水，也不要为省事把原文情节合并丢掉。"
             % (CHARS_PER_SHOT, max(30, CHARS_PER_SHOT // 2)))
     # ★ 自愈重切时注入的额外指令（追加在粒度判据之后，无需改提示词模板）
@@ -1373,6 +1388,23 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                                events=events, depth=depth,
                                continuity_ctx=continuity_ctx, cache_dir=cache_dir,
                                shots_hard_cap=shots_hard_cap)
+        # ⭐ 2026-10-10 用户口径 C：**内容撑不满单镜下限的镜头确定性合并到相邻同场景镜**。
+        #    与上面的密度自愈互补 —— 自愈按「字数」判过碎（依赖模型重切），
+        #    本步按「可演时长」判过空（纯确定性，不依赖模型，必然生效）。
+        #    第9集实测：48 → 30 镜，内容不足 5s 的镜头 29 → 9。
+        #    fail-open：任何异常都保留原镜头，绝不因合并失败弄丢内容。
+        try:
+            _m = merge_underfilled_shots(out)
+            if _m.get("merged"):
+                logger.info("[分镜合并] %s：内容不足的镜头已合并 %d 次（%d → %d 镜）",
+                            label, _m["merged"], len(out), len(_m["shots"]))
+                if events is not None:
+                    events.append({"label": label, "event": "merge_underfilled",
+                                   "merged": _m["merged"], "before": len(out),
+                                   "after": len(_m["shots"])})
+            out = _m["shots"]
+        except Exception as _me:  # noqa: BLE001
+            logger.warning("[分镜合并] 失败（保留原镜头）：%s: %s", type(_me).__name__, _me)
     return out
 
 
@@ -1507,6 +1539,87 @@ def estimate_shot_duration(shot: dict) -> float:
     """
     return round(max(SHOT_DURATION_MIN,
                      min(SHOT_DURATION_MAX, required_shot_duration(shot))) * 2) / 2.0
+
+
+def merge_underfilled_shots(shots: list) -> dict:
+    """把「内容撑不满单镜下限」的镜头并入相邻**同场景**镜头（2026-10-10 用户口径 C）。
+
+    ## 为什么需要
+
+    时长模型（required_shot_duration）里，无台词镜头的内容上限只有
+    SHOT_DURATION_SILENT + 描述加成 + 动作加成 ≈ 1.6 秒，而单镜下限是 5 秒。
+    第9集实测：48 镜中 21 镜无台词（44%），平均内容量 1.54 秒 → 每镜空转 3.5 秒，
+    合计空转 72.7 秒（占总时长 26%）。这些镜头多是「只拍地砖上的影子」「纸面特写
+    填满画面」这类**静态画面**——它们是相邻镜的画面细节，不是独立的一镜。
+
+    提示词已要求模型不要这样切（见 _shots_targeting_text 的静态画面条款），
+    但模型不保证遵守，故这里做**确定性的兜底合并**。
+
+    ## 合并规则（保守：宁可不合，也不破坏叙事）
+
+      · 只并入**相邻**且**同场景**（location 归一后相同）的镜头 —— 跨场景合并会把
+        两场戏黏在一起；
+      · 只并**前**一镜（保持时间顺序，不往前插）；前一镜已满/不同场景则**原样保留**；
+      · 合并后内容量不超过 SHOT_DURATION_MAX（否则又造出一个超长镜）；
+      · 拼接 description（去重），合并 dialogue；
+      · 一镜只被合并一次（合并后即成为 out 里的普通成员，不会被二次吞并）。
+
+    返回 {"shots": [...], "merged": n}（原列表不被就地修改，便于重跑对账）。
+    """
+    def _norm_loc(x) -> str:
+        return "".join(str((x or {}).get("location") or "").split())
+
+    out: list = []
+    merged = 0
+    for raw in (shots or []):
+        if not isinstance(raw, dict):
+            continue
+        s = dict(raw)
+        if out:
+            prev = out[-1]
+            _need = required_shot_duration(s)
+            if _need < SHOT_DURATION_MIN and _norm_loc(prev) == _norm_loc(s):
+                # 合并后的内容量：把两镜的 description / dialogue 合起来复算
+                probe = dict(prev)
+                _d1 = str(prev.get("description") or "").strip()
+                _d2 = str(s.get("description") or "").strip()
+                probe["description"] = "；".join(x for x in (_d1, _d2) if x)
+                probe["dialogue"] = _merge_dialogue(prev.get("dialogue"), s.get("dialogue"))
+                if required_shot_duration(probe) <= SHOT_DURATION_MAX:
+                    prev["description"] = probe["description"]
+                    prev["dialogue"] = probe["dialogue"]
+                    # 合并侧的高价值字段：高潮节拍 / 角色 / 物品取并集
+                    if str(s.get("beat") or "").strip() == "高潮":
+                        prev["beat"] = s.get("beat")
+                    for _k in ("characters", "items", "props"):
+                        _a = list(prev.get(_k) or [])
+                        for _v in (s.get(_k) or []):
+                            if _v not in _a:
+                                _a.append(_v)
+                        if _a:
+                            prev[_k] = _a
+                    merged += 1
+                    continue
+        out.append(s)
+    return {"shots": out, "merged": merged}
+
+
+def _merge_dialogue(a, b):
+    """合并两镜台词：结构化列表直接相连；字符串用换行相连。"""
+    def _as_list(x):
+        if not x:
+            return []
+        if isinstance(x, list):
+            return list(x)
+        return [x]
+    la, lb = _as_list(a), _as_list(b)
+    if not la:
+        return lb if lb else a
+    if not lb:
+        return la if la else a
+    if all(isinstance(x, dict) for x in la + lb):
+        return la + lb
+    return "\n".join(str(x) for x in la + lb)
 
 
 def build_episode_stats(shots: list) -> dict:
