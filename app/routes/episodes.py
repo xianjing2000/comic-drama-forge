@@ -148,6 +148,39 @@ def api_list_episodes(novel_id):
             _app_logger().warning(f"第{row.get('episode_no')}集进度探测失败：{e}")
             row.setdefault("status", "pending")
             row.setdefault("completed_shots", 0)
+    # ⭐⭐ 2026-10-10（用户实测：「前端剧本这里还是没有实时显示出来」）：
+    #   剧本是**整个步骤跑完才落盘**的（pipeline 写 第N集.json）。生产刚跑到
+    #   「第 1 集剧本 18% · 第 2 轮补生成复检中」时磁盘上什么都没有 ——
+    #   list_episodes 返回空列表，前端「剧本概览」便一直显示
+    #   「暂无剧集数据 / 请先启动自动生产」，用户以为根本没在跑。
+    #   （前端其实已有 10 秒静默重拉的轮询，但重拉同样拿到空表，救不了。）
+    #   这里读 autopilot 运行态，把**正在生成但尚未落盘**的那一集补成占位行：
+    #   status=producing + percent/step/message。落盘后真实行出现，占位按集号去重消失。
+    try:
+        _cur = (autopilot.status(key) or {}).get("current") or {}
+        _cep = int(_cur.get("episode") or 0)
+        if _cep and not any(int(r.get("episode_no") or 0) == _cep for r in episodes):
+            episodes.append({
+                "episode_no": _cep,
+                "file": "",
+                "path": "",
+                "title": "",
+                "episode_title": "",
+                "chapter_index": None,
+                "shot_count": 0,
+                "completed_shots": 0,
+                "status": "producing",
+                "producing": True,
+                "progress": int(_cur.get("percent") or 0),
+                "current_step": _cur.get("step") or "",
+                "message": _cur.get("message") or "",
+                "started_at": _cur.get("started_at") or "",
+                #: 供前端标注「生成中（剧本尚未落盘）」——避免把空行误当已完成的集
+                "pending_script": True,
+            })
+            episodes.sort(key=lambda r: int(r.get("episode_no") or 0))
+    except Exception as e:  # noqa: BLE001 - 占位失败不该让剧本列表 500
+        _app_logger().warning("补「正在生成」集占位失败（忽略）：%s", e)
     done = sum(1 for r in episodes if r.get("status") == "done")
     failed = sum(1 for r in episodes if r.get("status") == "failed")
     producing = sum(1 for r in episodes if r.get("status") == "producing")
