@@ -221,3 +221,9 @@ app/static/
 # 前端独立构建输出（frontend/ 内的 dist）
 frontend/dist/
 
+
+# 本地分析文档（应用运行产出的报告，不入库）
+docs/*报告*.md
+docs/*清单*.md
+archive/local_docs/
+comfyui_dir.json
