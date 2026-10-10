@@ -230,6 +230,10 @@ app.register_blueprint(scenes_bp)
 # ---- keyframes 域（2026-10-09 三步法搬迁）----
 from routes.keyframes import keyframes_bp
 app.register_blueprint(keyframes_bp)
+
+# 2026-10-11 worker 下沉（第一批）：本函数已迁至 workers/screenplay.py。
+#   这里保留名字再导出，既有 app._screenplay_worker 调用表面零改动。
+from workers.screenplay import _screenplay_worker  # noqa: F401, E402
 from job_state import (generation_state, lock)  # noqa: F401
 from routes.keyframes import (_keyframes_dir, api_keyframes_file, api_keyframes_generate, api_keyframes_list, api_keyframes_plan)  # noqa: F401
 from job_state import (generation_state, lock)  # noqa: F401
@@ -9624,36 +9628,6 @@ def _episodes_worker(task_id: str, novel_meta: dict, chapters: list, style: str,
 
 # ===================== 文学剧本层（两段式生产 ①：人审层，2026-10-03） =====================
 
-def _screenplay_worker(task_id: str, novel_meta: dict, chapter: dict,
-                       project_key: str, style: str, episode_no: int):
-    """文学剧本生成 worker：章节正文 → LLM 场次剧本 → output/screenplays/<项目>/第N集_文学剧本.md"""
-    try:
-        text = read_novel_text(NOVELS_DIR, novel_meta["novel_id"])
-        seg = text[int(chapter.get("start") or 0):int(chapter.get("end") or 0)]
-        with lock:
-            generation_state[task_id].update({"phase": "literary", "progress": 15,
-                                              "message": "正在把本章正文改写成文学剧本…"})
-        client = _current_llm_client()
-        if not client.configured:
-            raise LLMError("尚未配置自定义 AI 接口")
-        md = novel_screenplay.generate_screenplay(
-            client, novel_meta.get("title") or novel_meta.get("name") or "",
-            chapter.get("title") or f"第{episode_no}集", seg, style)
-        with lock:
-            generation_state[task_id].update({"progress": 80, "message": "落盘…"})
-        path = novel_screenplay.save_screenplay(
-            novel_screenplay.screenplay_path(project_key, episode_no), md)
-        with lock:
-            generation_state[task_id].update({
-                "status": "completed", "progress": 100,
-                "message": "文学剧本已生成（可在前端查看，确认后再改写为分镜剧本）",
-                "screenplay_path": path,
-                "results": [{"success": True, "episode_no": episode_no,
-                             "path": path, "chars": len(md)}]})
-    except Exception as e:  # noqa: BLE001
-        app.logger.exception("文学剧本生成失败")
-        with lock:
-            generation_state[task_id].update({"status": "failed", "error": str(e)})
 
 
 @app.route('/api/novels/<novel_id>/screenplay/generate', methods=['POST'])
