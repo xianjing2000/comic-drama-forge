@@ -931,100 +931,15 @@ CONFIG_KEYS = (
 )
 
 
+#: 质检配置的全部默认值（2026-10-10 从 _empty_config 提升为模块常量）。
+#  为什么要提出来：统一配置中心需要把数值型参数登记为可调项，
+#  而 config_doctor._resolve 只能解析「模块.属性」或「模块.字典.键」——
+#  函数返回值无法作为 owner。提为常量后 owner 可写
+#  qc_client.QC_CONFIG_DEFAULTS.<key>，且 overlay_config 能正确覆盖。
 def _empty_config() -> dict:
-    return {
-        # ⭐ 2026-10-XX：质检总开关默认值由 False 改 True —— 需求「质检默认开启」。
-        # ⚠️ 存量老配置（文件里没有该键）不会被这里改变：load_config 只在「键存在且非 None」
-        #    时覆盖，缺失则回落本默认值 → 老配置会**自然**读到 True；但为了让用户配置
-        #    文件本身也显式写上 True（且只做一次），由 migrate_enabled_default 幂等补写。
-        "enabled": True,             # 质检总开关（默认开启）
-        "image_enabled": True,       # 图片质检开关
-        "video_enabled": True,       # 视频质检开关
-        "audio_enabled": True,       # 音频质检开关（客观层零模型依赖；AI 层复用质检接口）
-        "script_enabled": True,      # 剧本质检开关
-        # 质检必须使用自己独立配置的 base_url / api_key / model（不再复用文本分析 LLM 接口）
-        "base_url": "",
-        "api_key": "",
-        "model": "",
-        "endpoint_override": {"base_url": "", "api_key": "", "model": ""},
-        "image_prompt": DEFAULT_IMAGE_PROMPT,
-        "video_prompt": DEFAULT_VIDEO_PROMPT,
-        "audio_prompt": DEFAULT_AUDIO_PROMPT,
-        "script_prompt": DEFAULT_SCRIPT_PROMPT,
-        # 音频客观层阈值（可按音色/语速调档）
-        "audio_min_speech_ratio": 0.50,   # 有声占比下限（低于此值扣分）
-        "audio_min_mean_db": -45.0,       # 平均电平下限（低于此值扣分）
-        "audio_max_drift": 0.50,          # 与预期时长偏差上限（比例，超限扣分）
-        "pass_score": 70,            # 合格线（0-100），score >= pass_score 且 pass != false 视为达标
-        "max_retries": 2,            # 不达标最大重试次数
-        # ⭐ 分镜链路专用重试轮数（2026-10-07 用户指定 2→1）。未配置时取本默认值 1
-        #    （存量配置没有这个键 → 自然读到 1，无需迁移）；消费侧再与 max_retries 取 min。
-        "storyboard_max_retries": 1,
-        # ⭐ 2026-10-08（用户拍板 A 方案）：分镜图质检「软放行」—— 质检不达标只记录、
-        #    仍写入正式目录。动机（实测）：同一项目内已通过的镜3 九宫格雷同度 0.831，
-        #    而信息量更大的镜4/28/37（边缘密度 8.29/11.83/8.55，均高于已通过镜1 的
-        #    6.58）却被判「主体缺失/内容错误」硬阻断 —— VLM 判官双标，把可用图长期挡在
-        #    门外。False = 回到旧的「关键缺陷硬阻断」。仅作用于分镜图，资产/视频不受影响。
-        "storyboard_soft_qc": True,
-        # best-of-N 分镜候选数（借 ViMax best_image_selector）：固定生成 N 张候选，
-        # 按质检分选**最佳**那张入库，替代「第一个通过即停」。1=关闭（默认，保持现行为），
-        # 上限 4（N 倍 GPU 渲染，慎调）。仅对**分镜图**生效（视频链路未接入）。
-        "best_of": 1,
-        "video_frame_count": 3,      # 视频抽帧数量（1-6）
-        "image_max_side": 1024,      # 送检前压缩的最长边（控制 token 与耗时）
-        # 图片质检是否附带「本镜出现的角色/物品/场景」的设定图：
-        # 分镜图是按参考图生成的，只送成品图的话模型没有锚点，「角色不像设定/道具变形」
-        # 这类问题只能靠猜。开启后按 shot.characters_in_shot / items_in_shot 顺序附带
-        # 最多 MAX_REF_IMAGES 张设定图，并要求逐张核对是否变形、与设定是否一致。
-        "image_ref_compare": True,
-    "image_blocking_ref_compare": True,
-        # ★ 图片质检「二次复核」（判官自洽性检查），默认开：
-        #   实测同一张图 + 同一组设定图 + temperature=0 重复送检，score 可为
-        #   45 / 78 / 85 / 92（同一张图通过率 2/4），还会出现「景别完美符合」与
-        #   「景别严重不符」两个相反结论 —— 判官自身抖动会让每次「判不过」都真烧一次
-        #   GPU 重画（1-2 分钟），而复核一次只要 2-5 秒。故：首次判不过时用**同一张图**
-        #   再判一次，任一判过即放行；两次都判不过才真重跑。
-        #   ⚠️ 客观层致命（黑图/纯色，确定性证据）不复核；⚠️ 接口故障不复核。
-        "image_qc_recheck": True,
-        # G9/O1 客观层确定性闸门（图片黑图 stddev 下限 / 视频时长偏差上限）
-        "image_pixel_std_min": 8.0,  # 像素 stddev < 8 → 黑图/纯色图 fatal
-        # ⚠️ 2026-10-08：默认从 0.30 提到 0.60。原因（实测 ep01 场次1）：H3 Director 的
-    #    分段是「17k+5 帧网格对齐」+ 段间连续性重叠，成片时长**系统性长于**剧本名义时长
-    #    —— 场次1 名义 47.67s，实际 66.08s（+38.6%），30% 阈值 100% 触发 → 成片被
-    #    硬阻断并无限重画（画面本身通过了全部内容判据）。0.60 仍能拦住真正的截断
-    #    （成片只剩一半 ≈ -50%）与明显异常，只是不再把 H3 的固有对齐膨胀当缺陷。
-    "video_max_drift": 0.60,      # 视频 |实测-期望|/期望 > 60% → fatal
-        "timeout": 180,              # 单次质检请求读超时（秒）
-        "api_retries": API_RETRY_ATTEMPTS,   # 网络层额外重试次数（瞬时故障时退避重试，与 max_retries 重画无关）
-        "api_backoff": API_RETRY_BACKOFF,    # 网络重试退避基数（秒），按 2 的幂增长、单次上限见 API_RETRY_MAX_SLEEP
-        # ⚠️ 推理型模型（如 agnes-2.5-flash、R1 系）会把 token 花在 reasoning_content 上，
-        # 额度给小时正文 content 直接为 ""，质检就永远「返回内容为空」。
-        # 2026-09-17 起**默认允许思考**（关思考会让质检退化成直觉判断、漏掉明显问题），
-        # 改用「token 下限 + 空正文自动加码重试」兜底。确需关掉的模块把这里设为 true。
-        "disable_thinking": False,
-        # 允许思考时质检请求的最小 max_tokens（思考本身就要吃几百 token）
-        "min_tokens_when_thinking": 1024,
-        # 单次视觉质检请求的 max_tokens（思考型模型要「先想完再吐完整 JSON」，8k 起步不易截断）
-        "image_max_tokens": 8192,
-        # 剧本质检各维度权重和合格线
-        "script_categories": {
-            "structure": {"weight": 0.2, "pass_threshold": 80},
-            "logic": {"weight": 0.3, "pass_threshold": 70},
-            "style": {"weight": 0.2, "pass_threshold": 70},
-            "prompt_quality": {"weight": 0.15, "pass_threshold": 60},
-            "feasibility": {"weight": 0.15, "pass_threshold": 70}
-        },
-        # 提示词预检（生成前质检，实现见 prompt_qc.py）
-        # ⚠️ 与图片/视频质检不同：它**不依赖质检接口**（纯确定性检查、零成本、零模型依赖），
-        # 因此即使没配质检接口也默认开启 —— 提示词是出图/出片的输入，输入错了后面白跑。
-        "prompt_enabled": True,
-        # warn=只记录 / repair=确定性自愈后放行（默认）/ block=有问题就拦
-        "prompt_mode": "repair",
-        # 存量迁移标记：默认 True —— 新建 / 清空即视为「已迁移」，不走老配置补写分支。
-        # 仅当配置文件**存在但缺此键**时才由 migrate_enabled_default 补写为 True。
-        "_qc_migrated": True,
-        "updated_at": None,
-    }
+    """返回一份配置默认值的**副本**（调用方可安全修改）。"""
+    return dict(QC_CONFIG_DEFAULTS)
+
 
 
 def _normalize_override(raw) -> dict:
@@ -1692,7 +1607,7 @@ def _is_local(url: str) -> bool:
 
 
 DISABLE_THINKING_DEFAULT = False
-MIN_TOKENS_WHEN_THINKING = 1024
+MIN_TOKENS_WHEN_THINKING = 24576
 
 
 def _with_thinking_off(payload: dict) -> dict:
@@ -4266,3 +4181,98 @@ def script_qc_ready(cfg: dict, override: dict = None) -> bool:
     """检查剧本质检是否就绪"""
     return bool(cfg.get("enabled") and cfg.get("script_enabled")
                 and qc_endpoint_ready(cfg, override))
+
+
+QC_CONFIG_DEFAULTS = {
+        # ⭐ 2026-10-XX：质检总开关默认值由 False 改 True —— 需求「质检默认开启」。
+        # ⚠️ 存量老配置（文件里没有该键）不会被这里改变：load_config 只在「键存在且非 None」
+        #    时覆盖，缺失则回落本默认值 → 老配置会**自然**读到 True；但为了让用户配置
+        #    文件本身也显式写上 True（且只做一次），由 migrate_enabled_default 幂等补写。
+        "enabled": True,             # 质检总开关（默认开启）
+        "image_enabled": True,       # 图片质检开关
+        "video_enabled": True,       # 视频质检开关
+        "audio_enabled": True,       # 音频质检开关（客观层零模型依赖；AI 层复用质检接口）
+        "script_enabled": True,      # 剧本质检开关
+        # 质检必须使用自己独立配置的 base_url / api_key / model（不再复用文本分析 LLM 接口）
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+        "endpoint_override": {"base_url": "", "api_key": "", "model": ""},
+        "image_prompt": DEFAULT_IMAGE_PROMPT,
+        "video_prompt": DEFAULT_VIDEO_PROMPT,
+        "audio_prompt": DEFAULT_AUDIO_PROMPT,
+        "script_prompt": DEFAULT_SCRIPT_PROMPT,
+        # 音频客观层阈值（可按音色/语速调档）
+        "audio_min_speech_ratio": 0.50,   # 有声占比下限（低于此值扣分）
+        "audio_min_mean_db": -45.0,       # 平均电平下限（低于此值扣分）
+        "audio_max_drift": 0.50,          # 与预期时长偏差上限（比例，超限扣分）
+        "pass_score": 70,            # 合格线（0-100），score >= pass_score 且 pass != false 视为达标
+        "max_retries": 2,            # 不达标最大重试次数
+        # ⭐ 分镜链路专用重试轮数（2026-10-07 用户指定 2→1）。未配置时取本默认值 1
+        #    （存量配置没有这个键 → 自然读到 1，无需迁移）；消费侧再与 max_retries 取 min。
+        "storyboard_max_retries": 1,
+        # ⭐ 2026-10-08（用户拍板 A 方案）：分镜图质检「软放行」—— 质检不达标只记录、
+        #    仍写入正式目录。动机（实测）：同一项目内已通过的镜3 九宫格雷同度 0.831，
+        #    而信息量更大的镜4/28/37（边缘密度 8.29/11.83/8.55，均高于已通过镜1 的
+        #    6.58）却被判「主体缺失/内容错误」硬阻断 —— VLM 判官双标，把可用图长期挡在
+        #    门外。False = 回到旧的「关键缺陷硬阻断」。仅作用于分镜图，资产/视频不受影响。
+        "storyboard_soft_qc": True,
+        # best-of-N 分镜候选数（借 ViMax best_image_selector）：固定生成 N 张候选，
+        # 按质检分选**最佳**那张入库，替代「第一个通过即停」。1=关闭（默认，保持现行为），
+        # 上限 4（N 倍 GPU 渲染，慎调）。仅对**分镜图**生效（视频链路未接入）。
+        "best_of": 1,
+        "video_frame_count": 3,      # 视频抽帧数量（1-6）
+        "image_max_side": 1024,      # 送检前压缩的最长边（控制 token 与耗时）
+        # 图片质检是否附带「本镜出现的角色/物品/场景」的设定图：
+        # 分镜图是按参考图生成的，只送成品图的话模型没有锚点，「角色不像设定/道具变形」
+        # 这类问题只能靠猜。开启后按 shot.characters_in_shot / items_in_shot 顺序附带
+        # 最多 MAX_REF_IMAGES 张设定图，并要求逐张核对是否变形、与设定是否一致。
+        "image_ref_compare": True,
+    "image_blocking_ref_compare": True,
+        # ★ 图片质检「二次复核」（判官自洽性检查），默认开：
+        #   实测同一张图 + 同一组设定图 + temperature=0 重复送检，score 可为
+        #   45 / 78 / 85 / 92（同一张图通过率 2/4），还会出现「景别完美符合」与
+        #   「景别严重不符」两个相反结论 —— 判官自身抖动会让每次「判不过」都真烧一次
+        #   GPU 重画（1-2 分钟），而复核一次只要 2-5 秒。故：首次判不过时用**同一张图**
+        #   再判一次，任一判过即放行；两次都判不过才真重跑。
+        #   ⚠️ 客观层致命（黑图/纯色，确定性证据）不复核；⚠️ 接口故障不复核。
+        "image_qc_recheck": True,
+        # G9/O1 客观层确定性闸门（图片黑图 stddev 下限 / 视频时长偏差上限）
+        "image_pixel_std_min": 8.0,  # 像素 stddev < 8 → 黑图/纯色图 fatal
+        # ⚠️ 2026-10-08：默认从 0.30 提到 0.60。原因（实测 ep01 场次1）：H3 Director 的
+    #    分段是「17k+5 帧网格对齐」+ 段间连续性重叠，成片时长**系统性长于**剧本名义时长
+    #    —— 场次1 名义 47.67s，实际 66.08s（+38.6%），30% 阈值 100% 触发 → 成片被
+    #    硬阻断并无限重画（画面本身通过了全部内容判据）。0.60 仍能拦住真正的截断
+    #    （成片只剩一半 ≈ -50%）与明显异常，只是不再把 H3 的固有对齐膨胀当缺陷。
+    "video_max_drift": 0.60,      # 视频 |实测-期望|/期望 > 60% → fatal
+        "timeout": 180,              # 单次质检请求读超时（秒）
+        "api_retries": API_RETRY_ATTEMPTS,   # 网络层额外重试次数（瞬时故障时退避重试，与 max_retries 重画无关）
+        "api_backoff": API_RETRY_BACKOFF,    # 网络重试退避基数（秒），按 2 的幂增长、单次上限见 API_RETRY_MAX_SLEEP
+        # ⚠️ 推理型模型（如 agnes-2.5-flash、R1 系）会把 token 花在 reasoning_content 上，
+        # 额度给小时正文 content 直接为 ""，质检就永远「返回内容为空」。
+        # 2026-09-17 起**默认允许思考**（关思考会让质检退化成直觉判断、漏掉明显问题），
+        # 改用「token 下限 + 空正文自动加码重试」兜底。确需关掉的模块把这里设为 true。
+        "disable_thinking": False,
+        # 允许思考时质检请求的最小 max_tokens（思考本身就要吃几百 token）
+        "min_tokens_when_thinking": 24576,
+        # 单次视觉质检请求的 max_tokens（思考型模型要「先想完再吐完整 JSON」，8k 起步不易截断）
+        "image_max_tokens": 8192,
+        # 剧本质检各维度权重和合格线
+        "script_categories": {
+            "structure": {"weight": 0.2, "pass_threshold": 80},
+            "logic": {"weight": 0.3, "pass_threshold": 70},
+            "style": {"weight": 0.2, "pass_threshold": 70},
+            "prompt_quality": {"weight": 0.15, "pass_threshold": 60},
+            "feasibility": {"weight": 0.15, "pass_threshold": 70}
+        },
+        # 提示词预检（生成前质检，实现见 prompt_qc.py）
+        # ⚠️ 与图片/视频质检不同：它**不依赖质检接口**（纯确定性检查、零成本、零模型依赖），
+        # 因此即使没配质检接口也默认开启 —— 提示词是出图/出片的输入，输入错了后面白跑。
+        "prompt_enabled": True,
+        # warn=只记录 / repair=确定性自愈后放行（默认）/ block=有问题就拦
+        "prompt_mode": "repair",
+        # 存量迁移标记：默认 True —— 新建 / 清空即视为「已迁移」，不走老配置补写分支。
+        # 仅当配置文件**存在但缺此键**时才由 migrate_enabled_default 补写为 True。
+        "_qc_migrated": True,
+        "updated_at": None,
+    }

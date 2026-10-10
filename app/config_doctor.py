@@ -541,6 +541,163 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'script_consistency.ELEMENT_COVERAGE_MIN',
     },
 
+    # ===== 2026-10-10 补登：qc_config.json 的数值型参数 =====
+    #  来源：qc_client.QC_CONFIG_DEFAULTS（本次从 _empty_config 提升为模块常量）。
+    #  为什么登记它们：第 2 轮排查发现 qc_config.json 有 39 个键，
+    #  但配置中心里只有 1 个同名项 —— 意味着质检系统真正的配置几乎全在 JSON，
+    #  改配置中心对它们无效。登记后经 overlay_config 覆盖（只覆盖被显式改过的项）。
+    #  owner 指向 qc_client.QC_CONFIG_DEFAULTS.<key>，
+    #  config_doctor._resolve 支持「模块.字典.键」形式。
+    'api_backoff': {
+        'default': 1.5, 'type': 'float', 'range': (0.0, 3600.0), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.api_backoff',
+    },
+    'api_retries': {
+        'default': 2, 'type': 'int', 'range': (0, 20), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.api_retries',
+    },
+    'audio_enabled': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检开关',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.audio_enabled',
+    },
+    'audio_max_drift': {
+        'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.audio_max_drift',
+    },
+    'audio_min_mean_db': {
+        'default': -45.0, 'type': 'float', 'range': (-100.0, 0.0), 'group': '音频',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.audio_min_mean_db',
+    },
+    'audio_min_speech_ratio': {
+        'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.audio_min_speech_ratio',
+    },
+    'best_of': {
+        'default': 1, 'type': 'int', 'range': (0, 64), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.best_of',
+    },
+    'enabled': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检开关',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.enabled',
+    },
+    'image_blocking_ref_compare': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.image_blocking_ref_compare',
+    },
+    'image_enabled': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检开关',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.image_enabled',
+    },
+    'image_max_side': {
+        'default': 1024, 'type': 'int', 'range': (0, 8192), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.image_max_side',
+    },
+    'image_max_tokens': {
+        'default': 8192, 'type': 'int', 'range': (0, 200000), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.image_max_tokens',
+    },
+    'image_pixel_std_min': {
+        'default': 8.0, 'type': 'float', 'range': (0.0, 100.0), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.image_pixel_std_min',
+    },
+    'image_qc_recheck': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.image_qc_recheck',
+    },
+    'image_ref_compare': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.image_ref_compare',
+    },
+    'max_retries': {
+        'default': 2, 'type': 'int', 'range': (0, 20), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.max_retries',
+    },
+    'pass_score': {
+        'default': 70, 'type': 'int', 'range': (0, 100), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.pass_score',
+    },
+    'prompt_enabled': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检开关',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.prompt_enabled',
+    },
+    'script_enabled': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检开关',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.script_enabled',
+    },
+    'storyboard_max_retries': {
+        'default': 1, 'type': 'int', 'range': (0, 20), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.storyboard_max_retries',
+    },
+    'storyboard_soft_qc': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.storyboard_soft_qc',
+    },
+    'timeout': {
+        'default': 180, 'type': 'int', 'range': (0, 3600), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.timeout',
+    },
+    'video_enabled': {
+        'default': True, 'type': 'bool', 'range': None, 'group': '质检开关',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.video_enabled',
+    },
+    'video_frame_count': {
+        'default': 3, 'type': 'int', 'range': (0, 64), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.video_frame_count',
+    },
+    'video_max_drift': {
+        'default': 0.6, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
+        'desc': '质检配置（qc_config.json）：原键名与代码默认值一致；'
+                '配置中心改动会经 overlay_config 覆盖 qc_config.json。',
+        'owner': 'qc_client.QC_CONFIG_DEFAULTS.video_max_drift',
+    },
 }
 
 

@@ -84,7 +84,7 @@ DEFAULT_TOKEN_LADDER = (2048, 4096, 8192, 16384, 24576)
 # 仍可用配置项 disable_thinking 对单个模块关掉。
 DISABLE_THINKING_DEFAULT = False
 # 允许思考时的最小 max_tokens：思考本身就要吃掉几百 token，额度太小必然空正文
-MIN_TOKENS_WHEN_THINKING = 1024
+MIN_TOKENS_WHEN_THINKING = 24576
 MAX_TOKENS_CEILING = 32768
 
 # ---- 思考「档位」模型（GLM-5.3 之类思考不可关闭的模型） ----
