@@ -231,6 +231,10 @@ app.register_blueprint(scenes_bp)
 from routes.keyframes import keyframes_bp
 app.register_blueprint(keyframes_bp)
 
+# 2026-10-11 助手下沉：镜头辅助助手 已迁至 shot_helpers.py。
+from shot_helpers import (  # noqa: F401, E402
+    _chapter_text_for_script, _shot_coverage_map)
+
 # 2026-10-11 助手下沉：混音助手 已迁至 mix_helpers.py。
 from mix_helpers import (  # noqa: F401, E402
     _mix_manifest, _mix_prepare, _mix_resolve_video,
@@ -724,73 +728,8 @@ def api_status():
 # ==========================================================================
 
 
-def _chapter_text_for_script(script: dict) -> str:
-    """由剧本 metadata（novel_id + chapter_index）反查该集对应的原文章节文本"""
-    meta = (script or {}).get("metadata") or {}
-    novel_id = meta.get("novel_id")
-    if not novel_id:
-        return ""
-    ch_index = meta.get("chapter_index") or (script or {}).get("episode_no") or 1
-    try:
-        text = read_novel_text(NOVELS_DIR, str(novel_id))
-    except Exception as e:  # noqa: BLE001
-        app.logger.debug(f"小说正文不可读（覆盖率归属将缺失）：{e}")
-        return ""
-    for c in split_chapters(text):
-        if int(c.get("index") or 0) == int(ch_index or 0):
-            return text[c.get("start") or 0:c.get("end") or 0]
-    return ""
 
 
-def _shot_coverage_map(script: dict) -> dict:
-    """把原文章节正文单元归属到镜头（用于分镜画布展示「该镜承载了原文哪几句」）
-
-    规则：逐单元与各镜「描述+台词+prompt_h3」做 4-gram 字面比对，
-    取命中率最高的镜头归属；命中率低于 0.3 视为未承载。
-    这是**离线规则判定**，与 coverage.py 的 LLM 判定同源（同一 gram 口径），
-    仅供画布展示定位用，不替代覆盖率报告结论。
-    """
-    text = _chapter_text_for_script(script)
-    if not text:
-        return {}
-    try:
-        units, _total = coverage.split_source_units(text)
-    except Exception:  # noqa: BLE001
-        return {}
-    if not units:
-        return {}
-    shots = [s for s in ((script or {}).get("shots") or []) if isinstance(s, dict)]
-    if not shots:
-        return {}
-    shot_grams = []
-    for s in shots:
-        corpus = " ".join(str(x) for x in (
-            s.get("description"), s.get("dialogue_text"), s.get("prompt_h3"),
-            s.get("location"), s.get("camera")) if x)
-        try:
-            shot_grams.append(coverage._grams(coverage._norm(corpus)))
-        except Exception:  # noqa: BLE001
-            shot_grams.append(set())
-
-    out: dict = {}
-    for uid, unit in enumerate(units, start=1):
-        if coverage.is_title_unit(unit):
-            continue
-        best_i, best_r = -1, 0.0
-        for i, grams in enumerate(shot_grams):
-            if not grams:
-                continue
-            try:
-                r = coverage.literal_ratio(unit, grams)
-            except Exception:  # noqa: BLE001
-                continue
-            if r > best_r:
-                best_i, best_r = i, r
-        if best_i >= 0 and best_r >= 0.3:
-            sid = shots[best_i].get("shot_id", best_i + 1)
-            out.setdefault(str(sid), []).append(
-                {"unit_id": uid, "text": unit[:200], "ratio": best_r})
-    return out
 
 
 def _collect_asset_refs(project: str) -> tuple:
