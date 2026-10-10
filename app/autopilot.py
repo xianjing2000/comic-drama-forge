@@ -1673,7 +1673,12 @@ def status(project: str = "", brief: bool = False) -> dict:
         # needs_user = failure_pause 或 未处理异常 > 0（供前端一键「查看/重跑」）。
         "curve": production_curve(24, project=project),
         # failure_pause：单集失败自动暂停的标记（含 project/episode/reason/error/at）
-        "failure_pause": st.get("failure_pause") or {},
+        # ⭐ 2026-10-10 修复「任务在跑却显示已暂停」：
+        #    此前写 `or {}` —— 无失败时返回**空对象**，而 JS 里 `{}` 是 truthy，
+        #    前端 `st.failure_pause || null` 于是拿到 {}，横幅照样渲染，但
+        #    reason/episode/error 全空 → 文案退化成「第集生产失败，已暂停」（用户实测）。
+        #    这里显式归一为 None（JSON null），让前端能正确判定"无失败"。
+        "failure_pause": (st.get("failure_pause") or None) or None,
         # needs_user：需要人工介入（failure_pause 非空 或 未处理异常 > 0）
         "needs_user": bool(st.get("failure_pause")) or len([e for e in exceptions if not e.get("resolved")]) > 0,
     })

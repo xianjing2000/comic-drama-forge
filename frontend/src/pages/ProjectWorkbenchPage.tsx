@@ -357,7 +357,13 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
         if (!alive) return;
         setCur((st.current as AutopilotCurrent) || null);
         setPaused(Boolean(st.paused));
-        setFailurePause((st.failure_pause as any) || null);
+        // ⚠️ 2026-10-10：后端旧版会返回**空对象 {}**，而 JS 里 {} 是 truthy ——
+        //    直接 `(x || null)` 会让横幅在"任务正常在跑"时也渲染（文案退化成
+        //    「第集生产失败」）。这里改为「必须是含字段的非空对象」才算失败。
+        const _fp = st.failure_pause as any;
+        setFailurePause(
+          _fp && typeof _fp === 'object' && Object.keys(_fp).length > 0 ? _fp : null,
+        );
       } catch {
         // 轮询失败静默：状态刷新是锦上添花，不能因一次失败打断整页
       }

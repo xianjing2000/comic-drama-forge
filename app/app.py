@@ -2132,6 +2132,100 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
         scratch_root = os.path.join(QC_DIR, project_name, "assets_scratch")
 
         results = []
+        # ===================== 资产提示词预热（2026-10-10 用户指定）=====================
+        # 用户要求：「要不止预热一个资产」—— 即在本批资产**出图期间**，把**本批全部**
+        # 资产的增强提示词先算好，而不是每轮到某个资产才开始拼/增强。
+        #
+        # 原理与安全性：
+        #   · 只调 prompt_enhance.enhance_prompt()，它命中/写入的是 process 内线程安全
+        #     缓存（_OK_CACHE + _CACHE_LOCK）→ 预热与正式跑用同一个 key（kind|style|salt|prompt）
+        #     → 正式跑时秒过，**零重复 LLM 调用**；
+        #   · 纯 LLM，零 GPU，不与 ComfyUI 抢卡（8G 显存跑不了并发出图，但 LLM 可以并行）；
+        #   · 只填缓存，**不落任何产物、不写教训库、不改 results** —— 预热失败绝不影响主线；
+        #   · 限流 max_workers=3：LLM 网关本会话已多次出现「只返回思考内容」（实测 105 次），
+        #     并发过高会加剧；3 是「够用又不压垮网关」的经验值。
+        # 开关：plan/pipeline 配置 prewarm_asset_prompt（界面可勾选，默认开）。
+        def _prewarm_asset_prompts(_assets, _atype, _gstyle, _pname):
+            """后台预热本批资产的增强提示词（只填 prompt_enhance 缓存）"""
+            try:
+                if str(os.environ.get('MJSCXT_PREWARM_ASSET_PROMPT') or '1').strip().lower() \
+                        in ('0', 'false', 'off', 'no'):
+                    return
+                import prompt_enhance as _pe
+                if not _pe.enhance_enabled():
+                    app.logger.info('[资产提示词预热] 增强层未启用，跳过')
+                    return
+                import prompt_memory as _pm
+                import comfyui_client as _cc_mod
+                from concurrent.futures import ThreadPoolExecutor
+                _done = {'n': 0, 'skip': 0}
+
+                def _one(_a):
+                    try:
+                        _nm = str(_a.get('name') or '').strip()
+                        if not _nm:
+                            return
+                        _p = str(_a.get('reference_prompt_zh')
+                                 or _a.get('prompt_zh') or _a.get('appearance') or '')
+                        if not _p:
+                            return
+                        # 与主路径 L2187/2194 **同序同参数**：顺序不一致会让缓存 key 漂移
+                        if _atype == 'character':
+                            _p = asset_prompt_kit.ensure_prompt_gender(_p, _a)
+                        elif _atype == 'scene':
+                            _p = asset_prompt_kit.ensure_scene_layout(_p, _a)
+                        if _atype == 'item':
+                            _imp = _a.get('importance', '')
+                            if _imp and _imp != '重要':
+                                _done['skip'] += 1
+                                return
+                        _style = str(_a.get('style') or _gstyle or '')
+                        # 与 _prompt_preflight 一致：先叠加该项目历史召回
+                        try:
+                            _t = _pm.learned_prompt(kind='prompt', prompt=_p, project=_pname,
+                                                    root_dir=PROJECT_OUTPUT_DIR, style=_style)
+                        except Exception:  # noqa: BLE001  召回失败按原文
+                            _t = _p
+                        _pe.enhance_prompt('asset', _t, ctx=_a, style=_style)
+                        _done['n'] += 1
+                    except Exception:  # noqa: BLE001  单个失败不影响其余
+                        pass
+
+                with ThreadPoolExecutor(max_workers=3,
+                                        thread_name_prefix='prewarm-asset') as _ex:
+                    list(_ex.map(_one, _assets))
+                app.logger.info('[资产提示词预热] %s 批：已预热 %d 条（跳过 %d 条），'
+                                '正式生成时命中缓存', _atype, _done['n'], _done['skip'])
+            except Exception as _pw_e:  # noqa: BLE001  预热整体失败不影响生产
+                app.logger.warning('[资产提示词预热] 调度失败（忽略，不影响生产）：%s', _pw_e)
+
+        # 开关（与 prewarm_next_script 同口径：env 可强制关，其次读配置）
+        _pw_on = True
+        try:
+            if str(os.environ.get('MJSCXT_PREWARM_ASSET_PROMPT') or '1').strip().lower() \
+                    in ('0', 'false', 'off', 'no'):
+                _pw_on = False
+            else:
+                _pw_cfg = None
+                try:
+                    _pw_cfg = (ctx or {}).get('config') if isinstance(ctx, dict) else None
+                except Exception:  # noqa: BLE001
+                    _pw_cfg = None
+                if isinstance(_pw_cfg, dict) and _pw_cfg.get('prewarm_asset_prompt') is False:
+                    _pw_on = False
+        except Exception:  # noqa: BLE001
+            _pw_on = True
+        if _pw_on and assets:
+            try:
+                threading.Thread(target=_prewarm_asset_prompts,
+                                 args=(list(assets), asset_type, gen_style, project_name),
+                                 daemon=True, name=f'prewarm-asset-{asset_type}').start()
+                app.logger.info('[资产提示词预热] 已在后台预热 %s 批共 %d 个资产（与出图并行）',
+                                asset_type, len(assets))
+            except Exception as _pw_t_e:  # noqa: BLE001
+                app.logger.warning('[资产提示词预热] 线程启动失败（忽略）：%s', _pw_t_e)
+        # ===================== 预热结束 =====================
+
         total = len(assets)
 
         def _set_phase(phase: str, qc_phase: str = None):
@@ -10895,7 +10989,11 @@ def api_autonomous_start():
                                'step_max_retries',
                                # ⭐ 2026-10-10：集间流水线开关（界面可勾选，默认开）
                                #    True = 本集烧 GPU 时后台预热下一集剧本（纯 LLM，不抢卡）
-                               'prewarm_next_script')}
+                               'prewarm_next_script',
+                               # ⭐ 2026-10-10：资产提示词预热（界面可勾选，默认开）。
+                               #    True = 本批资产生成期间后台预热**本批全部**资产的增强
+                               #    提示词（只填缓存，零 GPU、不落产物）。
+                               'prewarm_asset_prompt')}
 
     if not novel_id and project_name:
         # 尝试从现有计划获取 novel_id

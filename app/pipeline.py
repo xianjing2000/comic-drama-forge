@@ -244,6 +244,11 @@ DEFAULT_CONFIG = {
     #    关闭后回到严格串行（每一集的剧本都在该集开跑时才生成）。
     #    ⚠️ 环境变量 MJSCXT_PREWARM_NEXT_SCRIPT=0 仍可强制关闭（调试/排查用，优先级高于本开关）。
     "prewarm_next_script": True,
+    # ⭐ 2026-10-10：资产提示词预热（界面可勾选，默认开）。
+    #    True = 本批资产生成期间，后台把**本批全部**资产的增强提示词先算好
+    #    （只填 prompt_enhance 的进程内缓存，零 GPU、不落产物）。正式生成时命中缓存秒过。
+    #    env MJSCXT_PREWARM_ASSET_PROMPT=0 可强制关闭。
+    "prewarm_asset_prompt": True,
     # ---- 各环节开关 ----
     "enable_assets": True,
     "enable_video": True,
@@ -290,7 +295,7 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
         except (TypeError, ValueError):
             cfg[k] = DEFAULT_CONFIG[k]
     # 布尔开关：前端可能传字符串/0/1（JSON 类型不可信）→ 统一收敛为 bool
-    for k in ("prewarm_next_script",):
+    for k in ("prewarm_next_script", "prewarm_asset_prompt"):
         v = cfg.get(k)
         if isinstance(v, str):
             cfg[k] = v.strip().lower() not in ("0", "false", "off", "no", "")
