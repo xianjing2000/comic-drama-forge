@@ -186,6 +186,42 @@ class _Tee:
             raise OSError('no fileno')
 
 
+#: 日志轮转参数（2026-10-10 设计审查修复）。
+#  背景：本项目是**无人值守 24/7 挂机**（本文件开头即写明），但日志此前是
+#  直接 open(path, 'a') 追加写入、**全项目 0 处轮转配置** —— 单文件会无限增长。
+#  实测 serve_stdout.log 已达 3.17MB 且持续增长；长期挂机足以吃满磁盘。
+#  策略：单文件超过 MAX 就整体归档为 .1（旧的 .1 → .2 …），最多保留 KEEP 份，
+#  最老的一份丢弃。总占用被限制在约 MAX × (KEEP+1)。
+_LOG_MAX_BYTES = 32 * 1024 * 1024
+_LOG_KEEP = 5
+
+
+def _rotate_log(path: str, max_bytes: int = _LOG_MAX_BYTES, keep: int = _LOG_KEEP) -> bool:
+    """按大小轮转日志文件。返回是否发生了轮转（只读判断，失败只告警不抛）。"""
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) < max_bytes:
+            return False
+        # 逆序顺延：先删最老的，再把 .N-1 → .N，最后把主文件 → .1
+        oldest = '%s.%d' % (path, keep)
+        if os.path.isfile(oldest):
+            try:
+                os.remove(oldest)
+            except OSError:
+                pass
+        for i in range(keep - 1, 0, -1):
+            src = '%s.%d' % (path, i)
+            if os.path.isfile(src):
+                try:
+                    os.replace(src, '%s.%d' % (path, i + 1))
+                except OSError:
+                    pass
+        os.replace(path, path + '.1')
+        return True
+    except Exception as e:  # noqa: BLE001  轮转失败绝不能影响启动
+        logger.warning('日志轮转失败（忽略，继续追加写）：%s', e)
+        return False
+
+
 def _redirect_process_logs() -> None:
     """把本进程 stdout/stderr 追加写到日志文件（与 log_viewer 读侧同路径）"""
     global _LOG_FH
@@ -203,6 +239,12 @@ def _redirect_process_logs() -> None:
             return  # 源码/计划任务模式由 run_serve.bat 重定向，保持原行为
         os.makedirs(log_dir, exist_ok=True)
         log_path = os.path.join(log_dir, 'serve_stdout.log')
+        # ⭐ 2026-10-10：写之前先按大小轮转（无人值守挂机，不能让它无限增长）。
+        #   注意必须在 open(..., 'a') **之前** —— 打开后再改名会让句柄指向被移走的旧文件。
+        if _rotate_log(log_path):
+            logger.info('日志已轮转：%s → %s.1（单文件上限 %dMB，保留 %d 份）',
+                        os.path.basename(log_path), os.path.basename(log_path),
+                        _LOG_MAX_BYTES // (1024 * 1024), _LOG_KEEP)
         _orig = (sys.stdout, sys.stderr)
         fh = open(log_path, 'a', encoding='utf-8', errors='replace', buffering=1)
         try:

@@ -45,6 +45,7 @@ from config import (
     # SHOT_GRANULARITY_* 与本文件 CHARS_PER_SHOT / REF_INSERT_RATIO / SPLIT_ACTION_BEATS 的注释。
     SHOT_CAP_GROWTH, SHOT_GRANULARITY_TARGET_SHOTS, SHOT_GRANULARITY_MAX_SHOTS,
 )
+from common_util import as_dict as _as_dict
 
 logger = logging.getLogger(__name__)
 
@@ -595,17 +596,6 @@ def _chunk_title(c: dict) -> str:
 
 
 # ===================== 三段式生成 =====================
-
-def _as_dict(data) -> dict:
-    """模型返回容错：兼容部分模型把 JSON 对象包在数组里返回（[{"...": ...}]）的情况。"""
-    if isinstance(data, dict):
-        return data
-    if isinstance(data, list):
-        for it in data:
-            if isinstance(it, dict):
-                return it
-    return {}
-
 
 def _bare_list_to_bible(rows) -> dict:
     """模型只返回了某个数组（未包成完整对象）时的兜底归位。

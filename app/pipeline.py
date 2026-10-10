@@ -61,6 +61,7 @@ import preview_gate  # 两级生产（2026-09-29：预演产物永不可交付�
 
 from fs_atomic import atomic_write_json, read_json_strict
 
+from common_util import now as _now
 logger = logging.getLogger(__name__)
 
 # ===================== 集级互斥（B-02 P0-5 并发/幂等） =====================
@@ -377,10 +378,6 @@ def _A():
     if mod is None:
         raise PipelineError("宿主模块 app 尚未加载，无法运行流水线")
     return mod
-
-
-def _now() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
 # ===================== 通用工具 =====================

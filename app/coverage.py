@@ -43,6 +43,7 @@ from config import CONTINUITY_DIR, COVERAGE_THRESHOLD
 from llm_client import LLMError, LLMTruncatedError
 
 
+from common_util import now as _now
 logger = logging.getLogger(__name__)
 
 COVERAGE_VERSION = "coverage_v2"
@@ -62,10 +63,6 @@ SYSTEM_COVERAGE = ("你是漫剧剧本质检员，负责逐条核对原小说片
 
 
 # ===================== 基础工具 =====================
-
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
-
 
 def _safe_name(name, limit: int = 60) -> str:
     """与前端 / 项目键同样的安全化规则（非法字符转下划线）"""

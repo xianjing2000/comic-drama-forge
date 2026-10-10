@@ -21,6 +21,7 @@ import requests
 import cancellation
 from fs_atomic import atomic_write_json
 
+from common_util import mask_key as mask_key
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 240
@@ -340,15 +341,6 @@ def clear_config(config_path: str) -> dict:
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
     return cfg
-
-
-def mask_key(key: str) -> str:
-    """api_key 脱敏：仅保留首尾少量字符"""
-    if not key:
-        return ""
-    if len(key) <= 8:
-        return "*" * len(key)
-    return f"{key[:4]}{'*' * 6}{key[-4:]}"
 
 
 def public_view(cfg: dict) -> dict:

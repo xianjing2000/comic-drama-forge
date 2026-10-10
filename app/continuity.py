@@ -42,6 +42,7 @@ from novel_to_script import (
     required_shot_duration,
     save_episode_script,
 )
+from common_util import as_dict as _as_dict
 
 # 审计 P2-12（2026-09-29）：局部重写回写的角色/物品名必须走统一匹配器 ——
 # 旧实现 characters 裸相等（近名静默丢）、items 完全不过滤（未登记名直接写回），
@@ -145,16 +146,6 @@ def _read_optional(path: str, what: str):
     except (ValueError, OSError) as e:
         logger.error("%s 损坏且无可用 .bak，本次按「无数据」展示：%s", what, e)
         return None
-
-
-def _as_dict(data) -> dict:
-    if isinstance(data, dict):
-        return data
-    if isinstance(data, list):
-        for it in data:
-            if isinstance(it, dict):
-                return it
-    return {}
 
 
 def _json_call(client, prompt: str, label: str, system: str = None,

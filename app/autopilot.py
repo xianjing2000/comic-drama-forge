@@ -49,6 +49,7 @@ import traceback
 
 from fs_atomic import atomic_write_json, read_json_strict
 
+from common_util import now as _now, nonempty as _nonempty
 logger = logging.getLogger(__name__)
 
 # ===================== 状态与持久化 =====================
@@ -235,20 +236,9 @@ def _A():
     return mod
 
 
-def _now() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S")
-
-
 def _autopilot_dir(project: str = "") -> str:
     root = os.path.join(_A().PROJECT_OUTPUT_DIR, "autopilot")
     return os.path.join(root, project) if project else root
-
-
-def _nonempty(p: str) -> bool:
-    try:
-        return bool(p) and os.path.isfile(p) and os.path.getsize(p) > 0
-    except OSError:
-        return False
 
 
 def _write_json(path: str, data) -> None:

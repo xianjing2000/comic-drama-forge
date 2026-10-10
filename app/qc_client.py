@@ -49,6 +49,7 @@ import asset_prompt_kit
 # （只依赖标准库、config 延迟导入，不会形成循环导入）。
 import prompt_templates
 
+from common_util import mask_key as mask_key
 logger = logging.getLogger(__name__)
 
 # 数据根目录（定位加密密钥库 output/secrets.enc 与主密钥 .secret_key）。
@@ -1447,14 +1448,6 @@ def _normalize(cfg: dict) -> dict:
         except Exception:  # noqa: BLE001
             cfg[key] = default
     return cfg
-
-
-def mask_key(key: str) -> str:
-    if not key:
-        return ""
-    if len(key) <= 8:
-        return "*" * len(key)
-    return f"{key[:4]}{'*' * 6}{key[-4:]}"
 
 
 def resolve_endpoint(cfg: dict, override: dict = None) -> dict:
