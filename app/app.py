@@ -496,6 +496,38 @@ except Exception as _e:  # noqa: BLE001  自检失败不得阻断启动
     PATHS_CHECK_BOOT = {}
     app.logger.warning(f"路径自检执行失败（不影响启动）：{_e}")
 
+# ⭐ 回收站占用自检（2026-10-10）：软删除只有入口没有出口。
+#    12+ 处代码把产物移入 output/projects/_trash（项目删除 / 质检拒收 / 镜头重做 /
+#    场景基图替换……），但**没有任何代码清理它**，前端也没有入口 —— 实测两处数据根
+#    累计 6.42 GB（工作区 3.65 GB 是开发环境遗留孤儿 + 数据根 2.76 GB）。
+#    ⚠️⚠️ 这里**只报告、绝不删除**，与 qc_client.migrate_enabled_default 同一条纪律：
+#      模块级代码会在**任何** import app（守卫脚本 / 离线探针 / python -c）时执行，
+#      不能在那里删用户的文件。真正的清理走**显式入口**：
+#          python tools/prune_trash.py            # 预演（默认）
+#          python tools/prune_trash.py --apply    # 执行
+#    保留策略（可在 output_reclaim 里调）：7 天内 或 每项目最近 3 个；
+#    qc_reject / reset / _novels 三个分类桶各保留最近 N 个。
+try:
+    import output_reclaim
+    TRASH_BOOT = output_reclaim.trash_startup_report(
+        os.path.dirname(PROJECT_TRASH_DIR), apply=False)
+except Exception as _e:  # noqa: BLE001  自检失败不得阻断启动
+    TRASH_BOOT = ''
+    app.logger.warning(f"回收站自检执行失败（不影响启动）：{_e}")
+
+# ⭐ 数据根归属（2026-10-10）：本项目有**两个**可能的数据根，取决于怎么启动 ——
+#    · Electron 运行时：设了 MJSCXT_DATA_DIR → %APPDATA%\mjscxt-desktop\mjscxt-data
+#    · 开发者直连：未设 → 源码目录自身（env_loader 的「默认=源根」）
+#  两者各自有独立的 output/、projects/、_trash/。实测这让「该清哪一份」无从判断：
+#  工作区那份里躺着 3.65 GB 开发期回收站（其项目注册表为 0，生产读的是数据根）。
+#  所以把当前生效的数据根显式打出来，并标注本次是哪种模式。
+_DATA_ROOT_IS_SOURCE = os.path.normcase(str(PROJECT_DATA_DIR)) == os.path.normcase(str(PROJECT_ROOT_DIR))
+app.logger.info(
+    "数据根：%s（%s）｜ 产物根：%s",
+    PROJECT_DATA_DIR,
+    "源码目录 = 开发者直连模式" if _DATA_ROOT_IS_SOURCE else "运行时数据根",
+    PROJECT_OUTPUT_DIR)
+
 # ⭐ 质检存量迁移（2026-10-XX）：质检总开关默认值由「关」改「开」后，把从未显式开过
 # 质检的老配置**幂等**补成开启（备份 .bak.*，只改总开关，见 qc_client.migrate_enabled_default）。
 # ⚠️⚠️ **严禁在模块级调用本函数** —— 模块级代码会在**任何** `import app`（守卫脚本、
