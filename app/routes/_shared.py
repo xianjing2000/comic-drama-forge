@@ -48,39 +48,11 @@ from comfyui_client import ComfyUIClient
 
 import quality_stage
 
-def _move_with_retry(src, dst, attempts: int = 5, delay: float = 0.4):
-    """把产物从 ComfyUI output 搬进项目目录，**容忍 Windows 文件占用**（幂等）。
+# ⭐ 2026-10-10 拆分第 1 步：日志器 + 文件搬移已上移到 app/shared_base.py。
+# 为什么先抽这三个：它们**零业务依赖**（只用标准库 + flask），且 _app_logger 是
+# 被本文件 17 个函数依赖的地基。在这里**再导出**，55 个导入点一个都不用改，零行为变化。
+from shared_base import _app_logger, _move_with_retry, _trash_move  # noqa: F401  再导出
 
-    背景（2026-10-07 实测真缺陷）：资产链路出现过
-    ``PermissionError: [WinError 32] 另一个程序正在使用此文件，进程无法访问。``
-    —— ComfyUI 刚写完 PNG，句柄（或缩略图/杀软/另一条链路）尚未释放，``shutil.move``
-    当场抛错 → 该资产被判「生成失败」→ **白烧一次 45 秒渲染**，且断点续跑还要再烧。
-    渲染本身没问题，纯粹是搬移时机问题。
-
-    做法：
-      · 按 ``delay * (i + 1)`` 递增退避重试 ``attempts`` 次；
-      · 期间若 ``src`` 已消失而 ``dst`` 已就位（另一条链路已完成同一搬移）→
-        **视为成功**（幂等，不把并发搬移误判成失败）；
-      · ``src`` 与 ``dst`` 都不存在 → 直接抛 ``FileNotFoundError``（真丢产物，别空等）。
-    返回 ``dst``；重试耗尽仍失败时抛出最后一次异常（与旧行为同样 fail-loud）。
-    """
-    last = None
-    for i in range(max(1, int(attempts))):
-        if os.path.exists(dst) and not os.path.exists(src):
-            return dst                      # 已被别处搬走：幂等成功
-        try:
-            shutil.move(src, dst)
-            return dst
-        except OSError as e:                # PermissionError 是 OSError 子类
-            last = e
-            if not os.path.exists(src):
-                break                       # 源已没了、目标又没成 → 再等无意义
-            time.sleep(delay * (i + 1))
-    if last is None:
-        last = FileNotFoundError(f"产物不存在，无法搬移：{src}")
-    _app_logger().warning("产物搬移失败（已重试 %d 次）：%s -> %s：%s",
-                       attempts, src, dst, last)
-    raise last
 def _friendly_error(msg, fallback: str = "服务内部错误，请稍后重试（详情见后端日志）") -> str:
     """把后端异常整理成可安全展示给前端的文案（对应测试缺陷 D5）。
 
@@ -422,21 +394,6 @@ def _safe_project(name: str) -> str:
     """项目名安全化（与项目注册表的项目键规则保持一致）"""
     return project_store.safe_key(name)
 _shot_seq = shot_key.shot_seq
-def _trash_move(src, category, trash_root, cleared, skipped):
-    """把单个文件/目录移入回收站；不存在=无事发生，被占用=记入 skipped。
-
-    模块级版本（reset-shot / reset-asset 共用）；reset-episode 端点内另有闭包版本，语义一致。
-    """
-    if not src or not os.path.exists(src):
-        return
-    try:
-        dst = os.path.join(trash_root, category,
-                           os.path.basename(src.rstrip('\\/')) or category)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        _move_with_retry(src, dst)
-        cleared.append({"category": category, "path": src})
-    except Exception as e:  # noqa: BLE001  单项失败不阻断其余清理
-        skipped.append({"path": src, "error": str(e)})
 
 
 _AUDIO_QC_AUDIO_EXT = ('.wav', '.mp3', '.flac', '.m4a', '.aac', '.ogg')
@@ -860,22 +817,6 @@ upscale_lock = threading.Lock()
 upscale_tasks = {}
 
 
-def _app_logger():
-    """上下文安全的日志器：请求内用 Flask 的 app.logger（保留其 handler/格式），
-    请求外（后台线程、离线守卫、单测）回落到标准 logging —— 直接写 current_app.logger
-    会在没有应用上下文时抛 RuntimeError（2026-10-08 verify_qc_fault_open 实测）。
-
-    ⚠️ 2026-10-10 修复：此处原写作「return _app_logger()」——**递归调用自己**。
-    它会一路递归到 RecursionError，而 RecursionError 是 RuntimeError 的子类，
-    于是每次都被 except 接住、返回标准 logging：**Flask 的 logger 从未生效过**，
-    注释里写的意图（保留 app.logger 的 handler/格式）与实际行为完全相反；
-    每次调用还要付一次约 1000 层栈展开 + 异常构造的代价。
-    现改为真正取 current_app.logger。
-    """
-    try:
-        return current_app.logger
-    except RuntimeError:                 # 没有应用上下文（后台线程 / 离线守卫 / 单测）
-        return logging.getLogger("app")
 
 def _wm_load_cfg() -> dict:
     return video_watermark.load_config(WATERMARK_CONFIG_PATH)
