@@ -325,8 +325,99 @@ def merge_bible_from_episode(continuity_dir: str, project_key: str, script: dict
     #    资产生成时直接可用（asset_worker 侧只保留兜底）。
     #    幂等：全部场景都已有字段就直接返回；fail-open：任何异常只记日志。
     _relate_scenes_in_bible(bible)
+    # 2026-10-10 角色换装（用户要求，与场景关联同时机）：剧本提取资产时**登记**
+    # 本集换装，落 outfits/<key>/outfit.json（含 desc），由资产阶段扫描
+    # 「有 outfit.json 但无 base.png」的变体去出图。
+    _register_outfit_variants(bible, project_key, int(episode_no))
     save_bible(continuity_dir, project_key, bible)
     return {"added": added, "conflicts": conflicts, "bible": bible}
+
+
+def _register_outfit_variants(bible: dict, project_key: str, episode_no: int) -> list:
+    """剧本提取资产时**登记**本集换装（用户需求，2026-10-10）。
+
+    ## 为什么放在剧本阶段
+
+    与场景空间关联同一条理由：换装是**剧本事实**（characters[].outfit），它的
+    权威来源就是剧本。此刻登记，设定库一落地就带着「谁在哪一集换了什么装」，
+    资产阶段只需按需出图。
+
+    ## 这里只登记、不出图（刻意）
+
+    出图需要 ComfyUI（单张 1–2 分钟），且换装图以**角色主设定图**为基准 ——
+    剧本阶段主设定图往往还没生成。所以本函数只落 outfits/<key>/outfit.json
+    （含 desc），由资产阶段扫描「有 outfit.json 但无 base.png」的变体去出图。
+
+    ## key 规则
+
+    ep{集号两位}_{服装描述短哈希}：可复现（同集同服装必得同一 key）、无中文
+    路径风险、长度可控。匹配侧不依赖 key 语义 —— episode_helpers 里的
+    _episode_outfit_overrides 是用 **2-gram 比对 desc** 找 key 的。
+
+    幂等：该集服装与任一已登记变体的 desc 有 2-gram 重叠即视为已登记，不重复
+    落盘。fail-open：任何异常只记日志，绝不阻断剧本入库。
+    返回新登记的 [(角色名, key)]。
+    """
+    added = []
+    try:
+        from config import CHARACTERS_DIR as _CH_DIR
+        chars = [c for c in (bible.get("characters") or []) if isinstance(c, dict)]
+        if not chars:
+            return added
+
+        def _grams(t):
+            t = "".join(ch for ch in str(t or "") if ch.strip())
+            return {t[i:i + 2] for i in range(len(t) - 1)} or ({t} if t else set())
+
+        def _overlap(a, b):
+            ga, gb = _grams(a), _grams(b)
+            return len(ga & gb) / max(1, len(gb))
+
+        import hashlib
+        for c in chars:
+            nm = str(c.get("name") or "").strip()
+            if not nm:
+                continue
+            by_ep = c.get("outfit_by_episode") or {}
+            ep_outfit = str(by_ep.get(str(int(episode_no))) or "").strip() \
+                or str(c.get("current_outfit") or "").strip()
+            if not ep_outfit:
+                continue
+            odir = os.path.join(_CH_DIR, project_key, nm, "outfits")
+            _matched = False
+            if os.path.isdir(odir):
+                for key in os.listdir(odir):
+                    rec = os.path.join(odir, key, "outfit.json")
+                    if not os.path.isfile(rec):
+                        continue
+                    try:
+                        with open(rec, "r", encoding="utf-8") as f:
+                            desc = str((json.load(f) or {}).get("desc") or "")
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if desc and _overlap(desc, ep_outfit) > 0:
+                        _matched = True
+                        break
+            if _matched:
+                continue
+            _h = hashlib.md5(ep_outfit.encode("utf-8")).hexdigest()[:8]
+            key = "ep%02d_%s" % (int(episode_no), _h)
+            vdir = os.path.join(odir, key)
+            os.makedirs(vdir, exist_ok=True)
+            with open(os.path.join(vdir, "outfit.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "outfit_key": key, "desc": ep_outfit, "character": nm,
+                    "project": project_key, "episode": int(episode_no),
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "pending": True,
+                }, f, ensure_ascii=False, indent=2)
+            added.append((nm, key))
+        if added:
+            logger.info("[服装变体] 剧本阶段已登记 %d 个换装：%s",
+                        len(added), ", ".join("%s/%s" % x for x in added))
+    except Exception as e:  # noqa: BLE001  登记失败绝不阻断剧本入库
+        logger.warning("[服装变体] 换装登记失败（不影响入库）：%s: %s", type(e).__name__, e)
+    return added
 
 
 def _relate_scenes_in_bible(bible: dict) -> None:

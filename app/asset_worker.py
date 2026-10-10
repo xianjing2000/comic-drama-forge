@@ -211,6 +211,91 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
             else:
                 sub_dir = _sd
 
+        # ⭐ 2026-10-10 角色换装出图（用户要求）：剧本阶段已登记 outfits/<key>/outfit.json
+        #    （pending），这里在主设定图生成完成后把它们画出来。
+        #    为什么必须出图：消费侧 _pick_char_view 找的是 outfits/<key>/base.png，
+        #    只有 json 没有图 → 仍回落主设定图 → 换装不生效（这正是该功能此前
+        #    「机制齐全却从未生效」的原因：登记侧此前根本没人调用）。
+        #    串行执行，避免同项目多变体抢 GPU；fail-open，绝不影响主资产任务。
+        def _pending_outfit_variants(chars: list) -> list:
+            """扫描这些角色下「有 outfit.json 但无 base.png」的变体，返回资产描述列表。"""
+            out = []
+            try:
+                import json as _json
+                from config import CHARACTERS_DIR as _CH
+                for _nm in (chars or []):
+                    _nm = str(_nm or "").strip()
+                    if not _nm:
+                        continue
+                    _od = os.path.join(_CH, project_name, _nm, "outfits")
+                    if not os.path.isdir(_od):
+                        continue
+                    for _key in sorted(os.listdir(_od)):
+                        _vd = os.path.join(_od, _key)
+                        if not os.path.isdir(_vd):
+                            continue
+                        _base = os.path.join(_vd, "base.png")
+                        if os.path.isfile(_base) and os.path.getsize(_base) > 0:
+                            continue                      # 已出图
+                        _rec = os.path.join(_vd, "outfit.json")
+                        if not os.path.isfile(_rec):
+                            continue
+                        try:
+                            with open(_rec, "r", encoding="utf-8") as _f:
+                                _info = _json.load(_f) or {}
+                        except Exception:  # noqa: BLE001
+                            continue
+                        _desc = str(_info.get("desc") or "").strip()
+                        if not _desc:
+                            continue
+                        out.append((_nm, _key, _desc))
+            except Exception as _e:  # noqa: BLE001
+                logger.debug("扫描待出图换装变体失败（跳过）：%s", _e)
+            return out
+
+        def _spawn_outfit_variant_jobs(chars: list) -> None:
+            """为待出图的换装变体各起一个后台任务（串行在同一线程里，避免抢 GPU）。
+
+            复用 _generate_asset_task 本身（sub_dir=outfits/<key>），因此生成→质检→
+            重试→切分全链路与主设定图完全一致，零新增生成代码。
+            """
+            _pend = _pending_outfit_variants(chars)
+            if not _pend:
+                return
+            logger.info("[服装变体] 本批资产完成后待出图换装 %d 个：%s", len(_pend),
+                        ", ".join("%s/%s" % (x[0], x[1]) for x in _pend))
+
+            def _run() -> None:
+                for _nm, _key, _desc in _pend:
+                    try:
+                        _ast = _find_script_character(project_name, _nm) or {}
+                        _bp = _character_base_prompt(project_name, _nm) or ""
+                        _merged = (_bp + "；本集服装：" + _desc) if _bp else ("角色设定图；本集服装：" + _desc)
+                        _ast.update({"name": _nm, "reference_prompt_zh": _merged,
+                                     "prompt_zh": _merged})
+                        if not str(_ast.get("appearance") or "").strip():
+                            _ast["appearance"] = _merged
+                        _tid = "outfit_%s_%s_%s" % (project_name, _key,
+                                                    uuid.uuid4().hex[:8])
+                        with lock:
+                            generation_state[_tid] = {
+                                "status": "running", "asset_type": "character",
+                                "progress": 0, "total": 1, "current": 0,
+                                "phase": "服装变体", "results": [],
+                                "overwrite": False, "project_name": project_name,
+                                "step": "asset_outfit", "character": _nm,
+                                "outfit_key": _key,
+                            }
+                        _generate_asset_task(_tid, [_ast], "character", project_name,
+                                             _ast.get("style") or "",
+                                             False, os.path.join("outfits", _key))
+                    except Exception as _e:  # noqa: BLE001  变体失败不影响主资产
+                        logger.warning("[服装变体] %s/%s 出图失败：%s: %s",
+                                       _nm, _key, type(_e).__name__, _e)
+
+            _t = threading.Thread(target=_run, daemon=True)
+            _t.start()
+
         # ⭐ 2026-10-10 场景空间关联（用户需求①②③）：资产生成前确保关联已算。
         #    为什么放在这里：assets 由**前端**传入（不含 refs / fixed_structure），
         #    服务端必须先补齐 —— 否则 generate_scene_base 拿不到关联参考图，
@@ -1275,6 +1360,18 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 "success_count": sum(1 for r in results if r.get("success")),
                 "qc_blocked_count": blocked_count,
             })
+        # ⭐ 2026-10-10 角色换装出图（用户要求）：主设定图这一批已完成 → 触发本批
+        #    角色的换装变体出图（剧本阶段已登记 outfit.json，这里把图补齐）。
+        #    只对**主设定**触发（sub_dir 为空），避免变体再触发变体造成递归。
+        #    fail-open：触发失败只记日志，主资产任务已经完成，不受影响。
+        if asset_type == "character" and not sub_dir:
+            try:
+                _spawn_outfit_variant_jobs(
+                    [str(x.get("name") or "").strip() for x in (assets or [])
+                     if isinstance(x, dict)])
+            except Exception as _ole:  # noqa: BLE001
+                logger.warning("[服装变体] 触发换装出图失败（不影响主资产）：%s: %s",
+                               type(_ole).__name__, _ole)
     except Exception as e:
         logger.error(f"资产生成失败: {e}")
         _partial = locals().get("results") or []   # 审计 S11：已成功的部分结果不能丢
