@@ -289,6 +289,23 @@ from host_guard import (        # noqa: E402
 def _safe_run():
     """安全运行主服务，崩溃后返回 False"""
     try:
+        # ⭐ 2026-10-10（用户要求「统一配置、别老是改一处漏一处」）：
+        #    在 serve() 之前应用**统一配置中心** —— 取值优先级 数据库 > 环境变量 > 代码默认值，
+        #    并把最终值 setattr 回各业务模块（现有代码零改动）。必须放在这里：
+        #    此刻全部业务模块已 import，回写才能生效；放在更早的 import 期会因模块未加载而失败。
+        #    同时跑一次配置体检，把「同一语义多处定义不一致」「提示词双副本不一致」直接打日志。
+        try:
+            import config_center as _cc
+            import config_doctor as _cd
+            _cc.ensure_table()
+            _n = _cc.apply_to_runtime()
+            logger.info(_cd.summary_line())
+            _rep = _cd.doctor()
+            if not _rep.get("ok"):
+                for _w in (_rep.get("warnings") or [])[:10]:
+                    logger.warning("[配置体检] %s", _w)
+        except Exception as _e:  # noqa: BLE001  配置中心失败绝不让服务起不来
+            logger.warning("配置中心初始化失败（忽略，退回代码默认值）：%s", _e)
         host = (os.getenv("APP_HOST") or "127.0.0.1").strip()
         port = _env_int("APP_PORT", 5210)
         threads = _env_int("APP_THREADS", 8)

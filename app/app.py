@@ -11042,6 +11042,32 @@ def api_config_doctor():
         return jsonify({'success': False, 'error': str(e)[:300]}), 200
 
 
+@app.route('/api/config/settings', methods=['GET', 'POST'])
+def api_config_settings():
+    """统一配置中心（2026-10-10，第二步：持久化到数据库）。
+
+    GET  → 返回全部可调参数的生效值、来源（db/env/default）、默认值与说明，按分组组织。
+    POST → 写入单个参数（JSON: {key, value, note?}），写库后**立即回写运行时**，
+           全局生效，无需重启。
+
+    设计：参数唯一登记表是 config_doctor.REGISTRY；只有登记过的键才允许修改，
+    未登记键与非法值一律拒绝（防止脏数据把服务搞崩）。
+    取值优先级：数据库 > 环境变量 > 代码默认值。
+    """
+    try:
+        import config_center as _cc  # noqa: PLC0415
+        if request.method == 'GET':
+            return jsonify(_cc.snapshot())
+        data = request.get_json(silent=True) or {}
+        key = str(data.get('key') or '').strip()
+        if not key:
+            return jsonify({'ok': False, 'error': '缺少 key'}), 200
+        r = _cc.set_value(key, data.get('value'), note=str(data.get('note') or ''))
+        return jsonify(r), 200
+    except Exception as e:  # noqa: BLE001  配置接口永不 5xx
+        return jsonify({'ok': False, 'error': str(e)[:300]}), 200
+
+
 @app.route('/api/engine/state', methods=['GET'])
 def api_engine_state():
     """生成引擎（ComfyUI）健康与自愈状态（2026-10-09）。
