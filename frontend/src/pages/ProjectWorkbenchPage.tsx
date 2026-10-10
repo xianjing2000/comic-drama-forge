@@ -762,24 +762,39 @@ function OverviewTab({
   // 加载剧集列表
   // 抽成具名函数：错误态需要「重试」入口，而 useEffect 无法被手动重新触发。
   // 取数逻辑与原实现逐字一致，仅补一次错误清理，避免重试成功后旧的失败文案残留。
-  const fetchEpisodes = React.useCallback(() => {
+  // silent=true：后台轮询用 —— 不置 loading（否则每 10 秒闪一次转圈）、失败也不弹错。
+  const fetchEpisodes = React.useCallback((silent = false) => {
     if (!novelId) return;
-    setScriptLoading(true);
-    setScriptError('');
+    if (!silent) {
+      setScriptLoading(true);
+      setScriptError('');
+    }
     episodesApi.list(novelId)
       .then(data => {
         setEpisodes(data.episodes || []);
         setTotalEpisodes(data.total || 0);
       })
       .catch(err => {
-        setScriptError(err instanceof Error ? err.message : t('project.loadingFailed'));
+        if (!silent) setScriptError(err instanceof Error ? err.message : t('project.loadingFailed'));
       })
       .finally(() => {
-        setScriptLoading(false);
+        if (!silent) setScriptLoading(false);
       });
   }, [novelId, t]);
 
   useEffect(() => { fetchEpisodes(); }, [fetchEpisodes]);
+
+  // ⭐ 2026-10-10（用户实测：「剧本生产完成后不实时加载出来」）：
+  //    剧本是 autopilot 在**后台**异步生成的 —— 页面挂载时往往还没产出，而
+  //    fetchEpisodes 的依赖只有 novelId（剧本生成不改变它），所以「暂无剧集数据」
+  //    会一直挂着，直到用户手动切走再切回。
+  //    这里在「面板为空 + 有小说」时每 10 秒静默重拉，拿到数据即自动停；
+  //    首次重拉延迟 8 秒，避免与挂载时那次请求贴太近。
+  useEffect(() => {
+    if (!novelId || episodes.length > 0) return;
+    const timer = setInterval(() => { fetchEpisodes(true); }, 10000);
+    return () => clearInterval(timer);
+  }, [novelId, episodes.length, fetchEpisodes]);
 
   // 拉取分集断点提议：默认不带参数，与生产 autopilot.episode_units 完全同源，
   // 保证「提议 ≡ 实际生成」，不会提议说 1 集、真生成拆 3 集。
