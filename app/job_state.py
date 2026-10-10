@@ -22,3 +22,12 @@ generation_state = {}
 
 #: 保护 generation_state 的全局锁（不可重入；与 worker 共用）。
 lock = threading.Lock()
+
+# 2026-10-11 归位：以下两组状态原本定义在 app.py（L9669/L10355 附近），
+# 但按本模块的定位（所有消费方统一从这里 import）它们本就该在这里。
+# 归位后 app.py 改为 from job_state import ... 再导出，引用点零改动。
+dub_tasks = {}
+dub_lock = threading.Lock()
+
+mix_tasks = {}
+mix_lock = threading.Lock()
