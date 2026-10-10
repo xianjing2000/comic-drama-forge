@@ -11018,6 +11018,30 @@ def api_autonomous_start():
     return jsonify(result), status_code
 
 
+@app.route('/api/config/doctor', methods=['GET'])
+def api_config_doctor():
+    """配置体检（2026-10-10，用户要求「别老是改了一个地方另一个地方没改导致冲突」）。
+
+    只读接口：扫描三类冲突并返回结构化报告 ——
+      ① **参数登记 vs 实际值**：config_doctor.REGISTRY 里登记的可调参数
+         （阈值/轮数/开关/上限）是否与代码实际值一致；
+      ② **跨模块重复定义**：同一语义在两处定义（如 COVERAGE_MAX_ROUNDS 同时在
+         continuity 与 novel_to_script）是否同值；
+      ③ **提示词双副本**：app/prompts/*.txt（外部，优先）与 prompt_templates 的
+         _DEFAULT_*（代码兜底）是否逐字一致 —— 这是历史上「改了外部忘了兜底」
+         造成行为分叉的源头。
+
+    本接口不修改任何配置，也不改变取值路径，纯粹用于暴露问题。
+    """
+    try:
+        import config_doctor as _cd  # noqa: PLC0415
+        rep = _cd.doctor()
+        rep['success'] = True
+        return jsonify(rep)
+    except Exception as e:  # noqa: BLE001  体检接口永不 5xx
+        return jsonify({'success': False, 'error': str(e)[:300]}), 200
+
+
 @app.route('/api/engine/state', methods=['GET'])
 def api_engine_state():
     """生成引擎（ComfyUI）健康与自愈状态（2026-10-09）。
