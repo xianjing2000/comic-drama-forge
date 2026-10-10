@@ -168,8 +168,8 @@ def _episode_log_path(project_name: str, episode_no: int) -> str:
     落在 autopilot 目录树下：删除项目的级联清理（project_store.project_kind_roots 的
     "autopilot" 项）会一并收走，不产生新残留；与 plan/history 同根便于运维定位。
     """
-    import autopilot as _ap
-    base = os.path.join(_ap._autopilot_dir(project_name), "episodes")
+    from paths import autopilot_dir as _ap_dir
+    base = os.path.join(_ap_dir(project_name), "episodes")
     return os.path.join(base, f"ep{int(episode_no):02d}_log.jsonl")
 
 
@@ -1842,8 +1842,12 @@ def _prefetch_next_scripts(ctx: dict, limit: int = 1) -> None:
         target_shots = int(ctx["config"].get("target_shots") or 0)
         # 只预取下一集，防止一口气把后续全部章节都跑掉
         next_no = int(ctx["episode_no"] or 0) + 1
-        import autopilot as _autopilot
-        chapters, text = _autopilot.chapters_and_text(meta)
+        # ⚠️ 2026-10-10：原此处为 import autopilot + autopilot.chapters_and_text()，
+        #    是 pipeline → autopilot 循环依赖的唯一剩余入口（另一个是 _autopilot_dir，
+        #    已改走 paths）。chapters_and_text 已搬到 novel_parser，它只依赖本模块与
+        #    config，放那里最自然。至此 pipeline 不再 import autopilot。
+        from novel_parser import chapters_and_text as _chapters_and_text
+        chapters, text = _chapters_and_text(meta)
         if not chapters or not text:
             logger.debug("剧本预热：无可用章节/正文，跳过 project=%s ep=%s", key, next_no)
             return

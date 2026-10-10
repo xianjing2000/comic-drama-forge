@@ -92,6 +92,9 @@ _STATE = {
 _ATTEMPTS: dict = {}
 
 
+from paths import autopilot_dir as _autopilot_dir  # 2026-10-10 从本模块搬出，避免与 pipeline 循环依赖
+
+
 def _attempts_path(project: str) -> str:
     return os.path.join(_autopilot_dir(project), "attempts.json")
 
@@ -234,11 +237,6 @@ def _A():
     if mod is None:
         raise RuntimeError("宿主模块 app 尚未加载")
     return mod
-
-
-def _autopilot_dir(project: str = "") -> str:
-    root = os.path.join(_A().PROJECT_OUTPUT_DIR, "autopilot")
-    return os.path.join(root, project) if project else root
 
 
 def _write_json(path: str, data) -> None:

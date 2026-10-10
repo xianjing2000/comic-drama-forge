@@ -841,6 +841,42 @@ def remove_novel(novels_dir: str, novel_id: str, trash_dir: str = None) -> dict:
             "recoverable": True, "trash_dir": dst_root}
 
 
+
+
+NOVELS_DIR = __import__('config').NOVELS_DIR
+
+
+def chapters_and_text(novel_meta: dict) -> tuple:
+    """返回 (章节列表, 小说全文)。
+
+    拆章（一章拆多集）需要在**正文**上找语义切点，正文此前已在这里读过一次，
+    所以直接把全文一并带出，避免调用方二次读盘。
+
+    ⚠️ 2026-10-10 从 autopilot 搬来：pipeline 原本 import autopilot 只为用它，
+    而 autopilot 又 import pipeline，形成循环。此函数只依赖本模块与 config，
+    放这里最自然，搬走后 pipeline 不再需要 import autopilot。
+    """
+    if not novel_meta:
+        return [], ''
+    text = ''
+    try:
+        text = read_novel_text(NOVELS_DIR, novel_meta.get('novel_id')) or ''
+    except Exception as e:  # noqa: BLE001
+        logger.warning('小说正文读取失败：%s', e)
+    if not text:
+        return [], ''
+    items = []
+    for c in split_chapters(text):
+        items.append({
+            'index': int(c.get('index') or len(items) + 1),
+            'title': c.get('title') or ('第%d章' % c.get('index')),
+            'start': c.get('start') or 0,
+            'end': c.get('end') or 0,
+            'char_count': c.get('char_count') or 0,
+        })
+    return items, text
+
+
 def read_novel_text(novels_dir: str, novel_id: str, max_chars: int = None) -> str:
     meta = get_novel(novels_dir, novel_id)
     text_path = os.path.join(novels_dir, meta.get("text_file") or f"{novel_id}.txt")
