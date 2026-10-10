@@ -16,10 +16,14 @@ import time
 
 from flask import Blueprint, current_app, jsonify, request, send_file, send_from_directory
 
-import comfyui_client
 import project_store
 from config import PROJECT_OUTPUT_DIR, PROJECT_ROOT_DIR
-from routes._shared import _move_with_retry, _body, _app_logger
+# ⚠️ 本文件里的 comfyui_client 必须是 **ComfyUIClient 实例**，不是模块 ——
+#    这里只用实例方法（generate_storyboard / generate_scene_base）。
+#    写成 `import comfyui_client` 拿到的是模块对象，调用时必然抛
+#    AttributeError: module 'comfyui_client' has no attribute 'generate_storyboard'。
+#    routes/status_api.py 的 get_status 踩过同一个坑（已修），本文件此前漏改。
+from routes._shared import _move_with_retry, _body, _app_logger, comfyui_client
 
 projects_bp = Blueprint('projects', __name__)
 
