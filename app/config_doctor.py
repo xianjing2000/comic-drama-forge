@@ -200,7 +200,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'comfyui_job_store.DEFAULT_MAX_ENTRIES',
     },
     'novel_default_shots': {
-        'default': 0, 'type': 'int', 'range': (0, 1), 'group': '基础配置',
+        'default': 0, 'type': 'int', 'range': (0, 2000), 'group': '基础配置',
         'desc': '显式传 4~40 仍可按题材指定下限（如悬疑推理 18~30）。',
         'owner': 'config.NOVEL_DEFAULT_SHOTS',
     },
