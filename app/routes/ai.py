@@ -188,8 +188,22 @@ def api_ai_test():
         result.update({"module": module, "probe": "vision", "model": ep["model"],
                        "base_url": ep["base_url"]})
         if not result.get("success"):
-            result["guide"] = ("该接口或模型不支持图像输入（或不可达）。质检需要多模态模型，"
-                               "请改用支持视觉的模型（如 gpt-4o-mini / qwen-vl-max / glm-4v）。")
+            # ⚠️ 2026-10-11：探测失败的归因必须区分，否则文案会把排查方向带偏。
+            # 实战教训：上游对 1x1 探测图回 400 image_invalid（"use a real/valid image"），
+            # 而这里一律写成「该接口或模型不支持图像输入」，导致去查模型能力 ——
+            # 实际模型（cn:deepseek-v4.1-flash）完全支持视觉，换 64x64 图即通过。
+            _err = str(result.get("error") or "")
+            if "image_invalid" in _err or "real/valid image" in _err:
+                result["guide"] = (
+                    "上游拒绝了这次的探测图（image_invalid）。**这不代表模型不支持视觉** —— "
+                    "通常是探测图被判为无效（如 1x1 像素图）。若你看到此提示，说明探测图本身"
+                    "需要更换；运行态的质检用真实分镜图，不受影响。")
+            elif getattr(result, "get", None) and result.get("uncertain"):
+                result["guide"] = ("接口可达、模型有响应，但额度被思考占用、未返回正文，"
+                                   "无法确认是否支持图像；请提高该模块的 max_tokens 后重测。")
+            else:
+                result["guide"] = ("该接口或模型不支持图像输入（或不可达）。质检需要多模态模型，"
+                                   "请改用支持视觉的模型（如 gpt-4o-mini / qwen-vl-max / glm-4v）。")
         return jsonify(result), (200 if result.get("success") else 400)
 
     try:

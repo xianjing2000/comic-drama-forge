@@ -1780,8 +1780,18 @@ def _post_chat(ep: dict, payload: dict, timeout: int, retries: int = None,
     raise RuntimeError("质检接口重试流程异常结束")  # 理论不可达
 
 
-# 1x1 PNG（视觉连通性探测用，避免依赖本地文件）
-_PROBE_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8AAAwAB/AGtDQAAAABJRU5ErkJggg==")
+# 视觉连通性探测图（避免依赖本地文件）。
+#
+# ⚠️ 2026-10-11 修复：**绝不能用 1x1 像素图** —— 上游（FreeLLMAPI 网关）会把 1x1 判为
+#   「无效图像」直接拒收：
+#     HTTP 400 {"code":"image_invalid",
+#              "gateway_hint":"image data rejected by upstream; use a real/valid image"}
+#   而 routes/ai.py 又把这个 400 翻译成「该接口或模型不支持图像输入」，把排查方向
+#   彻底带偏（我本人就被误导去查模型能力，实际模型完全支持视觉）。
+#
+# 现改用 64x64 的真实小图（浅色底 + 橙色圆）：base64 仅 448 字符，
+# 实测 cn:deepseek-v4.1-flash 与 cn:glm-5v-turbo 都能正确识别内容。
+_PROBE_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAABFUlEQVR4nOWZ223EMBADqUGacH8pK/Xd/qaDuwoSSKuHRWt+DXBJUzIEq7x+33IGmYPMQeYgc5A5yBxkDjIHmYPMQeZ8zRC9fspfj+J78NGrDDzM/eN7XpIyJECT9bExSmeAtPVRMbjdvfp0uN19pxo7uO/RZBP3aWX2cZ/TZyv3iSn2Rwl2e/2ts45p4Fr4+psmHtOAd4Br+fqpn3tGAzuDzEHmIHOQOcgcdEKAGP03qpKomHtGA08IEMtXUdRNPKYBrS0hqmed1IBWlRAtU5obmJ0hGvUzS2hehmhXTu6BGRkipZnfxGMzRFat6ys0KkN06Bx/R/aQW8qH3BPfAjIHmYPMQeYgc5A5yBxkDjKHuw308gGGRGIjN0CLGAAAAABJRU5ErkJggg==")
 
 
 def test_vision(ep: dict, timeout: int = 60) -> dict:
