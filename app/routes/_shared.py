@@ -52,32 +52,10 @@ import quality_stage
 # 为什么先抽这三个：它们**零业务依赖**（只用标准库 + flask），且 _app_logger 是
 # 被本文件 17 个函数依赖的地基。在这里**再导出**，55 个导入点一个都不用改，零行为变化。
 from shared_base import _app_logger, _move_with_retry, _trash_move  # noqa: F401  再导出
+# ⭐ 2026-10-10 拆分第 2 步：HTTP 边界工具（错误归一化 / 取 body / 上传名净化 /
+# 目录穿越防护的 send_file）上移到 app/shared_web.py，同样只在这里再导出。
+from shared_web import _body, _friendly_error, _safe_upload_name, _serve_safe  # noqa: F401  再导出
 
-def _friendly_error(msg, fallback: str = "服务内部错误，请稍后重试（详情见后端日志）") -> str:
-    """把后端异常整理成可安全展示给前端的文案（对应测试缺陷 D5）。
-
-    前端错误框不应出现 traceback、文件路径、模块名等实现细节。
-    这里做一次归一化：截掉 traceback 段、去掉 File/line 与模块来源、
-    压缩空白并限长；若仍残留实现细节特征，则整体降级为通用文案。
-    业务类友好错误（中文短句）会原样保留。
-    """
-    text = str(msg or "").strip()
-    if not text:
-        return fallback
-    idx = text.find("Traceback (most recent call last)")
-    if idx != -1:
-        text = text[:idx].strip()
-    text = text.splitlines()[-1].strip() if text else ""
-    text = re.sub(r'File\s+"[^"]*",\s*line\s*\d+', "", text)
-    text = re.sub(r"\s*from\s+'[^']*'", "", text)          # cannot import name 'X' from 'mod'
-    text = re.sub(r"\s*\([^()]*\.py[^()]*\)", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    # 仍残留实现细节（模块/导入语句/文件路径）→ 一律降级，避免外泄内部结构
-    if re.search(r"\.py\b|\bimport\b|\bmodule\b|site-packages|[\\/]", text):
-        return fallback
-    if len(text) > 160:
-        text = text[:160] + "…"
-    return text or fallback
 def _autopilot_guard(fn):
     """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误
 
@@ -127,16 +105,6 @@ def _prompt_memory_view(kind: str = "", limit: int = 50) -> dict:
     except Exception as e:  # noqa: BLE001
         _app_logger().warning("读取质检教训库失败：%s", e)
         return {"total": 0, "by_kind": {}, "path": "", "lessons": [], "error": str(e)}
-def _body() -> dict:
-    """统一取请求 body，**永不抛异常**（返回 ``{}`` 兜底）
-
-    为什么不用裸 ``request.json``：Flask 在 Content-Type 不是 application/json 时抛
-    ``UnsupportedMediaType``（415），body 非法 JSON 时抛 ``BadRequest``（400）。
-    这类错误会让接口以 4xx 结束，而不是「按缺参数处理并给出可读错误」——
-    用 ``curl -d '{}'``（默认表单 Content-Type）调就会直接 415，排查成本很高。
-    项目约定：所有取 body 的地方统一走这里。
-    """
-    return request.get_json(silent=True) or {}
 def _novel_key(novel_meta: dict, project_ref: str = None) -> str:
     """剧集目录/项目名前缀所用的稳定键：优先取项目注册表分配的项目键。
 
@@ -157,11 +125,6 @@ def _resolve_continuity_key(novel_id):
     pref = (request.args.get('project_id') or request.args.get('project_name') or '').strip()
     proj = project_store.get_project(pref) if pref else project_store.find_by_novel(novel_id)
     return meta, proj, _novel_key(meta, proj["dir_key"] if proj else None)
-def _safe_upload_name(filename: str) -> str:
-    """保留中文文件名，仅剥离路径与非法字符"""
-    name = os.path.basename(str(filename or '').replace('\\', '/').split('/')[-1])
-    name = re.sub(r'[<>:"|?*\x00-\x1f]', '_', name).strip().strip('.')
-    return name or f"novel_{int(time.time())}.txt"
 UPLOAD_TMP_DIR = os.path.join(NOVELS_DIR, "_uploads")
 def _novels_stats(project_ref: str = None, include_unbound: bool = True):
     items = list_novels(NOVELS_DIR)
@@ -707,27 +670,6 @@ def _qc_record_verdict(project_name: str, kind: str, shot_key, stage: str,
     return rec
 
 
-def _serve_safe(base_dir: str, filename: str, **send_kw):
-    """目录穿越防护的 send_file 统一入口。
-
-    返回 send_file(...) 或 403/404 的 Flask 响应；永不抛异常。
-    用法：``return _serve_safe(KEYFRAMES_DIR, filename)``。
-
-    防护原理（S-06）：
-    - 旧写法用 ``os.path.normpath(filename).startswith('..')`` 拦截穿越，
-      但 ``os.path.join(base, safe_path)`` 遇**绝对路径**（如 ``C:\\Windows``、``/etc/passwd``）
-      会丢弃 base 前缀直接返回绝对路径 → 穿越成功。
-    - 这里用 ``os.path.abspath`` 归一后校验目标路径必须落在 base_dir 之内
-      （前缀匹配 base_dir + 分隔符），从根上杜绝穿越。
-    """
-    base = os.path.abspath(base_dir)
-    target = os.path.abspath(os.path.join(base, filename or ""))
-    # 必须严格落在 base 之内：base 本身（目录）或 base + 分隔符 开头
-    if not (target == base or target.startswith(base + os.sep)):
-        return abort(403)
-    if not os.path.isfile(target):
-        return abort(404)
-    return send_file(target, **send_kw)
 
 
 def _upscale_resolve_comfyview(query: dict) -> str:
