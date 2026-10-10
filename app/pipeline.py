@@ -281,7 +281,11 @@ DEFAULT_CONFIG = {
     "enable_tts_pre": True,
     "video_mode": "episode",       # 2026-10-01 起只保留整集一次生成（唯一合法值）
     # ---- 质量阈值 ----
-    "coverage_min_percent": 95.0,      # 原文覆盖率下限
+    # 原文覆盖率下限（%）。⭐ 2026-10-11 用户口径 0.85 → 85%。
+    #   ⚠️ 这里才是**真正生效**的门槛：pipeline 在 L1137 读 cfg["coverage_min_percent"]
+    #   作为 floor，而 config.COVERAGE_THRESHOLD(0.85) 只是 plan 未指定时的兜底。
+    #   此前两者不一致（这里 95、那里 85），造成「按 0.85 调了却仍判覆盖率不足」。
+    "coverage_min_percent": 85.0,
     "consistency_min_score": 80,       # 跨镜一致性分数下限
     "require_consistency": True,
     "step_max_retries": 2,             # 单步失败重试次数上限

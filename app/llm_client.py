@@ -91,7 +91,24 @@ DEFAULT_TOKEN_LADDER = (2048, 4096, 8192, 16384, 24576)
 DISABLE_THINKING_DEFAULT = False
 # 允许思考时的最小 max_tokens：思考本身就要吃掉几百 token，额度太小必然空正文
 MIN_TOKENS_WHEN_THINKING = 24576
-MAX_TOKENS_CEILING = 32768
+# ⭐⭐ 2026-10-11 用户口径：「模型思考是正常的，要忽略模型思考内容不要一直重试」。
+# 根因不是模型异常，而是**我们给的额度太小** —— 思考本身可能要吃掉
+# REASONING_ONLY_TOKEN_FLOOR(24576)，再放正文，32768 必然撞顶，
+# 于是反复触发「只吐思考内容 → 提额 → 再撞顶 → 判异常」的空转。
+# 提到 65536：思考与正文都能放下，从根上消除这条重试链。
+MAX_TOKENS_CEILING = int(__import__("os").environ.get("MJSCXT_MAX_TOKENS_CEILING", "65536") or 65536)
+
+# ⭐⭐ 2026-10-11 用户口径：「token 上限可以不设置吗，直接使用模型默认的」。
+# ---------------------------------------------------------------------------
+# 之前的所有麻烦（「模型只吐思考内容 → 提额 → 再撞顶 → 判异常」）根子上都是
+# **我们自己替模型定了输出上限**：思考 + 正文本该由服务端按模型能力分配，
+# 我们却在客户端钉死一个数字，思考一长就把正文挤没了。
+# 打开本开关（默认）后，请求体**不再携带 max_tokens**，由服务端使用模型默认上限：
+#   · 思考与正文都由服务端按模型真实容量分配 → 从根上消除「思考吃满额度」；
+#   · 提额阶梯/降档自救随之失去意义（也不需要了，不再无谓重试）。
+# 需要回到旧行为时设 MJSCXT_USE_MODEL_DEFAULT_MAX_TOKENS=0。
+USE_MODEL_DEFAULT_MAX_TOKENS = __import__("os").environ.get(
+    "MJSCXT_USE_MODEL_DEFAULT_MAX_TOKENS", "1").strip().lower() in ("1", "true", "yes", "on")
 
 # ---- 思考「档位」模型（GLM-5.3 之类思考不可关闭的模型） ----
 # GLM-5.3-Flash 是 always-on reasoning：没有 enable_thinking 开关，
@@ -680,9 +697,12 @@ class LLMClient:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
             "stream": False,
         }
+        # ⭐ 2026-10-11 用户口径：默认**不传 max_tokens**，由服务端按模型默认上限分配
+        #   （思考与正文都放得下）。仅当显式关闭该开关时才回到客户端钉死额度。
+        if not USE_MODEL_DEFAULT_MAX_TOKENS:
+            payload["max_tokens"] = max_tokens
         if self.reasoning_effort:
             kwargs = {"reasoning_effort": self.reasoning_effort}
             # clear_thinking 默认 false，聊天场景官方建议显式传 true（避免上一轮思考串场）
@@ -956,17 +976,23 @@ class LLMClient:
                 nxt = min(nxt, MAX_TOKENS_CEILING)
                 # ③ 额度已顶到上限、档位也降无可降 → 才是真的模型/服务端异常，快速失败上浮。
                 if nxt <= cur and not downgraded:
-                    logger.error(
-                        f"模型在最低思考档（{getattr(self, 'reasoning_effort', '') or '未注入'}）下"
-                        f"仍只吐思考内容（第 {attempts} 次，max_tokens={cur} 已达上限），"
-                        "判定为模型/服务端异常，停止无意义提额，快速失败上浮。")
+                    # ⭐ 2026-10-11：措辞按用户口径修正 —— 思考吃满额度是**模型特性**，
+                    #   不是「异常」。这里只如实说明「额度已给到上限仍无正文」，把
+                    #   判断权留给上层（它可以选择换更小的任务粒度，而不是无休止重试）。
+                    logger.warning(
+                        "模型输出仍有思考、无正文（第 %s 次，max_tokens=%s 已达上限）；"
+                        "思考档位 %s 已降无可降 —— 停止重试，交由上层处理（不再无限加码）",
+                        attempts, cur, getattr(self, 'reasoning_effort', '') or '未注入')
                     history.append({"attempt": attempts, "max_tokens": cur,
                                     "finish_reason": "reasoning_only", "truncated": True,
                                     "content_len": 0, "latency_ms": None})
                     break
-                logger.warning(f"模型只吐思考内容（第 {attempts} 次，max_tokens={cur}），"
-                               f"提高到 {nxt} 重试"
-                               + (f"（并把思考档位降为 {self.reasoning_effort}）" if downgraded else ""))
+                # ⭐ 2026-10-11 用户口径：**思考模型的思考是正常行为**，不是异常。
+                #   原先按 WARNING 记录，实测一轮跑下来刷了 34 条，把真正的告警淹没。
+                #   降为 INFO 并改写措辞（不再暗示出错）。
+                logger.info("模型只输出思考内容（正常现象，第 %s 次，max_tokens=%s），"
+                            "提高到 %s 续跑%s", attempts, cur, nxt,
+                            ("，并把思考档位降为 %s" % self.reasoning_effort) if downgraded else "")
                 history.append({"attempt": attempts, "max_tokens": cur,
                                 "finish_reason": "reasoning_only", "truncated": True,
                                 "content_len": 0, "latency_ms": None})

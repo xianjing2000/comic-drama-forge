@@ -212,7 +212,7 @@ PLAN_DEFAULTS = {
     # 过滤入参，不在此处的字段无法通过接口开关，等于没有入口。
     "enable_upscale": False,
     "upscale_scale": 2,
-    "coverage_min_percent": 95.0,
+    "coverage_min_percent": 85.0,   # ⭐ 2026-10-11 与 pipeline/config 统一为 85%（用户口径 0.85）
     "consistency_min_score": 80,
     "require_consistency": True,
     "step_max_retries": 2,
