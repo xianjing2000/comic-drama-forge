@@ -574,6 +574,11 @@ def project_kind_roots() -> list:
         # G8：两层结构 output/qc/audio/<项目> 此前只扫一层 QC_DIR 永远匹配不到；
         # _watermark_backup/<项目>（水印回滚源，按项目分子目录）补进删除覆盖，
         # 单项目删除时按项目名精确收走该项目自己的备份子目录（进可还原回收站）。
+        # ⭐ 2026-10-10 自动扫描补登记：字幕校对报告落
+        #   output/caption_verify/<项目>/ep{NN}.json（caption_verify.report_path），
+        #   按项目分目录，此前既不在 kind_roots 也不在保留名里 → 删项目会残留，
+        #   同名重建后旧校对报告被继承。
+        ("caption_verify", os.path.join(out, "caption_verify")),
         ("qc_audio", os.path.join(QC_DIR, "audio")),
         ("watermark_backup", os.path.join(QC_DIR, "_watermark_backup")),
     ]
@@ -773,9 +778,14 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
                     _reserved.add(os.path.relpath(_ap, _out_root).split(os.sep)[0])
         except Exception as _re:  # noqa: BLE001 - 推导失败退回下方兜底清单
             logger.warning("推导 output 保留目录名失败（回落兜底清单）：%s", _re)
+        # ⚠️ asset_lib 必须留在这里：它是**跨项目共享**的角色资产库
+        # （asset_library.library_root 用字面量拼 output/asset_lib/characters/<指纹>，
+        #  不按项目分，config 里也没有对应常量）→ 上面两条自动推导都覆盖不到。
+        # 删项目时它必须**保留**，否则会毁掉所有项目的形象复用资产。
         _reserved.update({
             "projects", "novels", "ai_chat", "lessons", "memory", "comic_drama",
-            "assets", "asset_lib", "analytics", "caption_verify", "workflows_export",
+            "assets", "analytics", "workflows_export",
+            "asset_lib",                      # ← 跨项目共享，务必保留
             "video", "temp", ".leases", "_te3d_render", "_trash",
         })
         _seen_loose = set()

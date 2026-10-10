@@ -112,5 +112,86 @@ class TestProjectKindRootsCoverage(unittest.TestCase):
             self.assertIn(k, kinds, "产物类别 %s 未登记 → 删除会残留" % k)
 
 
+class TestAutoScanOutputSubdirs(unittest.TestCase):
+    """**自动扫描**：代码里出现的每一个 output/ 一级目录，必须要么登记为产物类别
+    （project_kind_roots，删除时按项目名收走），要么在保留清单里（跨项目共享，
+    删除时必须保留）。两条都不占 → 测试失败。
+
+    为什么需要它：project_kind_roots 的注释写着「新增产物目录时必须同步登记到这里，
+    否则删除会再次漏」—— 说明历史上已因漏登记踩过坑（screenplays / sfx 都是事后补的，
+    caption_verify 是 2026-10-10 扫描才发现的）。手工维护的清单迟早会漏，
+    故用代码扫描把它变成**自动守卫**：新增目录若没登记，CI 直接失败。
+    """
+
+    #: 跨项目共享 / 非项目产物：删除项目时**必须保留**（不进 kind_roots）
+    SHARED_DIRS = {
+        "asset_lib",      # 跨项目角色资产库（按形象指纹分）
+        "analytics",      # 全局成本/事件
+        "lessons",        # 教训库
+        "memory",         # AI 记忆
+        "projects",       # 项目工作区本身（由主删除单独处理）
+        "ai_chat",        # 会话数据（由 ai_chat.purge_project 单独处理）
+        "assets",         # 容器目录（characters/items/scenes 在 kind_roots 里）
+        "comic_drama",    # 容器目录（comic_drama/* 在 kind_roots 里）
+    }
+
+    def _scan_output_subdirs(self):
+        """扫出代码里 os.path.join(PROJECT_OUTPUT_DIR, "字面量") 的一级名。"""
+        import re
+        app = APP
+        pat = re.compile(
+            r"""os\.path\.join\(\s*PROJECT_OUTPUT_DIR\s*,\s*["']([A-Za-z0-9_\-]+)["']""")
+        hits = {}
+        for dp, dn, fn in os.walk(app):
+            dn[:] = [d for d in dn if d != "__pycache__"]
+            for f in fn:
+                if not f.endswith(".py"):
+                    continue
+                fp = os.path.join(dp, f)
+                rel = os.path.relpath(fp, app).replace(os.sep, "/")
+                for i, line in enumerate(open(fp, encoding="utf-8").read().splitlines(), 1):
+                    for m in pat.finditer(line):
+                        hits.setdefault(m.group(1), []).append("%s:%d" % (rel, i))
+        return hits
+
+    def test_every_output_subdir_is_registered_or_shared(self):
+        import project_store as PS
+        kinds = {k for k, _ in PS.project_kind_roots()}
+        # kind_roots 的根目录名（含两层结构的首段，如 comic_drama）
+        kind_dirs = set()
+        for _, d in PS.project_kind_roots():
+            kind_dirs.add(os.path.basename(os.path.normpath(d)))
+            try:
+                import config
+                rel = os.path.relpath(os.path.abspath(d),
+                                      os.path.abspath(config.PROJECT_OUTPUT_DIR))
+                kind_dirs.add(rel.split(os.sep)[0])
+            except Exception:  # noqa: BLE001
+                pass
+        hits = self._scan_output_subdirs()
+        self.assertTrue(hits, "扫描没抓到任何目录，正则可能需要更新")
+        unregistered = []
+        for name, where in sorted(hits.items()):
+            if name in self.SHARED_DIRS:
+                continue
+            if name in kind_dirs:
+                continue
+            # 也允许 config 常量存在（那说明它是系统目录，保留清单会覆盖）
+            unregistered.append((name, where[0]))
+        self.assertEqual(
+            unregistered, [],
+            "以下 output 一级目录既未登记为产物类别、也不在共享清单里 —— "
+            "新增产物目录请登记到 project_store.project_kind_roots()；"
+            "若是跨项目共享目录，请加入本测试的 SHARED_DIRS：%s" % unregistered)
+
+    def test_shared_dirs_never_in_kind_roots(self):
+        """共享目录不得出现在 kind_roots 里 —— 否则删项目会误删跨项目资源。"""
+        import project_store as PS
+        dirs = {os.path.basename(os.path.normpath(d)) for _, d in PS.project_kind_roots()}
+        for name in ("asset_lib", "analytics", "lessons", "memory"):
+            self.assertNotIn(name, dirs,
+                             "%s 是跨项目共享目录，不该被当成项目产物删除" % name)
+
+
 if __name__ == "__main__":
     unittest.main()
