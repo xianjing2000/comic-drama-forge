@@ -10,7 +10,7 @@ import logging
 from config import PROJECT_OUTPUT_DIR
 from dub_helpers import _dub_character_desc
 from dub_helpers import _dub_line_speaker_from_script
-from routes._shared import _project_style
+from shared_project import _project_style
 from workers.audio import _audio_line_expect_sec
 import prompt_memory
 import tts_client

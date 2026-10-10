@@ -47,7 +47,7 @@ from shared_web import _serve_safe  # noqa: F401  再导出
 from shared_qc import _qc_gate, _qc_record, _qc_record_verdict  # noqa: F401  再导出
 from shared_tasks import _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _prune_task_registry  # noqa: F401  再导出
 from shared_upscale import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _comfy_view_url, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
-from routes._shared import _apply_project_settings, _project_style  # noqa: F401  再导出
+from shared_project import _apply_project_settings, _project_style  # noqa: F401  再导出
 import json
 import os
 from upscale_client import (

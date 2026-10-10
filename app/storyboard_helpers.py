@@ -56,11 +56,11 @@ from asset_refs import (  # noqa: F401, E402  助手按域下沉（第四批）
                         _pick_char_view, _pick_scene_view, _resolve_item_names,
                         _resolve_scene_entry, _resolve_static_dir, _scene_view_for_shot)
 from shared_qc import _qc_load_cfg  # noqa: F401  再导出
-from routes._shared import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_NON_PROJECT_DIRS, _audio_qc_project_key, _ep_dir, _ep_read_dir  # noqa: F401  再导出
+from shared_project import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_NON_PROJECT_DIRS, _audio_qc_project_key, _ep_dir, _ep_read_dir  # noqa: F401  再导出
 from keyframe_helpers import (  # noqa: F401, E402
     _ep_of_script, _keyframe_prompt_preflight, _keyframe_qc_verifier,
     _keyframe_recall_cb, _keyframe_sb_map, _prompt_preflight)
-from routes._shared import (_episode_video_stats, _load_legacy_flat_script, _load_script_for, register_final_deliverable)  # noqa: F401
+from shared_episode import _episode_video_stats, _load_legacy_flat_script, _load_script_for, register_final_deliverable  # noqa: F401  再导出
 from system_helpers import (_COMFYUI_CLEAR_HISTORY_LAST_TS,  # noqa: F401, E402
                                _COMFYUI_CLEAR_HISTORY_LOCK, _maybe_clear_comfyui_history)
 from artifact_helpers import (_COMFYUI_RECLAIM_INTERVAL_SEC, _COMFYUI_RECLAIM_LAST_TS,  # noqa: F401, E402
@@ -71,7 +71,8 @@ from artifact_helpers import (_COMFYUI_RECLAIM_INTERVAL_SEC, _COMFYUI_RECLAIM_LA
 from routes.projects import _collect_project_cast_images, _cover_prompt_from_outline, _move_with_retry, _project_cover_path  # noqa: F401  再导出
 from shared_ai import AI_MODULE_LABEL, _ai_client_for_module, _ai_guide_response, _current_llm_client, _optional_llm_client  # noqa: F401  再导出
 from shared_web import _safe_upload_name  # noqa: F401  再导出
-from routes._shared import EPISODE_BATCH_LIMIT, UPLOAD_TMP_DIR, _episode_units_for_chapters, _estimate_subchunks, _novels_stats, _resolve_novel_project  # noqa: F401  再导出
+from shared_novel import EPISODE_BATCH_LIMIT, UPLOAD_TMP_DIR, _episode_units_for_chapters, _estimate_subchunks, _novels_stats  # noqa: F401  再导出
+from shared_project import _resolve_novel_project  # noqa: F401  再导出
 from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
 from shared_base import _trash_move  # noqa: F401  再导出
 from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
@@ -79,7 +80,7 @@ from shared_web import _serve_safe  # noqa: F401  再导出
 from shared_qc import _qc_gate, _qc_record, _qc_record_verdict  # noqa: F401  再导出
 from shared_tasks import _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _prune_task_registry  # noqa: F401  再导出
 from shared_upscale import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _comfy_view_url, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
-from routes._shared import _apply_project_settings, _project_style  # noqa: F401  再导出
+from shared_project import _apply_project_settings, _project_style  # noqa: F401  再导出
 from lesson_helpers import (_apply_audio_hints, _qc_lesson_from_record,  # noqa: F401, E402
                              _record_audio_qc_lesson, _record_preflight_lesson, _record_qc_lesson)
 from sb_helpers import (  # noqa: F401, E402

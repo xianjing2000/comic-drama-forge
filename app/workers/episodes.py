@@ -22,8 +22,8 @@ from novel_parser import NovelParseError
 from config import CONTINUITY_DIR
 from config import NOVELS_DIR
 from novel_parser import read_novel_text
-from routes._shared import _episode_units_for_chapters
-from routes._shared import _novel_key
+from shared_novel import _episode_units_for_chapters
+from shared_project import _novel_key
 from workers.screenplay import _current_llm_client
 import chapter_preflight
 import continuity

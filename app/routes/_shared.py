@@ -71,6 +71,15 @@ from shared_upscale import (COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES,  # noqa: F40
                             _comfy_view_url, _upscale_resolve_comfyview,
                             _upscale_resolve_video, _upscale_url_for_path,
                             upscale_lock, upscale_tasks)
+# ⭐ 2026-10-10 拆分第 7 步：剧集/小说/项目收尾三组上移到 app/ 层。
+from shared_episode import (_episode_video_stats, _load_legacy_flat_script,  # noqa: F401  再导出
+                            _load_script_for, register_final_deliverable)
+from shared_novel import (EPISODE_BATCH_LIMIT, UPLOAD_TMP_DIR,  # noqa: F401  再导出
+                          _episode_units_for_chapters, _estimate_subchunks, _novels_stats)
+from shared_project import (_apply_project_settings, _audio_qc_project_key,  # noqa: F401  再导出
+                            _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT,
+                            _AUDIO_QC_NON_PROJECT_DIRS, _ep_dir, _ep_read_dir,
+                            _novel_key, _project_style, _resolve_novel_project)
 
 def _autopilot_guard(fn):
     """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误
@@ -121,153 +130,24 @@ def _prompt_memory_view(kind: str = "", limit: int = 50) -> dict:
     except Exception as e:  # noqa: BLE001
         _app_logger().warning("读取质检教训库失败：%s", e)
         return {"total": 0, "by_kind": {}, "path": "", "lessons": [], "error": str(e)}
-def _novel_key(novel_meta: dict, project_ref: str = None) -> str:
-    """剧集目录/项目名前缀所用的稳定键：优先取项目注册表分配的项目键。
-
-    一部小说 = 一个独立项目 → 剧本落盘 output/scripts/<项目键>/，与其它小说彻底隔离。
-    """
-    rec = project_store.get_project(project_ref) if project_ref else None
-    if not rec:
-        rec = project_store.find_by_novel(novel_meta.get("novel_id") or novel_meta.get("id"))
-    if rec:
-        return rec["dir_key"]
-    raw = (novel_meta.get("name") or novel_meta.get("title")
-           or novel_meta.get("novel_id") or "novel")
-    cleaned = re.sub(r"[《》〈〉【】「」『』\s]+", "", str(raw)).strip()
-    return cleaned or str(novel_meta.get("novel_id") or "novel")
 def _resolve_continuity_key(novel_id):
     """小说 → (meta, 项目记录, 项目键)，供连贯性查询接口复用"""
     meta = get_novel(NOVELS_DIR, novel_id)
     pref = (request.args.get('project_id') or request.args.get('project_name') or '').strip()
     proj = project_store.get_project(pref) if pref else project_store.find_by_novel(novel_id)
     return meta, proj, _novel_key(meta, proj["dir_key"] if proj else None)
-UPLOAD_TMP_DIR = os.path.join(NOVELS_DIR, "_uploads")
-def _novels_stats(project_ref: str = None, include_unbound: bool = True):
-    items = list_novels(NOVELS_DIR)
-    # 标注每部小说当前归属的项目（一部小说 = 一个独立项目）
-    for m in items:
-        rec = project_store.find_by_novel(m.get("novel_id") or m.get("id"))
-        m["project_id"] = (rec or {}).get("id", "")
-        m["project_key"] = (rec or {}).get("dir_key", "")
-        m["project_name"] = (rec or {}).get("name", "")
-        m["bound"] = bool(rec)
-    if project_ref:
-        rec = project_store.get_project(project_ref)
-        pid = (rec or {}).get("id") or project_ref
-        filtered = [m for m in items if m["project_id"] == pid
-                    or (include_unbound and not m["project_id"])]
-    else:
-        filtered = items
-    return {
-        "count": len(filtered),
-        "total_chars": sum(int(m.get("char_count") or 0) for m in filtered),
-        "novels": filtered,
-        "all_count": len(items),
-    }
-def _estimate_subchunks(char_count: int) -> int:
-    """不读全文的二次分块数量估算（用于章节列表）"""
-    return novel_to_script.estimate_subchunks(char_count)
-EPISODE_BATCH_LIMIT = 30          # 单次批量生成集数上限（保护后台任务）
-def _episode_units_for_chapters(novel_meta: dict, chapters: list) -> list:
-    """把「用户选中的章」展开成**拍摄单元**（超长章会拆成多集）。
-
-    ⚠️ 单元编号必须基于**全量章节**展开（口径 = ``autopilot.episode_units``），
-    不能用传入的子集 —— 否则同一章在「手动选集生成」与「托管」两条链路上会拿到
-    不同的集号，产物（``第N集.json`` / 成片 / 验收记录）互相错位。
-    """
-    selected = [int(c.get("index") or 0) for c in (chapters or [])]
-    if not selected:
-        return []
-    try:
-        all_chapters, text = autopilot.chapters_and_text(novel_meta)
-    except Exception as e:  # noqa: BLE001
-        _app_logger().warning("章节列表读取失败（按一章一集处理）：%s", e)
-        all_chapters, text = [], ""
-    if all_chapters:
-        try:
-            units = autopilot.episode_units(all_chapters, {"episodes": selected}, text)
-            if units:
-                return units
-        except Exception as e:  # noqa: BLE001
-            _app_logger().warning("拆章失败（按一章一集处理）：%s", e)
-    # 兜底：拿不到全量章节时退回「一章一集」（与历史行为一致）
-    return [{"episode_no": int(c.get("index") or i + 1),
-             "chapter_index": int(c.get("index") or i + 1),
-             "part": 1, "parts": 1, "chapter": c}
-            for i, c in enumerate(chapters or [])]
-def _resolve_novel_project(data: dict, novel_meta: dict) -> dict:
-    """把当前操作绑定到项目：显式指定优先，否则按小说自动建立/复用独立项目。"""
-    data = data or {}
-    ref = (data.get('project_id') or data.get('project_name') or '').strip()
-    rec = project_store.get_project(ref) if ref else None
-    if rec is None:
-        rec = project_store.ensure_project_for_novel(
-            novel_meta.get("novel_id") or novel_meta.get("id") or "",
-            novel_meta.get("name") or novel_meta.get("title") or "")
-    return rec
 
 
-_AUDIO_QC_AUDIO_EXT = ('.wav', '.mp3', '.flac', '.m4a', '.aac', '.ogg')
 
 
-_AUDIO_QC_MEDIA_EXT = ('.mp4', '.mkv', '.mov', '.webm', '.m4v', '.avi')
 
 
-_AUDIO_QC_NON_PROJECT_DIRS = ('lines', 'frames', 'output', 'temp', 'qc', 'audio', 'audio_mix')
 
 
-def _audio_qc_project_key(target: str) -> str:
-    """按产物路径反推项目名，用于可视化图片的落盘目录。
-
-    ⚠️ 不能退化成字面量（如 ``project``）：按 ``path`` 直接检查时拿不到项目名，
-    所有项目就会挤进同一个目录，**不同项目的同名文件互相覆盖** —— 而 AI 读图是
-    子进程/网络异步进行的，覆盖会变成竞态（读数项目的图）。
-    布局：成片 ``output/final_dub/<项目>/x.mp4``、逐句 ``output/dub/<项目>/lines/x.wav``。
-    """
-    d = os.path.dirname(os.path.abspath(target))
-    for _ in range(4):
-        name = os.path.basename(d)
-        if name and name.lower() not in _AUDIO_QC_NON_PROJECT_DIRS:
-            return name
-        parent = os.path.dirname(d)
-        if parent == d:                       # 已到根，别再往上
-            break
-        d = parent
-    return 'adhoc'
 
 
-def _ep_dir(base_dir: str, episode_no=None) -> str:
-    """写入用的集级产物目录（第 1 集 = 平铺目录）"""
-    try:
-        ep = int(episode_no or 1)
-    except (TypeError, ValueError):
-        ep = 1
-    if ep <= 1:
-        return base_dir
-    return os.path.join(base_dir, f"ep{ep:02d}")
 
 
-def _ep_read_dir(base_dir: str, project: str, episode_no=None) -> str:
-    """读取用的集级产物目录：优先集目录；**仅第 1 集**才回落到平铺目录。
-
-    ⚠️ 2026-10-09 修复（实测暴露）：原实现「不存在就回落平铺」对**第 2 集及以后**
-    是错的 —— 当 epNN/ 还没产出时，它会返回**第 1 集的平铺目录**，
-    于是前端/接口把第 1 集的分镜图当成第 2 集的产物展示（用户看到「两集分镜重复」）。
-    真正的兼容目标只是**第 1 集平铺时代的旧数据**（见 _ep_dir 的 docstring），
-    因此这里把回落严格限定在 ep <= 1。第 2+ 集目录不存在时返回该集应有的空目录路径，
-    让调用方得到「本集暂无产物」而不是「别人的产物」。
-    """
-    try:
-        _ep = int(episode_no or 1)
-    except (TypeError, ValueError):
-        _ep = 1
-    flat = os.path.join(base_dir, project)
-    d = _ep_dir(flat, episode_no)
-    if os.path.isdir(d) and d != flat:
-        return d
-    if _ep <= 1 and os.path.isdir(flat):
-        return flat
-    return d
 
 
 
@@ -291,84 +171,10 @@ def _dub_project_dir(project_name: str) -> str:
 
 
 
-def _apply_project_settings(style: str, project_name: str = "") -> str:
-    """把「AI 对话 → 应用设定」落盘的创作设定并入风格描述，供剧本 / 提示词 / 分镜链路引用。
-
-    - 命中项目则用该项目的生效设定；未命中则退回最近一次应用的设定；
-    - 未应用过任何设定时原样返回 style，行为与改造前一致。
-    """
-    base = (style or "").strip()
-    try:
-        brief = (ai_chat.settings_view(AI_SETTINGS_PATH, project_name).get("style_brief") or "").strip()
-        if not brief and (project_name or "").strip():
-            brief = (ai_chat.settings_view(AI_SETTINGS_PATH, "").get("style_brief") or "").strip()
-    except Exception as e:  # noqa: BLE001
-        _app_logger().warning(f"创作设定读取失败（忽略，沿用原风格）：{e}")
-        return base
-    if not brief:
-        return base
-    return f"{base}；{brief}" if base else brief
 
 
 
 
-def _project_style(project_name: str = "") -> str:
-    """取项目的生效风格：plan.json 的 style（总控 AI 敲定）> AI 设定面板 > config.json 的 style。
-
-    前端手工触发的生成路由（分镜 / 视频 / 资产）此前**完全不传风格**，
-    导致「界面按钮点出来的图」和「托管跑出来的图」风格行为不一致。
-    统一从这里取，保证两条链路同源。
-
-    2026-09-23（建项目选风格）：新增第三级兜底 config.json 的 style —— 用户「新建项目」时
-    下拉/自定义的风格写进 config.style，但此前这里完全不读它，选了什么都不会生效
-    （总控没敲定风格时 style 恒为空 → 生成被 409 拦截或回落默认）。现在总控没敲定时
-    退回 config.style，让「建项目时选风格」这条路径真正闭环。
-    """
-    proj = _safe_project(project_name or "")
-    try:
-        brief = (autopilot.get_plan(proj) or {}).get("style") or ""
-    except Exception as e:  # noqa: BLE001
-        _app_logger().warning(f"读取项目风格失败（忽略）：{e}")
-        brief = ""
-    if not brief:
-        try:
-            brief = _apply_project_settings("", proj)
-        except Exception:  # noqa: BLE001
-            brief = ""
-    if not brief:
-        # 建项目时选的风格 + 画面比例（config.json 的 style / aspect_ratio 字段）作为最后兜底。
-        # 画面比例拼进风格串，让 style_kit.aspect_ratio 能解析，从而真正落到视频/分镜画布
-        # （与总控 style_brief 里的「画面比例：9:16 竖屏」同一种表达，解析口径一致）。
-        try:
-            rec = project_store.get_project(proj)
-            if rec:
-                cfg = project_store.read_config(rec["dir_key"])
-                brief = str(cfg.get("style") or "").strip()
-                ar = str(cfg.get("aspect_ratio") or "").strip()
-                if ar:
-                    brief = f"{brief}，画面比例：{ar}" if brief else f"画面比例：{ar}"
-        except Exception as e:  # noqa: BLE001
-            _app_logger().warning(f"读取项目 config.style/aspect_ratio 失败（忽略）：{e}")
-            brief = ""
-    # 2026-09-28 修复（「建项目时选的画面比例」必须真正生效）：
-    # 三级兜底顺序**完全不变**，但「拼画幅」不再只发生在第三级 —— 只要最终 brief 里
-    # **还没有任何画幅信息**（style_kit.aspect_ratio(brief) is None），且项目
-    # config.aspect_ratio 非空，就统一补一句「画面比例：<ar>」。这样 plan.json / AI
-    # 设定面板有 style（正常情况恒成立）时，用户在「新建项目」里手选的比例也能落到
-    # 视频 / 分镜画布（两链路的 style_kit.resolve 都能解析这句）。
-    # ⚠️ 硬约束：brief **已带**画幅（关键词或显式 a:b）时绝不覆盖 —— 显式意图优先。
-    # 读 config 失败 fail-open：沿用原 brief、只告警不抛。
-    if not style_kit.aspect_ratio(brief):
-        try:
-            _rec = project_store.get_project(proj)
-            if _rec:
-                _ar = str(project_store.read_config(_rec["dir_key"]).get("aspect_ratio")
-                          or "").strip()
-                if _ar:
-                    brief = f"{brief}，画面比例：{_ar}" if brief else f"画面比例：{_ar}"
-        except Exception as e:  # noqa: BLE001
-            _app_logger().warning(f"补齐项目画面比例失败（忽略）：{e}")
-    return style_kit.normalize_style(brief)
 
 
 
@@ -402,166 +208,12 @@ def _wm_load_cfg() -> dict:
 
 
 
-def _episode_video_stats(project_name: str, episode_no) -> dict:
-    """该集镜头视频就绪度：剧本镜头数 vs 已落盘视频数（>1KB 才算数）"""
-    script = _load_script_for(project_name, episode_no)
-    shots = [s for s in (script.get('shots') or []) if isinstance(s, dict)]
-    d = _ep_dir(os.path.join(VIDEOS_DIR, project_name), episode_no)
-    ready = 0
-    if os.path.isdir(d):
-        for fn in os.listdir(d):
-            if not fn.lower().endswith('.mp4'):
-                continue
-            try:
-                if os.path.getsize(os.path.join(d, fn)) > 1024:
-                    ready += 1
-            except OSError:
-                continue
-    return {"total": len(shots), "ready": ready, "dir": d}
 
 
-def _load_legacy_flat_script(project_name: str) -> dict:
-    """回退：读取旧版扁平命名的剧本（SCRIPT_DIR/<name>_<时间戳>.json）。
-
-    仅在现行目录布局读不到剧本时调用，因此不会遮蔽正常的第N集.json。
-    按修改时间倒序取第一份「含 shots」的文件，避免命中空壳/中间态产物。
-    """
-    try:
-        names = os.listdir(SCRIPT_DIR)
-    except OSError:
-        return {}
-    cands = []
-    for fn in names:
-        if not fn.lower().endswith(".json"):
-            continue
-        stem = fn[:-5]
-        # 允许 <name>_<时间戳> 与 <name> 本身（例如「剑心初醒_兼容版」）
-        if stem != project_name and not stem.startswith(project_name + "_"):
-            continue
-        path = os.path.join(SCRIPT_DIR, fn)
-        try:
-            cands.append((os.path.getmtime(path), path))
-        except OSError:
-            continue
-    for _, path in sorted(cands, reverse=True):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:  # noqa: BLE001
-            _app_logger().warning(f"遗留剧本读取失败 {path}：{e}")
-            continue
-        if isinstance(data, dict) and (data.get("shots") or data.get("episode_no")):
-            _app_logger().info("剧本回退：%s 使用遗留扁平剧本 %s", project_name, os.path.basename(path))
-            return data
-    return {}
 
 
-def _load_script_for(project_name: str, episode_no=None) -> dict:
-    """按项目名（+可选集号）读取剧本；缺集号时取该项目第一集
-
-    兼容两种历史布局（否则「迁移项目」会永远读不到剧本）：
-      A. 现行：SCRIPT_DIR/<project_key>/第N集.json
-      B. 迁移遗留：SCRIPT_DIR/<name>_<时间戳>.json（扁平，无子目录）
-    遗留项目在项目索引里登记着 episode_count（例如 10），但按 A 找不到任何一集，
-    于是分镜画布 / 导出 / 质检等全部读到空数据，界面显示「10 集 · 0 分镜」。
-    这里在 A 落空时回退到 B，并优先取时间戳最新的一份。
-    """
-    key = project_store.safe_key(project_name)
-    script = None
-    if episode_no:
-        try:
-            script = novel_to_script.load_episode_script(SCRIPT_DIR, key, int(episode_no))
-        except Exception as e:  # noqa: BLE001
-            _app_logger().warning(f"剧本读取失败（第{episode_no}集）：{e}")
-    if not script:
-        try:
-            eps = novel_to_script.list_episodes(SCRIPT_DIR, key)
-        except Exception:  # noqa: BLE001
-            eps = []
-        if eps:
-            first = eps[0]
-            epno = first if isinstance(first, int) else (first.get("episode_no") or 1)
-            script = novel_to_script.load_episode_script(SCRIPT_DIR, key, epno)
-    if not script:
-        script = _load_legacy_flat_script(project_name)
-    return script or {}
 
 
-def register_final_deliverable(project_name: str, episode_no, video_path: str,
-                               meta: dict = None) -> dict:
-    """把整集成片登记进「待验收」队列（幂等）。
-
-    硬闸门（不满足就完全不登记，避免验收页被垃圾塞满）：
-      0) 成片不存在 / < 100KB；1) 探不到时长或 < 2s。
-
-    软闸门（镜头覆盖）：剧本镜头数 vs 已落盘镜头视频数。
-    这里刻意不做「时长 >= 镜头数 x N 秒」的硬判定 —— 漫剧单镜常常不到 1s
-    （实测 6 镜合并成片只有 4.46s），按时长否决会把真成片误判成半成品。
-    镜头不齐时仍然登记，但在 meta 里打 `incomplete_shots` + `warning`，
-    让「成品验收」页能显示「可能不完整」提醒，用户可据此打回。
-
-    返回 {"registered": bool, "reason": str, "stats": {...}, "item": {...}}
-    """
-    # 铁律（2026-09-29）：预演产物**永不可交付**。这里给一个**友好拒绝**（不抛异常），
-    # 让调用方能直接把原因显示给用户；同一不变量在 pipeline.record_deliverable 上还有
-    # 一道硬闸门（防绕过）。
-    _ok, _why = preview_gate.deliverable_ok(video_path)
-    if not _ok:
-        _app_logger().error("[预演拦截] 拒绝把非正式产物登记为成片（%s）：%s",
-                         os.path.basename(str(video_path or "")), _why)
-        return {"registered": False, "reason": _why, "stats": {}, "preview_blocked": True}
-    if not video_path or not os.path.exists(video_path):
-        return {"registered": False, "reason": "成片文件不存在", "stats": {}}
-    try:
-        size = os.path.getsize(video_path)
-    except OSError as e:
-        return {"registered": False, "reason": f"成片不可读：{e}", "stats": {}}
-    if size < 100 * 1024:
-        return {"registered": False, "reason": f"成片过小（{size} 字节），疑似半成品",
-                "stats": {"size": size}}
-
-    try:
-        ep = int(episode_no or 1)
-    except (TypeError, ValueError):
-        ep = 1
-
-    try:
-        vinfo = probe_video_info(video_path) or {}
-    except Exception:  # noqa: BLE001 - 探测失败不代表成片不可用，走宽松分支
-        vinfo = {}
-    duration = float(vinfo.get("duration") or 0)
-    if duration and duration < 2.0:
-        return {"registered": False, "reason": f"成片仅 {duration:.1f}s，疑似片段",
-                "stats": {"duration": duration, "size": size}}
-
-    stats = _episode_video_stats(project_name, ep)
-    stats["size"], stats["duration"] = size, duration
-    total, ready = int(stats.get("total") or 0), int(stats.get("ready") or 0)
-    incomplete = bool(total > 0 and ready < total)
-
-    item_meta = dict(meta or {})
-    item_meta.setdefault("source", "final")
-    item_meta.setdefault("duration_sec", round(duration, 2) if duration else None)
-    item_meta.setdefault("size_bytes", size)
-    item_meta["shots_total"] = total
-    item_meta["shots_ready"] = ready
-    if incomplete:
-        item_meta["incomplete_shots"] = True
-        item_meta["warning"] = (f"该集剧本 {total} 镜，仅发现 {ready} 个镜头视频，"
-                                f"成片可能不完整，建议核对后再验收")
-    try:
-        item = pipeline.record_deliverable(project_name, ep, video_path, meta=item_meta)
-    except Exception as e:  # noqa: BLE001 - 登记失败不能影响出片主流程
-        _app_logger().warning(f"成片登记交付物失败（{project_name} 第{ep}集）：{e}")
-        return {"registered": False, "reason": f"登记失败：{e}", "stats": stats}
-    if incomplete:
-        _app_logger().warning(f"成片已登记但镜头疑似不全：{project_name} 第{ep}集 "
-                           f"({ready}/{total}) -> {os.path.basename(video_path)}")
-        return {"registered": True,
-                "reason": f"已登记（镜头覆盖 {ready}/{total}，可能不完整）",
-                "stats": stats, "item": item, "incomplete": True}
-    _app_logger().info(f"成片已登记待验收：{project_name} 第{ep}集 -> {os.path.basename(video_path)}")
-    return {"registered": True, "reason": "已登记", "stats": stats, "item": item}
 
 
 

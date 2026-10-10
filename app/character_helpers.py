@@ -42,7 +42,7 @@ from qc_helpers import (  # noqa: F401, E402
     _qc_shot_desc, _qc_style_of, _qc_summary,
     _sanitize_outfit_key, _shot_has_char_ref, _shot_has_on_screen,
     _shot_outfit_dir)
-from routes._shared import (_episode_video_stats, _load_legacy_flat_script, _load_script_for, register_final_deliverable)  # noqa: F401
+from shared_episode import _episode_video_stats, _load_legacy_flat_script, _load_script_for, register_final_deliverable  # noqa: F401  再导出
 from asset_refs import (  # noqa: F401, E402  助手按域下沉（第四批）
                         _ASSET_IMG_EXTS, _ASSET_IMG_PRIORITY, _STATIC_DIR, _build_asset_index,
                         _first_existing_asset_image, _framing_wants_half_shot,
