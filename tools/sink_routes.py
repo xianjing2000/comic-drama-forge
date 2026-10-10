@@ -93,11 +93,14 @@ def import_stmt_for(name):
     """返回能提供 name 的 import 语句（按优先级，不猜）。"""
     if name in BUILTIN_OK:
         return None
+    # SHARED 必须优先于「同名模块」：comfyui_client 在 _shared 里是**实例**，
+    # 而 app/comfyui_client.py 是**模块** —— 蓝图要的是实例（get_status 是实例方法）。
+    # 曾因顺序反了导致 /api/status 500。
+    if name in SHARED:
+        return 'from routes._shared import %s' % name
     m = _module_exists(name)
     if m:
         return 'import %s' % m if m == name else 'from %s import %s' % (m.split('.')[0], name)
-    if name in SHARED:
-        return 'from routes._shared import %s' % name
     if name in HELPER_ORIGIN:
         return 'from %s import %s' % (HELPER_ORIGIN[name], name)
     if name in CONF:

@@ -25,7 +25,7 @@ from config import CHARACTERS_DIR
 from config import ITEMS_DIR
 from config import SCENES_DIR
 from routes._shared import _task_queue_status
-import comfyui_client
+from routes._shared import comfyui_client  # ComfyUIClient 实例（非模块！get_status 是实例方法）
 import gpu_task_gate
 import job_state
 
