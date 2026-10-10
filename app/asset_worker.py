@@ -25,6 +25,8 @@ from config import (
     SCENE_VIEW_KEYS, SCENE_VIEW_LABELS, SCENE_VIEW_ANGLE_ZH,
     SCENE_ANGLE_TO_VIEW, SCENE_VIEWS_ENABLED, SCENE_VIEW_MAX_RETRIES,
     SCENE_VIEW_DUP_PHASH_MAX,
+    # 场景多视角九宫格的「按剧情判断」门槛（2026-10-10 用户要求）
+    SCENE_GRID_MIN_SHOTS,
     # 场景九宫格多视角（2026-10-05）：开关 + 9 机位键序 + 机位句/标签 + 主图文件名/derive_mode
     SCENE_GRID_MODE, SCENE_GRID_ONESHOT,
     SCENE_GRID_VIEW_KEYS, SCENE_GRID_ANGLE_ZH, SCENE_GRID_LABELS,
@@ -90,6 +92,54 @@ import os
 import prompt_memory
 import qc_client
 import random
+def _scene_shot_count(project_name: str, scene_name: str, episode_no=None) -> int:
+    """该场景在本集剧本里**承载的镜头数** —— 判断是否需要多视角九宫格的客观信号。
+
+    ⭐ 2026-10-10 用户要求：「场景要根据剧情判断是否相应生成多视角9宫格」。
+    为什么用「镜头数」而不是让模型判断：镜头数是**已落盘的剧本事实**（确定性、
+    可复现、零 LLM 成本），而「这个场景会不会被多角度拍」在剧本阶段就已经定下来了
+    —— 出现 3 镜的场景必然要换机位，只出现 1 镜的背景场景则不必浪费 9 格算力。
+
+    返回 -1 表示**读不到剧本**（尚未生成 / 读取异常）→ 调用方按"不拦"处理，
+    保持旧行为（宁可想生成就生成，也不要因为读不到剧本把资产卡住）。
+    """
+    try:
+        import shared_episode
+        script = shared_episode._load_script_for(project_name, episode_no)
+        if not isinstance(script, dict):
+            return -1
+        want = str(scene_name or "").strip()
+        if not want:
+            return -1
+        n = 0
+        for sh in (script.get("shots") or []):
+            if not isinstance(sh, dict):
+                continue
+            if str(sh.get("location") or "").strip() == want:
+                n += 1
+        return n
+    except Exception as e:  # noqa: BLE001 - 判定失败不拦（保持旧行为）
+        logger.debug("场景镜头数统计失败（按需要多视角处理）：%s", e)
+        return -1
+
+
+def _scene_needs_multiview(project_name: str, scene_name: str, episode_no=None) -> bool:
+    """按剧情判断该场景是否需要多视角九宫格。
+
+    · 镜头数 >= SCENE_GRID_MIN_SHOTS（默认 3）→ 需要（多机位复用，必须有机位一致性）；
+    · 镜头数 <  该值 → 不需要（如只作背景交代的单镜场景，单图足够）；
+    · 读不到剧本（-1）→ 返回 True（不拦，保持旧行为）。
+    """
+    n = _scene_shot_count(project_name, scene_name, episode_no)
+    if n < 0:
+        return True
+    need = n >= int(SCENE_GRID_MIN_SHOTS or 3)
+    if not need:
+        logger.info("场景「%s」本集仅 %d 镜（< %d），按剧情判断**不需要**多视角九宫格，"
+                    "只出基础图（省算力）", scene_name, n, SCENE_GRID_MIN_SHOTS)
+    return need
+
+
 import scene_grid
 import sheet_split
 import shutil
@@ -872,7 +922,11 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     except Exception as _pe:  # noqa: BLE001
                         logger.warning("清理陈旧视角文件失败（不影响入库）：%s", _pe)
                 elif (asset_type == "scene" and SCENE_VIEWS_ENABLED
-                      and SCENE_GRID_MODE and SCENE_GRID_ONESHOT):
+                      and SCENE_GRID_MODE and SCENE_GRID_ONESHOT
+                      # ⭐ 2026-10-10 用户要求：按剧情判断是否**需要**多视角九宫格 ——
+                      #   只出现 1 镜的背景场景不生成（单图足够），反复出现的才生成。
+                      #   读不到剧本时返回 True（不拦），保持旧行为。
+                      and _scene_needs_multiview(project_name, name)):
                     # ---------- 场景：九宫格「单次出图」直出整图（2026-10-07 用户拍板） ----------
                     # 动机：旧路「9 档逐档独立 T2I + scene_grid.stitch_grid 拼接」实测
                     #   8 分 16 秒/场景，且 9 个机位在独立出图下易收敛成同一张平视全景；
