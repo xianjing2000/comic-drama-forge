@@ -15,6 +15,7 @@
   · 再导出列表来自新模块实际顶层名，不可能导入不存在的名字。
 """
 import io
+import os
 import ast
 import re
 import sys
@@ -175,6 +176,15 @@ def main(prefix, modname, note=''):
     good, unresolved = [], []
     for nm in missing:
         st = import_stmt_for(nm)
+        # ⚠️ 2026-10-11 修复（真实故障）：app.py 里有「从目标模块再导出」的语句，
+        #    原样复制会变成该模块**import 自己**：
+        #      lesson_helpers.py:36  from lesson_helpers import (_apply_audio_hints, ...)
+        #    → 自导入/循环依赖，连带 keyframe/video/storyboard/routes.* 全部 ImportError。
+        #    这类名字本就定义在目标模块内（同模块可见），既不需要 import，也不算未定位。
+        if st and re.search(r'from\s+%s\s+import' % re.escape(modname), st):
+            continue
+        if st and re.search(r'^import\s+%s\s*$' % re.escape(modname), st):
+            continue
         if st and st not in good:
             good.append(st)
         elif not st:
@@ -185,6 +195,17 @@ def main(prefix, modname, note=''):
         mod = mod[:idx] + chr(10).join(good) + chr(10) + chr(10) + mod[idx:]
 
     path = 'app/%s.py' % modname
+    # ⚠️ 2026-10-11 硬约束（真实事故）：**目标模块已存在且非空时一律中止**。
+    #    本工具早期直接 `open(path,'w')` 覆盖 —— 对已有内容的模块会**丢掉全部原有函数**：
+    #      lesson_helpers.py 196 行 -> 69 行（丢 127 行）
+    #      mix_helpers.py    205 行 -> 21 行（丢 184 行）
+    #    所幸内容都在 git 中可恢复。正确做法：新函数追加进已有模块，或另起新模块名；
+    #    覆盖不是本工具该做的事，故直接在写盘前拦住。
+    if os.path.exists(path) and os.path.getsize(path) > 0:
+        print('  [XX] 目标模块已存在且非空：%s' % path)
+        print('       本工具不覆盖已有模块（会丢失原有函数）。')
+        print('       请改用新的模块名，或手工把函数追加进该文件。')
+        return 1
     ast.parse(mod)
     io.open(path, 'w', encoding='utf-8').write(mod)
     print('  [OK] %s（%d 行）' % (path, mod.count(chr(10)) + 1))

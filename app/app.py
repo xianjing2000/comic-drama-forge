@@ -265,6 +265,10 @@ app.register_blueprint(script_api_bp)
 # 2026-10-11 路由拆分：资产生成 已迁至 routes/assets_api.py。
 from routes.assets_api import assets_api_bp  # noqa: E402
 app.register_blueprint(assets_api_bp)
+
+# 2026-10-11 助手下沉：音效隔离（新模块） 已迁至 sfx_helpers.py。
+from sfx_helpers import (  # noqa: F401, E402
+    _isolate_shot_sfx)
 from routes.assets_api import _OUTFIT_PROMPT_MARK  # noqa: F401, E402
 from routes.assets_api import (
     api_generate_assets, api_character_upload_sheet, api_character_outfit_generate,
@@ -1338,17 +1342,6 @@ from job_state import mix_lock  # noqa: F401  2026-10-11 归位到 job_state
 # （只有 /api/autopilot/run-once 与托管轮转会登记）。这里在成片真正落盘处统一登记。
 
 
-def _isolate_shot_sfx(video_path: str, project: str, episode, shot_id) -> dict:
-    """对单镜音轨做人声分离，只留音效（H3 原生音效，剔掉它自带的说话声）。
-
-    **fail-open**：任何异常都只返回 ok=False，绝不打断出片流程。
-    """
-    try:
-        import sfx_isolate
-        return sfx_isolate.isolate_sfx(
-            video_path, project, f"ep{int(episode):02d}_shot{int(shot_id):02d}")
-    except Exception as e:                                     # noqa: BLE001
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
 
