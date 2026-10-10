@@ -909,7 +909,25 @@ def _auto_screenplay(ctx: dict) -> None:
         meta = ctx.get('novel_meta') or {}
         text = str(chapter.get('text') or '')
         if not text:
-            text = _A().read_novel_text(_A().NOVELS_DIR, meta.get('novel_id')) or ''
+            # ⚠️ 2026-10-10 修 bug（用户发现「第 1 集剧本里有后续章节的内容」）：
+            #    原写法直接回退到 **整本小说**（read_novel_text 返回全文，实测 51268 字），
+            #    于是第 1 集的文学剧本里混进了第 2 章的 2704、第 3 章的楼层变化、
+            #    第 4 章的疗养院（陈默 / 林栖 / 陈护士等后续角色全部提前出场）。
+            #    正确做法与 convert_chapter_to_script 一致：拿全文后**按本章 start/end 切片**。
+            full = _A().read_novel_text(_A().NOVELS_DIR, meta.get('novel_id')) or ''
+            try:
+                _s = int(chapter.get('start') or 0)
+                _e = int(chapter.get('end') or 0)
+            except (TypeError, ValueError):
+                _s, _e = 0, 0
+            if _e > _s >= 0:
+                text = full[_s:_e]
+                logger.info('文学剧本自动生成：按章节边界取正文（第%s章 %d~%d，%d 字）',
+                            chapter.get('index'), _s, _e, len(text))
+            else:
+                text = full
+                logger.warning('文学剧本自动生成：章节缺少 start/end 边界，'
+                               '退化为整本小说（%d 字），可能混入多章内容', len(text))
         if not text:
             logger.warning('文学剧本自动生成：章节正文为空，跳过')
             return
