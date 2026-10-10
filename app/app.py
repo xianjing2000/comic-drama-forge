@@ -245,6 +245,26 @@ app.register_blueprint(status_api_bp)
 # 2026-10-11 路由拆分：视频重试 已迁至 routes/video_api.py。
 from routes.video_api import video_api_bp  # noqa: E402
 app.register_blueprint(video_api_bp)
+
+# 2026-10-11 路由拆分：小说分集/剧本 已迁至 routes/novels_api.py。
+from routes.novels_api import novels_api_bp  # noqa: E402
+app.register_blueprint(novels_api_bp)
+
+# 2026-10-11 路由拆分：分镜产物 已迁至 routes/storyboards_api.py。
+from routes.storyboards_api import storyboards_api_bp  # noqa: E402
+app.register_blueprint(storyboards_api_bp)
+
+# 2026-10-11 路由拆分：分镜画布/重跑 已迁至 routes/storyboard_api.py。
+from routes.storyboard_api import storyboard_api_bp  # noqa: E402
+app.register_blueprint(storyboard_api_bp)
+from routes.storyboard_api import (
+    api_storyboard_canvas, api_storyboard_shot_reorder, api_storyboard_retry_shot,
+    api_storyboard_grid_candidates, api_storyboard_grid_apply)  # noqa: F401
+from routes.storyboards_api import (
+    api_generate_storyboards, api_storyboard_manifest, api_storyboard_file,
+    api_storyboard_scratch_file)  # noqa: F401
+from routes.novels_api import (
+    api_novel_screenplay_generate, api_novel_screenplay_get, api_novel_episodes_generate)  # noqa: F401
 from routes.video_api import (
     api_video_retry_shot, api_video_retry_shots_batch, api_generate_videos,
     api_video_file, api_video_preview_approve)  # noqa: F401
@@ -690,205 +710,8 @@ def favicon_svg():
 
 
 
-@app.route('/api/storyboard/canvas/<path:project_name>', methods=['GET'])
-def api_storyboard_canvas(project_name):
-    """分镜画布数据：每镜一张卡片（分镜图/视频 + 质检分 + 一致性分 + 承载原文 + 台词）
-
-    卡片按剧本 shots 顺序排列；手动排序（order）保存在剧本 metadata.shot_order，
-    因此画布顺序与后续视频生成顺序始终一致。
-
-    ⚠️ 2026-10-02 起每张卡片的 `storyboard` 额外带**生成中**信息（`generating` /
-    `scratch_url`），让前端在整步落盘之前就能显示「第 N 镜生成中」的预览快照；
-    每镜 `storyboard.exists` 的语义不变（仍只代表正式产物已落盘）。
-    """
-    project = _safe_project(os.path.basename(project_name.rstrip('/')))
-    script = _load_script_for(project, request.args.get('episode_no'))
-    shots = script.get("shots") or []
-    if not shots:
-        return jsonify({"success": False, "error": "该剧本没有镜头数据",
-                        "project": project}), 404
-    meta = script.get("metadata") or {}
-
-    # 分镜图 + 质检（集级目录：第 1 集平铺，第 2 集起含 epNN）
-    _cv_ep = _ep_of_script(script, request.args.get('episode_no'))
-    _cv_sub = f"ep{int(_cv_ep):02d}/" if _cv_ep and int(_cv_ep) > 1 else ""
-    sb_map = _keyframe_sb_map(project, script, episode_no=_cv_ep)
-    sb_dir = _ep_read_dir(STORYBOARDS_DIR, project, _cv_ep)
-    sb_manifest = {}
-    mpath = os.path.join(sb_dir, "storyboard_manifest.json")
-    if os.path.isfile(mpath):
-        try:
-            with open(mpath, "r", encoding="utf-8") as f:
-                for s in ((json.load(f) or {}).get("shots") or []):
-                    if isinstance(s, dict):
-                        sb_manifest[_shot_num_key(s.get("shot_id"))] = s
-        except Exception as e:  # noqa: BLE001
-            app.logger.warning(f"分镜 manifest 读取失败：{e}")
-
-    # 视频
-    vid_dir = _ep_dir(os.path.join(VIDEOS_DIR, project), _cv_ep)
-    vid_map = {}
-    if os.path.isdir(vid_dir):
-        for fn in sorted(os.listdir(vid_dir)):
-            if fn.lower().endswith((".mp4", ".mov", ".webm")):
-                vid_map[_shot_num_key(os.path.splitext(fn)[0])] = os.path.join(vid_dir, fn)
-
-    # 一致性报告（按镜头取最低分）
-    consistency_by_shot = {}
-    try:
-        rep = consistency.load_report(project) or {}
-        for r in ((rep.get("shot_check") or {}).get("results") or []):
-            k = _shot_num_key(r.get("shot"))
-            cur = consistency_by_shot.get(k)
-            if cur is None or (r.get("score") or 0) < (cur.get("score") or 0):
-                consistency_by_shot[k] = {"score": r.get("score"),
-                                          "verdict": r.get("verdict"),
-                                          "character": r.get("character"),
-                                          "mode": r.get("mode")}
-    except Exception as e:  # noqa: BLE001
-        app.logger.debug(f"一致性报告读取失败（画布将不含一致性分）：{e}")
-
-    # 原文承载归属
-    try:
-        cover_map = _shot_coverage_map(script)
-    except Exception as e:  # noqa: BLE001
-        app.logger.debug(f"覆盖率归属计算失败：{e}")
-        cover_map = {}
-    cov_report = {}
-    try:
-        cov_report = coverage.load_coverage_report(CONTINUITY_DIR, project,
-                                                   meta.get("episode_no") or script.get("episode_no") or 1)
-    except Exception:  # noqa: BLE001
-        cov_report = {}
-
-    order = meta.get("shot_order") or []
-    ordered = list(shots)
-    if isinstance(order, list) and order:
-        ordered = sorted(shots, key=lambda s: (order.index(str(s.get("shot_id")))
-                                                if str(s.get("shot_id")) in order else 10 ** 6))
-    kf_dir = _ep_dir(os.path.join(KEYFRAMES_DIR, project), _cv_ep)
-    # 生成中快照（整步落盘之前也能预览）；纯展示增强，失败即空表
-    scratch_map = _storyboard_scratch_map(project)
-    cards = []
-    for i, s in enumerate(ordered):
-        sid = s.get("shot_id", i + 1)
-        k = _shot_num_key(sid)
-        seq = _shot_seq(sid, i + 1)
-        sb_file = sb_map.get(k) or sb_map.get(f"shot_{seq:02d}")
-        sb_item = sb_manifest.get(k) or {}
-        vid = vid_map.get(k) or vid_map.get(f"shot_{seq:02d}")
-        kf_end = os.path.join(kf_dir, f"shot_{seq:02d}_end.png")
-        cards.append({
-            "order": i,
-            "shot_id": sid,
-            "seq": seq,
-            "camera": s.get("camera"),
-            "duration": s.get("duration"),
-            "location": s.get("location"),
-            "emotion": s.get("emotion"),
-            "description": s.get("description"),
-            "dialogue": s.get("dialogue") or [],
-            "dialogue_text": s.get("dialogue_text"),
-            "characters_in_shot": s.get("characters_in_shot") or [],
-            "items_in_shot": s.get("items_in_shot") or [],
-            "storyboard": {
-                "exists": bool(sb_file),
-                "url": (f"/api/storyboards/file/{project}/{_cv_sub}shot_{seq:02d}.png"
-                        if sb_file else ""),
-                "path": sb_file or "",
-                "qc": sb_item.get("qc") or {},
-                "success": bool(sb_item.get("success")),
-                "blocked": bool(sb_item.get("qc_blocked")),
-                "error": sb_item.get("error") or "",
-                # ⭐ 生成中快照（2026-10-02）：正式产物未落盘、但 scratch 里已有该镜
-                #    的中间图时给出预览。exists/url 语义不变，前端据此显示「生成中」。
-                "generating": bool(not sb_file and scratch_map.get(seq)),
-                "scratch_url": (scratch_map.get(seq) or {}).get("url", ""),
-                # 单镜九宫格标记（2026-10-06）：manifest item 的 grid_layout 投影。
-                # 前端灯箱据此叠加 1-9 编号覆盖层（编号不再由模型画进图，见 B 方案）。
-                "grid": bool(sb_item.get("grid_layout")),
-            },
-            "video": {
-                "exists": bool(vid),
-                "url": (f"/api/videos/{project}/{_cv_sub}{os.path.basename(vid)}"
-                        if vid else ""),
-                "path": vid or "",
-            },
-            "keyframe": {
-                "start": bool(sb_file),
-                "end_exists": os.path.isfile(kf_end),
-                "end_url": (f"/api/keyframes/file/{project}/{_cv_sub}shot_{seq:02d}_end.png"
-                            if os.path.isfile(kf_end) else ""),
-            },
-            "consistency": consistency_by_shot.get(k) or {},
-            "coverage": {"units": cover_map.get(str(sid)) or [],
-                         "unit_count": len(cover_map.get(str(sid)) or [])},
-        })
-
-    summary = {
-        "shot_count": len(cards),
-        "storyboard_ready": sum(1 for c in cards if c["storyboard"]["exists"]),
-        "video_ready": sum(1 for c in cards if c["video"]["exists"]),
-        "keyframe_end_ready": sum(1 for c in cards if c["keyframe"]["end_exists"]),
-        "qc_blocked": sum(1 for c in cards if c["storyboard"]["blocked"]),
-        # ⭐ 生成中快照统计（2026-10-02）：正式产物未落盘、但 scratch 已有中间图的镜数。
-        #    前端据此显示「生成中 3/6」进度条，不必等整步完成。
-        "storyboard_generating": sum(1 for c in cards if c["storyboard"].get("generating")),
-        "coverage": {
-            "plot_coverage_percent": cov_report.get("plot_coverage_percent"),
-            "detail_coverage_percent": cov_report.get("detail_coverage_percent"),
-            "missing_count": cov_report.get("missing_count"),
-            "passed": cov_report.get("passed"),
-            "checked_at": cov_report.get("checked_at"),
-        } if cov_report else {},
-    }
-    return jsonify({"success": True, "project": project,
-                    "episode_no": meta.get("episode_no") or script.get("episode_no"),
-                    "episode_title": meta.get("episode_title") or script.get("episode_title"),
-                    "title": script.get("title"),
-                    "summary": summary, "cards": cards,
-                    "shot_order": order or [str(s.get("shot_id")) for s in shots]})
 
 
-@app.route('/api/storyboard/shot/reorder', methods=['POST'])
-def api_storyboard_shot_reorder():
-    """分镜拖拽排序：写回剧本 shots 顺序 + metadata.shot_order
-
-    body: {project_name, episode_no, order: [shot_id, ...]}
-    副作用：shot_id 保持原值不变（避免打断既有产物文件名映射），
-    仅调整 shots 数组顺序与 shot_order 记录。
-    """
-    data = request.json or {}
-    # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
-    project, err = _project_or_400(data.get('project_name') or '')
-    order = data.get('order') or []
-    if err is not None:
-        return err
-    if not order:
-        return jsonify({"success": False, "error": "缺少 project_name / order"}), 400
-    key = project_store.safe_key(project)
-    episode_no = data.get('episode_no')
-    script = _load_script_for(project, episode_no)
-    if not script:
-        return jsonify({"success": False, "error": "剧本不存在"}), 404
-    shots = script.get("shots") or []
-    idx = {str(s.get("shot_id")): s for s in shots}
-    new_shots = [idx[str(sid)] for sid in order if str(sid) in idx]
-    if len(new_shots) != len(shots):
-        missing = [str(s.get("shot_id")) for s in shots if str(s.get("shot_id")) not in
-                   {str(x) for x in order}]
-        return jsonify({"success": False,
-                        "error": f"排序清单与镜头不匹配（缺少：{missing[:5]}）"}), 400
-    script["shots"] = new_shots
-    ep_no = script.get("episode_no") or episode_no or 1
-    script.setdefault("metadata", {})["shot_order"] = [str(x) for x in order]
-    script["metadata"]["shot_order_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        novel_to_script.save_episode_script(script, SCRIPT_DIR, key, ep_no)
-    except Exception as e:  # noqa: BLE001
-        return jsonify({"success": False, "error": f"剧本落盘失败：{e}"}), 500
-    return jsonify({"success": True, "project": project, "episode_no": ep_no,
-                    "shot_order": [str(x) for x in order]})
 
 
 # ---- 蓝图共享助手已下沉到 routes/_shared.py（2026-10-08 解耦）----
@@ -897,19 +720,6 @@ from routes._shared import (  # noqa: F401  再导出：既有装饰器/调用�
     _prompt_memory_used_total, _prompt_memory_view)
 
 
-@app.route('/api/storyboard/retry-shot', methods=['POST'])
-@_autopilot_guard
-def api_storyboard_retry_shot():
-    """单镜分镜图重跑（同步返回；只影响该镜，不触碰其它镜头产物）
-
-    body: {project_name, shot: {...}, seed?, episode_no?}
-    未传 shot 时按 shot_id 从剧本取。
-
-    D1（2026-09-23）：见 `_storyboard_retry_shot_impl` 上方说明。
-    """
-    with gpu_task_gate.run_gpu_task(
-            f"sb_retry_{uuid.uuid4().hex[:8]}", "分镜图单镜重跑"):
-        return _storyboard_retry_shot_impl()
 
 
 
@@ -1034,161 +844,8 @@ def api_generate_script():
 # 一镜一次生成「3x3 九候选构图联系表」→ 选格裁切为正式分镜图。与 best-of-N 相比：
 # 一次生成出 9 个机位变体，省时省卡；选格可由 QC 模型打分或用户手动指定。
 
-@app.route('/api/storyboard/grid-candidates', methods=['POST'])
-def api_storyboard_grid_candidates():
-    """为一镜生成九宫格候选构图（异步）。body: {project_name, episode_no, shot_id}"""
-    data = _body()
-    project_name, err = _project_or_400((data.get('project_name') or '').strip())
-    if err is not None:
-        return err
-    try:
-        episode_no = max(1, int(data.get('episode_no') or 1))
-    except (TypeError, ValueError):
-        episode_no = 1
-    shot_key = (data.get('shot_id') or '').strip()
-    script = _load_script_for(project_name, episode_no) or {}
-    shots = script.get("shots") or []
-    shot = next((s for s in shots if isinstance(s, dict) and
-                 (str(s.get("shot_id")) == shot_key or
-                  str(_shot_seq(s.get("shot_id"), 0)) == shot_key.replace("shot_", ""))), None)
-    if shot is None:
-        return jsonify({"success": False,
-                        "error": f"剧本里找不到镜头：{shot_key}"}), 404
-    char_idx = _build_asset_index(script.get("characters") or [], project_name, "character")
-    item_idx = _build_asset_index(script.get("items") or [], project_name, "item")
-    scene_idx = _build_asset_index(script.get("scenes") or [], project_name, "scene")
-    refs = _allocate_storyboard_refs(shot, char_idx, item_idx, scene_idx, project_name)
-    if not refs:
-        return jsonify({"success": False,
-                        "error": "该镜无可用参考图（请先生成资产生成）"}), 400
-    style = data.get('style') or _project_style(project_name)
-    _res = style_kit.resolve(style, default_ratio=style_kit.DEFAULT_RATIO,
-                             megapixels=style_kit.storyboard_megapixels())
-    refs = _unify_ref_canvas(refs, _res["size"], project_name)
-    refs = _cap_storyboard_refs(refs, shot)
-    labels = [r[1] for r in refs]
-    seq = _shot_seq(shot.get("shot_id"), 1)
-    task_id = f"shot_grid_{project_name}_{int(time.time() * 1000)}"
-
-    with lock:
-        generation_state[task_id] = {
-            "status": "running", "phase": "分镜九宫格候选构图",
-            "project": project_name, "shot": shot.get("shot_id"),
-            "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        }
-
-    def _grid_worker():
-        try:
-            with gpu_task_gate.run_gpu_task(task_id, "分镜九宫格候选构图"):
-                # ---- 3D 导演台：九宫格「3D 构图基准网格」（2026-10-03）----
-                # 逐格渲染 9 个候选构图的 3D 站位/机位基准，拼成一张与目标九宫格一一对应的
-                # 3x3 网格 → 作 <image1> 构图基准 → 提示词追加 COMPOSITION BASELINE GRID 段。
-                # 渲染失败静默降级为纯文字站位锚点（fail-open，绝不阻断九宫格主链路）。
-                _grid_refs = [r[2] for r in refs]
-                _grid_labels = list(labels)
-                _grid_has_blocking = False
-                try:
-                    from config import ENABLE_3D_BLOCKING_IMAGE
-                    if ENABLE_3D_BLOCKING_IMAGE:
-                        import te_3d_render
-                        if te_3d_render.available():
-                            _blk_out = os.path.join(QC_DIR, project_name, "te3d_blocking")
-                            _grid_sheet = te_3d_render.render_blocking_grid(
-                                shot, _blk_out, target_size=_res["size"]) or ""
-                            if _grid_sheet:
-                                app.logger.info("[3D导演台] 九宫格 shot=%s 3D 构图基准网格已渲染：%s",
-                                                shot.get("shot_id"), os.path.basename(_grid_sheet))
-                                _grid_refs.insert(0, _grid_sheet)
-                                _grid_labels.insert(0, "3D构图基准网格")
-                                _grid_has_blocking = True
-                except Exception as _3d_e:  # noqa: BLE001
-                    app.logger.warning("[3D导演台] 九宫格 shot=%s 3D 基准渲染失败（降级为纯文字站位）：%s",
-                                       shot.get("shot_id"), _3d_e)
-                result = comfyui_client.generate_shot_grid_candidates(
-                    shot, _grid_labels, _grid_refs, project_name,
-                    f"shot_{seq:02d}", style=style,
-                    has_blocking_image=_grid_has_blocking,
-                    seed=random.randint(1, 2 ** 31 - 1), size=_res["size"])
-            grid_png = (result.get("files") or [""])[0]
-            if not grid_png or not os.path.isfile(grid_png):
-                raise RuntimeError("九宫格候选构图生成未返回文件")
-            # 集级目录（2026-10-02 修复）：分镜画布读 epNN/ 子目录，grid 产物此前
-            # 落平铺目录，第 2 集起选格结果不会出现在该集画布 —— 与
-            # _update_storyboard_manifest_shot 的目录/URL 口径对齐。
-            _flat = os.path.join(STORYBOARDS_DIR, project_name)
-            _sb_dir = _ep_dir(_flat, episode_no)
-            _sub = os.path.basename(_sb_dir) if _sb_dir != _flat else ""
-            dst = os.path.join(_sb_dir, f"shot_{seq:02d}_grid.png")
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(grid_png, dst)
-            with lock:
-                generation_state[task_id].update({
-                    "status": "completed", "progress": 100,
-                    "grid_url": (f"/api/storyboards/file/{project_name}/"
-                                 f"{_sub + '/' if _sub else ''}shot_{seq:02d}_grid.png"),
-                    "result": {"grid": dst},
-                })
-        except cancellation.Cancelled as e:
-            with lock:
-                generation_state[task_id].update({"status": "cancelled", "error": str(e)})
-        except Exception as e:  # noqa: BLE001
-            app.logger.error("分镜九宫格候选构图失败：%s", e, exc_info=True)
-            with lock:
-                generation_state[task_id].update({"status": "failed", "error": str(e)})
-
-    threading.Thread(target=_grid_worker, daemon=True, name=task_id).start()
-    return jsonify({"success": True, "task_id": task_id, "status": "started"})
 
 
-@app.route('/api/storyboard/grid-apply', methods=['POST'])
-def api_storyboard_grid_apply():
-    """把九宫格里选中的格（1-9）裁切为该镜正式分镜图（旧图移入回收站，可恢复）。
-
-    ⚠️ 选格应用视为**用户人工定稿**：裁切结果直接入库，不再走图片 AI 质检。
-    """
-    data = _body()
-    project_name, err = _project_or_400((data.get('project_name') or '').strip())
-    if err is not None:
-        return err
-    try:
-        episode_no = max(1, int(data.get('episode_no') or 1))
-    except (TypeError, ValueError):
-        episode_no = 1
-    shot_key = (data.get('shot_id') or '').strip()
-    try:
-        cell = max(1, int(data.get('cell') or 0))
-    except (TypeError, ValueError):
-        return jsonify({"success": False, "error": "cell 必须是 1-9 的整数"}), 400
-    if cell > 9:
-        return jsonify({"success": False, "error": "cell 必须是 1-9"}), 400
-    seq = _shot_seq(shot_key, 0)
-    if seq <= 0:
-        return jsonify({"success": False, "error": f"无法解析镜号：{shot_key}"}), 400
-    # 集级目录（2026-10-02 修复）：与 grid-candidates / 分镜画布同口径，第 2 集
-    # 起读写 epNN/ 子目录，选格裁切结果才能落到该集画布实际读取的位置。
-    _flat = os.path.join(STORYBOARDS_DIR, project_name)
-    _sb_dir = _ep_dir(_flat, episode_no)
-    _sub = os.path.basename(_sb_dir) if _sb_dir != _flat else ""
-    grid_png = os.path.join(_sb_dir, f"shot_{seq:02d}_grid.png")
-    if not os.path.isfile(grid_png):
-        return jsonify({"success": False,
-                        "error": f"九宫格候选图不存在：{grid_png}（请先生成候选构图）"}), 404
-    stamp = time.strftime("%Y%m%d_%H%M%S")
-    trash_root = os.path.join(PROJECT_TRASH_DIR, "shot_grid",
-                              f"{stamp}_{project_name}")
-    dst = os.path.join(_sb_dir, f"shot_{seq:02d}.png")
-    cleared, skipped = [], []
-    if os.path.isfile(dst):
-        _trash_move(dst, "storyboards", trash_root, cleared, skipped)
-    comfyui_client.crop_grid_cell(grid_png, cell - 1, dst)
-    app.logger.info("[shot-grid-apply] 项目=%s 集=%s 镜=%s 第 %d 格已应用（旧图 %d 项入回收站）",
-                    project_name, episode_no, shot_key, cell, len(cleared))
-    return jsonify({"success": True, "project": project_name, "shot_id": shot_key,
-                    "cell": cell, "applied": dst,
-                    "url": (f"/api/storyboards/file/{project_name}/"
-                            f"{_sub + '/' if _sub else ''}shot_{seq:02d}.png"),
-                    "cleared": cleared,
-                    "hint": "选中格已裁切为该镜正式分镜图（人工定稿，未走 AI 质检）"})
 
 
 # ===================== P2-2：RefMod 节点探测（Fizgig/MiniMaxH3Mod） =====================
@@ -1781,136 +1438,12 @@ _SCENE_DECOR_CHARS = ("《", "》", "「", "」", "『", "』", "\"", "'",
 
 
 
-@app.route('/api/storyboards/generate', methods=['POST'])
-def api_generate_storyboards():
-    """为剧本的每个 shot 生成一张分镜图（参考角色/物品/场景资产图）"""
-    # ⚠️ 故意不设 AI 门禁：分镜图 = 消费剧本里已产出的 shot.prompt + ComfyUI 出图 + 质检，
-    # 不读任何 AI 凭证。挂在 LLM 门禁上会把「没配 key 但有存量剧本」的用户一起拦死。
-    data = request.json or {}
-    # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
-    # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
-    project_name, err = _project_or_400((data.get('project_name') or '').strip())
-    if err is not None:
-        return err
-    shots = data.get('shots', [])
-    if not shots:
-        return jsonify({"error": "没有镜头数据"}), 400
-
-    limit = data.get('limit')
-    _g = _style_aspect_guard(project_name)
-    if _g is not None:
-        return _g
-    if isinstance(limit, int) and limit > 0:
-        shots = shots[:limit]
-
-    # ⑥ 自动引用剧本中已判定的「镜头数 / 每集时长」字段（缺 duration 时按项目配置兜底）
-    episode_stats = _episode_schema_defaults(project_name, shots)
-
-    char_idx = _build_asset_index(data.get('characters', []), project_name, "character")
-    item_idx = _build_asset_index(data.get('items', []), project_name, "item")
-    scene_idx = _build_asset_index(data.get('scenes', []), project_name, "scene")
-
-    # G5：任务 ID 用 uuid（秒级时间戳同秒双 POST 会覆盖 generation_state 且双线程并发抢同一目标路径）；
-    # 入口幂等：同项目+同集已有 running 的分镜任务 → 复用其 task_id（reused=True），不重复开线程。
-    # 匹配用稳定的 step 字段（worker 运行中 phase 会变化，不能用 phase 判）。
-    # B-11 P1-8：守卫键加 episode_no —— 第 2 集请求不再被第 1 集运行中任务吞掉。
-    _ep_no = data.get('episode_no')
-    with lock:
-        _prune_task_registry(generation_state)
-        _existing_sb = next((tid for tid, st in generation_state.items()
-                             if st.get("status") == "running"
-                             and st.get("project_name") == project_name
-                             and st.get("step") == "storyboard"
-                             and st.get("episode_no") == _ep_no), None)
-        if _existing_sb:
-            return jsonify({"task_id": _existing_sb, "status": "started", "reused": True,
-                            "total": len(shots), "overwrite": bool(data.get('overwrite')),
-                            "episode_stats": episode_stats})
-        task_id = f"storyboard_{project_name}_{uuid.uuid4().hex[:12]}"
-        generation_state[task_id] = {
-            "status": "running", "progress": 0, "total": len(shots),
-            "current": 0, "phase": "分镜图生成", "results": [],
-            "qc": _qc_brief("image"),
-            "project_name": project_name, "step": "storyboard",
-            "episode_no": _ep_no,
-            "refs_available": {
-                "characters": {k: bool(v["image"]) for k, v in char_idx.items()},
-                "items": {k: bool(v["image"]) for k, v in item_idx.items()},
-                "scenes": {k: bool(v["image"]) for k, v in scene_idx.items()},
-            },
-        }
-
-    # B-01 P1-12：GPU 并发闸门
-    def _storyboard_worker_gated():
-        with gpu_task_gate.run_gpu_task(task_id, "分镜图生成"):
-            _storyboard_worker(task_id, project_name, shots, char_idx, item_idx,
-                               scene_idx, data.get('episode_no'),
-                               _project_style(project_name), bool(data.get('overwrite')))
-    thread = threading.Thread(target=_storyboard_worker_gated, daemon=True)
-    thread.daemon = True
-    thread.start()
-    return jsonify({"task_id": task_id, "status": "started", "total": len(shots),
-                    "overwrite": bool(data.get('overwrite')),
-                    "episode_stats": episode_stats})
 
 
-@app.route('/api/storyboards/manifest/<path:project_name>')
-def api_storyboard_manifest(project_name):
-    """读取已生成的分镜图清单（用于页面回看）"""
-    project = _safe_project(os.path.basename(project_name.rstrip('/')))
-    _mf_ep = request.args.get('episode_no')
-    out_dir = _ep_read_dir(STORYBOARDS_DIR, project, _mf_ep)
-    manifest_path = os.path.join(out_dir, "storyboard_manifest.json")
-    if os.path.exists(manifest_path):
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-        return jsonify({"success": True, "exists": True, "project_name": project,
-                        "manifest": manifest})
-
-    # 无清单时按磁盘文件兜底（项目可能由其他会话生成）
-    # ⚠️ URL 必须带集前缀：out_dir 是集级目录（第 2 集起 <项目>/epNN/），
-    #    漏掉 epNN 段会让第 2 集起的所有图 404（同 _storyboard_worker 的旧 bug）。
-    #    审计 P2-2：episode_no 非数字时裸 int() 会 500，改容错解析。
-    try:
-        _mf_no = int(_mf_ep)
-    except (TypeError, ValueError):
-        _mf_no = 1
-    _mf_sub = f"ep{_mf_no:02d}/" if _mf_no > 1 else ""
-    shots = []
-    if os.path.isdir(out_dir):
-        for fn in sorted(os.listdir(out_dir)):
-            if fn.lower().endswith(".png"):
-                sid = fn.replace("shot_", "").replace(".png", "")
-                shots.append({
-                    "shot_id": int(sid) if sid.isdigit() else sid,
-                    "success": True,
-                    "file": os.path.join(out_dir, fn),
-                    "url": f"/api/storyboards/file/{project}/{_mf_sub}{fn}",
-                })
-    return jsonify({"success": True, "exists": bool(shots), "project_name": project,
-                    "manifest": {"project_name": project, "shots": shots,
-                                 "total": len(shots),
-                                 "success_count": sum(1 for s in shots if s.get("success"))}})
 
 
-@app.route('/api/storyboards/file/<path:filename>')
-def api_storyboard_file(filename):
-    """提供分镜图文件访问"""
-    return _serve_safe(STORYBOARDS_DIR, filename)
 
 
-@app.route('/api/storyboards/scratch/<path:project_name>/<path:filename>')
-def api_storyboard_scratch_file(project_name, filename):
-    """提供「分镜生成中」中间产物（storyboard_scratch）访问。
-
-    ⭐ 2026-10-02：分镜步骤是整步落盘，正式产物要等 6 镜全跑完才写进
-    STORYBOARDS_DIR；期间画布靠本路由读 scratch 目录显示「生成中」预览。
-    与 api_storyboard_file 同用 `_serve_safe` 做目录穿越防护
-    （base 按项目隔离在 QC_DIR/<项目>/storyboard_scratch 之内）。
-    """
-    project = _safe_project(os.path.basename(project_name.rstrip('/')))
-    base = os.path.join(QC_DIR, project, "storyboard_scratch")
-    return _serve_safe(base, filename)
 
 
 # ===== 第 5/7 步：视频生成（整集） =====
@@ -2121,224 +1654,12 @@ ai_chat.set_archive_root(os.path.dirname(os.path.abspath(AI_CHAT_HISTORY_PATH)))
 
 
 
-@app.route('/api/novels/<novel_id>/screenplay/generate', methods=['POST'])
-def api_novel_screenplay_generate(novel_id):
-    """生成某章的文学剧本（两段式生产 ①，异步）。body: {chapter, project_id/project_name?, style?, episode_no?}"""
-    try:
-        meta = get_novel(NOVELS_DIR, novel_id)
-    except NovelParseError as e:
-        return jsonify({"success": False, "error": str(e)}), 404
-    client = _current_llm_client()
-    if not client.configured:
-        return _ai_guide_response("尚未配置自定义 AI 接口，无法生成文学剧本")
-    data = request.json or {}
-    chapters = meta.get("chapters") or []
-    try:
-        ch_idx = int(data.get("chapter") or 1)
-    except (TypeError, ValueError):
-        ch_idx = 1
-    chapter = next((c for c in chapters if int(c.get("index") or 0) == ch_idx), None)
-    if chapter is None:
-        return jsonify({"success": False, "error": f"找不到章节 {ch_idx}"}), 404
-    proj = _resolve_novel_project(data, meta)
-    key = _novel_key(meta, proj["dir_key"])
-    try:
-        episode_no = max(1, int(data.get("episode_no") or ch_idx))
-    except (TypeError, ValueError):
-        episode_no = ch_idx
-    style = (data.get("style") or _project_style(proj["dir_key"]) or "3D动漫渲染")
-    task_id = f"screenplay_{novel_id}_{episode_no}_{int(time.time())}"
-    with lock:
-        generation_state[task_id] = {"status": "running", "progress": 2,
-                                     "phase": "prepare", "message": "准备章节正文…",
-                                     "novel_id": novel_id, "project_key": key}
-    threading.Thread(target=_screenplay_worker,
-                     args=(task_id, meta, chapter, key, style, episode_no),
-                     daemon=True).start()
-    return jsonify({"success": True, "task_id": task_id, "status": "started",
-                    "project_key": key, "episode_no": episode_no})
-
-
-@app.route('/api/novels/<novel_id>/screenplay/<int:episode_no>', methods=['GET'])
-def api_novel_screenplay_get(novel_id, episode_no):
-    """读取已生成的文学剧本（Markdown）。?project= 指定项目键（缺省按小说找项目）。"""
-    try:
-        meta = get_novel(NOVELS_DIR, novel_id)
-    except NovelParseError as e:
-        return jsonify({"success": False, "error": str(e)}), 404
-    pref = (request.args.get('project') or '').strip()
-    rec = project_store.get_project(pref) if pref else project_store.find_by_novel(novel_id)
-    key = _novel_key(meta, rec["dir_key"] if rec else None)
-    path = novel_screenplay.screenplay_path(key, episode_no)
-    md = novel_screenplay.load_screenplay(key, episode_no) if os.path.isfile(path) else ""
-    return jsonify({"success": True, "exists": bool(md), "markdown": md,
-                    "path": path, "project_key": key, "episode_no": int(episode_no)})
 
 
 
 
-@app.route('/api/novels/<novel_id>/episodes/generate', methods=['POST'])
-def api_novel_episodes_generate(novel_id):
-    """按章节分集生成：单章生成 / 批量生成多集（每章一集）
 
-    body: {chapters:[1,2,3] | start:1,end:3, style, target_shots, overwrite}
-    """
-    try:
-        # 生成剧本前先做章节目录体检（LLM 判断真章节，结果缓存；失败退回规则折叠）
-        meta = ensure_chapter_structure(NOVELS_DIR, novel_id, _optional_llm_client())
-    except NovelParseError as e:
-        return jsonify({"success": False, "error": str(e)}), 404
 
-    client = _current_llm_client()
-    if not client.configured:
-        return _ai_guide_response("尚未配置自定义 AI 接口，无法按章生成剧本")
-
-    all_chapters = meta.get("chapters") or []
-    if not all_chapters:
-        return jsonify({"success": False,
-                        "error": "该小说未识别到章节标记，无法按章分集；请改用「AI 转成剧本」整本处理"}), 400
-
-    data = request.json or {}
-    style = (data.get('style') or '3D动漫渲染').strip() or '3D动漫渲染'
-    # ⭐ 2026-10-10：0 = 不预设镜数（由原文信息密度决定）；显式传值仍 clamp 到 4~40。
-    try:
-        _ts_raw = int(data.get('target_shots')
-                      if data.get('target_shots') not in (None, '') else NOVEL_DEFAULT_SHOTS)
-    except (TypeError, ValueError):
-        _ts_raw = NOVEL_DEFAULT_SHOTS
-    target_shots = 0 if _ts_raw <= 0 else max(4, min(_ts_raw, 40))
-    overwrite = bool(data.get('overwrite'))
-    style = _apply_project_settings(style, data.get('project_name') or novel_id)
-
-    by_index = {}
-    for c in all_chapters:
-        by_index[int(c.get("index") or 0)] = c
-
-    requested = data.get('chapters')
-    if isinstance(requested, (str, int)):
-        requested = [requested]
-    picks = []
-    if isinstance(requested, list) and requested:
-        for x in requested:
-            try:
-                xi = int(x)
-            except (TypeError, ValueError):
-                continue
-            if xi in by_index and xi not in [p.get("index") for p in picks]:
-                picks.append(by_index[xi])
-    else:
-        start = data.get('start')
-        end = data.get('end')
-        try:
-            s = int(start) if start is not None else None
-            e = int(end) if end is not None else None
-        except (TypeError, ValueError):
-            s = e = None
-        if s is not None or e is not None:
-            lo = s if s is not None else 1
-            hi = e if e is not None else max(by_index)
-            picks = [c for idx, c in sorted(by_index.items()) if lo <= idx <= hi]
-
-    if not picks:
-        return jsonify({"success": False, "error": "未选择有效章节（chapters 或 start/end 至少提供一项）"}), 400
-
-    # 空壳章节防线（2026-10-02）：去掉标题行后几乎没有正文的条目绝不是可拍摄内容。
-    # 曾经拿 11 个字的「第一卷：魔性不改」跑完整条流水线：模型凭空编了 8 个镜头
-    # （「魔性不改 / 大道无情 / 唯我独尊」这类自造口号），原文台词一句没用，
-    # 整半章内容丢失，而覆盖率检查还报 100%（没有正文单元可核对 → 空集恒真）。
-    # 宁可在这里明确挡下并说清原因，也不产出整集幻觉剧本。
-    try:
-        _novel_text = read_novel_text(NOVELS_DIR, novel_id) or ""
-    except Exception as e:  # noqa: BLE001
-        app.logger.warning("空壳章节防线：正文读取失败（跳过检查）：%s", e)
-        _novel_text = ""
-    if _novel_text and len(_novel_text) > 5000:
-        _shells = []
-        for _c in picks:
-            try:
-                _body = chapter_body_chars(_novel_text, _c)
-            except Exception:  # noqa: BLE001
-                _body = 0
-            if _body < 120:
-                _shells.append("%s（%d 字）" % (_c.get("title") or _c.get("index"), _body))
-        if _shells:
-            return jsonify({
-                "success": False,
-                "error": ("下列章节去掉标题行后几乎没有正文，像是卷/分部标题而不是正文，"
-                          "不能据此生成剧本：" + "、".join(_shells[:5]) +
-                          "。请改选其后的正文章节（本书一节正文通常约 3000 字）。"),
-                "shell_chapters": _shells,
-            }), 400
-    if len(picks) > EPISODE_BATCH_LIMIT:
-        return jsonify({"success": False,
-                        "error": f"单次批量最多 {EPISODE_BATCH_LIMIT} 集，本次选择了 {len(picks)} 集；请缩小范围"}), 400
-
-    picks.sort(key=lambda c: int(c.get("index") or 0))
-    # A：绑定/自动建立该项目，剧本与后续产物全部落在该项目目录
-    proj = _resolve_novel_project(data, meta)
-    key = _novel_key(meta, proj["dir_key"])
-    ep_dir = os.path.abspath(os.path.join(SCRIPT_DIR, key))
-
-    # ⚠️ 互斥（2026-09-17 E2E 实测教训）：同一篇小说若已有分集生成任务在跑，
-    # 再派一次会让两轮并发处理同一章 —— 互相抢模型配额（实测把接口打成 503 风暴），
-    # 结果「一个成功写盘 + 一个 failed」，用户看到失败但产物其实是好的（覆盖率 100%）。
-    # 规则：章节有重叠 → 直接复用正在跑的那个任务；章节不重叠 → 允许并发。
-    # 旧任务没记 picks（历史数据）时保守视为冲突。
-    want = {int(c.get("index") or 0) for c in picks}
-    with lock:
-        for _tid, _st in list(generation_state.items()):
-            if not (isinstance(_st, dict) and _st.get("status") == "running"
-                    and str(_tid).startswith("episodes_")):
-                continue
-            if _st.get("novel_id") != meta.get("novel_id"):
-                continue
-            _running = {int(x) for x in (_st.get("picks") or [])}
-            if _running and not (_running & want):
-                continue                      # 章节不重叠，互不干扰
-            return jsonify({
-                "success": True, "reused": True, "task_id": _tid, "status": "running",
-                "novel_id": meta.get("novel_id"),
-                "message": (f"该小说已有分集生成任务在跑"
-                            f"（{_st.get('current') or 0}/{_st.get('total') or 0} 集），"
-                            "本次请求已复用它 —— 避免同一章被并发生成两次"),
-                "chapters": [{"index": c.get("index"), "title": c.get("title"),
-                              "char_count": c.get("char_count")} for c in picks],
-                "episodes": [c.get("index") for c in picks],
-                "total": len(picks),
-                "project_id": proj["id"], "project_key": key,
-                "episode_dir": ep_dir,
-            })
-
-    task_id = f"episodes_{meta.get('novel_id')}_{int(time.time())}"
-    with lock:
-        generation_state[task_id] = {
-            "status": "running", "progress": 0, "phase": "prepare",
-            "message": f"准备生成 {len(picks)} 集…", "current": 0, "total": len(picks),
-            "novel_id": meta.get("novel_id"), "results": [],
-            # 记录本任务负责的章节，供上面的互斥判断比对重叠
-            "picks": sorted(int(c.get("index") or 0) for c in picks),
-            "project_id": proj["id"], "project_key": key,
-            "episode_dir": ep_dir,
-        }
-    threading.Thread(target=_episodes_worker,
-                     args=(task_id, meta, picks, style, target_shots, overwrite, key,
-                           # ⭐ 2026-10-06（用户指定）：默认开启「文学剧本→开拍剧本」两段式全自动生产。
-                           # 用户是**自动项目**，明确"文学剧本无需人审"——故默认 True：自动出文学剧本、
-                           # 自动改写成开拍剧本（分镜/台词），全程不插入人工审核。前端若显式传
-                           # use_screenplay=false 仍可回退"章节原文直接开拍"（保持兼容）。
-                           data.get('use_screenplay', True)),
-                     daemon=True).start()
-    return jsonify({
-        "success": True, "task_id": task_id, "status": "started",
-        "novel_id": meta.get("novel_id"), "style": style, "target_shots": target_shots,
-        "use_screenplay": data.get('use_screenplay', True),
-        "project_id": proj["id"], "project_key": key, "project_name": proj["name"],
-        "episode_dir": ep_dir,
-        "chapters": [{"index": c.get("index"), "title": c.get("title"),
-                      "char_count": c.get("char_count")} for c in picks],
-        "episodes": [c.get("index") for c in picks],
-        "total": len(picks),
-    })
 
 
 # ===================== 前置解析（chapter pre-flight）=====================
