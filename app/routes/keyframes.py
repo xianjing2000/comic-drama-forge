@@ -14,34 +14,6 @@ def index(*_a, **_kw):
     return getattr(_root_app, 'index')(*_a, **_kw)
 
 
-def _ASSET_DIRS(*_a, **_kw):
-    """2026-10-09：该函数是 app.py 里的路由视图（路由仍注册在 app.py），
-    这里只为被搬走的内部调用提供同名转发。"""
-    import app as _root_app
-    return getattr(_root_app, '_ASSET_DIRS')(*_a, **_kw)
-
-
-def _ASSET_IMG_EXTS(*_a, **_kw):
-    """2026-10-09：该函数是 app.py 里的路由视图（路由仍注册在 app.py），
-    这里只为被搬走的内部调用提供同名转发。"""
-    import app as _root_app
-    return getattr(_root_app, '_ASSET_IMG_EXTS')(*_a, **_kw)
-
-
-def _ASSET_IMG_PRIORITY(*_a, **_kw):
-    """2026-10-09：该函数是 app.py 里的路由视图（路由仍注册在 app.py），
-    这里只为被搬走的内部调用提供同名转发。"""
-    import app as _root_app
-    return getattr(_root_app, '_ASSET_IMG_PRIORITY')(*_a, **_kw)
-
-
-def _STATIC_DIR(*_a, **_kw):
-    """2026-10-09：该函数是 app.py 里的路由视图（路由仍注册在 app.py），
-    这里只为被搬走的内部调用提供同名转发。"""
-    import app as _root_app
-    return getattr(_root_app, '_STATIC_DIR')(*_a, **_kw)
-
-
 def _build_asset_index(*_a, **_kw):
     """2026-10-09：该函数是 app.py 里的路由视图（路由仍注册在 app.py），
     这里只为被搬走的内部调用提供同名转发。"""
