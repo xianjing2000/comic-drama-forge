@@ -1658,7 +1658,7 @@ def rewrite_shots_for_issues(client, script: dict, issues: list, episode_no: int
      'audio_cues', 'characters_in_shot', 'items_in_shot', 'prompt_h3')} for s in target], ensure_ascii=False)}
 【输出要求】严格只输出一个 JSON 对象：
 {{"shots": [{{"shot_id": 镜头号（必须与输入一致）, "camera": "景别与运镜（取自运镜术语表）", "location": "场景名",
-  "description": "修正后的画面描述（100~120 字，下限 100 上限 120；动作过程写关键动作分解，用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座；并写清外貌衣着、环境与光线、构图与景别）",
+  "description": "修正后的画面描述（**不设字数上下限**，内容需要多长就写多长；把主体、关键动作分解（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座）、外貌衣着、环境与光线、构图与景别都写清楚，不要为凑字数堆砌背景）",
   "visual_detail": "画面补充细节（可选；光源方向/时间天气/动作过程等更细的描写写这里，≤120 字；没有就写空字符串）",
   "dialogue": [{{"speaker": "角色名", "text": "台词"}}],
   "emotion": "情绪", "audio_cues": "音效", "characters_in_shot": ["角色名"], "items_in_shot": ["物品名"],

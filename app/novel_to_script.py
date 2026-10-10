@@ -1180,7 +1180,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 【描述粒度口径（2026-10-06 用户指定：写关键动作分解、只写关键节点，**务必先读**）】
   · description 写「**起点 → 关键动作节点 → 结果**」：动作过程写**关键动作分解**（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座），只写关键节点、不写琐碎中间步（「拉开窗帘」写「走到窗前→拉开窗帘」即可，不写手指逐片推开的过程）。
   · 琐碎中间步与逐格推进**由视频/九宫格生成阶段负责**：5~6 秒镜头的 9 宫格就是把关键节点之间的时间自然切片，剧本层只写 2~4 个关键节点即可——把琐碎中间步写满反而让 9 个格全画同一个中间态（九宫格雷同，用户已纠正）。
-  · 每镜 description **100~120 字（下限 100，上限 120）**，写：主体、关键动作分解、关键构图位置、情绪落点。光线/氛围/背景**只在推动剧情或首次出场时写一句**，不逐句铺陈。
+  · 每镜 description **不设字数上下限** —— 内容需要多长就写多长，写清：主体、关键动作分解、关键构图位置、情绪落点。光线/氛围/背景**只在推动剧情或首次出场时写一句**，不逐句铺陈（不要为凑字数堆砌，也不要为压字数丢信息）。
 {REWRITE_RULES}
 【全剧风格】{bible.get('style') or ''}　【画面风格指南】{_ctx_block(continuity_ctx, 'style_guide_text') or (bible.get('production_notes') or {}).get('style_guide') or ''}
 {_ctx_line(continuity_ctx, 'prev_block')}{_ctx_line(continuity_ctx, 'bible_block')}{_ctx_line(continuity_ctx, 'contract_block')}{_ctx_line(continuity_ctx, 'style_block')}{_ctx_line(continuity_ctx, 'camera_block')}{_ctx_line(continuity_ctx, 'preflight_block')}{prev_tail}【可用角色】{json.dumps(char_brief, ensure_ascii=False)}

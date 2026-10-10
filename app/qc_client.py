@@ -3585,10 +3585,18 @@ def _validate_script_prompts(script: dict) -> list:
 
         if not visual_desc:
             issues.append(f"镜头 {shot_id} 缺少画面描述")
-        elif len(visual_desc) < 100:
-            issues.append(f"镜头 {shot_id} 画面描述过短（{len(visual_desc)}字），建议 100~120 字（下限 100，上限 120），并写关键动作分解（用→连接的 2~4 步）")
-        elif len(visual_desc) > 120:
-            issues.append(f"镜头 {shot_id} 画面描述过长（{len(visual_desc)}字），疑似背景铺陈堆砌，建议 100~120 字（上限 120）且只写关键动作与构图")
+        # ⚠️ 2026-10-10（用户明确要求）：**不再按字数判缺陷**。
+        #    原文是「<100 字判过短、>120 字判过长（疑似背景铺陈堆砌）」——
+        #    用户已多次强调「分镜提示词生成不限制长度」，此处是漏改的一处：
+        #    它既逼模型压缩掉必要信息，又会把写足内容的镜头判成缺陷。
+        #    长度不再参与判定；「内容是否覆盖了本镜要呈现的东西」由
+        #    _content_coverage() 负责（主体/空间位置/关键动作/关键道具/跨镜跳变），
+        #    那才是用户真正在意的（「人物不能突然出现在别的地方」）。
+        #    只保留一个「极短」兜底：低于 10 字几乎不可能承载一个可拍镜头，
+        #    属于明显残缺而非长度偏好。
+        elif len(visual_desc) < 10:
+            issues.append(f"镜头 {shot_id} 画面描述过短（{len(visual_desc)}字），不足以描述一个可拍镜头；请写清主体、关键动作与构图（不设字数上限）")
+
 
     # 检查角色外貌描述（真实字段：appearance）
     for i, char in enumerate(script.get("characters", [])):

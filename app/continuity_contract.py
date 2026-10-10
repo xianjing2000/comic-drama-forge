@@ -25,7 +25,8 @@ CrossChunkValidator，2026-09-28 落地）。
 ## 阈值（模块级常量，探针可覆盖）
 - ``CHAR_SURPRISE_APPEAR_GAP``：首出镜序号 ≥ 此值判「突兀出场」。
 - ``CHAR_DISAPPEAR_GAP``：末出镜到集尾镜头数 ≥ 此值判「中途消失」。
-- ``MAX_CONTRACT_ISSUES``：单集最多报多少条 contract issue（防某集角色多刷爆桶）。
+- ``MAX_CONTRACT_ISSUES``：单集最多报多少条 contract issue。**2026-10-10 起由 12 放宽到 500**
+  （用户要求不设上限；500 只是防失控天花板，正常一集不会触到）。
 """
 from __future__ import annotations
 
@@ -42,7 +43,13 @@ CHAR_SURPRISE_APPEAR_GAP: int = 3
 #: 末次出镜到集尾剩余镜头数 ≥ 此值判「中途消失」（角色应自然收尾而非断在中间）。
 CHAR_DISAPPEAR_GAP: int = 4
 #: 单集最多报告多少条 contract 类 issue（防止角色多时刷爆校验桶）。
-MAX_CONTRACT_ISSUES: int = 12
+# ⚠️ 2026-10-10（用户明确要求「不要设置上限」）：
+#    原值 12，实测已出现「13 条 > 上限 12，截断保留前 12 条（第2集）」——
+#    被截掉的很可能正是最该修的那条连续性问题（用户最在意的就是
+#    「人物不能突然出现在别的地方」）。这里放宽到 500：
+#    实践中等于「不设上限」，同时保留一个防失控的天花板 ——
+#    这些 issue 会被拼进局部重写的提示词，无限增长会把 prompt 撑爆。
+MAX_CONTRACT_ISSUES: int = 500
 #: edit_reason 里含这些子词视为「已声明场景切换/转场」，scene_jump 不报。
 _SCENE_SWITCH_MARKERS = ("转场", "切换", "切至", "切到", "切换场景", "转场至", "cross-cut", "cut to")
 
