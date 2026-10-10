@@ -38,6 +38,12 @@ const SECRET_FILES = new Set([
   'qc_config.json.bak', 'tasks.db',
 ]);
 
+// 代码回溯快照：<文件>.bak_<主题>_<日期> / <文件>.rollback_bpNN_<日期>
+// ⚠️ 2026-10-10（用户实测）：macOS/Windows 打包时这些快照会被一并收进安装包 ——
+//    实测混入 3 个共约 710KB（app.py.rollback_bp16/bp17、comfyui_client.py.bak_heartbeat）。
+//    它们是本机个人历史、无运行时用途，且会随包分发到用户机器上，故一律排除。
+const SNAPSHOT_RE = /\.(?:bak_|rollback_)/i;
+
 // 递归拷目录（中文路径安全：逐个 fs.copyFileSync + mkdirSync，不用 cpSync filter）
 function copyDirRec(src, dst) {
   fs.mkdirSync(dst, { recursive: true });
@@ -49,7 +55,9 @@ function copyDirRec(src, dst) {
       if (EXCLUDE_DIRS.has(entry.name)) continue;
       copyDirRec(s, d);
     } else if (entry.isFile()) {
-      if (entry.name.endsWith('.pyc') || SECRET_FILES.has(entry.name.toLowerCase())) continue;
+      if (entry.name.endsWith('.pyc') ||
+          SNAPSHOT_RE.test(entry.name) ||
+          SECRET_FILES.has(entry.name.toLowerCase())) continue;
       fs.copyFileSync(s, d);
       files += 1;
     }
