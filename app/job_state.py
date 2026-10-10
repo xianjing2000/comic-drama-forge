@@ -31,3 +31,5 @@ dub_lock = threading.Lock()
 
 mix_tasks = {}
 mix_lock = threading.Lock()
+
+interrupted_tasks = 0

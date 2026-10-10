@@ -13,26 +13,95 @@ import io
 import ast
 import re
 import sys
+import os
 
 P = 'app/app.py'
 src = io.open(P, encoding='utf-8').read()
 lines = src.split(chr(10))
 tree = ast.parse(src)
 
-IMPORT_LINES = []
-for n in tree.body:
-    if isinstance(n, ast.ImportFrom):
-        IMPORT_LINES.append(([a.asname or a.name for a in n.names],
-                             chr(10).join(lines[n.lineno - 1:n.end_lineno])))
-    elif isinstance(n, ast.Import):
-        IMPORT_LINES.append(([(a.asname or a.name.split('.')[0]) for a in n.names],
-                             chr(10).join(lines[n.lineno - 1:n.end_lineno])))
+# ---- 建立「名字 -> 来源模块」索引（不依赖 app.py 的再导出语句）----
+def _top_names(path):
+    out = set()
+    try:
+        t = ast.parse(io.open(path, encoding='utf-8').read())
+    except Exception:
+        return out
+    for n in t.body:
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(n.name)
+        elif isinstance(n, ast.Assign):
+            for x in n.targets:
+                if isinstance(x, ast.Name):
+                    out.add(x.id)
+        elif isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name):
+            out.add(n.target.id)
+    return out
 
+# routes/_shared.py 的导出（最优先）
+SHARED = _top_names('app/routes/_shared.py')
+# 各 helper 模块
+HELPER_ORIGIN = {}
+for f in sorted(os.listdir('app')):
+    if not f.endswith('.py') or '.bak' in f:
+        continue
+    mod = f[:-3]
+    if mod in ('app', 'serve', 'config'):
+        continue
+    for nm in _top_names(os.path.join('app', f)):
+        HELPER_ORIGIN.setdefault(nm, mod)
+# workers
+for sub in ('audio', 'episodes', 'screenplay'):
+    p = 'app/workers/%s.py' % sub
+    if os.path.isfile(p):
+        for nm in _top_names(p):
+            HELPER_ORIGIN.setdefault(nm, 'workers.%s' % sub)
+# config 常量
+CONF = _top_names('app/config.py')
+
+STDLIB = set(sys.stdlib_module_names) if hasattr(sys, 'stdlib_module_names') else set()
+
+
+# 生成的蓝图头部已 import 的名字（无需再解析）
+BUILTIN_OK = {
+    'BP',  # refs 计算时 @app.route( 的占位符
+    'Blueprint', 'jsonify', 'request', 'send_file', 'abort', 'render_template',
+    'redirect', 'send_from_directory', 'Response', 'make_response', 'url_for',
+    'session', 'g', 'current_app', 'Flask',
+    'os', 'sys', 'json', 'time', 'uuid', 'threading', 're', 'io', 'hashlib',
+    'shutil', 'random', 'base64', 'subprocess', 'datetime', 'pathlib',
+    'collections', 'math', 'glob', 'tempfile', 'copy', 'traceback', 'logging',
+    'functools', 'itertools', 'typing', 'zipfile', 'csv', 'struct', 'socket',
+    'textwrap', 'string', 'platform', 'signal', 'urllib', 'asyncio',
+}
+
+
+def _module_exists(name):
+    """app/<name>.py 或 app/<pkg>/<name>.py 是否存在。"""
+    if os.path.isfile('app/%s.py' % name):
+        return name
+    for pkg in ('workers',):
+        if os.path.isfile('app/%s/%s.py' % (pkg, name)):
+            return '%s.%s' % (pkg, name)
+    return None
+
+
+# app.py 真正的 import 语句（只扫前 400 行，排除后来追加的再导出区）
+RCEXPORT_SKIP = 400
 
 def import_stmt_for(name):
-    for nm, txt in IMPORT_LINES:
-        if name in nm:
-            return txt
+    """返回能提供 name 的 import 语句（按优先级，不猜）。"""
+    if name in BUILTIN_OK:
+        return None
+    m = _module_exists(name)
+    if m:
+        return 'import %s' % m if m == name else 'from %s import %s' % (m.split('.')[0], name)
+    if name in SHARED:
+        return 'from routes._shared import %s' % name
+    if name in HELPER_ORIGIN:
+        return 'from %s import %s' % (HELPER_ORIGIN[name], name)
+    if name in CONF:
+        return 'from config import %s' % name
     return None
 
 
@@ -62,7 +131,20 @@ def main(prefix, modname, note=''):
     if any(x in ('index', 'static_assets') for x in names):
         print('  [XX] 匹配到受保护视图 —— 中止'); return 1
 
-    body_txt = chr(10).join(chr(10).join(lines[n.lineno - 1:n.end_lineno]) for n, _, _ in hits)
+    # 必须含装饰器行：@_autopilot_guard 这类名字只在装饰器里出现，
+    # 若从 def 行开始取，refs 会漏掉它们（曾导致生成的蓝图未导入 _autopilot_guard）
+    def _block(n):
+        s0 = n.lineno - 1
+        while s0 > 0 and lines[s0 - 1].startswith('@'):
+            s0 -= 1
+        return chr(10).join(lines[s0:n.end_lineno])
+    body_txt = chr(10).join(_block(n) for n, _, _ in hits)
+    # refs 必须基于**替换后**的文本计算：app.logger / app.test_request_context 会被
+    # 换成 logger / current_app.*，若按原文算会把 'app' 误判为未解析名字。
+    body_txt = body_txt.replace('app.logger', 'logger')
+    body_txt = body_txt.replace('app.test_request_context', 'current_app.test_request_context')
+    body_txt = body_txt.replace('app.app_context()', 'current_app.app_context()')
+    body_txt = body_txt.replace('@app.route(', '@BP.route(')
     defined = set()
     for x in ast.walk(ast.parse(body_txt)):
         if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Store):
@@ -82,6 +164,8 @@ def main(prefix, modname, note=''):
     imports, unresolved = [], []
     for r in refs:
         st = import_stmt_for(r)
+        if r in BUILTIN_OK:
+            continue
         if not st:
             unresolved.append(r); continue
         if re.search(r'from\\s+app\\s+import', st) or st.strip() == 'import app':
@@ -91,6 +175,14 @@ def main(prefix, modname, note=''):
     print('  引用外部名 %d ｜ 可复制 import %d ｜ 需人工处理 %d: %s'
           % (len(refs), len(imports), len(unresolved), unresolved))
 
+    # ⚠️ 硬约束：有未定位名字就**中止**，不生成蓝图也不改 app.py。
+    #    首版没拦，导致 routes/video_api.py 里 _autopilot_guard 未定义，
+    #    app.py import 直接 NameError（服务起不来）。
+    if unresolved:
+        print('  [XX] 有 %d 个名字无法自动解析：%s' % (len(unresolved), unresolved))
+        print('       请先下沉它们或手工处理，本批中止（未修改任何文件）')
+        return 1
+
     DOC = chr(39) * 3
     head = [
         '# -*- coding: utf-8 -*-',
@@ -98,14 +190,28 @@ def main(prefix, modname, note=''):
         '',
         '# 由 tools/sink_routes.py 生成：URL 与响应体一字不改，只把 @app.route 换成蓝图路由；',
         '# 共享助手从 routes/_shared.py 取（沿用既有蓝图模式）。',
-        'from flask import Blueprint, jsonify, request, send_file, abort  # noqa: F401',
+        'import logging',
+        'from flask import Blueprint, jsonify, request, send_file, abort, current_app  # noqa: F401',
         'import os    # noqa: F401',
+        "import sys   # noqa: F401",
+        "import re    # noqa: F401",
+        "import time  # noqa: F401",
+        "import uuid  # noqa: F401",
+        "import threading   # noqa: F401",
+        "import hashlib     # noqa: F401",
+        "import shutil      # noqa: F401",
+        "import random      # noqa: F401",
+        "import base64      # noqa: F401",
+        "import datetime    # noqa: F401",
+        "import traceback   # noqa: F401",
+        "import subprocess  # noqa: F401",
         'import json  # noqa: F401',
         'import time  # noqa: F401',
         'import uuid  # noqa: F401',
     ]
     head += imports
-    head += ['', "%s_bp = Blueprint('%s', __name__)" % (modname, modname), '', '']
+    head += ['', 'logger = logging.getLogger(__name__)', '',
+             "%s_bp = Blueprint('%s', __name__)" % (modname, modname), '', '']
 
     blocks = []
     for n, url, d in hits:
@@ -116,6 +222,10 @@ def main(prefix, modname, note=''):
         while s0 > 0 and lines[s0 - 1].startswith('@'):
             s0 -= 1
         seg = lines[s0:n.end_lineno]
+        # app.logger -> logger（蓝图模块自带 logger，避免依赖 app 实例）
+        seg = [s.replace('app.logger', 'logger') for s in seg]
+        seg = [s.replace('app.test_request_context', 'current_app.test_request_context') for s in seg]
+        seg = [s.replace('app.app_context()', 'current_app.app_context()') for s in seg]
         b = [s.replace('@app.route(', "@%s_bp.route(" % modname) for s in seg]
         assert any('_bp.route(' in x for x in b), 'block %s 未包含蓝图装饰器' % n.name
         blocks.append(chr(10).join(b))

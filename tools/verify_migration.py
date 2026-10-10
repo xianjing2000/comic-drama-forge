@@ -70,7 +70,8 @@ by_url = {str(r): r.endpoint for r in m.app.url_map.iter_rules()}
 probl = []
 for u, want_ep in CRIT.items():
     got = by_url.get(u)
-    if got != want_ep:
+    # 蓝图 endpoint 会带蓝图名前缀（status_api.api_status），故用后缀匹配
+    if got is None or not (got == want_ep or got.endswith('.' + want_ep)):
         probl.append((u, want_ep, got))
 if probl:
     print('  [XX] 关键路由 endpoint 不符: %s' % probl)

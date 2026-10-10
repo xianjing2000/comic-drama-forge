@@ -233,6 +233,25 @@ app.register_blueprint(keyframes_bp)
 # 2026-10-11 路由拆分：托管控制面 已迁至 routes/autonomous.py。
 from routes.autonomous import autonomous_bp  # noqa: E402
 app.register_blueprint(autonomous_bp)
+
+# 2026-10-11 路由拆分：分集场景 已迁至 routes/episode_api.py。
+from routes.episode_api import episode_api_bp  # noqa: E402
+app.register_blueprint(episode_api_bp)
+
+# 2026-10-11 路由拆分：系统状态 已迁至 routes/status_api.py。
+from routes.status_api import status_api_bp  # noqa: E402
+app.register_blueprint(status_api_bp)
+
+# 2026-10-11 路由拆分：视频重试 已迁至 routes/video_api.py。
+from routes.video_api import video_api_bp  # noqa: E402
+app.register_blueprint(video_api_bp)
+from routes.video_api import (
+    api_video_retry_shot, api_video_retry_shots_batch, api_generate_videos,
+    api_video_file, api_video_preview_approve)  # noqa: F401
+from routes.status_api import (
+    api_status)  # noqa: F401
+from routes.episode_api import (
+    api_episode_scenes)  # noqa: F401
 from routes.autonomous import (
     api_autonomous_start, api_autonomous_stop, api_autonomous_resume,
     api_autonomous_status, api_autonomous_chat, api_autonomous_report,
@@ -346,6 +365,7 @@ from workers.episodes import _episodes_worker, _salvage_episode_script  # noqa: 
 # 2026-10-11 worker 下沉（第一批）：本函数已迁至 workers/screenplay.py。
 #   这里保留名字再导出，既有 app._screenplay_worker 调用表面零改动。
 from workers.screenplay import _screenplay_worker  # noqa: F401, E402
+import job_state
 from job_state import (generation_state, lock)  # noqa: F401
 from routes.keyframes import (_keyframes_dir, api_keyframes_file, api_keyframes_generate, api_keyframes_list, api_keyframes_plan)  # noqa: F401
 from job_state import (generation_state, lock)  # noqa: F401
@@ -403,9 +423,9 @@ from job_state import generation_state, lock  # noqa: E402,F401
 
 try:
     # 启动时把上次残留的 running 任务标记为 interrupted（可供前端提示「可继续」）
-    _interrupted = task_db.recycle_interrupted()
+    job_state.interrupted_tasks = task_db.recycle_interrupted()
 except Exception as _e:  # noqa: BLE001  不得因任务库异常导致启动失败
-    _interrupted = 0
+    job_state.interrupted_tasks = 0
     app.logger.warning(f"任务库中断恢复失败（不影响启动）：{_e}")
 
 # ⭐ AI 凭证单一事实源（tasks.db · ai_credentials 表）：启动时一次性把旧
@@ -633,26 +653,6 @@ def favicon_svg():
 # ===== 状态 =====
 
 
-@app.route('/api/status')
-def api_status():
-    comfyui_status = comfyui_client.get_status()
-    return jsonify({
-        "comfyui": comfyui_status,
-        "assets": {
-            "characters": sum(
-                len(files) for _, _, files in os.walk(CHARACTERS_DIR)
-            ) if os.path.exists(CHARACTERS_DIR) else 0,
-            "items": sum(
-                len(files) for _, _, files in os.walk(ITEMS_DIR)
-            ) if os.path.exists(ITEMS_DIR) else 0,
-            "scenes": sum(
-                len(files) for _, _, files in os.walk(SCENES_DIR)
-            ) if os.path.exists(SCENES_DIR) else 0,
-        },
-        "task_queue": _task_queue_status(),
-        "gpu_gate": gpu_task_gate.status(),
-        "interrupted_tasks": _interrupted,
-    })
 
 
 # ===== P0-4 持久化任务队列查询 =====
@@ -916,60 +916,8 @@ def api_storyboard_retry_shot():
 
 
 
-@app.route('/api/video/retry-shot', methods=['POST'])
-@_autopilot_guard
-def api_video_retry_shot():
-    """单镜视频重跑（同步；只重生成该镜的 mp4）
-
-    支持 mode：reference（默认，分镜图+主角锚点）/ keyframe（首尾帧插值）
-
-    D1（2026-09-23）：与分镜重跑同口径——加 @_autopilot_guard（异常不再泄漏成
-    裸 HTML 500）+ 整段关键区进入 gpu_task_gate（与批量视频 worker 互斥，
-    避免两个 ComfyUI 任务抢同一张 GPU）。
-    """
-    with gpu_task_gate.run_gpu_task(
-            f"video_retry_{uuid.uuid4().hex[:8]}", "单镜视频重跑"):
-        return _video_retry_shot_impl()
 
 
-@app.route('/api/video/retry-shots-batch', methods=['POST'])
-@_autopilot_guard
-def api_video_retry_shots_batch():
-    """批量单镜重生成（2026-10-02）：body = {project_name, episode_no?, shot_ids: [...]}
-
-    逐镜**串行**复用 `_video_retry_shot_impl` 的完整链路（切段 / 提示词预检 /
-    生成 / 质检 / 落盘 / manifest 回写），GPU 闸门包住**整个批次**（批内不再嵌套
-    加锁 —— impl 本身无闸门，闸门在单镜路由壳上）。单镜失败不中断批次；
-    上限 12 镜防误触全量重跑。同步返回逐镜结果（前端逐条展示）。
-    """
-    data = request.json or {}
-    ids = data.get('shot_ids')
-    if not isinstance(ids, list) or not [s for s in ids if str(s).strip()]:
-        return jsonify({"success": False,
-                        "error": "shot_ids 必须是非空数组（如 [\"shot_03\", \"shot_07\"]）"}), 400
-    ids = [str(s).strip() for s in ids if str(s).strip()][:12]
-    base_body = {k: v for k, v in data.items() if k != 'shot_ids'}
-    results = []
-    with gpu_task_gate.run_gpu_task(
-            f"video_retry_batch_{uuid.uuid4().hex[:8]}", "批量单镜重生成"):
-        for sid in ids:
-            body = dict(base_body)
-            body['shot_id'] = sid
-            try:
-                with app.test_request_context(json=body):
-                    resp = _video_retry_shot_impl()
-                    payload = (resp[0].get_json() if isinstance(resp, tuple)
-                               else resp.get_json())
-                    status = resp[1] if isinstance(resp, tuple) else resp.status_code
-                    results.append({"shot_id": sid, "http_status": status,
-                                    **(payload if isinstance(payload, dict) else {})})
-            except Exception as e:  # noqa: BLE001  单镜失败不断批次
-                app.logger.warning("[批量重生成] 镜头 %s 失败：%s", sid, e)
-                results.append({"shot_id": sid, "success": False, "error": str(e)})
-    ok_n = sum(1 for r in results if r.get("success"))
-    app.logger.info("[批量重生成] 完成：%d/%d 镜成功", ok_n, len(results))
-    return jsonify({"success": ok_n > 0, "total": len(results), "ok_count": ok_n,
-                    "results": results})
 
 
 
@@ -1975,121 +1923,6 @@ def api_storyboard_scratch_file(project_name, filename):
 # （见文件顶部），全项目唯一的镜号归一化实现见 app/shot_key.py。
 
 
-@app.route('/api/videos/generate', methods=['POST'])
-def api_generate_videos():
-    data = _body()
-    # P2-T2：写盘路由统一走 _project_or_400（同 api_generate_storyboards 口径）
-    project_name, err = _project_or_400((data.get('project_name') or '').strip())
-    if err is not None:
-        return err
-    shots = data.get('shots', [])
-    character_refs = data.get('character_refs', [])
-    scene_refs = data.get('scene_refs', [])
-    storyboards = data.get('storyboards', {}) or {}   # {shot_id: /api/storyboards/file/... 或本地路径}
-    use_storyboard = data.get('use_storyboard', True)
-    # 2026-10-01 起只保留整集一次生成（per_shot/keyframe 废弃，2026-10-05 移除分支）：
-    # 请求传 mode 不再生效，恒按 episode 处理（旧的项目级 video_mode 设定同样只归一为 episode）。
-    mode = 'episode'
-    timeout_per_segment = int(data.get('timeout_per_segment') or 900)
-    episode_tag = str(data.get('episode_tag') or '').strip()
-    # 跨镜链式：上一镜尾帧 = 下一镜首帧（auto / always / off，默认取 KEYFRAME_CHAIN_MODE）
-    chain_mode = keyframe.norm_chain_mode(
-        data.get('chain_mode') or KEYFRAME_CHAIN_MODE)
-
-    # 集号：作为入口幂等键的一部分（见下），也写进 generation_state 供状态回显。
-    # 裸 int(episode_no) 会抛 —— 历史前端可能传 "" / null / "2"，统一走 _ep_of_script 同口径的容错。
-    # ⚠️ 提前到这里解析：空 shots 时要用它读剧本兜底，后面幂等键 / 状态 / worker 全部复用同一个值。
-    _vid_ep = data.get('episode_no')
-    try:
-        _vid_ep = int(_vid_ep) if str(_vid_ep or "").strip() else 1
-    except (TypeError, ValueError):
-        _vid_ep = 1
-
-    # ⚠️ 2026-09-28 修复：前端「整集生成视频」按钮（工程台 handleGenerateEpisode）只发
-    #    {project_name, episode_no}，从不带 shots —— 旧代码在此直接 400「没有镜头数据」，
-    #    按钮永久失败（client.ts 注释承诺的「后端按剧本兜底」从未实现）。
-    #    现在：shots 为空时按本集剧本兜底（剧本里的 shots 就是生成视频所需的镜头表）。
-    #    ⚠️ 兜底只发生在空 shots 时，有 shots 的调用路径（流水线 / 单镜重跑）行为**完全不变**。
-    if not shots:
-        _scr_fb = _load_script_for(project_name, _vid_ep)
-        if not isinstance(_scr_fb, dict):
-            _scr_fb = {}
-        shots = _scr_fb.get("shots") or []
-        # 参考图同理兜底：只在调用方没显式传时补剧本里已判定的角色 / 场景。
-        # （物品的权威来源是剧本、由 _video_generate_worker_body 自行兜底；此处不覆盖显式传参）
-        if not character_refs:
-            character_refs = _scr_fb.get("characters") or []
-        if not scene_refs:
-            scene_refs = _scr_fb.get("scenes") or []
-    if not shots:
-        return jsonify({"error": "没有镜头数据"}), 400
-    _g = _style_aspect_guard(project_name)
-    if _g is not None:
-        return _g
-
-    # ⑥ 视频链路自动引用剧本自动判定的镜头时长（缺 duration 时按项目配置兜底）
-    episode_stats = _episode_schema_defaults(project_name, shots)
-
-    task_id = f"video_{project_name}_{uuid.uuid4().hex[:12]}"
-    with lock:
-        _prune_task_registry(generation_state)
-        # G5 + B-11 P1-8：同项目**同集**已有 running 的视频任务 → 复用。
-        # ⚠️ 修复（2026-09-25）：旧键只匹配 project_name + step=="video"，**不含集号** ——
-        #    用户在第 2 集点「生成视频」，若第 1 集的视频任务还在跑，会被直接吞掉：
-        #    返回 reused=True 且 task_id 指向第 1 集的任务，第 2 集永远不生成，
-        #    而界面显示「已开始」。分镜侧早已加 episode_no（见 api_generate_storyboards），
-        #    视频侧漏了 —— 两条链路口径不一致。
-        # 用 `==` 精确比集号（而非 `!=` 排除），历史任务无 episode_no 字段时按 1 处理，
-        # 与 `_ep_dir` 的「第 1 集平铺」口径一致。
-        def _st_ep(st):
-            try:
-                return int(st.get("episode_no") or 1)
-            except (TypeError, ValueError):
-                return 1
-
-        _existing_vid = next((tid for tid, st in generation_state.items()
-                              if st.get("status") == "running"
-                              and st.get("project_name") == project_name
-                              and st.get("step") == "video"
-                              and _st_ep(st) == _vid_ep), None)
-        if _existing_vid:
-            return jsonify({"success": True, "task_id": _existing_vid, "status": "started",
-                            "reused": True, "total": len(shots),
-                            "mode": mode, "project_name": project_name,
-                            "episode_no": _vid_ep})
-        generation_state[task_id] = {
-            "status": "running", "progress": 0,
-            "total": len(shots), "current": 0, "results": [],
-            "phase": "视频生成", "qc": _qc_brief("video"),
-            "project_name": project_name, "step": "video",
-            "episode_no": _vid_ep,
-            "episode_stats": episode_stats,
-        }
-
-    # 抽取 worker 时这里被截断了：既没启动线程也没有 return，
-    # 导致 POST /api/videos/generate 抛 "did not return a valid response" (500)。
-    # 现在把「启动后台线程 + 返回 task_id」补回路由本身（worker 只负责干活）。
-    # B-01 P1-12：GPU 并发闸门
-    def _video_generate_worker_gated():
-        with gpu_task_gate.run_gpu_task(task_id, f"视频生成({mode})"):
-            _video_generate_worker(
-                task_id, project_name, shots, character_refs, scene_refs,
-                storyboards, use_storyboard, mode, timeout_per_segment,
-                # 传规范化后的 _vid_ep（与上面幂等键 / 状态里的集号同源），
-                # 而不是原始 data['episode_no'] —— 否则 "" / None 会让落盘目录与状态不一致。
-                episode_tag, _vid_ep,
-                chain_mode=chain_mode,
-                style=(data.get('style') or _project_style(project_name)),
-                overwrite=bool(data.get('overwrite')),
-                build_only=bool(data.get('build_only')),
-                only_scenes=(data.get('only_scenes')
-                             if isinstance(data.get('only_scenes'), list) else None))
-    thread = threading.Thread(target=_video_generate_worker_gated, daemon=True)
-    thread.daemon = True
-    thread.start()
-
-    return jsonify({"success": True, "task_id": task_id, "status": "started",
-                    "total": len(shots), "mode": mode})
 
 
 
@@ -2119,10 +1952,6 @@ def api_asset_file(filename):
     return resp
 
 
-@app.route('/api/videos/<path:filename>')
-def api_video_file(filename):
-    """提供视频文件访问"""
-    return _serve_safe(VIDEOS_DIR, filename, conditional=True)
 
 
 # ===== 视频水印（C 项：可配置、默认关闭、支持「全视频移动」） =====
@@ -2346,64 +2175,6 @@ def api_novel_screenplay_get(novel_id, episode_no):
                     "path": path, "project_key": key, "episode_no": int(episode_no)})
 
 
-@app.route('/api/episode/scenes', methods=['GET'])
-def api_episode_scenes():
-    """场次级状态（层级展示用，2026-10-03）：第N集 → 第1场/第2场…
-
-    query: project=<项目键>&episode_no=N。返回每场的场次号/标题/镜数、分镜图完成数、
-    场次视频（scene_XX.mp4）是否就绪 —— 前端按「集 → 场」两级树渲染。
-    """
-    project = _safe_project(request.args.get('project') or '')
-    try:
-        episode_no = max(1, int(request.args.get('episode_no') or 1))
-    except (TypeError, ValueError):
-        episode_no = 1
-    if not project:
-        return jsonify({"success": False, "error": "project 必填"}), 400
-    script = _load_script_for(project, episode_no) or {}
-    flow = [s for s in (script.get("scene_flow") or []) if isinstance(s, dict)]
-    # 分镜 manifest（按镜 success 统计每场完成数）
-    _flat = os.path.join(STORYBOARDS_DIR, project)
-    _sb_dir = _ep_dir(_flat, episode_no)
-    _sub = os.path.basename(_sb_dir) if _sb_dir != _flat else ""
-    mpath = os.path.join(_sb_dir, "storyboard_manifest.json")
-    _mshots = {}
-    if os.path.isfile(mpath):
-        try:
-            m = read_json_strict(mpath, {})
-            _mshots = {str(s.get("shot_id")): s
-                       for s in ((m or {}).get("shots") or []) if isinstance(s, dict)}
-        except Exception:  # noqa: BLE001
-            _mshots = {}
-    vdir = _ep_dir(os.path.join(VIDEOS_DIR, project), episode_no)
-    scenes = []
-    for sc in flow:
-        sids = [str(x) for x in (sc.get("shot_ids") or [])]
-        sb_ok = sum(1 for sid in sids
-                    if (_mshots.get(sid) or {}).get("success"))
-        _sn = int(sc.get("scene_no") or len(scenes) + 1)
-        vfile = os.path.join(vdir, f"scene_{_sn:02d}.mp4")
-        scenes.append({
-            "scene_no": _sn,
-            "heading": sc.get("heading") or f"第{_sn}场",
-            "location": sc.get("location"),
-            "int_ext": sc.get("int_ext"),
-            "time_of_day": sc.get("time_of_day"),
-            "shot_ids": sids,
-            "shot_count": len(sids),
-            "storyboard_ok": sb_ok,
-            "video_ready": os.path.isfile(vfile) and os.path.getsize(vfile) > 0,
-            "video_url": (f"/api/videos/{project}/{_sub + '/' if _sub else ''}"
-                          f"scene_{_sn:02d}.mp4"),
-        })
-    full = os.path.join(vdir, f"ep{episode_no:02d}_full.mp4")
-    if not os.path.isfile(full):
-        full = os.path.join(vdir, "episode_full.mp4")
-    return jsonify({
-        "success": True, "project": project, "episode_no": episode_no,
-        "scene_count": len(scenes), "scenes": scenes,
-        "full_video_ready": os.path.isfile(full) and os.path.getsize(full) > 0,
-    })
 
 
 @app.route('/api/novels/<novel_id>/episodes/generate', methods=['POST'])
@@ -2725,35 +2496,6 @@ def _handle_bad_request(e):
     }), 400
 
 
-@app.route('/api/videos/preview/approve', methods=['POST'])
-def api_video_preview_approve():
-    """批准某集预演 → 之后重新生成本集即走**正式**生产（两级生产第二阶段）。
-
-    批准会绑定该预演产物的哈希（见 preview_gate.approve）：预演被重出一版，
-    旧批准自动失效，避免「批的是上一版预演」。
-    """
-    data = request.json or {}
-    project, err = _project_or_400(
-        data.get('project') or data.get('project_name') or '', field_name="project")
-    if err is not None:
-        return err
-    ep = data.get('episode_no') or 1
-    path = str(data.get('path') or '')
-    if not path:
-        # 没传路径 → 在该集视频目录里找预演产物（文件名带 PREVIEW_MARK）
-        try:
-            _d = _ep_dir(os.path.join(VIDEOS_DIR, project), ep)
-            _cand = [os.path.join(_d, f) for f in sorted(os.listdir(_d))
-                     if preview_gate.is_preview_path(f)] if os.path.isdir(_d) else []
-            path = _cand[-1] if _cand else ''
-        except Exception as e:                                       # noqa: BLE001
-            app.logger.warning("查找预演产物失败：%s", e)
-    if not path or not os.path.isfile(path):
-        return jsonify({"success": False,
-                        "error": "未找到该集的预演产物（请先生成预演）"}), 404
-    state = preview_gate.approve(project, ep, path, note=str(data.get('note') or ''))
-    app.logger.info("[预演] 已批准：%s 第%s集 → %s", project, ep, os.path.basename(path))
-    return jsonify({"success": True, "preview": state, "path": path})
 
 
 # =====================================================================
