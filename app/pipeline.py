@@ -113,7 +113,9 @@ def _acquire_episode_lock(project_name: str, episode_no: int) -> bool:
         try:
             lk.release()
         except RuntimeError:
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('pipeline.py:115', '静默降级')
         logger.warning("第%s集正被其他执行体运行（文件租约被占用），本次跳过：%s",
                        episode_no, project_name)
         return False
@@ -931,7 +933,9 @@ def _auto_screenplay(ctx: dict) -> None:
         try:
             ctx['progress']('生成文学剧本（自动，无需人审）…', 2, phase='script:screenplay')
         except Exception:  # noqa: BLE001
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('pipeline.py:933', 'noqa: BLE001')
         md = _ns.generate_screenplay(
             client, str(meta.get('title') or meta.get('novel_id') or ''),
             str(chapter.get('title') or ''), text, cfg.get('style') or '')

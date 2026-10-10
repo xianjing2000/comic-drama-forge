@@ -2790,7 +2790,9 @@ def _detect_subject_bbox(image_path: str) -> dict:
                 return {"x": cx - w / 2 / W, "y": cy - h / 2 / H,
                         "w": w / W, "h": h / H, "method": "yolo"}
     except Exception:
-        pass
+        # 
+        from degradation import note as _dg_note
+        _dg_note('qc_client.py:2792', '静默降级')
     try:
         import PIL.Image
         import numpy as np

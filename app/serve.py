@@ -159,7 +159,9 @@ class _Tee:
             try:
                 n = stream.write(data)
             except Exception:  # noqa: BLE001 任一目标失败都不影响另一侧
-                pass
+                # 
+                from degradation import note as _dg_note
+                _dg_note('serve.py:161', 'noqa: BLE001 任一目标失败都不影响另一侧')
         return n
 
     def writelines(self, lines):
@@ -173,7 +175,9 @@ class _Tee:
             try:
                 stream.flush()
             except Exception:  # noqa: BLE001
-                pass
+                # 
+                from degradation import note as _dg_note
+                _dg_note('serve.py:175', 'noqa: BLE001')
 
     def isatty(self):
         return False
@@ -207,14 +211,18 @@ def _rotate_log(path: str, max_bytes: int = _LOG_MAX_BYTES, keep: int = _LOG_KEE
             try:
                 os.remove(oldest)
             except OSError:
-                pass
+                # 
+                from degradation import note as _dg_note
+                _dg_note('serve.py:209', '静默降级')
         for i in range(keep - 1, 0, -1):
             src = '%s.%d' % (path, i)
             if os.path.isfile(src):
                 try:
                     os.replace(src, '%s.%d' % (path, i + 1))
                 except OSError:
-                    pass
+                    # 
+                    from degradation import note as _dg_note
+                    _dg_note('serve.py:216', '静默降级')
         os.replace(path, path + '.1')
         return True
     except Exception as e:  # noqa: BLE001  轮转失败绝不能影响启动
@@ -250,7 +258,9 @@ def _redirect_process_logs() -> None:
         try:
             fh.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)
         except Exception:  # noqa: BLE001 某些流不支持 reconfigure
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('serve.py:252', 'noqa: BLE001 某些流不支持 reconfigure')
         _LOG_FH = fh
         tee_out = _Tee(_orig[0], fh)
         tee_err = _Tee(_orig[1], fh)
@@ -284,11 +294,15 @@ def _redirect_process_logs() -> None:
                     try:
                         _LOG_FH.flush()
                     except Exception:  # noqa: BLE001
-                        pass
+                        # 
+                        from degradation import note as _dg_note
+                        _dg_note('serve.py:286', 'noqa: BLE001')
                     sys.stdout, sys.stderr = _orig
                     _LOG_FH.close()
             except Exception:  # noqa: BLE001
-                pass
+                # 
+                from degradation import note as _dg_note
+                _dg_note('serve.py:290', 'noqa: BLE001')
 
         atexit.register(_restore)
         sys.stdout.write(f'[serve] log redirected to: {log_path}\n')

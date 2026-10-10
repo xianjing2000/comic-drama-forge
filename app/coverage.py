@@ -583,7 +583,9 @@ def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=
         try:
             progress_cb("覆盖率初检：逐句核对原文是否被镜头承载…")
         except Exception:  # noqa: BLE001
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('coverage.py:585', 'noqa: BLE001')
     report = check_coverage(client, chapter_text, script, threshold=thr, use_llm=use_llm, events=events)
     if progress_cb:
         try:
@@ -591,7 +593,9 @@ def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=
                         f"细节 {report.get('detail_coverage_percent')}%，遗漏 "
                         f"{len(report.get('missing_ids') or [])} 条")
         except Exception:  # noqa: BLE001
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('coverage.py:593', 'noqa: BLE001')
 
     while (report.get("missing_ids")
            and report.get("plot_coverage", 0) < thr
@@ -609,7 +613,9 @@ def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=
                 progress_cb(f"覆盖率不足，第 {supplement_rounds}/{rounds_cap} 轮补生成中"
                             f"（遗漏 {prev_missing} 条，只增不删）…")
             except Exception:  # noqa: BLE001
-                pass
+                # 
+                from degradation import note as _dg_note
+                _dg_note('coverage.py:611', 'noqa: BLE001')
         sup = supplement_missing(client, chapter_text, script, report.get("missing_ids"),
                                  episode_no=ep, events=events,
                                  main_unit_ids=report.get("body_unit_ids"))
@@ -621,7 +627,9 @@ def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=
                 progress_cb(f"第 {supplement_rounds} 轮补生成结束：新增 {sup.get('added_shots', 0)} 镜，"
                             f"复检中…")
             except Exception:  # noqa: BLE001
-                pass
+                # 
+                from degradation import note as _dg_note
+                _dg_note('coverage.py:623', 'noqa: BLE001')
         if not sup.get("added_shots"):
             logger.warning(f"第{ep}集覆盖率补生成第 {supplement_rounds} 轮未产出新镜头，停止补生成")
             break

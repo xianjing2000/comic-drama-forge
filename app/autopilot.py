@@ -868,7 +868,9 @@ def describe_current(cur: dict) -> str:
         try:
             parts.append(f"第 {int(ep)} 集")
         except (TypeError, ValueError):
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('autopilot.py:870', '静默降级')
     if title:
         parts.append(title)
     # 阶段名：优先更细的 phase（去掉 `:子序号` 后缀），回退到 step
@@ -923,7 +925,9 @@ def report_progress(message: str = "", percent=None) -> None:
             try:
                 kw["percent"] = max(0, min(100, int(percent)))
             except (TypeError, ValueError):
-                pass
+                # 
+                from degradation import note as _dg_note
+                _dg_note('autopilot.py:925', '静默降级')
         _set_current(**kw)
     except Exception as e:  # noqa: BLE001  纯展示用途，绝不能影响生产主链路
         logger.debug("步骤内进度上报失败（忽略）：%s", e)
@@ -1244,7 +1248,9 @@ def prewarm_next_script(project: str, plan: dict, cur_episode: int) -> bool:
             elif not _flag:
                 return False
     except Exception:  # noqa: BLE001  读开关异常不阻断（按默认开启）
-        pass
+        # 
+        from degradation import note as _dg_note
+        _dg_note('autopilot.py:1246', 'noqa: BLE001  读开关异常不阻断（按默认开启）')
     try:
         import pipeline
         meta = _novel_meta(project, plan)
@@ -1288,7 +1294,9 @@ def prewarm_next_script(project: str, plan: dict, cur_episode: int) -> bool:
                     if _md:
                         config.setdefault("screenplay_text", _md)
                 except Exception:  # noqa: BLE001 设定缺失不影响主流程
-                    pass
+                    # 
+                    from degradation import note as _dg_note
+                    _dg_note('autopilot.py:1290', 'noqa: BLE001 设定缺失不影响主流程')
                 ctx = {
                     "config": config, "project_name": project,
                     "project_key": config.get("project_key") or project,

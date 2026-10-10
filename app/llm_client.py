@@ -1157,7 +1157,9 @@ class FailoverLLMClient:
         try:
             self.active.last_error = value
         except Exception:  # noqa: BLE001
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('llm_client.py:1159', 'noqa: BLE001')
 
     @property
     def last_json_meta(self) -> dict:
@@ -1168,7 +1170,9 @@ class FailoverLLMClient:
         try:
             self.active.last_json_meta = value
         except Exception:  # noqa: BLE001
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('llm_client.py:1170', 'noqa: BLE001')
 
     @property
     def reasoning_effort(self) -> str:
@@ -1179,7 +1183,9 @@ class FailoverLLMClient:
         try:
             self.active.reasoning_effort = value
         except Exception:  # noqa: BLE001
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('llm_client.py:1181', 'noqa: BLE001')
 
     @property
     def disable_thinking(self):
@@ -1190,7 +1196,9 @@ class FailoverLLMClient:
         try:
             self.active.disable_thinking = value
         except Exception:  # noqa: BLE001
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('llm_client.py:1192', 'noqa: BLE001')
 
     # ---- 故障转移核心 ----
     def _note_api_error(self, exc) -> None:
@@ -1237,7 +1245,9 @@ class FailoverLLMClient:
         except LLMError:
             pass  # 主模型还挂着，继续用备用
         except Exception:  # noqa: BLE001  探活本身异常不阻断任务
-            pass
+            # 
+            from degradation import note as _dg_note
+            _dg_note('llm_client.py:1239', 'noqa: BLE001  探活本身异常不阻断任务')
 
     def _call_with_failover(self, method: str, *args, **kwargs):
         """调 active client 的 method；API 级报错计数 + 自动切换 + 全链兜底。
