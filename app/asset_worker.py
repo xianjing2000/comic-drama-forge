@@ -211,6 +211,71 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
             else:
                 sub_dir = _sd
 
+        # ⭐ 2026-10-10 场景空间关联（用户需求①②③）：资产生成前确保关联已算。
+        #    为什么放在这里：assets 由**前端**传入（不含 refs / fixed_structure），
+        #    服务端必须先补齐 —— 否则 generate_scene_base 拿不到关联参考图，
+        #    ensure_scene_layout 也拿不到 fixed_structure，门框仍会对不上。
+        #    幂等：bible 里已有该字段的场景跳过，只有缺失时才调一次模型；
+        #    fail-open：关联分析失败按「无关联」继续，绝不阻断资产生产。
+        def _ensure_scene_relations(asset_items: list, proj: str) -> None:
+            try:
+                if not any(isinstance(x, dict) for x in (asset_items or [])):
+                    return
+                missing = [x for x in (asset_items or [])
+                           if isinstance(x, dict)
+                           and (not x.get("refs") or not x.get("fixed_structure"))]
+                if not missing:
+                    return
+                from config import CONTINUITY_DIR as _cd
+                import continuity as _cont
+                import scene_relations as _sr
+                bible = _cont.load_bible(_cd, proj) or {}
+                rows = [s for s in (bible.get("scenes") or []) if isinstance(s, dict)]
+                if not rows:
+                    return
+                need = [s for s in rows
+                        if not s.get("refs") and not s.get("fixed_structure")]
+                if need:
+                    from shared_ai import _optional_llm_client
+                    _cli = _optional_llm_client()
+                    if _cli is not None:
+                        _rel = _sr.relate_scenes(_cli, rows)
+                        _stat = _sr.apply_scene_relations(bible, _rel)
+                        if _stat.get("updated"):
+                            _cont.save_bible(_cd, proj, bible)
+                            logger.info("[场景关联] 已写入 %d 个场景（分组/参考/固定结构）",
+                                        _stat["updated"])
+                # 把 bible 的值回填进本次要生成的 asset（内存对象；前端传的不含这些字段）
+                by_name = {str(s.get("name") or "").strip(): s for s in rows}
+                for x in (asset_items or []):
+                    if not isinstance(x, dict):
+                        continue
+                    src = by_name.get(str(x.get("name") or "").strip())
+                    if not src:
+                        continue
+                    for k in ("refs", "fixed_structure", "space_group", "is_anchor"):
+                        if not x.get(k) and src.get(k):
+                            x[k] = src[k]
+            except Exception as _e:  # noqa: BLE001  关联是增强，绝不阻断资产生产
+                logger.warning("[场景关联] 资产生成前的关联补齐失败（按无关联继续）：%s: %s",
+                               type(_e).__name__, _e)
+
+        def _scene_relation_refs(asset: dict, project_name: str) -> list:
+            """取该场景的**关联参考图**（已存在的同组场景 base.png，最多 2 张）。
+
+            依据 asset["refs"]（由 scene_relations.relate_scenes 写回 bible.scenes[]）。
+            取不到 / 文件缺失 / 任何异常 → 空列表（调用方回落纯 T2I，零回归）。
+            """
+            try:
+                import scene_relations as _sr
+                return _sr.scene_ref_images(asset or {}, SCENES_DIR, project_name)
+            except Exception as _e:  # noqa: BLE001
+                logger.debug("场景关联参考图解析失败（按无参考处理）：%s", _e)
+                return []
+
+        if asset_type == "scene" and not sub_dir:
+            _ensure_scene_relations(assets, project_name)
+
         def _asset_full_dir(asset_name: str) -> str:
             """该资产的落盘目录：主设定目录（base_dir/<项目>/<名称>），或
             （服装变体）主设定目录 + sub_dir 子目录。sub_dir 为空时与从前逐字节一致。"""
@@ -550,8 +615,19 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                             filename_prefix=_gen_prefix, surface_text=surface_text)
                     else:
                         # character / scene：保持既有字典派发调用签名不变
+                        # ⭐ 2026-10-10 场景空间关联：场景带 refs 时传关联参考图，
+                        #    让门框 / 地面 / 墙面材质与关联场景接上（见
+                        #    ComfyUIClient.generate_scene_base 的 ref_images 说明）。
+                        #    只取**已存在**的同组场景图；取不到就不传（回落纯 T2I，
+                        #    与从前逐字一致）。参考图编辑失败由下层 fail-open 兜底。
+                        _base_kw = {}
+                        if asset_type == "scene":
+                            _refs = _scene_relation_refs(asset, project_name)
+                            if _refs:
+                                _base_kw["ref_images"] = _refs
                         base_files = gen_base(prompt_zh, seed=seed, style=gen_style,
-                                              size=gen_size, filename_prefix=_gen_prefix)
+                                              size=gen_size, filename_prefix=_gen_prefix,
+                                              **_base_kw)
                     if not base_files:
                         base_attempts.append({"attempt": attempt + 1, "seed": seed, "stage": "基础图生成",
                                               "ok": False, "error": "基础图生成失败"})

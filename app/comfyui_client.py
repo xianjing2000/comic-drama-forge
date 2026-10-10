@@ -263,6 +263,15 @@ PROMPT_ENHANCER_ENV = "MJSCXT_PROMPT_ENHANCER"
 # 已在官方写法改写中移除 → 必须同步更新，否则幂等判定永假、提示词无限膨胀）。
 SCENE_EXACT_TEXT_MARKER = "必须呈现文字：居中印有"
 
+#: 场景**空间关联**参考图的使用声明（2026-10-10）。
+#: 为什么需要它：实测「以关联场景为参考」时参考图引力较强，会把提示词里的陈设细节
+#: 一并覆盖（木桌→金属桌）。此句把参考图的**作用域**限定在材质 / 建筑结构 / 光线，
+#: 陈设仍以本场景描述为准，兼顾「空间连贯」与「细节可控」。
+SCENE_RELATION_REF_HINT = (
+    "；参考图仅用于对齐建筑结构、墙面与地面材质、门框形制与光线色温，"
+    "本场景的家具与陈设以以上描述为准"
+)
+
 
 def _prompt_enhancer_node_enabled() -> bool:
     """增强节点注入的运行时开关（默认**关**；1/true/yes/on 显式开启）。
@@ -2661,8 +2670,25 @@ class ComfyUIClient:
                             style: str = "", size=None,
                             filename_prefix: str = None,
                             view_key: str = None,
-                            surface_text: str = "") -> List[str]:
-        """生成场景图（T2I）
+                            surface_text: str = "",
+                            ref_images: List[str] = None) -> List[str]:
+        """生成场景图（T2I，或带关联参考的参考图编辑）
+
+        ref_images（2026-10-10 新增，**带默认值以兼容所有既有调用**）：
+          **场景空间关联**参考图（如「2704房间」以「2704门口」为参考）。
+          · 空（默认）→ 走纯 T2I（scene_gen 工作流），与加参数前**逐字一致**；
+          · 非空 → 改走**参考图编辑**链路（storyboard_gen 工作流，9 槽位），
+            让门框 / 地面 / 墙面材质 / 光比与关联场景真正接上。
+
+          ⚠️ 为什么不能继续用 scene_gen：该工作流是**纯 T2I、没有参考图槽位**
+            （见本函数下方 2026-09-29 的注释与 8 组对照实验）。实测结论：以
+            「2704门口」为参考生成「2704房间」，门框与门外走廊地面材质与参考图
+            一致；而无参考时门框颜色完全对不上——同一个空间被画成两处。
+
+          ⚠️ 已知副作用（实验实测，调用方需知情）：参考图**引力较强**，会部分
+            覆盖提示词里的陈设细节（木桌→金属桌）。故提示词应显式声明「只沿用
+            参考图的材质 / 建筑结构 / 光线，陈设以本场景描述为准」（见
+            SCENE_RELATION_REF_HINT）。关联越紧密，细节自由度越低。
 
         view_key（2026-09-29 新增）：场景**机位档**（``config.SCENE_VIEW_KEYS``）。
           · ``None``（默认）→ 与旧实现**逐字一致**（不追加任何机位句），
@@ -2703,11 +2729,57 @@ class ComfyUIClient:
         #    幂等 + 措辞避开 CHARACTER_WORDS（"人物/人影…"），不被 sanitize_scene_prompt 丢弃。
         #    ⭐ 2026-10-07：传入 surface_text（非空）时改为**确切文字**硬约束（根因修法）。
         prompt_zh = ComfyUIClient._ensure_scene_text_render(prompt_zh, surface_text)
+        # ⭐ 2026-10-10 场景空间关联：有关联参考图时改走参考图编辑链路。
+        #    只在 base 图（view_key 为空）上做 —— 机位档是「同一场景换机位」，
+        #    与「关联场景」正交；混在一起会互相干扰（机位档本就靠同 seed 保证一致）。
+        if ref_images and not view_key:
+            return self._generate_scene_with_refs(
+                prompt_zh, list(ref_images), seed=seed, style=style, size=size,
+                filename_prefix=filename_prefix)
         return self._generate_base_image(
             WORKFLOW_TEMPLATE["scene_gen"], prompt_zh,
             asset_type="scene", seed=seed, style=style, size=size,
             filename_prefix=filename_prefix,
             prompt_extra=scene_view_prompt_suffix(view_key))
+
+    def _generate_scene_with_refs(self, prompt_zh: str, ref_images: List[str],
+                                  seed: int = None, style: str = "",
+                                  size=None, filename_prefix: str = None) -> List[str]:
+        """以**关联场景图**为条件生成场景图（参考图编辑）。
+
+        复用 generate_storyboard 的参考图链路（上传到 ComfyUI output → 逐个槽位
+        注入 images.image_N，见其 docstring）：本仓只有 storyboard_gen 工作流带
+        参考图槽位，而实测它出场景图**效果可用**（1664×928，与资产同尺寸）。
+
+        ⚠️ generate_storyboard **没有 style 参数**，故风格后缀必须在这里自行拼进
+        提示词（与 _generate_base_image 内的处理同口径）。
+
+        失败语义（fail-open，2026-10-10 定稿）：场景关联是**增强**而非依赖 ——
+        参考图不可用 / 参考图编辑链路报错时，自动回落**无参考的纯 T2I**，
+        绝不因为「关联」这一步把整集资产生产拖垮。回落是安静降级但有日志。
+        """
+        text = str(prompt_zh or "").strip()
+        if style:
+            text = style_kit.with_reference_style(text, style)
+        if SCENE_RELATION_REF_HINT not in text:
+            text = text.rstrip("。，,.;； ") + SCENE_RELATION_REF_HINT
+        _pfx = filename_prefix or "comic_drama_scene/scene"
+        try:
+            res = self.generate_storyboard(text, ref_images,
+                                           filename_prefix=_pfx, seed=seed, size=size)
+            files = list(res.get("files") or []) if isinstance(res, dict) else list(res or [])
+            if files:
+                logger.info("[场景关联] 已按关联参考图出图：%d 张参考图 → %s",
+                            len(ref_images), os.path.basename(files[0]))
+                return files
+            logger.warning("[场景关联] 参考图编辑未产出文件，回落无参考生成")
+        except Exception as e:  # noqa: BLE001  关联失败绝不阻断资产生产
+            logger.warning("[场景关联] 参考图编辑失败（回落无参考生成）：%s: %s",
+                           type(e).__name__, e)
+        return self._generate_base_image(
+            WORKFLOW_TEMPLATE["scene_gen"], prompt_zh,
+            asset_type="scene", seed=seed, style=style, size=size,
+            filename_prefix=filename_prefix, prompt_extra="")
 
     @staticmethod
     def _ensure_scene_text_render(prompt_zh: str, surface_text: str = "") -> str:

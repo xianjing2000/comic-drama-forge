@@ -447,6 +447,11 @@ def scene_layout_marked(text: str) -> bool:
     return _SCENE_LAYOUT_MARK in str(text or "")
 
 
+#: 场景**固定结构**条款的幂等标记（2026-10-10，场景空间关联需求③）。
+#: 追加串必须以本串开头，幂等判定才成立。
+SCENE_FIXED_STRUCTURE_MARKER = "，固定结构（跨镜头不变，须与同空间其他场景一致）："
+
+
 def ensure_scene_layout(prompt: str, scene: dict = None) -> str:
     """保证**场景出图提示词**达到「可复用地理参考」的布局底线。
 
@@ -462,6 +467,16 @@ def ensure_scene_layout(prompt: str, scene: dict = None) -> str:
     p = str(prompt or "").strip()
     if not p:
         return _SCENE_LAYOUT_SUFFIX.lstrip("，")
+    # ⭐ 2026-10-10 固定结构（场景空间关联，用户需求③）：
+    #    同一空间的不同位置（2704房间 / 2704门口 / 27F走廊）此前各自独立出图，
+    #    提示词里**没有门框 / 地面 / 墙面这类固定结构**的约束，模型只能自由发挥
+    #    —— 实测「2704房间」门框是深色的，而「2704门口」是斑驳木框，同一个地方
+    #    被画成两处。fixed_structure 由剧本阶段（novel_to_script 的 scenes schema）
+    #    或 scene_relations.relate_scenes 产出，这里把它拼进出图提示词作为硬约束。
+    #    幂等标记见 SCENE_FIXED_STRUCTURE_MARKER。
+    _fs = str((scene or {}).get("fixed_structure") or "").strip()
+    if _fs and SCENE_FIXED_STRUCTURE_MARKER not in p:
+        p = p.rstrip("。，,.;； ") + SCENE_FIXED_STRUCTURE_MARKER + _fs
     if scene_layout_marked(p):
         return p
     return p.rstrip("。，,.;； ") + _SCENE_LAYOUT_SUFFIX
