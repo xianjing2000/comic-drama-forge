@@ -6,6 +6,11 @@
 """
 import os, sys, io, ast, builtins
 os.environ.setdefault('MJSCXT_DATA_DIR', os.path.join(os.environ['APPDATA'], 'mjscxt-desktop', 'mjscxt-data'))
+# ⚠️ 2026-10-10：必须关掉托管 —— 本脚本会 __import__('app')，而 app 模块级会
+#    「检测到启用项目 → 自动恢复生产 → 启动托管守护线程」。实测运行本验证器时
+#    日志里多出两组「托管循环开始 / 守护线程已启动」，即**顺带拉起了一个真实的
+#    生产托管**，与正在跑的服务抢任务。脚本纪律：绝不产生生产副作用。
+os.environ.setdefault('MJSCXT_AUTOPILOT', '0')
 sys.path.insert(0, 'app')
 
 # 自动发现：app/ 下所有 *_helpers.py + workers 包（不再硬编码，避免漏检新模块）
