@@ -58,6 +58,9 @@ from shared_web import _body, _friendly_error, _safe_upload_name, _serve_safe  #
 # ⭐ 2026-10-10 拆分第 3 步：AI 客户端构造与前置门禁上移到 app/shared_ai.py。
 from shared_ai import (AI_MODULE_LABEL, _ai_client_for_module, _ai_gate_or_400,  # noqa: F401  再导出
                        _ai_guide_response, _current_llm_client, _optional_llm_client)
+# ⭐ 2026-10-10 拆分第 4 步：项目/镜头基础（反向依赖最热的 6 个实体）上移到 app/shared_project.py。
+from shared_project import (_first_existing, _project_or_400, _safe_project,  # noqa: F401  再导出
+                            _shot_num_key, _shot_seq, comfyui_client)
 
 def _autopilot_guard(fn):
     """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误
@@ -192,62 +195,6 @@ def _resolve_novel_project(data: dict, novel_meta: dict) -> dict:
             novel_meta.get("novel_id") or novel_meta.get("id") or "",
             novel_meta.get("name") or novel_meta.get("title") or "")
     return rec
-def _project_or_400(raw, field_name="project_name"):
-    """G4 收口：路由层「项目入参 → 安全键 / 400」的统一入口。
-
-    ⚠️ 不能写 `_safe_project(x) or 兜底`、也不能判 `_safe_project(x)` 的真值——
-    `safe_key('')` 返回**字面量 'project'**（真值），守卫恒不成立（死守卫），
-    漏传项目名会静默写进共享 `project` 命名空间。判空必须看**原始入参**
-    （与 api_qc_project_summary 的 G3 修复同一口径）。
-
-    A-01（F-01）加固：额外**拒绝路径穿越**入参（含 `..` / 绝对路径 / 路径分隔符）。
-    仅靠 `safe_key` 收敛会把 `../../evil` 静默变成合法键 `evil`——虽不越界写盘，
-    但把越界尝试当成正常项目混淆视听；此处直接 400，作到「越界即拒 + 不落盘」。
-    收敛后仍做一次 abspath 前缀校验作为双保险（防御未来 safe_key 规则变更）。
-
-    返回 (project, error)：error 为 None 表示合法（project 已 safe_key）；
-    否则 error 是 (jsonify, 400) 响应，直接 return 它。
-    用法::
-
-        project, err = _project_or_400((data.get('project_name') or '').strip())
-        if err is not None:
-            return err
-    """
-    if not (isinstance(raw, str) and raw.strip()):
-        return "", (jsonify({"success": False, "error": f"缺少 {field_name}"}), 400)
-    raw_s = raw.strip()
-    # task#7 口径补齐：含控制字符（如 NUL `\x00`）/ **无任何有效字符**（如 `.` `。` `…`）的
-    # 入参 → 与空串**同口径 400**。否则 `safe_key` 会把它们坍缩成共享默认键 `project`
-    # （非越界、无写盘，但会静默写进共享命名空间，且与空串口径不一致、掩盖调用方 bug）。
-    # ⚠️ 判「有效字符」只看 isalnum/_/-（与 safe_key 的存活字符一致）：中文名（isalnum 为真，
-    #    如「剑影孤城」「蛊真人精校版」）照常通过，绝不被误杀。
-    if any(ord(_c) < 32 or ord(_c) == 0x7f for _c in raw_s):
-        _app_logger().warning("[task#7] 拒绝含控制字符的项目名：%r", raw_s)
-        return "", (jsonify({"success": False,
-                             "error": f"非法的 {field_name}（含控制字符）"}), 400)
-    _cleaned = re.sub(r"[《》〈〉【】「」『』]", "", raw_s)
-    if not any((_c.isalnum() or _c in "_-") for _c in _cleaned):
-        _app_logger().warning("[task#7] 拒绝无有效字符的项目名（与空串同口径）：%r", raw_s)
-        return "", (jsonify({"success": False,
-                             "error": f"非法的 {field_name}（无有效字符）"}), 400)
-    if (raw_s.startswith(("/", "\\")) or ".." in raw_s
-            or "/" in raw_s or "\\" in raw_s
-            or os.path.isabs(raw_s) or os.path.splitdrive(raw_s)[0]):
-        _app_logger().warning("[A-01] 拒绝越界项目名（疑似路径穿越）：%r", raw_s)
-        return "", (jsonify({
-            "success": False,
-            "error": f"非法的 {field_name}（禁止路径分隔符 / 绝对路径 / 「..」）"}), 400)
-    project = _safe_project(raw_s)
-    _root = os.path.abspath(PROJECT_OUTPUT_DIR)
-    _pdir = os.path.abspath(os.path.join(PROJECT_OUTPUT_DIR, project))
-    if not _pdir.startswith(_root + os.sep):
-        _app_logger().warning("[A-01] 项目名收敛后仍越界，拒绝：%r → %r", raw_s, project)
-        return "", (jsonify({"success": False, "error": f"非法的 {field_name}"}), 400)
-    return project, None
-def _safe_project(name: str) -> str:
-    """项目名安全化（与项目注册表的项目键规则保持一致）"""
-    return project_store.safe_key(name)
-_shot_seq = shot_key.shot_seq
 
 
 _AUDIO_QC_AUDIO_EXT = ('.wav', '.mp3', '.flac', '.m4a', '.aac', '.ogg')
@@ -849,17 +796,10 @@ def register_final_deliverable(project_name: str, episode_no, video_path: str,
     return {"registered": True, "reason": "已登记", "stats": stats, "item": item}
 
 
-def _first_existing(*candidates):
-    for c in candidates:
-        if isinstance(c, str) and c and os.path.exists(c):
-            return c
-    return None
 
 
-_shot_num_key = shot_key.norm_shot_key
 
 
-comfyui_client = ComfyUIClient()
 
 
 def _quality_asset_url(kind: str, project: str, name: str) -> str:
