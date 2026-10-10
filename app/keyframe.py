@@ -335,6 +335,56 @@ def _own_start(sb_map: Dict[str, str], key: str, seq: int) -> str:
             or "")
 
 
+def prev_episode_end_frame(keyframes_dir: str) -> str:
+    """**上一集最后一镜的尾帧**路径（跨集串帧用，2026-10-10 用户要求）。
+
+    用户口径：「第一集的分镜最后一帧要传到第二集的视频生成第一个分镜里面去」。
+    即把既有的**集内**跨镜链式（上一镜尾帧 = 下一镜首帧）延伸到**集与集之间**，
+    让第 N+1 集的开场画面从第 N 集的收尾画面长出来，而不是各画各的。
+
+    目录约定（shared_project._ep_dir）：**第 1 集平铺**在 <项目>/，第 2 集起为 epNN/。
+    因此：
+      · 当前是平铺目录（即第 1 集）→ 没有上一集，返回 ""；
+      · 当前是 ep(N) → 上一集目录 = ep(N-1)，但 N-1==1 时是**平铺的项目根**。
+
+    末帧取「上一集里 shot_NN_end.png 序号最大的那个」（= 该集最后一个镜头）。
+    找不到任何尾帧（该集还没生成过关键帧）→ 返回 ""，调用方自然回退到本镜分镜图。
+
+    只读、无副作用；任何异常一律返回 ""（绝不因它让视频生成失败）。
+    """
+    try:
+        import re as _re
+        d = os.path.abspath(str(keyframes_dir or ""))
+        if not d or not os.path.isdir(d):
+            return ""
+        base = os.path.basename(d)
+        m = _re.match(r"^ep(\d+)$", base)
+        cur = int(m.group(1)) if m else 1
+        if cur <= 1:
+            return ""                      # 第 1 集之上没有上一集
+        parent = os.path.dirname(d)
+        prev_no = cur - 1
+        prev_dir = parent if prev_no <= 1 else os.path.join(parent, f"ep{prev_no:02d}")
+        if not os.path.isdir(prev_dir):
+            return ""
+        best, best_no = "", 0
+        for fn in os.listdir(prev_dir):
+            mm = _re.match(r"^shot_(\d+)_end\.png$", fn)
+            if not mm:
+                continue
+            n = int(mm.group(1))
+            p = os.path.join(prev_dir, fn)
+            try:
+                if n > best_no and os.path.isfile(p) and os.path.getsize(p) > 0:
+                    best, best_no = p, n
+            except OSError:
+                continue
+        return best
+    except Exception as e:  # noqa: BLE001 - 跨集串帧是增强，失败必须无感降级
+        logger.debug("查找上一集末帧失败（按无跨集串帧处理）：%s", e)
+        return ""
+
+
 def plan_keyframes(shots: List[dict], sb_map: Dict[str, str],
                    keyframes_dir: str, only_missing: bool = True,
                    chain_mode: str = DEFAULT_CHAIN_MODE) -> List[dict]:
@@ -355,6 +405,13 @@ def plan_keyframes(shots: List[dict], sb_map: Dict[str, str],
     prev_sid = None
     prev_end_ready = False
 
+    # ⭐ 跨集串帧（2026-10-10 用户要求）：本集**第一镜**的链式来源不是「上一镜」
+    #   而是「上一集的最后一镜」。集内链式对第一镜天然没有 prev_shot（下面 i==0
+    #   时 prev_shot is None），所以这里单独取一次上一集末帧作为它的"前序画面"。
+    #   用户口径是「要传过去」，故不受 same_scene 限制（跨集场景通常是变的，
+    #   若按同场景判据就永远不串 —— 这正是需要显式放开的地方）。
+    _xp_end = prev_episode_end_frame(keyframes_dir) if cm != "off" else ""
+
     for i, shot in enumerate(shots or []):
         sid = shot.get("shot_id", i + 1)
         seq = shot_key.shot_seq(sid, 0) or (i + 1)
@@ -362,12 +419,16 @@ def plan_keyframes(shots: List[dict], sb_map: Dict[str, str],
         own = _own_start(sb_map, key, seq)
         own_ok = bool(own) and os.path.isfile(own)
 
-        # ---- 链式首帧：上一镜尾帧 ----
+        # ---- 链式首帧：上一镜尾帧（集内）；第一镜则接**上一集末帧**（跨集）----
         chain_src, chain_from = "", None
         if cm != "off" and prev_shot is not None and prev_seq:
             if cm == "always" or same_scene(prev_shot, shot):
                 chain_src = end_frame_path(keyframes_dir, prev_seq)
                 chain_from = prev_sid
+        elif cm != "off" and prev_shot is None and _xp_end:
+            # 本集第一镜：以上一集的收尾画面作为本集开场（跨集串帧）
+            chain_src = _xp_end
+            chain_from = "prev_episode"
 
         start, chained = own, False
         if chain_src:
