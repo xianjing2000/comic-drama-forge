@@ -185,7 +185,7 @@ PLAN_DEFAULTS = {
     "max_episode_attempts": 2,     # 同一集连续失败上限，超过即挂起等人工
     # ---- 传给 pipeline 的生产配置 ----
     "style": "",
-    "target_shots": 12,
+    "target_shots": 0,             # 0 = 不预设镜数（按原文信息密度判定；显式传值时 clamp 4~40）
     # video_mode 已废弃（2026-10-01 起视频只有整集模式，pipeline 会强制归一为 episode）
     "enable_assets": True,
     "enable_video": True,

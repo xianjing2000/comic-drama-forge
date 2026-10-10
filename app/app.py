@@ -9697,7 +9697,13 @@ def api_novel_episodes_generate(novel_id):
 
     data = request.json or {}
     style = (data.get('style') or '3D动漫渲染').strip() or '3D动漫渲染'
-    target_shots = max(4, min(int(data.get('target_shots') or NOVEL_DEFAULT_SHOTS), 40))
+    # ⭐ 2026-10-10：0 = 不预设镜数（由原文信息密度决定）；显式传值仍 clamp 到 4~40。
+    try:
+        _ts_raw = int(data.get('target_shots')
+                      if data.get('target_shots') not in (None, '') else NOVEL_DEFAULT_SHOTS)
+    except (TypeError, ValueError):
+        _ts_raw = NOVEL_DEFAULT_SHOTS
+    target_shots = 0 if _ts_raw <= 0 else max(4, min(_ts_raw, 40))
     overwrite = bool(data.get('overwrite'))
     style = _apply_project_settings(style, data.get('project_name') or novel_id)
 

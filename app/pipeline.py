@@ -232,7 +232,7 @@ DEFAULT_CONFIG = {
     "novel_id": "",                # 小说 id（必填）
     "project_key": "",             # 项目键（缺省由 novel_id 推导）
     "style": "",                   # 总控 AI 敲定的风格描述
-    "target_shots": 12,            # 每集目标镜头数
+    "target_shots": 0,             # 每集目标镜头数下限；0 = 不预设（按原文信息密度判定）
     # ---- 范围 ----
     "episodes": "all",             # "all" 或 [1,2,3]
     "overwrite_script": False,     # 是否覆盖已存在的剧本
@@ -887,7 +887,7 @@ def step_script(ctx) -> dict:
 
     conv = A.continuity.convert_chapter_with_continuity(
         client, ctx["novel_meta"], text, chapter, ctx["project_key"], A.CONTINUITY_DIR,
-        style=cfg.get("style") or "", target_shots=int(cfg.get("target_shots") or 12),
+        style=cfg.get("style") or "", target_shots=int(cfg.get("target_shots") or 0),
         episode_no=ctx["episode_no"], save_dir=A.SCRIPT_DIR, progress_cb=_cb,
         screenplay_text=screenplay_text,
     )
@@ -1605,7 +1605,7 @@ def _prefetch_next_scripts(ctx: dict, limit: int = 1) -> None:
         meta = ctx["novel_meta"]
         key = ctx["project_key"]
         style = ctx["config"].get("style") or ""
-        target_shots = int(ctx["config"].get("target_shots") or 12)
+        target_shots = int(ctx["config"].get("target_shots") or 0)
         # 只预取下一集，防止一口气把后续全部章节都跑掉
         next_no = int(ctx["episode_no"] or 0) + 1
         import autopilot as _autopilot

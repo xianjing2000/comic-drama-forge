@@ -194,7 +194,13 @@ AI_MODULES = ("text", "qc", "chat")
 # ⚠️ 2026-10-05：实际分块以 novel_to_script.CHUNK_CHARS=2400 为唯一事实源。
 # 旧 NOVEL_CHUNK_CHARS=3000 / NOVEL_MAX_CHUNKS=8 已随整本转剧本路径（/api/novels/<id>/convert）
 # 下线而删除，勿再加回。
-NOVEL_DEFAULT_SHOTS = 12        # 默认目标镜头数
+# 默认目标镜头数：**0 = 不预设**（2026-10-10 用户指定）。
+# 语义：镜数交给模型按原文信息密度自行判定 —— 原文信息量大就多切、少就少切，
+# 不再用一个固定数字当**下限**把内容摊薄或灌水。
+# ⚠️ 此前这里的 12 会被写进提示词的【硬性约束】("shots 数组元素个数必须在 12 ~ 16 之间")，
+#    而同一份模板里又写着「本片目标是每集 20~30 个镜头」—— 两条指令自相矛盾。
+# 显式传 4~40 仍可按题材指定下限（如悬疑推理 18~30）。
+NOVEL_DEFAULT_SHOTS = 0
 NOVEL_PREVIEW_CHARS = 4000      # 前端预览单页字符数
 NOVEL_BRIEF_CHARS = 800         # 「原著简报」正文取样字符数（喂给 AI 总控做风格判断，≤ agent 结果窗口）
 # 单次 LLM 请求超时（秒）。⚠️ 必须可 env 覆盖：reasoning_effort=max + 长章节（数千字正文）
@@ -434,7 +440,7 @@ def norm_video_mode(value, default: str = "episode") -> str:
 PROJECT_DEFAULT_CONFIG = {
     "style": "3D动漫渲染",              # 创作风格
     "episodes": 1,                      # 目标集数
-    "target_shots": 12,                 # 目标镜头数（AI 转剧本时自动判定，此处为期望值）
+    "target_shots": 0,                  # 目标镜头数下限；**0 = 不预设**，由模型按原文信息密度判定
     "shots_per_episode": 12,
     "episode_duration_sec": 90,         # 每集期望时长（秒）
     # ⚠️ 2026-09-26 口径变更：每集时长产品口径 = **1~2 分钟、最长 3 分钟**

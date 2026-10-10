@@ -1093,7 +1093,27 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         # 调用方显式给了额度时，它是**权威**：目标也不得超过它，否则 prompt 自相矛盾
         #（「至少 25 个、上限 6 个」）。⚠️ 2026-10-09 起主流程不再传单集上限（按场次生产）。
         shots_target = max(1, min(shots_target, _hard))
-    shots_cap = max(shots_target, min(120, int(math.ceil(shots_target * SHOT_CAP_GROWTH))))
+    # ⭐ 2026-10-10（用户指定「不默认每集镜头数」）：
+    #    shots_target <= 0 = **不预设下限**，镜数交给模型按原文信息密度判定；
+    #    > 0 时保持旧行为（下限 + cap）。
+    #    为什么要开放：固定的默认 12 会被写进【硬性约束】当**下限**，而同一份模板里
+    #    又写着「本片目标是每集 20~30 个镜头」—— 自相矛盾，且会把内容摊薄/灌水。
+    if shots_target > 0:
+        shots_cap = max(shots_target, min(120, int(math.ceil(shots_target * SHOT_CAP_GROWTH))))
+        _shots_min_text = f"至少 {shots_target} 个"
+        _shots_range_text = f"shots 数组元素个数必须在 {shots_target} ~ {shots_cap} 之间"
+        _shots_targeting_text = (f"本块镜数下限 {shots_target} 个（原文信息量更大时可多于它，"
+                                 f"上限 {shots_cap} 个）。")
+    else:
+        # 无下限：cap 取「单集镜数上限」口径（config.SHOT_GRANULARITY_MAX_SHOTS=30 的
+        # 1.33 倍余量，与 app.py 的 target_shots 硬上限 40 对齐），仅作防爆护栏。
+        shots_cap = max(12, min(120, int(math.ceil(SHOT_GRANULARITY_MAX_SHOTS * SHOT_CAP_GROWTH))))
+        _shots_min_text = "数量由你按本块原文的信息密度判定（**不设下限**）"
+        _shots_range_text = (f"shots 数组元素个数**不得超过 {shots_cap} 个**（**不设下限**）")
+        _shots_targeting_text = (
+            "**镜数不预设**——由你按本块原文的**信息密度**判定：冲突/转折/关键动作/金句密集"
+            "就多切镜，情节单薄就少切镜；既**不要为凑数灌水**（同一件事补插入镜、把一个动作"
+            "拆成几镜），也**不要为省事把原文情节合并丢掉**。")
     if _hard > 0:
         shots_cap = min(shots_cap, max(shots_target, _hard))
     speech_budget = SHOT_SPEECH_BUDGET_CHARS
@@ -1116,6 +1136,9 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
             chunk_total=chunk['total'],
             target_shots=shots_target,
             shots_cap=shots_cap,
+            shots_min_text=_shots_min_text,
+            shots_range_text=_shots_range_text,
+            shots_targeting_text=_shots_targeting_text,
             style=bible.get('style') or '',
             style_guide=(_ctx_block(continuity_ctx, 'style_guide_text')
                          or (bible.get('production_notes') or {}).get('style_guide') or ''),
@@ -1140,8 +1163,8 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         # 兜底：用户覆盖 / 出厂模板 / 代码内注册兜底三级都不可用时走原 f-string（正文与
         # app/prompts/script_generate.txt 的骨架、prompt_templates._DEFAULT_SCRIPT_GENERATE
         # 逐字一致，仅占位符由运行时值填充）。
-        prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：至少 {shots_target} 个、上限 {shots_cap} 个。把下方原文**压缩提炼**成可拍摄的镜头，只保留推动剧情的关键情节（冲突/转折/关键动作/金句），纯背景铺陈直接删去、勿逐句照搬。
-【粒度口径（2026-10-06 用户指定，**务必先读**）】本片目标是**每集 20~30 个镜头、每镜 5~6 秒**（不是每镜 2 秒的快切）。
+        prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：{_shots_min_text}、上限 {shots_cap} 个。把下方原文**压缩提炼**成可拍摄的镜头，只保留推动剧情的关键情节（冲突/转折/关键动作/金句），纯背景铺陈直接删去、勿逐句照搬。
+【粒度口径（**务必先读**）】{_shots_targeting_text}每镜 5~6 秒（不是每镜 2 秒的快切）。
   · **镜数少了不等于少写情节**：目标镜数变少时，请把相邻的连续情节**合并进同一个镜头**（一个镜头里可以容纳一个完整的动作过程、以及前后两段关键情节），而**不是**把原文情节丢掉。原文里的冲突/转折/关键动作/金句仍必须**全部**落到镜头里 —— 本系统对原文覆盖率有硬校验，漏情节会导致整集重跑。
   · **不要把一个完整动作拆成几个镜头**：「抬手→握拳→挥出」是**一个**镜头里的连续动作，不是三个镜头。只有当**空间/时间/视角真的发生跳跃**（换了地点、跳了时间、要强调另一个主体）时才切镜。
   · **不要为同一件事再补一个镜头**：已经拍过的道具/手部，不要为了「规避人脸」再单独切一个几乎同画面的插入镜。
@@ -1178,7 +1201,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 ②本镜是时空回溯的落点（kind=回溯，如「春秋蝉，逆转时光。」）；
 ③本集结尾仍有未回收伏笔、需要留住悬念（kind=悬念）。
 **其余镜头一律写空对象**——字幕滥用会打断观感。caption.text ≤20 字，只写交代时空或悬念的短句；**禁止**复述台词、禁止写画面描述、禁止把台词搬进字幕。
-【硬性约束】shots 数组元素个数必须在 {shots_target} ~ {shots_cap} 之间：只把原文里**推动剧情的冲突/转折/关键动作/金句**落到镜头里，纯背景补叙、纯环境描写（不推进剧情）**直接删去、不单独成镜**；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
+【硬性约束】{_shots_range_text}：只把原文里**推动剧情的冲突/转折/关键动作/金句**落到镜头里，纯背景补叙、纯环境描写（不推进剧情）**直接删去、不单独成镜**；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
 【关键情节自检】写完回看上方「剧情摘要/情节要点」，确认每个关键情节都有对应镜头；纯背景补叙、纯环境描写若未推进剧情应当已删去，**不要求逐句覆盖原文**。记住：本系统没有旁白，背景补叙与环境描写靠画面承载、绝不写成台词，心理活动靠神态动作或第一人称角色自语承载。"""
     label = f"shots#{chunk.get('index')}"
     hit = _cache_get(cache_dir, "shots", prompt, events, label)

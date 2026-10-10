@@ -1806,7 +1806,7 @@ def _run_parallel_steps(steps: list) -> list:
 
 def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, chapter: dict,
                                     project_key: str, continuity_dir: str, *,
-                                    style: str = "3D动漫渲染", target_shots: int = 12,
+                                    style: str = "3D动漫渲染", target_shots: int = 0,
                                     episode_no: int = 1, save_dir: str = None,
                                     enable_rewrite: bool = True,
                                     progress_cb=None, force_refresh_assets: bool = False,
