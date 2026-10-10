@@ -62,7 +62,9 @@ _PROJECT_ROOT = os.path.abspath(
 _DB_PATH = os.getenv("MJSCXT_CRED_DB") or os.path.join(_PROJECT_ROOT, "output", "tasks.db")
 
 # 三个 AI 模块（与 ai_config.MODULES 对齐；qc 即质检视觉模型）
-MODULES = ("text", "qc", "chat")
+# ⭐ 2026-10-10：原为本地重复定义（3 处同值），统一到 config.AI_MODULES ——
+# 改一处即可，不再有「改了这本、漏了那本」。
+from config import AI_MODULES as MODULES
 
 _CREDS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_credentials (

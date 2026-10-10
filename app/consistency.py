@@ -44,8 +44,10 @@ from fs_atomic import atomic_write_json, read_json_strict
 
 logger = logging.getLogger(__name__)
 
-_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-CONTINUITY_DIR = os.path.join(_ROOT_DIR, "output", "continuity")
+# ⭐ 2026-10-10 同 nle_export 的 bug：用 __file__ 上级自算数据目录，绕过数据根。
+#   设置 MJSCXT_DATA_DIR 后，一致性数据写在数据根，这里却去代码目录读 → 读不到。
+#   统一从 config 取（跟随 PROJECT_DATA_DIR）。旧的 _ROOT_DIR 已无其他用途，一并移除。
+from config import CONTINUITY_DIR  # noqa: F401
 
 # 判定阈值（可被环境变量覆盖）
 PASS_SCORE = int(os.getenv("MJSCXT_CONSISTENCY_PASS", "70"))   # ≥ 视为一致

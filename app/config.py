@@ -707,6 +707,13 @@ UPSCALE_CALIBRATION_PATH = os.path.join(UPSCALE_DIR, "calibration.json")
 # ===================== 配音（QwenTTS） =====================
 # 配音产物目录：output/dub/<项目>/lines/ 单句 + output/dub/<项目>/<项目>_epNN_配音.wav 合并音轨
 DUB_DIR = os.path.join(PROJECT_OUTPUT_DIR, "dub")
+# ⭐ 2026-10-10：NLE 导出目录此前**只在 nle_export.py 里用 __file__ 上级硬算**
+# （= 代码所在目录），绕过了数据根重定向 → 生产产物在 mjscxt-data 而导出写到工作区。
+# 统一到 config 之后，它与其他所有产物目录一样跟随 PROJECT_DATA_DIR。
+EXPORT_DIR = os.path.join(PROJECT_OUTPUT_DIR, "export")
+# ⭐ 2026-10-10：analytics 此前在 analytics.py 里用 __file__ 上级硬算（= 代码目录），
+# 导致成本/事件数据写进代码目录而非数据根。统一到 config。
+ANALYTICS_DIR = os.path.join(PROJECT_OUTPUT_DIR, "analytics")
 
 # QwenTTS 默认合成参数（前端可按角色覆盖 speaker / instruct / seed 等）
 TTS_DEFAULT_PARAMS = {

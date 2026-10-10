@@ -44,12 +44,14 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-EXPORT_DIR = os.path.join(_ROOT_DIR, "output", "export")
-VIDEOS_DIR = os.path.join(_ROOT_DIR, "output", "videos")
-# 历史遗留：tts 整集配音下线后，output/dub 不再新增整集配音轨（仅存 voice_bank 参考音色库）
-DUB_DIR = os.path.join(_ROOT_DIR, "output", "dub")
-STORYBOARDS_DIR = os.path.join(_ROOT_DIR, "output", "storyboards")
+# ⭐⭐ 2026-10-10 用户指出「一个值散在多处、改一处漏四处」后查出的**真 bug**：
+#   本模块原先用 __file__ 上级自算 _ROOT_DIR，再拼 output/{export,videos,dub,storyboards}。
+#   而 _ROOT_DIR 是**代码所在目录**，不是数据根 —— 一旦设置 MJSCXT_DATA_DIR（桌面版
+#   就会设，指向 %APPDATA%/mjscxt-desktop/mjscxt-data），生产产物落在数据根，
+#   这里却仍去代码目录找 → NLE 导出**永远找不到视频/分镜/配音**。
+#   现统一从 config 取（跟随 PROJECT_DATA_DIR），与其余产物目录同一事实源。
+#   同时删除 _ROOT_DIR —— 它只服务于这几个路径，留着就是第二个事实源。
+from config import DUB_DIR, EXPORT_DIR, STORYBOARDS_DIR, VIDEOS_DIR  # noqa: F401
 
 # 剪映工程 FPS / 画布（竖屏漫剧默认；H3 成片 24fps）
 JY_FPS = 24

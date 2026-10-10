@@ -127,7 +127,9 @@ def _locked(fn):
     return _wrapper
 
 # 三个独立模块的键（顺序即前端展示顺序）
-MODULES = ("text", "qc", "chat")
+# ⭐ 2026-10-10：原为本地重复定义（3 处同值），统一到 config.AI_MODULES ——
+# 改一处即可，不再有「改了这本、漏了那本」。
+from config import AI_MODULES as MODULES
 
 MODULE_META = {
     "text": {

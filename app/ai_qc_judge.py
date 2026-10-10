@@ -22,8 +22,6 @@ from typing import List
 
 logger = logging.getLogger(__name__)
 
-# 项目根目录
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # 处理策略定义
 HANDLING_STRATEGIES = {

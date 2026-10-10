@@ -8,10 +8,12 @@ import logging
 from typing import List, Dict, Optional
 from datetime import datetime
 
-from config import ANTHROPIC_API_KEY, LLM_PROVIDER, SCRIPT_DIR, PROJECT_OUTPUT_DIR
+from config import (ANTHROPIC_API_KEY, LLM_PROVIDER, QC_CONFIG_PATH, SCRIPT_DIR,
+                    PROJECT_OUTPUT_DIR)
 
-# 项目根目录
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# ⭐ 2026-10-10：原先这里自算 _PROJECT_ROOT（= 代码目录）并据此读 qc_config.json，
+#   而真正的 qc_config.json 在数据根（config.QC_CONFIG_PATH）→ 设置 MJSCXT_DATA_DIR
+#   后必然读不到。统一走 config，删掉这个第二事实源。
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -108,7 +110,7 @@ class ScriptGenerator:
         import prompt_memory
         
         # 获取质检配置
-        qc_config_path = os.path.join(_PROJECT_ROOT, "qc_config.json")
+        qc_config_path = QC_CONFIG_PATH
         qc_cfg = qc_client.load_config(qc_config_path)
         
         attempts = []

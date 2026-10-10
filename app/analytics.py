@@ -33,9 +33,9 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# 项目根目录
-_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-ANALYTICS_DIR = os.path.join(_ROOT_DIR, "output", "analytics")
+# ⭐ 2026-10-10：同 script_generator —— 原先用 __file__ 上级硬算 output/analytics
+# （= 代码目录），绕过数据根。统一从 config 取。
+from config import ANALYTICS_DIR  # noqa: F401
 EVENTS_PATH = os.path.join(ANALYTICS_DIR, "events.jsonl")
 
 _LOCK = threading.Lock()

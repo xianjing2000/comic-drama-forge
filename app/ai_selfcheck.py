@@ -29,11 +29,13 @@ import time
 
 logger = logging.getLogger(__name__)
 
-_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-_AI_CONFIG_PATH = os.path.join(_ROOT_DIR, "ai_config.json")
-_LLM_CONFIG_PATH = os.path.join(_ROOT_DIR, "llm_config.json")
+# ⭐ 2026-10-10：原先在代码目录找 ai_config.json / llm_config.json，而它们在数据根。
+#   config 已有这两个路径常量，直接复用（避免第二事实源）。
+from config import AI_CONFIG_PATH as _AI_CONFIG_PATH, LLM_CONFIG_PATH as _LLM_CONFIG_PATH
 
-MODULES = ("text", "qc", "chat")
+# ⭐ 2026-10-10：原为本地重复定义（3 处同值），统一到 config.AI_MODULES ——
+# 改一处即可，不再有「改了这本、漏了那本」。
+from config import AI_MODULES as MODULES
 
 MODULE_LABELS = {
     "text": "文本分析模型",

@@ -36,7 +36,6 @@ from typing import Callable, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PLUGINS_DIR = os.path.join(os.path.dirname(__file__), "plugins")
 
 # 插件类别
