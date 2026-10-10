@@ -5,7 +5,7 @@
 一律产出：
 
     def _STATIC_DIR(*_a, **_kw):
-        """该函数是 app.py 里的路由视图…"""
+        '''该函数是 app.py 里的路由视图…'''   # noqa: 内层用三单引号，避免提前结束本 docstring
         import app as _root_app
         return getattr(_root_app, '_STATIC_DIR')(*_a, **_kw)
 
