@@ -71,8 +71,8 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     #    是全表唯一的不可逆项。现正名为 novel_default_shots；
     #    target_shots 作为**别名**保留（旧调用方仍可读写，见 config_center.ALIASES）。
     'novel_default_shots': {
-        'default': 0, 'type': 'int', 'range': (0, 500), 'group': '剧本',
-        'desc': '每集目标镜数；0 = 不预设（用户口径：上下限都不限制）',
+        'default': 0, 'type': 'int', 'range': (0, 2000), 'group': '基础配置',
+        'desc': '显式传 4~40 仍可按题材指定下限（如悬疑推理 18~30）。',
         'owner': 'config.NOVEL_DEFAULT_SHOTS',
     },
     'auto_screenplay': {
@@ -199,11 +199,6 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'desc': ': 台账最多保留多少条（超上限按时间淘汰最旧）。',
         'owner': 'comfyui_job_store.DEFAULT_MAX_ENTRIES',
     },
-    'novel_default_shots': {
-        'default': 0, 'type': 'int', 'range': (0, 2000), 'group': '基础配置',
-        'desc': '显式传 4~40 仍可按题材指定下限（如悬疑推理 18~30）。',
-        'owner': 'config.NOVEL_DEFAULT_SHOTS',
-    },
     'shot_duration_desc_sec_max': {
         'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '基础配置',
         'desc': ': 画面描述带来的时长加成上限（旧值 2.0s）+ 折算系数（每多少字给 1 秒）',
@@ -261,8 +256,11 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'max_segment_loras': {
         'default': 8, 'type': 'int', 'range': (0, 100), 'group': 'H3 导演台',
-        'desc': ': 段级 LoRA 条数上限（与插件 ``segment_loras.normalize_lora_rows`` 一致，=8）',
-        'owner': 'h3_director_builder.MAX_SEGMENT_LORAS',
+        'desc': '段级 LoRA 条数上限（与插件 segment_loras.normalize_lora_rows 一致，=8）。'
+                '⚠️ 该常量在 h3_segment_loras 与 h3_director_builder **两处各定义一份**，'
+                '故用 must_match 锁死同值 —— 改一处两处一起改。',
+        'owner': 'h3_segment_loras.MAX_SEGMENT_LORAS',
+        'must_match': ['h3_director_builder.MAX_SEGMENT_LORAS'],
     },
     'beat_max_sec': {
         'default': 6.0, 'type': 'float', 'range': (0.0, 60.0), 'group': 'H3 提示词',
@@ -278,11 +276,6 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': 1.5, 'type': 'float', 'range': (0.0, 60.0), 'group': 'H3 提示词',
         'desc': ': ``ceil(duration / H3_SEGMENT_MAX_SEC)`` 的基础上，把余数摊平而非留一个超短尾段。',
         'owner': 'h3_prompt_kit.H3_SEGMENT_MIN_SEC',
-    },
-    'max_segment_loras': {
-        'default': 8, 'type': 'int', 'range': (0, 100), 'group': 'H3 LoRA',
-        'desc': 'MAX_SEGMENT_LORAS',
-        'owner': 'h3_segment_loras.MAX_SEGMENT_LORAS',
     },
     'style_lora_min_strength': {
         'default': 0.6, 'type': 'float', 'range': (0.0, 1.0), 'group': 'H3 LoRA',
@@ -305,9 +298,10 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'llm_client.TIMEOUT_MAX_ATTEMPTS',
     },
     'min_tokens_when_thinking': {
-        'default': 1024, 'type': 'int', 'range': (0, 10000000), 'group': 'LLM',
-        'desc': '允许思考时的最小 max_tokens：思考本身就要吃掉几百 token，额度太小必然空正文',
+        'default': 1024, 'type': 'int', 'range': (0, 200000), 'group': 'LLM',
+        'desc': '允许思考时的最小 max_tokens（太小必然只剩思考、正文为空）',
         'owner': 'llm_client.MIN_TOKENS_WHEN_THINKING',
+        'must_match': ['qc_client.MIN_TOKENS_WHEN_THINKING'],
     },
     'max_tail': {
         'default': 2000, 'type': 'int', 'range': (0, 10000000), 'group': '运维',
@@ -393,11 +387,6 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
         'desc': ': 预演每段时长的下限（与 h3_prompt_kit 的段时长下限同量级）。',
         'owner': 'preview_gate.MIN_PREVIEW_SEGMENT_SEC',
-    },
-    'min_tokens_when_thinking': {
-        'default': 1024, 'type': 'int', 'range': (0, 10000000), 'group': '质检',
-        'desc': 'MIN_TOKENS_WHEN_THINKING',
-        'owner': 'qc_client.MIN_TOKENS_WHEN_THINKING',
     },
     'desc_to_dialogue_ratio_max': {
         'default': 3.0, 'type': 'float', 'range': (0.0, 100.0), 'group': '质检',
@@ -505,6 +494,49 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'tts_client.VOICE_BANK_MAX_SEC',
     },
 
+    # ===== 2026-10-10 补登：孤儿检测发现的「可配置但漏登记」项 =====
+    # 来源：按与生成时相同的规则重扫，找出「符合可配置特征但不在 REGISTRY」的常量。
+    # 其中 DISABLE_THINKING_DEFAULT / MIN_TOKENS_WHEN_THINKING 都是**同一语义两处定义**
+    # （llm_client 与 qc_client 各一份），正是用户担心的「改一处漏一处」场景，
+    # 故用 must_match 显式声明，回写时会两处一起改。
+    'disable_thinking_default': {
+        'default': False, 'type': 'bool', 'range': None, 'group': 'LLM',
+        'desc': '是否默认关闭模型思考（2026-09-17 起改为 False = 允许思考；'
+                '关思考会让质检退化成直觉判断，漏掉明显问题）',
+        'owner': 'llm_client.DISABLE_THINKING_DEFAULT',
+        'must_match': ['qc_client.DISABLE_THINKING_DEFAULT'],
+    },
+    'shot_duration_silent': {
+        'default': 0.6, 'type': 'float', 'range': (0.0, 60.0), 'group': '镜头',
+        'desc': '无台词纯画面镜头的最短秒数',
+        'owner': 'config.SHOT_DURATION_SILENT',
+    },
+    'chars_per_second': {
+        'default': 4.5, 'type': 'float', 'range': (0.5, 30.0), 'group': '镜头',
+        'desc': '中文配音语速（字/秒），用于台词时长折算',
+        'owner': 'config.CHARS_PER_SECOND',
+    },
+    'beat_climax_bonus_sec': {
+        'default': 0.7, 'type': 'float', 'range': (0.0, 30.0), 'group': '镜头',
+        'desc': '「高潮」节拍镜的时长加成（秒）',
+        'owner': 'config.BEAT_CLIMAX_BONUS_SEC',
+    },
+    'shot_granularity_target_sec': {
+        'default': 5.5, 'type': 'float', 'range': (0.5, 120.0), 'group': '镜头',
+        'desc': '每镜目标秒数（用户口径 5~6 秒）',
+        'owner': 'config.SHOT_GRANULARITY_TARGET_SEC',
+    },
+    'chapter_dev_tolerance': {
+        'default': 0.25, 'type': 'float', 'range': (0.0, 1.0), 'group': '连贯性',
+        'desc': '章节锚定的字数偏差容差（0.25 = ±25%）',
+        'owner': 'script_consistency.CHAPTER_DEV_TOLERANCE',
+    },
+    'element_coverage_min': {
+        'default': 0.6, 'type': 'float', 'range': (0.0, 1.0), 'group': '连贯性',
+        'desc': '要素覆盖率达标线（低于此值判未覆盖）',
+        'owner': 'script_consistency.ELEMENT_COVERAGE_MIN',
+    },
+
 }
 
 
@@ -603,6 +635,15 @@ def doctor() -> Dict[str, Any]:
             rep['warnings'].append(
                 '命名不统一【' + _f['family'] + '】前缀式 ' + str(_f['prefix_style']) +
                 ' 个 / 后缀式 ' + str(_f['suffix_style']) + ' 个。建议：' + _f['suggested'])
+    # 孤儿检测（2026-10-10 补强）：找出「该登记却没登记」的可配置常量 ——
+    # 只做「登记 vs 实际值」检查发现不了它们，而未登记项被改动正是老问题重现的入口。
+    rep['orphans'] = orphan_candidates()
+    if rep['orphans'].get('count'):
+        rep['warnings'].append(
+            '发现 %s 个可配置常量未登记（改动它们不会被同步、也不会被体检发现）：%s'
+            % (rep['orphans']['count'],
+               ', '.join(x['module'] + '.' + x['name']
+                         for x in rep['orphans']['items'][:8])))
     rep['prompts'] = prompt_fingerprints()
     for m in (rep['prompts'].get('mismatch') or []):
         rep['ok'] = False
@@ -672,6 +713,72 @@ def naming_report() -> Dict[str, Any]:
         if mixed:
             out['mixed_families'].append(label)
     return out
+
+
+
+
+def orphan_candidates() -> Dict[str, Any]:
+    """找出「符合可配置特征、但没在 REGISTRY 登记」的常量（2026-10-10 补强）。
+
+    为什么需要：此前只有「登记 vs 实际值」检查，能发现「登记了但值不对」，
+    却**发现不了「该登记却没登记」** —— 而未登记的常量被改动时，正是
+    「改一处漏一处」重新出现的入口（实测查出 10 个，其中 DISABLE_THINKING_DEFAULT、
+    MIN_TOKENS_WHEN_THINKING 都是同一语义两处定义）。规则与当初生成 REGISTRY 时一致。
+    只报不改。
+    """
+    import re as _re
+    base = os.path.dirname(os.path.abspath(__file__))
+    pat = _re.compile(r'^([A-Z][A-Z0-9_]{2,})\s*(?::\s*[^=]+)?=\s*(.+)$')
+    cfg = ('THRESHOLD', 'RATIO', 'RATE', 'ROUNDS', 'RETRIES', 'RETRY', 'MAX_', 'MIN_',
+           'LIMIT', 'BUDGET', 'ENABLED', 'ENABLE_', 'DISABLE', 'TIMEOUT', 'SECONDS', '_SEC',
+           'CHARS', 'SHOTS', 'TOKENS', 'SCORE', 'PASS_', 'WEIGHT', 'SIZE', 'COUNT',
+           'DURATION', '_MAX', '_MIN', 'TOLERANCE', 'GAP', 'SCALE', 'FACTOR', 'MODE',
+           'LEVEL', 'PERCENT')
+    impl = ('_RE', '_PATTERN', 'REGEX', '_REGEX', 'URL', 'PATH', '_DIR', 'DIR_', 'EXT',
+            'EXTENSION', '_SUFFIX', '_PREFIX', 'PROMPT', 'TEMPLATE', '_TXT', 'MARKER',
+            'SENTINEL', 'KEY', 'HEADER', 'MIME', '_VERSION_', 'SCHEMA', 'TABLE', 'COLUMN',
+            'ENUM', '_NAMES', 'ALIASES', 'MAP', '_TYPES', '_VALUES', '_LIST', '_SET')
+    owners = set()
+    for _k, _v in REGISTRY.items():
+        owners.add(str(_v.get('owner') or ''))
+        for _m in (_v.get('must_match') or []):
+            owners.add(str(_m))
+    out = []
+    try:
+        for fn in sorted(os.listdir(base)):
+            if not fn.endswith('.py') or fn.startswith('_'):
+                continue
+            try:
+                src = open(os.path.join(base, fn), encoding='utf-8').read()
+            except Exception:  # noqa: BLE001
+                continue
+            for ln in src.split(chr(10)):
+                m = pat.match(ln)
+                if not m:
+                    continue
+                name, val = m.group(1), m.group(2).strip()
+                if name.startswith('_') or len(name) < 4:
+                    continue
+                t = 'str'
+                if _re.match(r'^(True|False)$', val):
+                    t = 'bool'
+                elif _re.match(r'^-?\d+$', val):
+                    t = 'int'
+                elif _re.match(r'^-?\d+\.\d+', val):
+                    t = 'float'
+                if t not in ('int', 'float', 'bool'):
+                    continue
+                if any(k in name.upper() for k in impl):
+                    continue
+                if not any(k in name.upper() for k in cfg):
+                    continue
+                dotted = fn[:-3] + '.' + name
+                if dotted in owners:
+                    continue
+                out.append({'module': fn[:-3], 'name': name, 'type': t, 'value': val[:30]})
+    except Exception as e:  # noqa: BLE001
+        return {'ok': False, 'error': str(e)[:200]}
+    return {'ok': True, 'count': len(out), 'items': out}
 
 
 def summary_line() -> str:
