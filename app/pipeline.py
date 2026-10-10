@@ -249,6 +249,13 @@ DEFAULT_CONFIG = {
     #    （只填 prompt_enhance 的进程内缓存，零 GPU、不落产物）。正式生成时命中缓存秒过。
     #    env MJSCXT_PREWARM_ASSET_PROMPT=0 可强制关闭。
     "prewarm_asset_prompt": True,
+    # ⭐ 2026-10-10（用户指定「文学剧本无需人审」）：文学剧本自动生成，默认开。
+    #    True = 剧本步骤开始时若文学剧本不存在，自动用 LLM 生成（约 2-3 分钟），
+    #    产物落盘 output/screenplays/<项目>/第N集_文学剧本.md 供前端查看。
+    #    ⚠️ 只产出文件，**不改变生产输入** —— 是否以它为原文由 use_screenplay 决定
+    #    （默认 false = 用章节原文；多一层 LLM 改写会多一次精确文本被压缩的风险）。
+    #    env MJSCXT_AUTO_SCREENPLAY=0 可强制关闭。
+    "auto_screenplay": True,
     # ---- 各环节开关 ----
     "enable_assets": True,
     "enable_video": True,
@@ -295,7 +302,7 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
         except (TypeError, ValueError):
             cfg[k] = DEFAULT_CONFIG[k]
     # 布尔开关：前端可能传字符串/0/1（JSON 类型不可信）→ 统一收敛为 bool
-    for k in ("prewarm_next_script", "prewarm_asset_prompt"):
+    for k in ("prewarm_next_script", "prewarm_asset_prompt", "auto_screenplay"):
         v = cfg.get(k)
         if isinstance(v, str):
             cfg[k] = v.strip().lower() not in ("0", "false", "off", "no", "")
@@ -859,9 +866,71 @@ PROBES = {
 #                          "error": str, "detail": {...}, "artifact": str}
 
 
+def _auto_screenplay(ctx: dict) -> None:
+    """文学剧本自动生成（2026-10-10 用户指定「无需人审」）。
+
+    原设计（2026-10-03 两段式）：文学剧本是**人审层**，只在界面上手动点「生成」——
+    用户明确要求「文学剧本无需人审」，故改为自动产出：本函数在剧本步骤**最开头**
+    （probe_script 早返回**之前**）执行，缺则生成、已存在则跳过，
+    写盘 output/screenplays/<项目>/第N集_文学剧本.md 供前端查看/留档。
+
+    ⚠️ **不改生产输入**：只产出文学剧本文件；分镜剧本仍按 config.use_screenplay
+    决定是否以它作为「原文」（默认 false = 用章节原文）。刻意保持这个分离 ——
+    多一层 LLM 改写就多一次精确文本（如规则条款）被压缩的风险，是否启用应由用户决定。
+
+    ⚠️ fail-open：任何失败只记日志，绝不影响主流程。
+    开关：env MJSCXT_AUTO_SCREENPLAY=0，或计划字段 auto_screenplay=false。
+    """
+    try:
+        import os as _os
+        if str(_os.environ.get('MJSCXT_AUTO_SCREENPLAY') or '1').strip().lower() \
+                in ('0', 'false', 'off', 'no'):
+            return
+        cfg = ctx.get('config') or {}
+        _flag = cfg.get('auto_screenplay')
+        if _flag is not None:
+            if isinstance(_flag, str):
+                if _flag.strip().lower() in ('0', 'false', 'off', 'no', ''):
+                    return
+            elif not _flag:
+                return
+        import novel_screenplay as _ns
+        key = str(ctx.get('project_key') or '')
+        ep = int(ctx.get('episode_no') or 1)
+        if not key:
+            return
+        if _ns.load_screenplay(key, ep):
+            return   # 已存在 → 幂等跳过
+        client = _A()._current_llm_client()
+        if not client or not getattr(client, 'configured', False):
+            logger.warning('文学剧本自动生成：文本模型未配置，跳过')
+            return
+        chapter = ctx.get('chapter') or {}
+        meta = ctx.get('novel_meta') or {}
+        text = str(chapter.get('text') or '')
+        if not text:
+            text = _A().read_novel_text(_A().NOVELS_DIR, meta.get('novel_id')) or ''
+        if not text:
+            logger.warning('文学剧本自动生成：章节正文为空，跳过')
+            return
+        try:
+            ctx['progress']('生成文学剧本（自动，无需人审）…', 2, phase='script:screenplay')
+        except Exception:  # noqa: BLE001
+            pass
+        md = _ns.generate_screenplay(
+            client, str(meta.get('title') or meta.get('novel_id') or ''),
+            str(chapter.get('title') or ''), text, cfg.get('style') or '')
+        path = _ns.save_screenplay(_ns.screenplay_path(key, ep), md)
+        logger.info('文学剧本已自动生成：第%s集 %d 字 → %s', ep, len(md), path)
+    except Exception as e:  # noqa: BLE001  文学剧本失败绝不影响主流程
+        logger.warning('文学剧本自动生成失败（不影响主流程）：%s', e)
+
 def step_script(ctx) -> dict:
     """章节正文 → 结构化剧本（含原文覆盖率守门 + 跨集连贯性编排）"""
     A = _A()
+    # 文学剧本自动生成（2026-10-10 用户指定「无需人审」）——必须放在
+    #    probe_script 早返回之前，否则剧本已存在的断点续跑永远不会生成它。
+    _auto_screenplay(ctx)
     if probe_script(ctx) and not ctx["config"].get("overwrite_script"):
         return {"ok": True, "skipped": True, "artifact": _script_path(ctx),
                 "detail": {"note": "剧本已存在，跳过（断点续跑）"}}

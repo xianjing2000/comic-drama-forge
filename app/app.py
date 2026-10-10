@@ -10993,7 +10993,9 @@ def api_autonomous_start():
                                # ⭐ 2026-10-10：资产提示词预热（界面可勾选，默认开）。
                                #    True = 本批资产生成期间后台预热**本批全部**资产的增强
                                #    提示词（只填缓存，零 GPU、不落产物）。
-                               'prewarm_asset_prompt')}
+                               'prewarm_asset_prompt',
+                               # 文学剧本自动生成（界面可勾选，默认开）
+                               'auto_screenplay')}
 
     if not novel_id and project_name:
         # 尝试从现有计划获取 novel_id

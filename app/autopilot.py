@@ -189,6 +189,7 @@ PLAN_DEFAULTS = {
     # ⭐ 2026-10-10：集间流水线开关（界面「一键启动」参数区可勾选）。
     #    True = 本集烧 GPU 时后台并行预热下一集剧本（纯 LLM，零 GPU，不抢卡）。
     "prewarm_next_script": True,
+    "auto_screenplay": True,
     # video_mode 已废弃（2026-10-01 起视频只有整集模式，pipeline 会强制归一为 episode）
     "enable_assets": True,
     "enable_video": True,
