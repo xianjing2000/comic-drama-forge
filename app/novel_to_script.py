@@ -1098,22 +1098,27 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     #    > 0 时保持旧行为（下限 + cap）。
     #    为什么要开放：固定的默认 12 会被写进【硬性约束】当**下限**，而同一份模板里
     #    又写着「本片目标是每集 20~30 个镜头」—— 自相矛盾，且会把内容摊薄/灌水。
+    # ⭐ 2026-10-10（用户追加指定「每集下限和上限都不限制」）：
+    #    提示词里**不再出现任何镜数上下限** —— 唯一准绳是原文的信息密度与剧情完整度。
+    #    shots_cap 仍计算（模板变量位与下游 token 预算需要它），但它只是**技术护栏**，
+    #    **不写进提示词**，模型看不到。
     if shots_target > 0:
         shots_cap = max(shots_target, min(120, int(math.ceil(shots_target * SHOT_CAP_GROWTH))))
-        _shots_min_text = f"至少 {shots_target} 个"
-        _shots_range_text = f"shots 数组元素个数必须在 {shots_target} ~ {shots_cap} 之间"
-        _shots_targeting_text = (f"本块镜数下限 {shots_target} 个（原文信息量更大时可多于它，"
-                                 f"上限 {shots_cap} 个）。")
+        _shots_min_text = f"至少 {shots_target} 个（**不设上限**）"
+        _shots_range_text = (f"shots 数组元素个数**不设上限**（显式要求至少 {shots_target} 个）；"
+                             f"不得为凑数把同一件事拆成多镜")
+        _shots_targeting_text = (f"本块镜数**下限 {shots_target} 个、不设上限**"
+                                 f"（原文信息量更大时可远多于它）。")
     else:
-        # 无下限：cap 取「单集镜数上限」口径（config.SHOT_GRANULARITY_MAX_SHOTS=30 的
-        # 1.33 倍余量，与 app.py 的 target_shots 硬上限 40 对齐），仅作防爆护栏。
+        # 无下限：cap 仅作技术护栏（防单次响应体过大），不写进提示词。
         shots_cap = max(12, min(120, int(math.ceil(SHOT_GRANULARITY_MAX_SHOTS * SHOT_CAP_GROWTH))))
-        _shots_min_text = "数量由你按本块原文的信息密度判定（**不设下限**）"
-        _shots_range_text = (f"shots 数组元素个数**不得超过 {shots_cap} 个**（**不设下限**）")
+        _shots_min_text = "数量由你按本块原文的信息密度判定（**不设上下限**）"
+        _shots_range_text = ("shots 数组元素个数**不设上下限**"
+                             "（既无「至少 N 镜」，也无「不得超过 N 镜」）")
         _shots_targeting_text = (
-            "**镜数不预设**——由你按本块原文的**信息密度**判定：冲突/转折/关键动作/金句密集"
-            "就多切镜，情节单薄就少切镜；既**不要为凑数灌水**（同一件事补插入镜、把一个动作"
-            "拆成几镜），也**不要为省事把原文情节合并丢掉**。")
+            "**镜数不预设、无上下限**——由你按本块原文的**信息密度**判定：冲突/转折/关键动作/"
+            "金句密集就多切镜，情节单薄就少切镜；既**不要为凑数灌水**（同一件事补插入镜、"
+            "把一个动作拆成几镜），也**不要为省事把原文情节合并丢掉**。")
     if _hard > 0:
         shots_cap = min(shots_cap, max(shots_target, _hard))
     speech_budget = SHOT_SPEECH_BUDGET_CHARS
@@ -1163,8 +1168,11 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         # 兜底：用户覆盖 / 出厂模板 / 代码内注册兜底三级都不可用时走原 f-string（正文与
         # app/prompts/script_generate.txt 的骨架、prompt_templates._DEFAULT_SCRIPT_GENERATE
         # 逐字一致，仅占位符由运行时值填充）。
-        prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：{_shots_min_text}、上限 {shots_cap} 个。把下方原文**压缩提炼**成可拍摄的镜头，只保留推动剧情的关键情节（冲突/转折/关键动作/金句），纯背景铺陈直接删去、勿逐句照搬。
+        prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：{_shots_min_text}。把下方原文**压缩提炼**成可拍摄的镜头，只保留推动剧情的关键情节（冲突/转折/关键动作/金句），纯背景铺陈直接删去、勿逐句照搬。
 【粒度口径（**务必先读**）】{_shots_targeting_text}每镜 5~6 秒（不是每镜 2 秒的快切）。
+⚠️ **镜数不设上下限**：既没有「至少 N 镜」的下限，也没有「不得超过 N 镜」的上限。唯一的准绳是
+**原文的信息密度**与**剧情完整度** —— 原文里的冲突/转折/关键动作/金句必须全部落到镜头里
+（覆盖率有硬校验），但不得为凑数灌水、也不得为省事合并丢掉情节。
   · **镜数少了不等于少写情节**：目标镜数变少时，请把相邻的连续情节**合并进同一个镜头**（一个镜头里可以容纳一个完整的动作过程、以及前后两段关键情节），而**不是**把原文情节丢掉。原文里的冲突/转折/关键动作/金句仍必须**全部**落到镜头里 —— 本系统对原文覆盖率有硬校验，漏情节会导致整集重跑。
   · **不要把一个完整动作拆成几个镜头**：「抬手→握拳→挥出」是**一个**镜头里的连续动作，不是三个镜头。只有当**空间/时间/视角真的发生跳跃**（换了地点、跳了时间、要强调另一个主体）时才切镜。
   · **不要为同一件事再补一个镜头**：已经拍过的道具/手部，不要为了「规避人脸」再单独切一个几乎同画面的插入镜。
@@ -1201,7 +1209,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 ②本镜是时空回溯的落点（kind=回溯，如「春秋蝉，逆转时光。」）；
 ③本集结尾仍有未回收伏笔、需要留住悬念（kind=悬念）。
 **其余镜头一律写空对象**——字幕滥用会打断观感。caption.text ≤20 字，只写交代时空或悬念的短句；**禁止**复述台词、禁止写画面描述、禁止把台词搬进字幕。
-【硬性约束】{_shots_range_text}：只把原文里**推动剧情的冲突/转折/关键动作/金句**落到镜头里，纯背景补叙、纯环境描写（不推进剧情）**直接删去、不单独成镜**；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
+【硬性约束】{_shots_range_text}。只把原文里**推动剧情的冲突/转折/关键动作/金句**落到镜头里，纯背景补叙、纯环境描写（不推进剧情）**直接删去、不单独成镜**；name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
 【关键情节自检】写完回看上方「剧情摘要/情节要点」，确认每个关键情节都有对应镜头；纯背景补叙、纯环境描写若未推进剧情应当已删去，**不要求逐句覆盖原文**。记住：本系统没有旁白，背景补叙与环境描写靠画面承载、绝不写成台词，心理活动靠神态动作或第一人称角色自语承载。"""
     label = f"shots#{chunk.get('index')}"
     hit = _cache_get(cache_dir, "shots", prompt, events, label)
@@ -3351,16 +3359,19 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     # 它的可见症状就是分镜九宫格（单镜 9 关键帧·时间推进）里大量重复格：
     # 镜头越短，9 帧里能塞进的互异画面越少。这里响亮记一笔，便于在日志里第一时间
     # 看出「参数被 env 改回旧值」或「模型又超产」，而不是等用户看图才发现。
-    _gran_limit = int(SHOT_GRANULARITY_MAX_SHOTS * 1.5)
+    # ⭐ 2026-10-10：用户已取消镜数上下限（「每集下限和上限都不限制」），
+    #    故不再以 SHOT_GRANULARITY_MAX_SHOTS 判「切太细」——那会与新口径冲突、
+    #    并在合法的长集上刷无意义告警。仅在**异常多**（>120 镜，已远超任何合理单集）
+    #    时提示一次，用于发现「参数被 env 改回旧值」这类真异常。
+    _gran_limit = 120
     if len(shots) > _gran_limit:
         _avg_sec = sum(float(s.get("duration") or 0) for s in shots) / max(1, len(shots))
         logger.warning(
-            "第%s集：分镜粒度偏离目标 —— 本集 %d 镜 / 平均 %.2f 秒（目标 %d~%d 镜、"
-            "每镜 5~6 秒）。镜数偏多会让「单镜 9 关键帧」的分镜九宫格出现重复格。"
-            "请核查 CHARS_PER_SHOT / REF_INSERT_RATIO / SPLIT_ACTION_BEATS / "
-            "SHOT_DURATION_MIN 是否被 env 改回旧值。",
-            episode_no, len(shots), _avg_sec,
-            SHOT_GRANULARITY_TARGET_SHOTS, SHOT_GRANULARITY_MAX_SHOTS)
+            "第%s集：本集 %d 镜 / 平均 %.2f 秒 —— 镜数异常多（>%d），已远超任何合理单集。"
+            "镜数本身不再设限（用户口径：上下限都不限），此提示仅用于发现"
+            "「CHARS_PER_SHOT / REF_INSERT_RATIO / SPLIT_ACTION_BEATS / SHOT_DURATION_MIN "
+            "被 env 改回旧值」这类真异常。",
+            episode_no, len(shots), _avg_sec, _gran_limit)
 
     for sh in shots:
         sh["episode"] = int(episode_no)
