@@ -26,6 +26,7 @@ import style_kit as S  # noqa: E402  （别名，供新增用例使用）
 import shot_key as SK  # noqa: E402
 import failure_codes as FC  # noqa: E402
 import shot_camera as SC  # noqa: E402
+import novel_parser as NP  # noqa: E402
 
 
 class TestRoundToMultiple(unittest.TestCase):
@@ -287,6 +288,74 @@ class TestShotCamera(unittest.TestCase):
         for t in SC.SHOT_TYPES:
             spec = SC.camera_spec(t)
             self.assertTrue(spec and len(str(spec)) > 10, '景别 %s 的 camera_spec 为空/过短' % t)
+
+class TestNovelDecode(unittest.TestCase):
+    """novel_parser.decode_bytes：中文小说编码探测（4 层保护）。
+
+    为什么必须测：编码判错 = **整本小说内容变成乱码**，而且不会报错、
+    只会让下游拿到一堆无意义字符，是最难排查的一类故障。
+    """
+
+    LONG_ZH = '第一章 开始\n' + '这是一段用于验证编码探测的中文内容。' * 40
+
+    def test_utf8_strict(self):
+        out, enc, _ = NP.decode_bytes('第一章 开始'.encode('utf-8'))
+        self.assertEqual(out, '第一章 开始')
+        self.assertEqual(enc, 'utf-8')
+
+    def test_ascii_is_utf8(self):
+        out, enc, _ = NP.decode_bytes(b'hello world')
+        self.assertEqual(out, 'hello world')
+        self.assertEqual(enc, 'utf-8')
+
+    def test_utf8_bom_detected(self):
+        out, enc, _ = NP.decode_bytes(b'\xef\xbb\xbf' + '第一章'.encode('utf-8'))
+        self.assertEqual(enc, 'utf-8-sig')
+        self.assertEqual(out, '第一章')
+
+    def test_empty_bytes(self):
+        out, _enc, _note = NP.decode_bytes(b'')
+        self.assertEqual(out, '')
+
+    def test_long_gbk_decoded_correctly(self):
+        """⚠️ 真实小说场景：GBK 长文本必须正确解码。
+
+        注意边界：**极短**的 GBK 片段（几个字）会被 charset-normalizer 统计判成
+        cp949「韩文」而解出乱码 —— 这是统计方法的固有局限，不是本函数的缺陷，
+        真实小说（数千字以上）不受影响。故这里用长文本断言正确性，
+        并把「短文本可能误判」的边界一并记录在案。
+        """
+        out, enc, _ = NP.decode_bytes(self.LONG_ZH.encode('gbk'))
+        self.assertEqual(out[:6], '第一章 开始', 'GBK 长文本解码错误（编码判定为 %s）' % enc)
+        self.assertNotIn('\ufffd', out, 'GBK 解码结果含替换字符')
+
+    def test_long_gb18030_decoded_correctly(self):
+        out, _enc, _ = NP.decode_bytes(self.LONG_ZH.encode('gb18030'))
+        self.assertEqual(out[:6], '第一章 开始')
+
+    def test_utf8_bom_variant_of_long_text(self):
+        out, enc, _ = NP.decode_bytes(b'\xef\xbb\xbf' + self.LONG_ZH.encode('utf-8'))
+        self.assertEqual(out[:6], '第一章 开始')
+        self.assertEqual(enc, 'utf-8-sig')
+
+
+class TestNovelRatios(unittest.TestCase):
+    """三个打分辅助函数：回退择优就靠它们。"""
+
+    def test_han_ratio_all_chinese(self):
+        self.assertGreater(NP._han_ratio('中文内容测试'), 0.9)
+
+    def test_han_ratio_no_chinese(self):
+        self.assertEqual(NP._han_ratio('hello world'), 0.0)
+
+    def test_ascii_ratio(self):
+        self.assertGreater(NP._ascii_ratio('hello'), 0.9)
+
+    def test_bad_ratio_clean_text_is_zero(self):
+        self.assertLess(NP._bad_ratio('正常的中文内容'), 0.001)
+
+    def test_bad_ratio_counts_replacement_char(self):
+        self.assertGreater(NP._bad_ratio('\ufffd\ufffd\ufffd'), 0.5)
 
 if __name__ == '__main__':
     unittest.main()
