@@ -47,6 +47,11 @@ ENV_MAP: Dict[str, str] = {
 #  这比直接删除旧名安全 —— 不会让任何既有调用静默失效。
 ALIASES: Dict[str, str] = {
     'target_shots': 'novel_default_shots',
+    # ⚠️ 2026-10-10：qc_config.json 用的键名与代码常量名不一致（同一作用、两个名字）。
+    #    统一规则是「JSON 键 == 配置中心 key == 代码常量小写化」，故正式键为
+    #    disable_thinking_default；旧的 disable_thinking 作为别名保留，
+    #    overlay_config 会把两者一起覆盖，避免「改了正式键、旧键仍在生效」。
+    'disable_thinking': 'disable_thinking_default',
 }
 
 
@@ -234,6 +239,49 @@ def apply_to_runtime() -> int:
 def get_value(key: str) -> Any:
     """读取单个参数的当前生效值（不触发回写）。自动解析别名。"""
     return (resolve_all().get(canonical_key(key)) or {}).get('value')
+
+
+def overlay_config(cfg: dict) -> dict:
+    """把配置中心里「被显式改过」的项叠加到模块自己的配置字典上。
+
+    ## 解决什么问题（2026-10-10 实测发现）
+    qc_client / llm_client 有**自己的配置链**：load_config() 只读自己的 JSON 文件
+    （qc_config.json / ai_config.json），完全不经过配置中心。实测证据：
+        qc_config.json 的 min_tokens_when_thinking = 1024
+        qc_client.load_config() 返回               = 1024   ← 只读 JSON
+        配置中心 DB 里的值                          = 24576
+    → 配置中心改的值对这两个模块**完全无效**，还造成同一参数在 JSON 与 DB 双写。
+    本函数在它们的 load_config() 返回前做一次叠加，把链路接通。
+
+    ## 关键设计：只覆盖「来源为 db/env」的项
+    若某项仍是代码默认值（source == 'default'），**不覆盖** JSON ——
+    这样用户没在配置中心动过的参数，JSON 里的既有配置依然生效，
+    不会因为「登记了 93 项」就把 JSON 里 38 个键全部冲掉。零破坏性。
+
+    别名同时处理：JSON 里可能用旧名（如 disable_thinking），
+    ALIASES 里注册过的旧名会一并被覆盖，避免「改了正式键、旧键还在生效」。
+    """
+    if not isinstance(cfg, dict):
+        return cfg
+    try:
+        resolved = resolve_all()
+    except Exception as e:  # noqa: BLE001  配置中心异常绝不影响模块自己的配置
+        logger.warning('配置中心叠加失败（忽略，沿用模块自身配置）：%s', e)
+        return cfg
+    out = dict(cfg)
+    n = 0
+    for key, info in resolved.items():
+        if info.get('source') == 'default':
+            continue                      # 未被显式改过 → 不覆盖 JSON
+        # 正式键 + 所有指向它的旧别名
+        targets = [key] + [a for a, c in ALIASES.items() if c == key]
+        for t in targets:
+            if t in out:
+                out[t] = info['value']
+                n += 1
+    if n:
+        logger.info('配置中心叠加生效：覆盖 %d 项（模块 JSON < 配置中心）', n)
+    return out
 
 
 def set_value(key: str, value: Any, note: str = '') -> Dict[str, Any]:

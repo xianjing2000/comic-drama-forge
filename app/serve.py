@@ -340,6 +340,19 @@ def _safe_run():
             import config_center as _cc
             import config_doctor as _cd
             _cc.ensure_table()
+            # ⭐ 2026-10-10：统一 schema 初始化（幂等）。
+            #   排查发现 tasks.db 的 4 张表由 3 个模块各自建表、没有版本号，
+            #   且 tasks 缺 (project,status) 复合索引与 created_at 索引。
+            #   ensure_schema 只补建缺失项并记录 schema_version，不动既有数据。
+            try:
+                import schema as _sc
+                _sr = _sc.ensure_schema(_cc.db_path())
+                if _sr.get('created_tables') or _sr.get('created_indexes'):
+                    logger.info('schema 初始化：新建表 %s ｜ 新建索引 %s ｜ 版本 %s',
+                                _sr.get('created_tables'), _sr.get('created_indexes'),
+                                _sr.get('version'))
+            except Exception as _se:  # noqa: BLE001
+                logger.warning('schema 初始化失败（忽略）：%s', _se)
             _n = _cc.apply_to_runtime()
             logger.info(_cd.summary_line())
             _rep = _cd.doctor()

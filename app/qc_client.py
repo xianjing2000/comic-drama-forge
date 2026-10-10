@@ -1131,7 +1131,19 @@ def load_config(config_path: str) -> dict:
     #    音频/剧本/尾帧质检的开关因此形同虚设。两份口径并存必然漂移，现收敛为单一实现。
     # G14：若文件「存在但解析失败」，cfg 上带 _config_corrupt/_config_error，_normalize
     #    只赋值已知键、不删除额外键，故损坏标记会随返回值带出，供 public_view 高亮。
-    return _normalize(cfg)
+    # ⭐ 2026-10-10（P0 修复）：把**统一配置中心**的值叠加进来。
+    #   背景：本函数只读 qc_config.json + ai_credentials 表，完全不经过配置中心 ——
+    #   实测 qc_config.json 的 min_tokens_when_thinking=1024 与配置中心 DB 的 24576
+    #   同时存在，而本函数返回 1024（配置中心改的值对质检完全无效，还形成双写）。
+    #   overlay_config 只覆盖「被显式改过（来源 db/env）」的项，JSON 里其余 38 个键不受影响。
+    #   放在 _normalize 之后：让叠加进来的值也过同一套校验与默认补全。
+    try:
+        import config_center as _cc
+        cfg = _cc.overlay_config(_normalize(cfg))
+    except Exception as _e:  # noqa: BLE001  配置中心异常绝不影响质检自身配置
+        logger.warning(f"配置中心叠加失败（沿用质检自身配置）：{_e}")
+        cfg = _normalize(cfg)
+    return cfg
 
 
 # 存量迁移备份文件的时间戳格式（本地时间，秒级；同一秒重复迁移由幂等标记兜住）。

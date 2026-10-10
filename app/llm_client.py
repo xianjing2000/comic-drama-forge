@@ -294,6 +294,13 @@ def load_config(config_path: str) -> dict:
             cfg["model"] = env_model
     except Exception as e:  # noqa: BLE001
         logger.warning(f"LLM 密钥读取异常（回退 json）：{e}")
+    # ⭐ 2026-10-10（P0 修复）：叠加统一配置中心的值（同 qc_client.load_config 的理由）。
+    #   overlay_config 只覆盖已被显式改过（来源 db/env）的项，未动的键保持 JSON 原值。
+    try:
+        import config_center as _cc
+        cfg = _cc.overlay_config(cfg)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning(f"配置中心叠加失败（沿用 LLM 自身配置）：{_e}")
     return cfg
 
 
