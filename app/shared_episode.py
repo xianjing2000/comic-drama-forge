@@ -100,7 +100,14 @@ def _load_script_for(project_name: str, episode_no=None) -> dict:
         try:
             script = novel_to_script.load_episode_script(SCRIPT_DIR, key, int(episode_no))
         except Exception as e:  # noqa: BLE001
-            _app_logger().warning(f"剧本读取失败（第{episode_no}集）：{e}")
+            # ⭐ 2026-10-10：「该集尚未生成」是**生产过程中的正常态**（例如前端正在
+            #   轮询一个还没轮到生成的集），原先一律记 WARNING —— 实测一份日志里
+            #   同一句出现 71 次，把真正的告警淹没了。按「未生成」与「读取出错」
+            #   分流：前者 debug，后者才 warning。
+            if "尚未生成" in str(e) or "不存在" in str(e) or "No such file" in str(e):
+                _app_logger().debug("剧本尚未生成（第%s集）：%s", episode_no, e)
+            else:
+                _app_logger().warning(f"剧本读取失败（第{episode_no}集）：{e}")
     if not script:
         try:
             eps = novel_to_script.list_episodes(SCRIPT_DIR, key)

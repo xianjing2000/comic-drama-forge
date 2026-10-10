@@ -29,7 +29,7 @@ _PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts
 #: 写进模块级 ``_FALLBACKS``（谁持有兜底谁注册，避免两处存同一份正文漂移）。
 REGISTRY = {
     "script_rewrite_rules": {
-        "title": "剧本改写规则（压缩提炼 / 一镜一动作 / 镜头语言克制 13 条）",
+        "title": "剧本改写规则（**合理改编·不得无脑删改** / 一镜一动作 / 镜头语言克制 13 条）",  # 2026-10-10 用户口径：改的是体裁形式，不是内容取舍
         "file": "script_rewrite_rules.txt",
         "variables": [],
     },

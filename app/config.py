@@ -539,12 +539,18 @@ def env_float(name: str, default: float, floor: float = 0.0, ceiling: float = 1.
 
 
 #: 原文覆盖率阈值（低于该值自动补生成缺失片段）；env MJSCXT_COVERAGE_THRESHOLD 可覆盖
-# ⚠️ 2026-10-10（用户要求「剧本要还原小说的所有细节，不能过度改写」）：
-#    原默认 0.70 —— 实测覆盖率 96.5% 远高于它，于是**从不触发补生成**，
-#    遗漏的 7 条原文单元就此留在剧本之外。改为 0.98：
-#    只有几乎完全覆盖才算过关，剩下的由多轮补生成（coverage.max_rounds）去补。
-#    仍可用 env MJSCXT_COVERAGE_THRESHOLD 覆盖（调低可恢复旧行为）。
-COVERAGE_THRESHOLD = env_float("MJSCXT_COVERAGE_THRESHOLD", 0.98, floor=0.0, ceiling=1.0)
+# 背景演变（三次调整，每次都有实测依据）：
+#   · 0.70（原始）—— 实测 96.5%，**从不触发补生成**，遗漏 7 条原文单元留在剧本外；
+#   · 0.98（2026-10-10 用户要求「还原所有细节，不能过度改写」）—— 方向对，但
+#     **门槛定得过高**：实测第 1 集只有 83.67%，与 98% 差 14~15 个百分点，
+#     于是**每集必然跑满 3 轮补生成**，且每轮后跟一次全量复检（大 token LLM 调用）。
+#     实测：第 1 集剧本跑了 44 分钟仍未结束 —— 一集约 1 小时，14 集要一天多。
+#   · **0.90（2026-10-10 用户指示「改成 0.9 试试」）** —— 取两者之间：
+#     85%+ 的内容能过，只对确有缺漏的集补 1 轮，兼顾还原度与产能。
+# ⚠️ 覆盖率不是「无脑改编」的挡箭牌：提示词层面同样要求「**可合理改编，不得无脑删改**」
+#    （见 novel_to_script 的分镜提示词），门槛只负责兜住真正的遗漏。
+#    仍可用 env MJSCXT_COVERAGE_THRESHOLD 覆盖。
+COVERAGE_THRESHOLD = env_float("MJSCXT_COVERAGE_THRESHOLD", 0.90, floor=0.0, ceiling=1.0)
 SCRIPT_DIR = os.path.join(PROJECT_OUTPUT_DIR, "scripts")
 ASSETS_DIR = os.path.join(PROJECT_OUTPUT_DIR, "assets")
 CHARACTERS_DIR = os.path.join(ASSETS_DIR, "characters")   # 角色资产（含多视图）
