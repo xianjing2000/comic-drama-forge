@@ -273,7 +273,6 @@ def _purge_sb_refs(project: str) -> dict:
 # _first_nonempty_image）与取图判据（_build_asset_index 的 _first_existing）
 # 此前各自维护一套「判有图」逻辑，口径漂移（一个只认 4 个扩展名、另一个只
 # 认 front/base 固定名）。统一为：扩展名白名单 + 取第一张非空图片。
-_ASSET_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
 #: 资产目录内「主视角图」的取图优先级（2026-09-24 修复）。
 #: ⚠️ 实测 bug：原来只按**文件名字典序**取第一张非空图，而角色资产目录里
@@ -284,9 +283,6 @@ _ASSET_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 #:    一旦视角图变成真单机位（2026-09-24 sheet_split 改造后就是如此），
 #:    这个字典序兜底就会静默地把每个镜头的角色锚点换成「只有背面」。
 #: 故改为显式优先级：正面 > 整图 > 左侧 > 右侧 > 背面 > 其它图片（字典序）。
-_ASSET_IMG_PRIORITY = ("front.png", "base.png", "front.jpg", "base.jpg",
-                       "left.png", "right.png", "back.png",
-                       "left.jpg", "right.jpg", "back.jpg")
 
 
 def _comfyui_official_dirs() -> list:
