@@ -481,6 +481,21 @@ except Exception as _e:  # noqa: BLE001  自检失败不得阻断启动
     AI_SELFCHECK_BOOT = {}
     app.logger.warning(f"AI 前置自检执行失败（不影响启动）：{_e}")
 
+# ⭐ 路径自检（2026-10-11 新增）：校验所有**路径类常量的运行时值**
+#    （非空 / 绝对路径 / 关键目录存在）。
+# 为什么需要：COMFYUI_ROOT 未回退到自动检测值 → COMFYUI_OUTPUT_DIR='' →
+#    产物搬移的 src 退化成相对路径 → 相对进程 CWD 解析失败 →
+#    「ComfyUI 出图完全正常，却逐个资产入库失败并被隔离」。
+#    当时 116 个测试、58 模块导入、243 路由**全部通过**，没有任何检查发现它 ——
+#    静态检查覆盖不到「配置解析出的值是否有意义」，故补这一类运行时值自检。
+#    只告警、不阻断启动。
+try:
+    import config_paths_check
+    PATHS_CHECK_BOOT = config_paths_check.startup_report()
+except Exception as _e:  # noqa: BLE001  自检失败不得阻断启动
+    PATHS_CHECK_BOOT = {}
+    app.logger.warning(f"路径自检执行失败（不影响启动）：{_e}")
+
 # ⭐ 质检存量迁移（2026-10-XX）：质检总开关默认值由「关」改「开」后，把从未显式开过
 # 质检的老配置**幂等**补成开启（备份 .bak.*，只改总开关，见 qc_client.migrate_enabled_default）。
 # ⚠️⚠️ **严禁在模块级调用本函数** —— 模块级代码会在**任何** `import app`（守卫脚本、
