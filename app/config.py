@@ -469,8 +469,14 @@ def norm_video_mode(value, default: str = "episode") -> str:
 PROJECT_DEFAULT_CONFIG = {
     "style": "3D动漫渲染",              # 创作风格
     "episodes": 1,                      # 目标集数
-    "target_shots": 0,                  # 目标镜头数下限；**0 = 不预设**，由模型按原文信息密度判定
-    "shots_per_episode": 12,
+    # ⭐ 2026-10-10 用户指出「同一个值散在 5 处、改一处漏四处」后的统一：
+    #   **镜数的唯一正式名是 target_shots**（配置中心 key = novel_default_shots）。
+    #   此前这里还有一个 "shots_per_episode": 12 —— 与 target_shots 语义完全相同、值却
+    #   冲突（0 vs 12），是「AI 总控报每集 12 镜」的**源头**：它进了项目默认配置，
+    #   再被 routes/autopilot.py 解析成 target_shots。已删除，勿再引入第二个名字。
+    #   历史字段名 shots_per_episode 仍被前端契约沿用，作为**别名**处理
+    #   （见 config_center.ALIASES 与 project_store 的兼容读取）。
+    "target_shots": 0,                  # 目标镜头数；**0 = 不预设**，由模型按原文信息密度判定
     "episode_duration_sec": 90,         # 每集期望时长（秒）
     # ⚠️ 2026-09-26 口径变更：每集时长产品口径 = **1~2 分钟、最长 3 分钟**
     #（单一事实来源是 novel_to_script.EPISODE_TARGET_SEC=90 / EPISODE_MAX_SEC=180）。

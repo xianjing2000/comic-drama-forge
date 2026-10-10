@@ -433,7 +433,10 @@ def create_project(name: str, novel_id: str = "", novel_name: str = "",
         "episode_count": 0,
         "shot_count": 0,
         "episode_duration_sec": int(cfg.get("episode_duration_sec") or 0),
-        "shots_per_episode": int(cfg.get("shots_per_episode") or 0),
+        # ⭐ 2026-10-10 统一：镜数正式名是 target_shots；历史键 shots_per_episode 兼容读取。
+        "shots_per_episode": int(cfg.get("target_shots")
+                                  if cfg.get("target_shots") is not None
+                                  else (cfg.get("shots_per_episode") or 0)),
         "from_migration": False,
         "note": note,
     }
@@ -506,7 +509,9 @@ def update_config(ref: str, patch: dict) -> dict:
     cfg.update(_patch)
     _write_json(paths(rec["dir_key"])["config"], cfg)
     fields = {}
-    for src, dst in (("shots_per_episode", "shots_per_episode"),
+    # ⭐ 2026-10-10 统一：镜数写入接受两个名字，落到同一个历史字段（前端契约不变）。
+    for src, dst in (("target_shots", "shots_per_episode"),
+                     ("shots_per_episode", "shots_per_episode"),
                      ("episode_duration_sec", "episode_duration_sec")):
         if src in patch and patch[src] is not None:
             try:

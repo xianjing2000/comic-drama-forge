@@ -47,6 +47,12 @@ ENV_MAP: Dict[str, str] = {
 #  这比直接删除旧名安全 —— 不会让任何既有调用静默失效。
 ALIASES: Dict[str, str] = {
     'target_shots': 'novel_default_shots',
+    # ⭐ 2026-10-10 用户口径「相同的配置字段要统一名称」的继续：镜数此前有三个名字
+    #   （NOVEL_DEFAULT_SHOTS / target_shots / shots_per_episode），其中一个还带着
+    #   冲突的默认值 12。正式名统一为 novel_default_shots（常量 NOVEL_DEFAULT_SHOTS
+    #   小写化）；target_shots 与 shots_per_episode 都作为别名映射过去，
+    #   读写自动归一 —— 这样「改一处」即可，不会再出现改了正式键、旧键仍生效。
+    'shots_per_episode': 'novel_default_shots',
     # ⚠️ 2026-10-10：qc_config.json 用的键名与代码常量名不一致（同一作用、两个名字）。
     #    统一规则是「JSON 键 == 配置中心 key == 代码常量小写化」，故正式键为
     #    disable_thinking_default；旧的 disable_thinking 作为别名保留，

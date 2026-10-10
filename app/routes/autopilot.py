@@ -649,8 +649,12 @@ def api_autopilot_plan_from_settings(project_name):
     patch = {}
     if brief:
         patch['style'] = brief
-    # 单集镜头数：从设定里解析数字（如 "12 个" → 12）
-    shots = str(s.get('shots_per_episode') or '')
+    # 单集镜头数：从设定里解析数字（如 "12 个" → 12）。
+    # ⭐ 2026-10-10 统一：优先读正式名 target_shots，回落历史名 shots_per_episode；
+    # 两者都不在（或为「自动（按内容密度）」）→ 不写 patch，保持计划的
+    # target_shots=0（不预设，由内容密度判定）。
+    shots = str(s.get('target_shots') if s.get('target_shots') not in (None, '')
+                else (s.get('shots_per_episode') or ''))
     digits = ''.join(ch for ch in shots if ch.isdigit())
     if digits:
         try:
