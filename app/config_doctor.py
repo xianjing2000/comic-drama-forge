@@ -44,8 +44,15 @@ logger = logging.getLogger(__name__)
 REGISTRY: Dict[str, Dict[str, Any]] = {
     # ---- 原文覆盖率与重写轮数（2026-10-10 用户要求「还原所有细节」后调整）----
     'coverage_threshold': {
-        'default': 0.98, 'type': 'float', 'range': (0.0, 1.0), 'group': '覆盖率',
-        'desc': '原文覆盖率阈值：低于该值触发补生成（原 0.70，96.5% 都从不触发）',
+        # ⚠️⭐ 2026-10-10 重要教训：**这个 default 才是最终事实源**。
+        #   配置中心的取值优先级是「数据库 > 环境变量 > 本表 default」，
+        #   启动时 apply_to_runtime() 会把解析结果**回写**到 owner 模块的同名属性。
+        #   即：只改 config.COVERAGE_THRESHOLD 是**无效**的 —— 会被本表 default 覆盖回去。
+        #   （实测：config 改成 0.85 → 启动后 resolve_all 仍返回 0.98 source=default，
+        #     config 属性被回写成 0.98，于是「88.78% > 85%」却仍判覆盖率不足。）
+        #   改阈值必须**同时**改这里与 config，二者缺一不可。
+        'default': 0.85, 'type': 'float', 'range': (0.0, 1.0), 'group': '覆盖率',
+        'desc': '原文覆盖率阈值：低于该值触发补生成（0.70 从不触发 → 0.98 过严跑满 3 轮 → 0.85 初检即过）',
         'owner': 'config.COVERAGE_THRESHOLD',
     },
     'coverage_max_rounds': {
