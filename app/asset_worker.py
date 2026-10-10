@@ -1064,7 +1064,13 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                             logger=logger)
                     except Exception as _pe:  # noqa: BLE001
                         logger.warning("清理陈旧视角文件失败（不影响入库）：%s", _pe)
-                elif asset_type == "scene" and SCENE_VIEWS_ENABLED:
+                elif (asset_type == "scene" and SCENE_VIEWS_ENABLED
+                      # ⭐ 2026-10-11 补漏：这条「逐档独立出图 + 拼接」路径**同样**要过
+                      #   「按剧情判断」门槛。此前只改了上面 L924 的「单次出图」分支，
+                      #   判定拦下后控制流落到这里，于是只出现 2 镜的「老楼楼梯间」
+                      #   照样花 16 分钟逐档出 9 张再拼接 —— 白烧算力，且九宫格必然
+                      #   偏稀（部分档不达标被丢弃，7/9 格）。两条路径必须同口径。
+                      and _scene_needs_multiview(project_name, name)):
                     # ---------- 场景：按机位逐档出图（2026-09-29 新增） ----------
                     # 动机：场景此前只有一张 base.png，分镜不论什么机位都拿它当参考图 ——
                     #   俯拍 / 斜侧镜头拿到的是**正面基准图**，构图先验与镜头要求反向。
