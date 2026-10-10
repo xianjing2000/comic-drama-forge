@@ -687,7 +687,8 @@ def naming_report() -> Dict[str, Any]:
             if not fn.endswith('.py') or fn.startswith('_'):
                 continue
             try:
-                src = open(os.path.join(base, fn), encoding='utf-8').read()
+                with open(os.path.join(base, fn), encoding='utf-8') as _fh:
+                    src = _fh.read()
             except Exception:  # noqa: BLE001
                 continue
             for ln in src.split(chr(10)):
@@ -749,7 +750,8 @@ def orphan_candidates() -> Dict[str, Any]:
             if not fn.endswith('.py') or fn.startswith('_'):
                 continue
             try:
-                src = open(os.path.join(base, fn), encoding='utf-8').read()
+                with open(os.path.join(base, fn), encoding='utf-8') as _fh:
+                    src = _fh.read()
             except Exception:  # noqa: BLE001
                 continue
             for ln in src.split(chr(10)):

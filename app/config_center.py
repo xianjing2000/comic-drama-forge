@@ -24,6 +24,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sqlite3
@@ -70,6 +71,28 @@ def _connect(path: str) -> sqlite3.Connection:
     return conn
 
 
+
+
+@contextlib.contextmanager
+def _db(path: str):
+    """连接上下文管理器：退出时**关闭连接**。
+
+    ⚠ 不能写成 with _connect(p) as conn —— sqlite3 的 Connection
+    作为上下文管理器时**只提交/回滚事务，不会关闭连接**，会留下一堆未关闭的
+    sqlite3.Connection（用 -W error::ResourceWarning 跑测试时成片报出）。
+    这里显式关闭，避免长期挂机场景下的句柄泄漏。
+    """
+    conn = _connect(path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def ensure_table(path: str = None) -> bool:
     """建表（幂等）。返回是否可用。"""
     p = path or db_path()
@@ -77,7 +100,7 @@ def ensure_table(path: str = None) -> bool:
         return False
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with _connect(p) as conn:
+        with _db(p) as conn:
             conn.execute(
                 'CREATE TABLE IF NOT EXISTS app_settings ('
                 '  key TEXT PRIMARY KEY,'
@@ -133,7 +156,7 @@ def resolve_all() -> Dict[str, Dict[str, Any]]:
     p = db_path()
     if p and ensure_table(p):
         try:
-            with _connect(p) as conn:
+            with _db(p) as conn:
                 for k, v in conn.execute('SELECT key, value FROM app_settings'):
                     db_vals[str(k)] = '' if v is None else str(v)
         except Exception as e:  # noqa: BLE001
@@ -233,7 +256,7 @@ def set_value(key: str, value: Any, note: str = '') -> Dict[str, Any]:
     if not p or not ensure_table(p):
         return {'ok': False, 'error': '配置库不可用'}
     try:
-        with _connect(p) as conn:
+        with _db(p) as conn:
             conn.execute('INSERT INTO app_settings(key, value, value_type, updated_at, note) '
                          'VALUES(?,?,?,?,?) '
                          'ON CONFLICT(key) DO UPDATE SET value=excluded.value, '
