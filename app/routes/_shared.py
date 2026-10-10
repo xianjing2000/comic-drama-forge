@@ -61,6 +61,16 @@ from shared_ai import (AI_MODULE_LABEL, _ai_client_for_module, _ai_gate_or_400, 
 # ⭐ 2026-10-10 拆分第 4 步：项目/镜头基础（反向依赖最热的 6 个实体）上移到 app/shared_project.py。
 from shared_project import (_first_existing, _project_or_400, _safe_project,  # noqa: F401  再导出
                             _shot_num_key, _shot_seq, comfyui_client)
+# ⭐ 2026-10-10 拆分第 6 步：质检 / 超分解析 / 任务队列三组上移到 app/ 层。
+from shared_qc import (_qc_gate, _qc_load_cfg, _qc_record,  # noqa: F401  再导出
+                       _qc_record_verdict)
+from shared_tasks import (_TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES,  # noqa: F401  再导出
+                          _prune_task_registry, _task_analytics_hook,
+                          _task_queue_status, task_queue)
+from shared_upscale import (COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES,  # noqa: F401  再导出
+                            _comfy_view_url, _upscale_resolve_comfyview,
+                            _upscale_resolve_video, _upscale_url_for_path,
+                            upscale_lock, upscale_tasks)
 
 def _autopilot_guard(fn):
     """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误
@@ -260,8 +270,6 @@ def _ep_read_dir(base_dir: str, project: str, episode_no=None) -> str:
     return d
 
 
-def _qc_load_cfg() -> dict:
-    return qc_client.load_config(QC_CONFIG_PATH)
 
 
 def _dub_audio_url(project_name: str, rel_path: str) -> str:
@@ -275,19 +283,12 @@ def _dub_project_dir(project_name: str) -> str:
     return d
 
 
-COMFY_VIDEO_DIRS = [("ComfyUI片段", os.path.join(COMFYUI_OUTPUT_DIR, "video")),
-                    ("ComfyUI超分", os.path.join(COMFYUI_OUTPUT_DIR, "upscale"))]
 
 
-UPSCALE_URL_PREFIXES = [("/api/final/", FINAL_DIR),
-                        ("/api/videos/", VIDEOS_DIR),
-                        ("/api/upscale/", UPSCALE_DIR)]
 
 
-_TASK_STATE_KEEP_DONE = 40
 
 
-_TASK_TERMINAL_STATUSES = ("completed", "done", "failed", "error", "cancelled")
 
 
 def _apply_project_settings(style: str, project_name: str = "") -> str:
@@ -309,11 +310,6 @@ def _apply_project_settings(style: str, project_name: str = "") -> str:
     return f"{base}；{brief}" if base else brief
 
 
-def _comfy_view_url(filename: str, subfolder: str = "") -> str:
-    """生成后端代理 URL（/api/upscale/comfyview），实际播放时 302 到 ComfyUI /view"""
-    from urllib.parse import quote
-    return (f"/api/upscale/comfyview?filename={quote(filename)}"
-            f"&subfolder={quote(subfolder)}")
 
 
 def _project_style(project_name: str = "") -> str:
@@ -375,226 +371,24 @@ def _project_style(project_name: str = "") -> str:
     return style_kit.normalize_style(brief)
 
 
-def _prune_task_registry(registry: dict) -> int:
-    """清理一个任务注册表里超量的终态条目，返回清理条数（须持有该注册表的锁）"""
-    if not isinstance(registry, dict):
-        return 0
-    _done = sum(1 for v in registry.values()
-                if isinstance(v, dict)
-                and str(v.get("status") or "") in _TASK_TERMINAL_STATUSES)
-    _excess = _done - _TASK_STATE_KEEP_DONE
-    if _excess <= 0:
-        return 0
-    _pruned = 0
-    for _k in list(registry):
-        if _excess <= 0:
-            break
-        _v = registry.get(_k)
-        if isinstance(_v, dict) and \
-                str(_v.get("status") or "") in _TASK_TERMINAL_STATUSES:
-            registry.pop(_k, None)
-            _excess -= 1
-            _pruned += 1
-    return _pruned
-
-
-def _qc_gate(verdict: dict) -> dict:
-    """统一质检入库闸门（P0）：ok=false 或 不达标 一律不得静默入库。
-    - skipped=True   → 质检未执行（总开关/类型开关关闭、接口未配置），按「放行」处理并明确标注；
-    - ok=False       → 质检调用异常，结果不可判定，一律阻断（不得静默入库）；
-    - accepted=False → 不通过；命中关键缺陷时 blocked=True（关键缺陷阻断）。
-
-    P0 加固（不盲信 verdict.accepted）：无论上游 verdict 的 accepted / passed / blocked
-    给什么值，本函数都会用本地关键缺陷词表对 issues（并集上游显式 critical_issues）做一次
-    独立复核；一旦命中关键缺陷（画面崩坏 / 拼接 / 人物重复 等），**强制阻断**，不得因为
-    模型自评 accepted=True 而放行。放行条件是 accepted 与 passed **同时**为真（任一为假即阻断）。
-    """
-    verdict = verdict or {}
-    if verdict.get("skipped"):
-        return {"accept": True, "blocked": False, "skipped": True, "label": "质检未执行",
-                "reason": verdict.get("reason") or "质检未执行（跳过）", "critical_issues": []}
-    if not verdict.get("ok"):
-        # P0-2：区分「接口级故障」与「内容不合格」。
-        # interface_fault=True（鉴权 401/403、超时、网络抖动、未配置 key）= 根本没拿到
-        # 模型判定，**不等于**产物不合格——ComfyUI 已出好的图/片不能因质检 key 失效被丢弃。
-        # 此时 fail-open：放行已产出资产 + 响亮告警；但若客观层已命中致命缺陷
-        # （全黑/无音轨等确定性闸门，见 critical_issues）仍强制阻断，不放行真坏帧。
-        if verdict.get("interface_fault"):
-            crit = [str(x) for x in (verdict.get("critical_issues") or [])]
-            if crit:
-                return {"accept": False, "blocked": True, "skipped": False,
-                        "fault_open": False, "label": "客观层致命缺陷（AI 质检接口不可用）",
-                        "reason": "；".join(crit[:3]), "critical_issues": crit}
-            _app_logger().warning(
-                "质检接口故障，已 fail-open 放行本资产（结果不可判定）：%s",
-                verdict.get("error") or "质检接口不可用")
-            return {"accept": True, "blocked": False, "skipped": False,
-                    "fault_open": True, "label": "质检接口故障·已放行",
-                    "reason": (verdict.get("error") or "质检接口不可用")
-                              + "（接口级故障，未做内容判定，已放行）",
-                    "critical_issues": []}
-        return {"accept": False, "blocked": True, "skipped": False, "label": "质检调用异常",
-                "reason": verdict.get("error") or "质检调用失败，结果不可判定", "critical_issues": []}
-
-    # ---- 独立复核：本地词表命中 ∪ 上游显式 critical_issues（不依赖模型自评结论） ----
-    local_hits = qc_client.find_critical_issues(verdict.get("issues") or [])
-    declared = [str(x) for x in (verdict.get("critical_issues") or [])]
-    crit = list(dict.fromkeys(list(local_hits) + declared))
-    if crit:
-        _app_logger().warning(f"质检闸门独立复核命中关键缺陷，强制阻断：{crit[:3]}")
-        return {"accept": False, "blocked": True, "skipped": False,
-                "label": "关键缺陷阻断（独立复核）" if local_hits else "关键缺陷阻断",
-                "reason": verdict.get("reason") or ("命中关键缺陷：" + "；".join(crit[:3])),
-                "critical_issues": crit}
-
-    accepted = verdict.get("accepted")
-    passed = verdict.get("passed")
-    if accepted is None:
-        accepted = bool(passed)
-    if passed is None:
-        passed = bool(accepted)
-    if not (bool(accepted) and bool(passed)):
-        if verdict.get("style_mismatch"):
-            return {"accept": False, "blocked": bool(verdict.get("blocked")),
-                    "skipped": False, "style_blocked": True, "label": "风格不达标",
-                    "reason": verdict.get("reason") or "画面风格与目标风格不符",
-                    "critical_issues": [],
-                    "style_issues": verdict.get("style_issues") or []}
-        return {"accept": False, "blocked": bool(verdict.get("blocked")), "skipped": False,
-                "label": "质检不达标", "reason": verdict.get("reason") or "质检未达标",
-                "critical_issues": []}
-    return {"accept": True, "blocked": False, "skipped": False, "label": "质检达标",
-            "reason": verdict.get("reason") or "", "critical_issues": []}
-
-
-def _qc_record(project_name: str, kind: str, shot_id, payload: dict) -> str:
-    """写一条质检/重试历史（失败也不影响主流程）"""
-    try:
-        return qc_client.append_history(QC_DIR, project_name, kind, shot_id, payload)
-    except Exception as e:  # noqa: BLE001
-        _app_logger().warning(f"质检历史写入失败（忽略）：{e}")
-        return ""
-
-
-def _qc_record_verdict(project_name: str, kind: str, shot_key, stage: str,
-                       attempt: int, seed, file_path: str, verdict: dict,
-                       extra: dict = None, style: str = "") -> dict:
-    """把一次质检结论整理成历史记录并落盘，返回该记录（含 history_file）
-
-    style：本次质检所用的目标风格串。连同 style_mismatch / style_issues 一并落盘，
-    供教训库识别「风格不达标」并触发改写提示词重生成。
-    """
-    rec = {"attempt": attempt, "seed": seed, "file": file_path, "stage": stage,
-           "ok": bool(verdict.get("ok")), "passed": bool(verdict.get("passed")),
-           "accepted": bool(verdict.get("accepted") if verdict.get("accepted") is not None
-                            else verdict.get("passed")),
-           "blocked": bool(verdict.get("blocked")),
-           "score": verdict.get("score"), "reason": verdict.get("reason"),
-           "issues": verdict.get("issues") or [],
-           "critical_issues": verdict.get("critical_issues") or [],
-           "style_mismatch": bool(verdict.get("style_mismatch")),
-           "style_issues": verdict.get("style_issues") or [],
-           "style": style_kit.normalize_style(style),
-           "error": verdict.get("error"), "latency_ms": verdict.get("latency_ms"),
-           # P0-2：接口级故障（鉴权/超时/网络）标记，供 _qc_summary 区分「故障放行」与「内容不合格」
-           "interface_fault": bool(verdict.get("interface_fault")),
-           # ★ 二次复核留档：首次判不过时用同一张图再判一次（判官抖动实测极大）。
-           #   落盘后可直接统计「多少重跑是被复核拦下来的」，用于评估该机制收益。
-           "recheck": verdict.get("recheck") or None,
-           "recheck_first": verdict.get("recheck_first") or None}
-    if extra:
-        rec.update(extra)
-    rec["history_file"] = _qc_record(project_name, kind, shot_key, rec)
-    return rec
 
 
 
 
-def _upscale_resolve_comfyview(query: dict) -> str:
-    """解析 /api/upscale/comfyview?... 形式的 ComfyUI 产出视频为本地绝对路径"""
-    filename = (query.get("filename") or "").replace("\\", "/").lstrip("/")
-    subfolder = (query.get("subfolder") or "").replace("\\", "/").strip("/")
-    if not filename or ".." in filename.split("/") or ".." in subfolder.split("/"):
-        raise UpscaleError("非法的 ComfyUI 文件参数")
-    candidate = os.path.abspath(os.path.join(COMFYUI_OUTPUT_DIR, subfolder, filename))
-    root = os.path.abspath(COMFYUI_OUTPUT_DIR)
-    if not candidate.startswith(root + os.sep):
-        raise UpscaleError("非法路径：不允许跳出 ComfyUI 输出目录")
-    if not os.path.exists(candidate):
-        raise UpscaleError(f"ComfyUI 产出文件不存在: {candidate}")
-    return candidate
 
 
-def _upscale_resolve_video(data: dict) -> str:
-    """解析待超分视频的真实本地路径：支持 video_path（绝对路径）或 video_url（/api/... 前缀）"""
-    video_path = (data.get("video_path") or "").strip()
-    if video_path:
-        video_path = os.path.abspath(video_path)
-        if not os.path.exists(video_path):
-            raise UpscaleError(f"视频文件不存在: {video_path}")
-        # 审计 P2-4（2026-09-29）：绝对路径输入限定在 output/ 与 ComfyUI 输出目录内。
-        # URL 分支本就有目录边界，绝对路径分支此前没有 —— 零鉴权部署下等于
-        # 「任意磁盘视频文件间接读取」（送 ComfyUI 渲染、产物可回看）。normcase
-        # 对齐大小写不敏感文件系统的路径比较。
-        _vp_norm = os.path.normcase(video_path)
-        _allowed_roots = (os.path.abspath(PROJECT_OUTPUT_DIR),
-                          os.path.abspath(COMFYUI_OUTPUT_DIR))
-        if not any(_vp_norm.startswith(os.path.normcase(r + os.sep))
-                   for r in _allowed_roots):
-            raise UpscaleError("非法路径：video_path 仅允许 output/ 或 ComfyUI 输出目录内的文件")
-        return video_path
-
-    url = (data.get("video_url") or "").strip()
-    if url.startswith("/api/upscale/comfyview"):
-        from urllib.parse import urlparse, parse_qs
-        qs = parse_qs(urlparse(url).query)
-        return _upscale_resolve_comfyview({k: v[0] for k, v in qs.items()})
-    url = url.split("?")[0]
-    if url:
-        for prefix, base in UPSCALE_URL_PREFIXES:
-            if url.startswith(prefix):
-                rel = url[len(prefix):]
-                candidate = os.path.abspath(os.path.join(base, rel))
-                if not candidate.startswith(os.path.abspath(base)):
-                    raise UpscaleError("非法路径：不允许跳出输出目录")
-                if not os.path.exists(candidate):
-                    raise UpscaleError(f"URL 对应文件不存在: {candidate}")
-                return candidate
-        raise UpscaleError(f"不支持的视频 URL 前缀: {url}")
-
-    raise UpscaleError("请提供 video_path（绝对路径）或 video_url（如 /api/final/<项目>/<文件>）")
 
 
-def _upscale_url_for_path(path: str) -> str:
-    """把输出目录下的绝对路径反查为可播放 URL（用于前端对比预览）"""
-    try:
-        p = os.path.abspath(path)
-    except Exception:
-        return ""
-    for prefix, base in UPSCALE_URL_PREFIXES:
-        b = os.path.abspath(base)
-        if p.startswith(b + os.sep):
-            rel = os.path.relpath(p, b).replace(os.sep, "/")
-            return prefix + rel
-    for _label, base in COMFY_VIDEO_DIRS:
-        b = os.path.abspath(base)
-        if p.startswith(b + os.sep):
-            rel = os.path.relpath(p, b).replace(os.sep, "/")
-            sub = os.path.relpath(b, os.path.abspath(COMFYUI_OUTPUT_DIR)).replace(os.sep, "/")
-            return _comfy_view_url(rel, "" if sub == "." else sub)
-    # ComfyUI 侧任意子目录产出（video / v5video / upscale / 自定义工作流目录等）：
-    # 统一走 comfyview 代理，保证「超分前」对比预览有可播放地址
-    root = os.path.abspath(COMFYUI_OUTPUT_DIR)
-    if p.startswith(root + os.sep):
-        rel = os.path.relpath(p, root).replace(os.sep, "/")
-        return _comfy_view_url(os.path.basename(rel), os.path.dirname(rel).replace("\\", "/"))
-    return ""
 
 
-upscale_lock = threading.Lock()
 
 
-upscale_tasks = {}
+
+
+
+
+
+
 
 
 
@@ -602,36 +396,10 @@ def _wm_load_cfg() -> dict:
     return video_watermark.load_config(WATERMARK_CONFIG_PATH)
 
 
-def _task_analytics_hook(task: dict, event: str) -> None:
-    try:
-        analytics.record_from_task(task, analytics_kind=task.get("kind"))
-    except Exception as e:  # noqa: BLE001  统计失败不得影响任务
-        _app_logger().warning(f"任务统计写入失败（忽略）：{e}")
 
 
-def _task_queue_status() -> dict:
-    """TaskQueue 状态 + 「未接线」显式标注（N2，2026-09-22 复验）。
-
-    ``TaskQueue.submit`` 在本项目**没有生产调用方**：单 GPU 并发由 ``gpu_task_gate``
-    的进程级 Semaphore 承担（见 ``gpu_task_gate.py`` 模块头「不做什么」）。D-07 给
-    submit 加的背压/去重是该模块**自身契约**的加固，供嵌入使用与测试。这里显式标注
-    ``wired=False``，避免 ``/api/status`` 的 ``task_queue`` 字段让调用方误以为它是
-    生产并发闸门（即「已修但不可达」的假象）。
-
-    既有字段（running/concurrency/queued/max_queue/pending/current/current_elapsed_sec）
-    原样保留，``wired`` / ``note`` 均为**新增**字段。
-    """
-    try:
-        st = dict(task_queue.status())
-    except Exception as e:  # noqa: BLE001  可观测性接口自身绝不能把 /api/status 打挂
-        return {"wired": False, "error": f"{type(e).__name__}: {e}"}
-    st["wired"] = False
-    st["note"] = ("本进程 GPU 并发由 gpu_gate 承担；TaskQueue.submit 未接线"
-                  "（D-07 加固属模块自身契约，非生产路径）")
-    return st
 
 
-task_queue = task_store.get_queue(TASKS_DB_PATH)
 
 
 def _episode_video_stats(project_name: str, episode_no) -> dict:

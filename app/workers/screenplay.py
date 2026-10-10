@@ -31,7 +31,7 @@ def _current_llm_client():
     走 routes._shared 的唯一实现（那里已处理 ai_config 的按模块路由、可选客户端等
     细节）。延迟 import 是为了避免 workers 与 routes 的模块级循环依赖。
     '''
-    from routes._shared import _current_llm_client as _impl
+    from shared_ai import _current_llm_client as _impl
     return _impl()
 
 

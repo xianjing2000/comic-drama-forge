@@ -48,7 +48,8 @@ from workers.audio import (_audio_line_expect_sec, _audio_qc_lines,  # noqa: F40
 from collect_helpers import (  # noqa: F401, E402
     _collect_asset_refs, _collect_reference_images)
 from routes.tts import (_dub_audio_url, _dub_project_dir)  # noqa: F401
-from routes._shared import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_NON_PROJECT_DIRS, _audio_qc_project_key, _ep_dir, _ep_read_dir, _qc_load_cfg  # noqa: F401  再导出
+from shared_qc import _qc_load_cfg  # noqa: F401  再导出
+from routes._shared import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_NON_PROJECT_DIRS, _audio_qc_project_key, _ep_dir, _ep_read_dir  # noqa: F401  再导出
 from keyframe_helpers import (  # noqa: F401, E402
     _ep_of_script, _keyframe_prompt_preflight, _keyframe_qc_verifier,
     _keyframe_recall_cb, _keyframe_sb_map, _prompt_preflight)
@@ -63,7 +64,10 @@ from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
 from shared_base import _trash_move  # noqa: F401  再导出
 from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
 from shared_web import _serve_safe  # noqa: F401  再导出
-from routes._shared import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
+from shared_qc import _qc_gate, _qc_record, _qc_record_verdict  # noqa: F401  再导出
+from shared_tasks import _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _prune_task_registry  # noqa: F401  再导出
+from shared_upscale import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _comfy_view_url, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
+from routes._shared import _apply_project_settings, _project_style  # noqa: F401  再导出
 from project_helpers import (  # noqa: F401, E402
     _project_caption_burn_enabled, _project_subtitle_enabled, _project_worldview)
 from artifact_helpers import (_COMFYUI_RECLAIM_INTERVAL_SEC, _COMFYUI_RECLAIM_LAST_TS,  # noqa: F401, E402

@@ -64,8 +64,12 @@ from keyframe_helpers import (  # noqa: F401, E402
     _ep_of_script, _keyframe_prompt_preflight, _keyframe_qc_verifier,
     _keyframe_recall_cb, _keyframe_sb_map, _prompt_preflight)
 from shared_web import _serve_safe  # noqa: F401  再导出
-from routes._shared import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
-from routes._shared import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_NON_PROJECT_DIRS, _audio_qc_project_key, _ep_dir, _ep_read_dir, _qc_load_cfg  # noqa: F401  再导出
+from shared_qc import _qc_gate, _qc_record, _qc_record_verdict  # noqa: F401  再导出
+from shared_tasks import _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _prune_task_registry  # noqa: F401  再导出
+from shared_upscale import COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _comfy_view_url, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks  # noqa: F401  再导出
+from routes._shared import _apply_project_settings, _project_style  # noqa: F401  再导出
+from shared_qc import _qc_load_cfg  # noqa: F401  再导出
+from routes._shared import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_NON_PROJECT_DIRS, _audio_qc_project_key, _ep_dir, _ep_read_dir  # noqa: F401  再导出
 from qc_helpers import (  # noqa: F401, E402
     CLOSEUP_CHAR_CROP_TOP, _OUTFITS_DIRNAME, _allocate_storyboard_refs,
     _apply_closeup_ref_strategy, _cap_storyboard_refs, _closeup_char_crop,

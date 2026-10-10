@@ -23,8 +23,8 @@ from dub_mix import mix_out_dir
 from dub_mix import mix_video_with_entries
 from dub_mix import write_mix_report
 from fs_atomic import atomic_write_json
-from routes._shared import _prune_task_registry
-from routes._shared import _qc_load_cfg
+from shared_tasks import _prune_task_registry
+from shared_qc import _qc_load_cfg
 from shared_project import _safe_project
 from routes._shared import register_final_deliverable
 from routes.tts import _dub_audio_url
