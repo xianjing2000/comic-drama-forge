@@ -1170,7 +1170,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         # 兜底：用户覆盖 / 出厂模板 / 代码内注册兜底三级都不可用时走原 f-string（正文与
         # app/prompts/script_generate.txt 的骨架、prompt_templates._DEFAULT_SCRIPT_GENERATE
         # 逐字一致，仅占位符由运行时值填充）。
-        prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：{_shots_min_text}。把下方原文**压缩提炼**成可拍摄的镜头，只保留推动剧情的关键情节（冲突/转折/关键动作/金句），纯背景铺陈直接删去、勿逐句照搬。
+        prompt = f"""【任务】为漫剧《{bible.get('title') or ''}》的「{chunk.get('title')}」（第 {chunk['index']}/{chunk['total']} 段）编写分镜：{_shots_min_text}。把下方原文改写成可拍摄的镜头。⭐ **原文里的全部内容都要落到镜头里**（2026-10-10 用户口径）：冲突 / 转折 / 关键动作 / 金句**必须**；背景铺陈与环境描写**也要** —— 可并入相邻镜头，但**不得删去**。**允许改写成剧本格式、允许提取人物/物品/场景，不允许丢弃原文信息。**
 【粒度口径（**务必先读**）】{_shots_targeting_text}每镜 5~6 秒（不是每镜 2 秒的快切）。
 ⚠️ **镜数不设上下限**：既没有「至少 N 镜」的下限，也没有「不得超过 N 镜」的上限。唯一的准绳是
 **原文的信息密度**与**剧情完整度** —— 原文里的冲突/转折/关键动作/金句必须全部落到镜头里
@@ -1188,7 +1188,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
 {_ctx_line(continuity_ctx, 'prev_block')}{_ctx_line(continuity_ctx, 'bible_block')}{_ctx_line(continuity_ctx, 'contract_block')}{_ctx_line(continuity_ctx, 'style_block')}{_ctx_line(continuity_ctx, 'camera_block')}{_ctx_line(continuity_ctx, 'preflight_block')}{prev_tail}【可用角色】{json.dumps(char_brief, ensure_ascii=False)}
 【可用物品】{json.dumps(item_brief, ensure_ascii=False)}
 【可用场景】{json.dumps(scene_brief, ensure_ascii=False)}
-【本段原文（先压缩提炼：只保留冲突/转折/关键动作/金句，纯背景铺陈直接删去，勿逐句照搬）】
+【本段原文（须完整承载：冲突/转折/关键动作/金句必须落到镜头；背景铺陈与环境描写也要 —— 可并入相邻镜头，但不得删去。允许改写成剧本格式，不得丢弃原文信息）】
 {chunk.get('text') or ''}
 【本段剧情摘要】{outline.get('summary', '')}
 【本段情节要点】{json.dumps(outline.get('key_beats') or [], ensure_ascii=False)}
@@ -1227,7 +1227,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
   · 新增原文没有的情节、角色、道具、地点；
   · 改变原文的人物动机、因果链与结局。
 一句话：形式上从「小说」变成「剧本」，内容上**只能增、不能减**。name 字段必须与上面「可用角色/物品/场景」中的名字完全一致，不要新造名字。若上方给出「本集必须出现的原文金句」，必须把每句**原样**写进对应角色的 dialogue.text（不得改写、不得拆分、不得省略）。上一集已发生的事件禁止在本集重演。
-【关键情节自检】写完回看上方「剧情摘要/情节要点」，确认每个关键情节都有对应镜头；纯背景补叙、纯环境描写若未推进剧情应当已删去，**不要求逐句覆盖原文**。记住：本系统没有旁白，背景补叙与环境描写靠画面承载、绝不写成台词，心理活动靠神态动作或第一人称角色自语承载。"""
+【关键情节自检】写完回看上方「剧情摘要/情节要点」，确认**每一个**原文细节都有对应镜头——**要求逐句覆盖原文**，包括背景补叙与环境描写（它们可并入相邻镜头，但不得删除）。记住：本系统没有旁白，背景补叙与环境描写靠画面承载、绝不写成台词，心理活动靠神态动作或第一人称角色自语承载。"""
     label = f"shots#{chunk.get('index')}"
     hit = _cache_get(cache_dir, "shots", prompt, events, label)
     if hit is not None and isinstance(hit.get("shots"), list) and hit["shots"]:

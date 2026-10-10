@@ -32,7 +32,7 @@
 #       > 本文件 > 代码内兜底（prompt_templates._DEFAULT_SCRIPT_GENERATE）；
 #       本文件以 # 开头的头注释块在加载时被剥离，不会进入提示词正文。
 
-【任务】为漫剧《{drama_title}》的「{chunk_title}」（第 {chunk_index}/{chunk_total} 段）编写分镜：{shots_min_text}。把下方原文**压缩提炼**成可拍摄的镜头，只保留推动剧情的关键情节（冲突/转折/关键动作/金句），纯背景铺陈直接删去、勿逐句照搬。
+【任务】为漫剧《{drama_title}》的「{chunk_title}」（第 {chunk_index}/{chunk_total} 段）编写分镜：{shots_min_text}。把下方原文改写成可拍摄的镜头。⭐ **原文里的全部内容都要落到镜头里**（2026-10-10 用户口径）：冲突 / 转折 / 关键动作 / 金句**必须**；背景铺陈与环境描写**也要** —— 可并入相邻镜头，但**不得删去**。**允许改写成剧本格式、允许提取人物/物品/场景，不允许丢弃原文信息。**
 【粒度口径（**务必先读**）】{shots_targeting_text}每镜 5~6 秒（不是每镜 2 秒的快切）。
 ⚠️ **镜数不设上下限**：既没有「至少 N 镜」的下限，也没有「不得超过 N 镜」的上限。唯一的准绳是
 **原文的信息密度**与**剧情完整度** —— 原文里的冲突/转折/关键动作/金句必须全部落到镜头里
@@ -50,7 +50,7 @@
 {prev_block}{bible_block}{contract_block}{style_block}{camera_block}{preflight_block}{prev_tail}【可用角色】{char_brief_json}
 【可用物品】{item_brief_json}
 【可用场景】{scene_brief_json}
-【本段原文（先压缩提炼：只保留冲突/转折/关键动作/金句，纯背景铺陈直接删去，勿逐句照搬）】
+【本段原文（须完整承载：冲突/转折/关键动作/金句必须落到镜头；背景铺陈与环境描写也要 —— 可并入相邻镜头，但不得删去。允许改写成剧本格式，不得丢弃原文信息）】
 {chunk_text}
 【本段剧情摘要】{outline_summary}
 【本段情节要点】{key_beats_json}
