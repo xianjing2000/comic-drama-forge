@@ -54,6 +54,15 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': 0.85, 'type': 'float', 'range': (0.0, 1.0), 'group': '覆盖率',
         'desc': '原文覆盖率阈值：低于该值触发补生成（0.70 从不触发 → 0.98 过严跑满 3 轮 → 0.85 初检即过）',
         'owner': 'config.COVERAGE_THRESHOLD',
+        # ⚠️⭐ 2026-10-10 第二处坑：coverage.py 在**模块级**把它复制成了自己的常量
+        #   （DEFAULT_THRESHOLD = float(COVERAGE_THRESHOLD or 0.70)，
+        #    DETAIL_THRESHOLD = DEFAULT_THRESHOLD），而 apply_to_runtime() 只回写
+        #    REGISTRY 登记过的位置 —— 于是 config.COVERAGE_THRESHOLD 变成 0.85，
+        #    coverage.DEFAULT_THRESHOLD 却停留在 import 时捕获的旧值 0.98，
+        #    而真正做判定的正是 coverage.DEFAULT_THRESHOLD（run_coverage_check 的 thr）。
+        #    症状：实测「情节 88.78% > 门槛 85%」仍被判「覆盖率不足」。
+        #    故用 must_match 显式声明，让配置中心回写时一并改掉这两份副本。
+        'must_match': ['coverage.DEFAULT_THRESHOLD', 'coverage.DETAIL_THRESHOLD'],
     },
     'coverage_max_rounds': {
         'default': 3, 'type': 'int', 'range': (0, 10), 'group': '覆盖率',
