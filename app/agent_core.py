@@ -312,6 +312,17 @@ TOOLS = [
                        "episodes('all' 或 [1,2,3]) / target_shots / style / enable_upscale / "
                        "upscale_scale / enable_tts_pre / "
                        "step_max_retries / "
+                       # ⭐ 2026-10-10：此前只列参数名，AI 总控把 target_shots 的**默认值 12**
+                       #    当成了硬性方案报给用户（实测用户问「为什么每集 12 个镜头」）。
+                       #    这里写明它是**期望值、可调、有范围**，并要求按题材给建议。
+                       "⚠️ target_shots（每集目标镜头数）的准确语义：**默认 12，是给 AI 转剧本的"
+                       "「期望值」，不是硬限制**。实际允许范围 4~40（接口会 clamp 到该区间）。"
+                       "应按题材与节奏给建议并说明可调：悬疑/推理/对话密集型（信息密度高、"
+                       "需要更多反应镜与切镜）建议 18~30；动作/爽片（一镜一动作、快切为主）"
+                       "建议 8~14；常规叙事 12~18。注意每集镜数超过 "
+                       "config.SHOT_GRANULARITY_MAX_SHOTS（30）会被剧本体检判为「切太细」"
+                       "并点名，故上限建议不超过 30。**不要**把 12 当作不可改的默认方案照搬。"
+                       "另外 app.py 里的「上限 12 镜」是**单镜重跑**的防误触上限，与每集镜数无关。"
                        "auto_accept(产出即自动验收，默认 false) / auto_revive_hours(失败集挂起多久后"
                        "自动复活重试，默认 6 小时，0=永不) / max_episode_attempts 等。"
                        "（enable_tts / enable_mix / video_mode 已废弃：tts/mix 步骤下线，"
