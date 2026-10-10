@@ -1721,7 +1721,8 @@ def audit_shots_structure(raw_shots, bible: dict, tag: str = "") -> list:
             if _cap_text:
                 if len(_cap_text) > CAPTION_MAX_CHARS:
                     _add("caption_overflow",
-                         "镜#%d 字幕 %d 字超出上限 %d，将被截断"
+                         "镜#%d 字幕 %d 字明显偏长（参考值 %d 字），建议精简为交代时空或悬念的短句"
+                         "（不会截断，仅提示）"
                          % (idx + 1, len(_cap_text), CAPTION_MAX_CHARS), idx)
                 if _cap_kind and _cap_kind not in CAPTION_KINDS:
                     _add("caption_kind_off_whitelist",
@@ -2228,7 +2229,9 @@ def _split_multi_action_row(row: dict) -> list:
 # 时空跳跃（如「春秋蝉，逆转时光。」）。本模块原先只有 location + scene_lighting，
 # 没有内外景/时间/场次号，也没有一等字幕字段 —— 这里补齐。
 INT_EXT_VALUES = ("内景", "外景", "内外景")
-CAPTION_MAX_CHARS = 24
+#: 字幕「偏长」的**告警**阈值（2026-10-10 起不再用于截断，用户要求不设上限）。
+#  仅当字幕超过此值且**出现在不适合的位置**时才提醒，正文长度本身不作为缺陷。
+CAPTION_MAX_CHARS = 200
 CAPTION_KINDS = ("时间地点", "回溯", "悬念")
 
 _INT_EXT_HINTS = (
@@ -2382,7 +2385,10 @@ def _norm_caption(raw) -> dict:
         kind = str(raw.get("kind") or "").strip()
     else:
         return {}
-    text = " ".join(str(text).split())[:CAPTION_MAX_CHARS]
+    # ⚠️ 2026-10-10（用户要求「不要设置上限」）：原先这里按 CAPTION_MAX_CHARS 硬截断
+    #    （实测 <24 字被切掉，字幕语义残缺）。改为**只做空白规范化，不截断** ——
+    #    长度仅用于下面的告警提示，由内容决定该写多长。
+    text = " ".join(str(text).split())
     if not text:
         return {}
     if kind not in CAPTION_KINDS:
