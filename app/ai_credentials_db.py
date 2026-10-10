@@ -125,8 +125,31 @@ def _cipher(plain: str) -> str:
         return plain
 
 
+# Fernet token 的固定前缀（version byte 0x80 的 base64 头），用于识别真密文
+_FERNET_PREFIX = "gAAAAA"
+
+
+def _looks_like_fernet(value: str) -> bool:
+    """是否形如 Fernet token。
+
+    Fernet token = base64url(0x80 || timestamp || iv || ciphertext)，**必然**以 gAAAAA 开头。
+    用它区分「历史明文行」与「真正的密文」。
+    """
+    return bool(value) and value.startswith(_FERNET_PREFIX)
+
+
 def _decipher(cipher_text: str) -> str:
-    """解密 Fernet 密文 → 明文。旧明文行 / 解密失败返回原值或空串（不抛异常）。"""
+    """解密 Fernet 密文 → 明文（不抛异常）。
+
+    ⚠️ 2026-10-11 修复（真实故障）：原实现把所有解密异常都当作
+    「非 Fernet 密文（历史明文行）」而**原样返回密文**。于是主密钥更换后：
+      · 对外脱敏回显变成 gAAAAA**** —— 既泄露密文前缀，界面又是乱码；
+      · 更严重的是调用 AI 时把**密文当明文 api_key** 发给网关，认证必然失败，
+        而日志里没有任何指向「解密失败」的错误 —— 典型的静默失败。
+    现在按 Fernet 形状区分：
+      · 形如 Fernet token 但解密失败 → 密钥不可用：**返回空串 + 响亮告警**；
+      · 其他（真正的历史明文行）→ 原样返回。
+    """
     if not cipher_text:
         return ""
     try:
@@ -134,9 +157,21 @@ def _decipher(cipher_text: str) -> str:
         if store._fernet:
             try:
                 return store._fernet.decrypt(cipher_text.encode("ascii")).decode("utf-8")
-            except Exception:
-                # 非 Fernet 密文（历史明文行）→ 原样返回
+            except Exception as e:  # noqa: BLE001
+                if _looks_like_fernet(cipher_text):
+                    logger.error(
+                        "AI 凭证解密失败（主密钥可能已更换），该模块需重新配置密钥："
+                        "密文前 12 位 %s…（长度 %d，原因 %s）",
+                        cipher_text[:12], len(cipher_text), type(e).__name__)
+                    return ""
+                # 真正的历史明文行 → 原样返回
                 return cipher_text
+        # 主密钥/cryptography 不可用：密文同样**不可当作明文使用**（否则拿密文去调 AI）
+        if _looks_like_fernet(cipher_text):
+            logger.error(
+                "AI 凭证解密不可用（缺主密钥或 cryptography），该模块需重新配置密钥："
+                "密文前 12 位 %s…（长度 %d）", cipher_text[:12], len(cipher_text))
+            return ""
         return cipher_text
     except Exception:  # noqa: BLE001
         return ""
