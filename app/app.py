@@ -11033,6 +11033,16 @@ def api_engine_state():
         st = _cc.get_engine_state()
     except Exception as e:  # noqa: BLE001  状态接口永不 5xx
         return jsonify({"success": False, "error": str(e)}), 200
+    # 附带「ComfyUI 安装目录检测」结果（2026-10-10）：用户安装位置可能与开发机不同，
+    # 这里让前端/运维直接看到「检测到哪个目录、依据是什么、启动脚本在哪」。
+    # ?refresh=1 忽略缓存重新检测（排查「为什么没找到 / 找错了」用）。
+    try:
+        import comfyui_locator as _cl  # noqa: PLC0415
+        if request.args.get("refresh"):
+            _cl.find_comfyui_dir(refresh=True)
+        st["comfyui_dir"] = _cl.describe()
+    except Exception as e:  # noqa: BLE001
+        st["comfyui_dir"] = {"found": False, "error": str(e)[:200]}
     st["success"] = True
     return jsonify(st)
 
