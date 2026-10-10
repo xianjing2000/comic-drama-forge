@@ -654,6 +654,16 @@ _PROJECT_KIND_DIRS = {"characters": CHARACTERS_DIR, "items": ITEMS_DIR,
 
 # ===== 页面（Vite SPA）=====
 @app.route('/')
+def index():
+    """SPA 首页（Vite 构建产物）
+
+    2026-10-11 恢复：搬迁 _resolve_static_dir 时，把它下面紧邻的这个视图整段误删，
+    只留下悬空的 @app.route('/') 装饰器贴在 static_assets 上 ——
+    Flask 于是把 / 注册到 static_assets，访问首页报
+        TypeError: static_assets() missing 1 required positional argument: 'filename'
+    现恢复原实现（与删除前逐字一致），并加 tests/test_route_integrity.py 守护。
+    """
+    return send_from_directory(_STATIC_DIR, 'index.html')
 
 
 @app.route('/assets/<path:filename>')
