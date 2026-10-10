@@ -1768,7 +1768,7 @@ def audit_shots_structure(raw_shots, bible: dict, tag: str = "") -> list:
             val = s.get(field)
             if isinstance(val, str) and len(val) > limit:
                 _add("field_overflow", f"镜#{idx + 1} {field} 长 {len(val)} 字 > 上限 {limit}，"
-                                       f"将被截断", idx)
+                                       f"将被截断（该字段有硬性格式约束，与画面描述长度无关）", idx)
             elif val is not None and not isinstance(val, str) and field in (
                     "description", "edit_reason", "audio_cues"):
                 # description 等应为字符串；模型偶尔给 dict/list → 会被 str() 强转
@@ -2223,6 +2223,86 @@ def _split_multi_action_row(row: dict) -> list:
     logger.info("一镜多动作已拆镜：镜%s → 「%s」/「%s」",
                 row.get("shot_id"), a["description"][:30], b["description"][:30])
     return [a, b]
+
+
+
+def _extract_numbered_block(novel_text: str, anchor: str, max_lines: int = 16) -> str:
+    """从小说原文里提取「以某个标题开头 + 编号条目」的精确文本块。
+
+    ⚠️ 为什么需要它（2026-10-10 用户要求「剧本还原小说」）：
+    实测证据 —— 小说第 1 章偏移 1552 处有完整的《楼层安全守则》八条，
+    但生成的剧本里「四十七/四十八层」出现 0 次，LLM 自己编了另一套八条
+    （还写成「灰色制服的人」，原文是「红色工牌的人」）。
+    也就是说：**只要依赖 LLM 抄写，它就会在提炼阶段偷懒改写**。
+    这类「规则 / 守则 / 条款 / 公告」是剧情硬信息，必须由程序从原文提取。
+
+    策略（保守，找不到就返回空串，绝不猜）：
+      1. 在原文里定位 anchor（如「楼层安全守则」）；
+      2. 从其后开始，收集形如 `1. xxx` / `1、xxx` / `1 xxx` 的连续编号行；
+      3. 需要至少 2 条才算命中（单条多为误匹配）；
+      4. 遇到空行或明显非条目行（连续两行不像条目）则停止；
+      5. 若原文紧跟着还有「手写 / 红笔 / 落款」一类描述行，一并取回（供外观描述用）。
+    """
+    try:
+        if not novel_text or not anchor:
+            return ''
+        i = novel_text.find(anchor)
+        if i < 0:
+            return ''
+        tail = novel_text[i:i + 4000]
+        lines = [ln.strip() for ln in tail.splitlines()]
+        rules = []
+        started = False
+        miss = 0
+        for ln in lines[1:]:
+            if not ln:
+                if started:
+                    break
+                continue
+            m = re.match(r'^([1-9]|1[0-9])[.．、,，:：]?\s*(.+)$', ln)
+            if m and len(m.group(2).strip()) >= 4:
+                rules.append('%s. %s' % (m.group(1), m.group(2).strip()))
+                started = True
+                miss = 0
+            else:
+                if started:
+                    miss += 1
+                    if miss >= 2 or len(rules) >= max_lines:
+                        break
+        if len(rules) < 2:
+            return ''
+        return ' '.join(rules)
+    except Exception:  # noqa: BLE001
+        return ''
+
+
+def _restore_surface_text_from_novel(items, scenes, novel_text: str) -> int:
+    """用小说原文中的精确条款覆盖 surface_text（仅当能明确提取到）。
+
+    返回被替换的条目数。全程 fail-open、只读、不猜。
+    """
+    n = 0
+    try:
+        for group in (items or [], scenes or []):
+            for ent in (group or []):
+                if not isinstance(ent, dict):
+                    continue
+                name = str(ent.get('name') or '').strip()
+                if not name:
+                    continue
+                # 标题本身在原文中出现才尝试（避免用不存在的名字去搜）
+                got = _extract_numbered_block(novel_text, name)
+                if not got:
+                    continue
+                old = str(ent.get('surface_text') or '').strip()
+                if got and got != old:
+                    ent['surface_text'] = got
+                    n += 1
+                    logger.info('surface_text 已按小说原文还原：%s（%d 字，原为 %d 字）',
+                                name, len(got), len(old))
+    except Exception as e:  # noqa: BLE001
+        logger.warning('surface_text 原文还原失败（忽略）：%s', e)
+    return n
 
 # ---- 场次表头 + 字幕/转场（2026-10-02，对齐标准剧本格式）----
 # 参考改编稿用【第一场】外景·无名山巅·黄昏 的场记头组织镜头，并用「字幕」交代
@@ -3285,6 +3365,20 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
          #    必须与其他字段同批登记 —— _norm_list 只保留白名单字段，漏登记会静默丢弃。
          "surface_text",
          "reference_prompt_zh", "reference_prompt_en"]))
+    # ⭐ 2026-10-10（用户要求「剧本还原小说」）：用**本章原文**精确还原 surface_text。
+    #    ⚠️ 为什么必须由程序做、不能靠提示词：实测证据 —— 提示词里已写明「必须是小说原文的
+    #    照抄，不得改写」，但生成的第 1 集 63 镜里提到原文「四十七/四十八层」的为 **0 镜**；
+    #    LLM 在 bible 提炼阶段把《楼层安全守则》整个重编了一套（还写成「灰色制服的人」，
+    #    而原文是「红色工牌的人」）。**只要依赖模型抄写，它就会在提炼阶段偷懒改写。**
+    #    这里改为确定性提取：按物品/场景名在原文里定位「标题 + 编号条款」块，
+    #    命中则整段替换为原文；未命中的条目**原样保留**（找不到就不动，绝不构造）。
+    try:
+        _restored = _restore_surface_text_from_novel(items, scenes, seg)
+        if _restored:
+            logger.info("第%s集：已按小说原文还原 %d 条 surface_text（确保规则/告示类"
+                        "硬信息与原文逐字一致）", episode_no, _restored)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("surface_text 原文还原失败（忽略，不影响主流程）：%s", _e)
     if not characters:
         raise LLMError("模型未返回有效角色设定，转换中止")
     # 风格：以调用方传入的 style 为准（模型的返回值可能是自我发挥，用户意图优先）
