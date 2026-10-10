@@ -173,7 +173,13 @@ def _decipher(cipher_text: str) -> str:
                 "密文前 12 位 %s…（长度 %d）", cipher_text[:12], len(cipher_text))
             return ""
         return cipher_text
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # 最外层兜底：走到这里说明上面两条分支都没覆盖到（属于意外形态）。
+        # ⚠️ 绝不能静默 —— 静默正是「拿密文 / 空串当 api_key 去调 AI」那类
+        #    故障的温床（本项目真实发生过：解析失败时把密文当明文返回）。
+        logger.warning(
+            "AI 凭证解密出现未预期异常，按「不可用」处理（返回空）：%s: %s",
+            type(exc).__name__, exc)
         return ""
 
 
