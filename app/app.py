@@ -139,6 +139,8 @@ from script_prompt_analyzer import analyze_script as analyze_script_prompts, sav
 from character_manager import CharacterManager
 from relation_manager import RelationManager, RelationConflictDetector
 
+# ---- 跨域助手已下沉到 routes/_shared.py（2026-10-08 第七批）----
+from routes._shared import _ai_gate_or_400, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
 
 
 app = Flask(__name__)
@@ -263,6 +265,7 @@ app.register_blueprint(script_api_bp)
 # 2026-10-11 路由拆分：资产生成 已迁至 routes/assets_api.py。
 from routes.assets_api import assets_api_bp  # noqa: E402
 app.register_blueprint(assets_api_bp)
+from routes.assets_api import _OUTFIT_PROMPT_MARK  # noqa: F401, E402
 from routes.assets_api import (
     api_generate_assets, api_character_upload_sheet, api_character_outfit_generate,
     api_character_outfits_list, api_asset_file)  # noqa: F401
@@ -288,21 +291,73 @@ from routes.autonomous import (
     api_autonomous_status, api_autonomous_chat, api_autonomous_report,
     api_autonomous_report_export, api_autonomous_projects, api_autonomous_deliverables)  # noqa: F401
 
+# 2026-10-11 助手下沉：视频生成助手 已迁至 video_helpers.py。
+from video_helpers import (  # noqa: F401, E402
+    _VIDEO_TASK_IS_PIPELINE, _ensure_voice_bank_refs, _norm_shot_key,
+    _video_generate_worker, _video_generate_worker_body, _video_retry_shot_impl,
+    _video_should_stop)
 
 # 2026-10-11 助手下沉：资产生成 worker 已迁至 asset_worker.py。
 from asset_worker import (  # noqa: F401, E402
     _ITEM_OWNER_REF_PRIORITY, _generate_asset_task, _item_owner_ref_image)
 
+# 2026-10-11 随分镜批次下沉：这两个名字语义属于分镜 QC，且只被 storyboard_helpers 使用。
+from storyboard_helpers import _PromptQCBlocked, _REF_CANVAS_CACHE  # noqa: F401, E402
 
+# 2026-10-11 助手下沉：分镜助手 已迁至 storyboard_helpers.py。
+from storyboard_helpers import (  # noqa: F401, E402
+    _GRID_PLAN_TPL_FP, _OPT_REASONING_MARKERS, _TE3D_RENDER_LOCK,
+    _blocking_spec_text, _build_identity_ref_grid, _fit_ref_to_canvas,
+    _grid_panel_plan, _grid_plan_template_fingerprint, _optimize_prompt_from_qc,
+    _ref_canvas_target, _sanitize_optimized_prompt, _storyboard_prompt_structurally_ok,
+    _storyboard_retry_shot_impl, _storyboard_scratch_map, _storyboard_worker,
+    _unify_ref_canvas, _update_storyboard_manifest_shot, _write_artifact_meta)
 
+# 2026-10-11 助手下沉：分镜自愈助手 已迁至 sb_helpers.py。
+from sb_helpers import (  # noqa: F401, E402
+    _SB_STRUCTURAL_DEFECT_KEYWORDS, _sb_heal_comfyui, _sb_structural_defect)
 
+# 2026-10-11 助手下沉：角色助手 已迁至 character_helpers.py。
+from character_helpers import (  # noqa: F401, E402
+    _character_base_prompt, _character_outfit_dir, _find_script_character)
 
+# 2026-10-11 助手下沉：资产收集助手 已迁至 collect_helpers.py。
+from collect_helpers import (  # noqa: F401, E402
+    _collect_asset_refs, _collect_reference_images)
 
+# 2026-10-11 助手下沉：项目级配置助手 已迁至 project_helpers.py。
+from project_helpers import (  # noqa: F401, E402
+    _project_caption_burn_enabled, _project_subtitle_enabled, _project_worldview)
 
+# 2026-10-11 助手下沉：集级配置助手 已迁至 episode_helpers.py。
+from episode_helpers import (  # noqa: F401, E402
+    _OUTFIT_RECORD_FILE, _bigram_overlap, _episode_frame_ratios,
+    _episode_outfit_overrides, _episode_qc_desc, _episode_schema_defaults)
 
+# 2026-10-11 助手下沉：镜头辅助助手 已迁至 shot_helpers.py。
+from shot_helpers import (  # noqa: F401, E402
+    _chapter_text_for_script, _shot_coverage_map)
 
+# 2026-10-11 助手下沉：混音助手 已迁至 mix_helpers.py。
+from mix_helpers import (  # noqa: F401, E402
+    _mix_manifest, _mix_prepare, _mix_resolve_video,
+    _mix_segments_dir)
 
+# 2026-10-11 助手按域下沉（第六批）：关键帧助手已迁至 keyframe_helpers.py。
+from keyframe_helpers import (  # noqa: F401, E402
+    _ep_of_script, _keyframe_prompt_preflight, _keyframe_qc_verifier,
+    _keyframe_recall_cb, _keyframe_sb_map, _prompt_preflight)
 
+# 2026-10-11 助手按域下沉（第五批）：质检助手已迁至 qc_helpers.py。
+from qc_helpers import (  # noqa: F401, E402
+    CLOSEUP_CHAR_CROP_TOP, _OUTFITS_DIRNAME, _allocate_storyboard_refs,
+    _apply_closeup_ref_strategy, _cap_storyboard_refs, _closeup_char_crop,
+    _normalize_scene_name, _on_screen_characters, _qc_brief,
+    _qc_history_file_for, _qc_prev_shot_desc, _qc_prev_shot_ref,
+    _qc_prune_attempts, _qc_ref_images, _qc_retry_hopeless,
+    _qc_shot_desc, _qc_style_of, _qc_summary,
+    _sanitize_outfit_key, _shot_has_char_ref, _shot_has_on_screen,
+    _shot_outfit_dir)
 
 # 2026-10-11 助手按域下沉（第四批）：资产索引/参考图选择已迁至 asset_refs.py。
 from asset_refs import (  # noqa: F401, E402  助手按域下沉（第四批）
@@ -318,8 +373,20 @@ from asset_refs import (  # noqa: F401, E402  助手按域下沉（第四批）
 # 2026-10-11 助手按域下沉（第三批）：教训库/风格/系统维护各自迁出。
 from lesson_helpers import (_apply_audio_hints, _qc_lesson_from_record,  # noqa: F401, E402
                              _record_audio_qc_lesson, _record_preflight_lesson, _record_qc_lesson)
+from style_helpers import _style_aspect_confirmed, _style_aspect_guard  # noqa: F401, E402
+from system_helpers import (_COMFYUI_CLEAR_HISTORY_LAST_TS,  # noqa: F401, E402
+                               _COMFYUI_CLEAR_HISTORY_LOCK, _maybe_clear_comfyui_history)
 
+# 2026-10-11 助手按域下沉（第二批）：质检清理/产物回收已迁至 artifact_helpers.py。
+from artifact_helpers import (_COMFYUI_RECLAIM_INTERVAL_SEC, _COMFYUI_RECLAIM_LAST_TS,  # noqa: F401, E402
+                               _COMFYUI_RECLAIM_LOCK, _PURGE_REJECTED_ENV, _comfyui_official_dirs,
+                               _mark_history_file_purged, _maybe_reclaim_comfyui_output,
+                               _purge_prompt_records, _purge_rejected_artifacts,
+                               _purge_rejected_enabled, _purge_sb_refs, _reject_artifact)
 
+# 2026-10-11 助手按域下沉（第一批）：配音脚本解析已迁至 dub_helpers.py。
+from dub_helpers import (_dub_character_desc, _dub_line_speaker_from_script,  # noqa: F401, E402
+                        _dub_resolve_script)
 
 # 2026-10-11 worker 下沉（第三批）：配音/混音已迁至 workers/audio.py。
 from workers.audio import (_audio_line_expect_sec, _audio_qc_lines,  # noqa: F401, E402
@@ -333,7 +400,34 @@ from workers.episodes import _episodes_worker, _salvage_episode_script  # noqa: 
 #   这里保留名字再导出，既有 app._screenplay_worker 调用表面零改动。
 from workers.screenplay import _screenplay_worker  # noqa: F401, E402
 import job_state
+from job_state import (generation_state, lock)  # noqa: F401
+from routes.keyframes import (_keyframes_dir, api_keyframes_file, api_keyframes_generate, api_keyframes_list, api_keyframes_plan)  # noqa: F401
+from job_state import (generation_state, lock)  # noqa: F401
+from routes.scenes import (_find_scene_asset_dir, _scene_grid_prompt_for, api_scenes_grid_apply, api_scenes_grid_file, api_scenes_grid_preview)  # noqa: F401
+from job_state import (generation_state, lock)  # noqa: F401
+from routes.scripts import (_analyze_worker, _ensure_script_file, api_analyze_prompts)  # noqa: F401
+from routes.generation_status import (api_generation_status)  # noqa: F401  （保留旧表面：app.api_generation_status 仍可用）
+from routes._shared import (_quality_asset_url, _quality_find_full, _quality_find_preview, _quality_state_view, _quality_video_url)  # noqa: F401
+from routes.quality import (_quality_contract_summary, _quality_ep_numbers, _quality_episode_row, _quality_refs_for_shot, _quality_storyboard_url)  # noqa: F401
+from routes._shared import (_first_existing, _shot_num_key, comfyui_client)  # noqa: F401
+from routes.consistency import (_consistency_collect)  # noqa: F401
+from routes.episodes import (_episode_progress)  # noqa: F401
+from routes.export import (_serve_attachment)  # noqa: F401
+from routes._shared import (_episode_video_stats, _load_legacy_flat_script, _load_script_for, register_final_deliverable)  # noqa: F401
+from routes.final import (_wm_apply_to_final, video_processor)  # noqa: F401
+from routes._shared import (_task_analytics_hook, _task_queue_status, task_queue)  # noqa: F401
 from routes.tasks import (task_db)  # noqa: F401
+from routes.llm import (LLM_NOT_CONFIGURED_GUIDE)  # noqa: F401
+from routes.watermark import (_wm_view)  # noqa: F401
+# 该域被搬走的助手全部保留再导出（守卫可能直接取 app._xxx）。
+from routes._shared import (COMFY_VIDEO_DIRS, UPSCALE_URL_PREFIXES, _TASK_STATE_KEEP_DONE, _TASK_TERMINAL_STATUSES, _apply_project_settings, _comfy_view_url, _project_style, _prune_task_registry, _qc_gate, _qc_record, _qc_record_verdict, _serve_safe, _upscale_resolve_comfyview, _upscale_resolve_video, _upscale_url_for_path, upscale_lock, upscale_tasks)  # noqa: F401  该域助手已下沉到共享模块
+from routes.upscale import (_upscale_worker)  # noqa: F401  本域私有助手
+# 该域被搬走的助手全部保留再导出：守卫/测试可能直接取 app._xxx 做端点级验证。
+from routes.tts import (_dub_audio_url, _dub_project_dir)  # noqa: F401
+# ---- 质检域私有助手再导出（2026-10-08 第八批）----
+# 守卫脚本会直接取 app._resolve_audio_qc_target 等做端点级测试，保持旧可达面。
+from routes.qc import (_audio_qc_file_url, _audio_qc_visuals_key,  # noqa: F401
+                       _qc_test_override, _resolve_audio_qc_target)
 # 总控 AI 自主执行内核：注入 Flask 实例，工具调用走进程内直连（不走网络/不绑端口）
 agent_core.bind_app(app)
 # ⚠️ 审计 P1-6（2026-09-29）：不再启用全局 CORS。
@@ -353,6 +447,8 @@ APP_DEBUG = os.getenv("APP_DEBUG", "0").lower() in ("1", "true", "yes", "on")
 
 
 
+# 全局状态：**唯一定义在 app/job_state.py**（消费方都从这里导入同一对象，禁止重新赋值）
+from job_state import generation_state, lock  # noqa: E402,F401
 
 
 # 视频 worker「是否托管（pipeline）任务」的执行期标记（contextvar，随线程上下文传递）。
@@ -499,12 +595,16 @@ except Exception as _e:  # noqa: BLE001
 #:    half.png（半身胸像）作次选。
 
 
+# ---- 项目助手已下沉到 routes/projects.py（2026-10-08 第五批）----
+from routes.projects import _collect_project_cast_images, _cover_prompt_from_outline, _move_with_retry, _project_cover_path  # noqa: F401  再导出
 
 
 
 
 
 
+# ---- _body / _resolve_continuity_key 已下沉到 routes/_shared.py（2026-10-08）----
+from routes._shared import _body, _novel_key, _resolve_continuity_key  # noqa: F401  再导出
 
 
 # ==========================================================================
@@ -518,6 +618,8 @@ except Exception as _e:  # noqa: BLE001
 #       第 2 集起写入 epNN/ 子目录。读取时优先集目录、回落平铺目录，兼容旧数据。
 # ==========================================================================
 
+# ---- 质检域跨域助手已下沉到 routes/_shared.py（2026-10-08 第八批）----
+from routes._shared import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_NON_PROJECT_DIRS, _audio_qc_project_key, _ep_dir, _ep_read_dir, _qc_load_cfg  # noqa: F401  再导出
 
 
 
@@ -625,6 +727,15 @@ def favicon_svg():
 
 
 
+# ---- 蓝图共享助手已下沉到 routes/_shared.py（2026-10-08 解耦）----
+from routes._shared import (  # noqa: F401  再导出：既有装饰器/调用零改动
+    _autopilot_guard, _friendly_error, _prompt_memory_dead_count,
+    _prompt_memory_used_total, _prompt_memory_view)
+
+# 2026-10-11 补：pipeline.py:1528 走 `A._app_logger()`（A = 宿主 app 模块）
+# 记录「audio 教训回流失败」时用 —— 原先 app 顶层没有它，该分支一执行就 AttributeError。
+# 由 tests/test_app_attr_bindings.py 的延迟绑定扫描发现（98 处访问中唯一缺失项）。
+from routes._shared import _app_logger  # noqa: F401, E402
 
 
 
@@ -972,6 +1083,8 @@ _SCENE_DECOR_CHARS = ("《", "》", "「", "」", "『", "』", "\"", "'",
 # ===== 视频水印（C 项：可配置、默认关闭、支持「全视频移动」） =====
 # 说明：图片生成链路不添加任何水印（C 项⑧）；本区块只处理视频后处理，不改 ComfyUI 工作流。
 
+# ---- AI 助手已下沉到 routes/ai.py（2026-10-08 第六批）----
+from routes.ai import LLM_NOT_CONFIGURED_GUIDE_MAP, _ai_config_view, _ai_credentials_verify, _chat_project, _chat_state, _save_ai_module, _wm_load_cfg  # noqa: F401  再导出
 
 
 # ===== 视频超分（FlashVSR 真实实现，成片/片段 → 高分辨率） =====
@@ -986,6 +1099,12 @@ _SCENE_DECOR_CHARS = ("《", "》", "「", "」", "『", "』", "\"", "'",
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 单次上传上限 200MB
 
 
+# ---- 小说库/预检助手已下沉到 routes/_shared.py（2026-10-08 第四批）----
+from routes._shared import (  # noqa: F401  再导出
+    AI_MODULE_LABEL, EPISODE_BATCH_LIMIT, UPLOAD_TMP_DIR, _ai_client_for_module,
+    _ai_guide_response,
+    _current_llm_client, _episode_units_for_chapters, _estimate_subchunks,
+    _novels_stats, _optional_llm_client, _resolve_novel_project, _safe_upload_name)
 
 
 # =====================================================================
@@ -1128,6 +1247,8 @@ ai_chat.set_archive_root(os.path.dirname(os.path.abspath(AI_CHAT_HISTORY_PATH)))
 # 视频配音（QwenTTS 真实链路：剧本台词 → 逐角色语音 → output/dub/<项目>/）
 # =====================================================================
 
+from job_state import dub_tasks  # noqa: F401  2026-10-11 归位到 job_state
+from job_state import dub_lock  # noqa: F401  2026-10-11 归位到 job_state
 
 
 
@@ -1200,6 +1321,8 @@ def _apply_audio_lessons(plan_lines: list, project_name: str) -> int:
 # 音画对齐与混音合成（配音轨 × 成片视频 → 带配音成片 output/final_dub/）
 # =====================================================================
 
+from job_state import mix_tasks  # noqa: F401  2026-10-11 归位到 job_state
+from job_state import mix_lock  # noqa: F401  2026-10-11 归位到 job_state
 
 
 
