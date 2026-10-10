@@ -231,6 +231,22 @@ app.register_blueprint(scenes_bp)
 from routes.keyframes import keyframes_bp
 app.register_blueprint(keyframes_bp)
 
+# 2026-10-11 助手下沉：分镜自愈助手 已迁至 sb_helpers.py。
+from sb_helpers import (  # noqa: F401, E402
+    _SB_STRUCTURAL_DEFECT_KEYWORDS, _sb_heal_comfyui, _sb_structural_defect)
+
+# 2026-10-11 助手下沉：角色助手 已迁至 character_helpers.py。
+from character_helpers import (  # noqa: F401, E402
+    _character_base_prompt, _character_outfit_dir, _find_script_character)
+
+# 2026-10-11 助手下沉：资产收集助手 已迁至 collect_helpers.py。
+from collect_helpers import (  # noqa: F401, E402
+    _collect_asset_refs, _collect_reference_images)
+
+# 2026-10-11 助手下沉：项目级配置助手 已迁至 project_helpers.py。
+from project_helpers import (  # noqa: F401, E402
+    _project_caption_burn_enabled, _project_subtitle_enabled, _project_worldview)
+
 # 2026-10-11 助手下沉：集级配置助手 已迁至 episode_helpers.py。
 from episode_helpers import (  # noqa: F401, E402
     _OUTFIT_RECORD_FILE, _bigram_overlap, _episode_frame_ratios,
@@ -503,32 +519,6 @@ _ITEM_OWNER_REF_PRIORITY = ("front.png", "front.jpg", "half.png", "half.jpg")
 from routes.projects import _collect_project_cast_images, _cover_prompt_from_outline, _move_with_retry, _project_cover_path  # noqa: F401  再导出
 
 
-def _sb_heal_comfyui(task_id: str, project: str) -> bool:
-    """分镜/资产 worker 里的 ComfyUI 自愈：连续拒连/未出图时自动重启 ComfyUI 进程。
-
-    背景（2026-10-08）：ComfyUI 在「后端超时 → 全局 /interrupt」后可能进入半死状态
-    （webserver 仍监听 8188 但执行器被打断），后续镜头 /upload/image 全部 10061 拒连。
-    本函数在「该镜头 ComfyUI 未出图且 ComfyUI 不在线」时重启 ComfyUI 并等它就绪，
-    让下一镜头（或本镜头重试）能继续，而非让整集镜头全挂。
-
-    返回 True = 已重启且就绪（可继续），False = 重启失败/ComfyUI 仍离线（按离线处理）。
-    全程 fail-open，不抛异常。
-    """
-    global _comfyui_heal_count
-    try:
-        _comfyui_heal_count = getattr(globals(), "_comfyui_heal_count", 0) + 1
-        app.logger.warning(
-            "[自愈] 镜头 ComfyUI 未出图且离线，自动重启 ComfyUI（第 %d 次，项目=%s，任务=%s）",
-            _comfyui_heal_count, project, task_id)
-        ok = comfyui_client.restart_comfyui(wait_sec=180, poll_sec=3.0)
-        if ok:
-            app.logger.info("[自愈] ComfyUI 重启成功，继续分镜生成")
-        else:
-            app.logger.warning("[自愈] ComfyUI 重启后仍未就绪，本镜头继续按离线处理")
-        return ok
-    except Exception as e:  # noqa: BLE001
-        app.logger.warning("[自愈] ComfyUI 重启异常（按离线处理）：%s", e)
-        return False
 
 
 def _item_owner_ref_image(project_name: str, owner) -> str:
@@ -719,50 +709,6 @@ def api_status():
 
 
 
-def _collect_asset_refs(project: str) -> tuple:
-    """从磁盘自动收集项目的角色 / 场景参考图（无需前端传入）
-
-    返回 (character_refs, scene_refs)，元素形如 {"name":..., "front": 本地路径}，
-    可直接喂给 _collect_reference_images。
-
-    为什么需要它：单镜重跑等「带内调用的接口」如果只依赖前端传参，
-    前端一旦传了结构不完整的对象（例如直接传剧本里的 characters，只有
-    reference_prompt_zh 而没有 front/base 键），参考图会静默丢失、
-    视频退化成无角色锚点——这类静默降级比报错更难发现。
-
-    S6 修复：判据与 pipeline.probe_assets 对齐 ——
-      1) 扩展名白名单 (".png", ".jpg", ".jpeg", ".webp")，不再只认 4 个固定文件名；
-      2) 同一目录下取第一张非空图片（兼容 ComfyUI 直接输出 base_123.png 等非标名）；
-      3) 找不到任何图片 → 返回空 dict，**绝不静默 take-first**（由调用方决策报错/跳过）。
-    B-14 P2-4：判据统一抽到模块级 _first_existing_asset_image，取图判据
-    _build_asset_index 复用同一函数，消除两处「判有图」口径漂移。
-    """
-    def _first_nonempty_image(d: str) -> str:
-        return _first_existing_asset_image(d)
-
-    def _scan(root: str) -> list:
-        out = []
-        base = os.path.join(root, _safe_project(project))
-        if not os.path.isdir(base):
-            return out
-        for name in sorted(os.listdir(base)):
-            d = os.path.join(base, name)
-            if not os.path.isdir(d):
-                continue
-            # S6 候选顺序：front/base 固定名优先，否则取目录内第一张非空图片
-            ref = ""
-            for cand in ("front.png", "base.png", "front.jpg", "base.jpg"):
-                p = os.path.join(d, cand)
-                if os.path.isfile(p):
-                    ref = p
-                    break
-            if not ref:
-                ref = _first_nonempty_image(d)
-            if ref:
-                out.append({"name": name, "front": ref, "base": ref})
-        return out
-
-    return _scan(CHARACTERS_DIR), _scan(SCENES_DIR)
 
 
 # ==========================================================================
@@ -2931,50 +2877,10 @@ def _append_outfit_prompt(base_prompt: str, outfit_desc: str) -> str:
     return f"本套服装：{desc}"
 
 
-def _character_outfit_dir(project_name: str, character: str, outfit_key: str = "") -> str:
-    """角色服装变体目录（outfit_key 为空时是 outfits 根目录）"""
-    d = os.path.join(CHARACTERS_DIR, project_name, character, _OUTFITS_DIRNAME)
-    return os.path.join(d, outfit_key) if outfit_key else d
 
 
-def _find_script_character(project_name: str, character: str) -> dict:
-    """从项目剧本（_load_script_for）按名字（含别名归一）找角色档案；找不到返回 {}
-
-    用途：服装变体的提示词要在「角色主设定」之上追加服装描述，主设定来自剧本
-    characters[].reference_prompt_zh；appearance / gender 等字段也一并透传，
-    供生成端 ensure_prompt_gender 不变量与质检描述使用。
-    """
-    _norm = _normalize_char_alias(character)
-    try:
-        for c in ((_load_script_for(project_name, None) or {}).get("characters") or []):
-            if isinstance(c, dict) and \
-                    _normalize_char_alias(str(c.get("name") or "")) == _norm:
-                return dict(c)
-    except Exception as e:  # noqa: BLE001  剧本读失败不阻断（回落主设定 meta）
-        app.logger.warning("服装变体读取剧本角色档案失败（忽略）：%s", e)
-    return {}
 
 
-def _character_base_prompt(project_name: str, character: str) -> str:
-    """角色主设定的参考提示词：剧本 characters[].reference_prompt_zh 优先，
-    回落主设定目录 base.png.meta.json 的 prompt（O2 产物旁路元数据）。
-
-    都拿不到返回 ''——此时变体提示词只含服装段，生成端的性别不变量会按剩余
-    字段兜底；与「剧本缺角色描述」的既有资产生成行为同口径，不额外阻断。
-    """
-    p = str(_find_script_character(project_name, character).get("reference_prompt_zh")
-            or "").strip()
-    if p:
-        return p
-    try:
-        meta_path = os.path.join(CHARACTERS_DIR, project_name, character,
-                                 "base.png.meta.json")
-        if os.path.isfile(meta_path):
-            with open(meta_path, "r", encoding="utf-8") as f:
-                return str((json.load(f) or {}).get("prompt") or "").strip()
-    except Exception as e:  # noqa: BLE001
-        app.logger.warning("服装变体读取主设定 meta 失败（忽略）：%s", e)
-    return ""
 
 
 def _outfit_desc_of(outfit_dir: str) -> str:
@@ -3372,34 +3278,6 @@ _SCENE_DECOR_CHARS = ("《", "》", "「", "」", "『", "』", "\"", "'",
 
 
 
-def _project_worldview(project_name: str) -> str:
-    """取项目的「世界观设定」文本（2026-10-03）：供公共提示词 WORLD 行拼接用。
-
-    来源优先级：① autopilot plan 的 brief（总控 AI 敲定的故事概述）；
-    ② 项目 config.json 的 note。两者皆空则返回 ""（公共段不写 WORLD 行，零变更）。
-    纯只读、永不抛。
-    """
-    _pw = ""
-    try:
-        _plan = (autopilot.get_plan(project_name) or {})
-        _brief = str(_plan.get("brief") or _plan.get("worldview") or _plan.get("era_world") or "")
-        if _brief and len(_brief) <= 400:
-            _pw = _brief
-    except Exception:  # noqa: BLE001
-        pass
-    if not _pw:
-        try:
-            _proj = _safe_project(project_name)
-            if _proj:
-                # 修复（2026-10-05）：项目键 ≠ 目录，config.json 按 project_store 的
-                # 项目工作区绝对路径拼（同 _h3_plan_common_refs 处的口径）。
-                _cfg = json.load(open(project_store.paths(_proj)["config"], encoding="utf-8"))
-                _note = str(_cfg.get("note") or "")
-                if _note and len(_note) <= 200:
-                    _pw = _note
-        except Exception:  # noqa: BLE001
-            _pw = ""
-    return _pw
 
 
 def _ensure_voice_bank_refs(common: list, project_name: str, all_characters=None) -> None:
@@ -3908,31 +3786,8 @@ def _grid_panel_plan(shot, chars, style, client, project_name: str = "",
 #: 图不可用，**不参与 storyboard_soft_qc 软放行**，必须按硬阻断重跑。
 #: 实测：shot_04 格3/4/6/9 四格近乎相同，质检已判「九宫格面板雷同」，却被软放行入库。
 #: ⚠️ 与 qc_client.IMAGE_CRITICAL_KEYWORDS 里同名字段刻意保持一致（同一套判据）。
-_SB_STRUCTURAL_DEFECT_KEYWORDS = (
-    # ⚠️ 2026-10-09 按用户决策：「面板雷同 / 面板重复」已**移出**本词表（降级为 warning）。
-    #    原因与影响见 qc_client.IMAGE_CRITICAL_KEYWORDS 处的同批注释：
-    #    9 格对 7B 模型要求过高、首轮通过率仅 1/7，且它是唯一 critical，长期拖住链路。
-    #    代价：**雷同的分镜图现在可能通过软放行入库**（这正是 2026-10-08 加它时要防的）。
-    #    回退：把下面这行取消注释即可恢复「结构性缺陷 → 不参与软放行」。
-    # "面板雷同", "九宫格面板雷同", "面板重复",
-    "九宫格场景不一致", "格间换场景",
-    "九宫格左右手镜像", "左右手互换", "左右手颠倒", "镜像翻转", "朝向翻转",
-)
 
 
-def _sb_structural_defect(gate) -> bool:
-    """该镜的质检结论是否含**结构性缺陷**（软放行必须跳过它们）。
-
-    判定文本 = reason + label + critical_issues（三者任一命中即算）。
-    gate 非 dict / 缺字段都返回 False（退化为「可软放行」，不改变既有行为）。
-    """
-    if not isinstance(gate, dict):
-        return False
-    parts = [str(gate.get("reason") or ""), str(gate.get("label") or "")]
-    for x in (gate.get("critical_issues") or []):
-        parts.append(str(x))
-    txt = " ".join(parts)
-    return any(k in txt for k in _SB_STRUCTURAL_DEFECT_KEYWORDS)
 
 
 def _storyboard_worker(task_id: str, project_name: str, shots: list,
@@ -4927,69 +4782,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     _maybe_clear_comfyui_history("storyboard 批量生成收尾")
 
 
-def _project_subtitle_enabled(project_name: str = "") -> bool:
-    """该项目的成片「硬字幕」开关（config.json 的 subtitle_enabled），默认 False。
-
-    2026-09-24（用户明确要求「不要生成字幕」）：
-    成片阶段有两处会往视频里烧硬字幕（pipeline.step_final / video_postprocess.finalize_episode），
-    此前无条件执行。现在统一从这里取值：读不到 / 非 true → 视为关闭，直接不烧字幕。
-    这样「H3 提示词不诱导字幕」+「成片不烧字幕」两层都封死，
-    确需硬字幕的老项目可在其 config.json 里显式写 "subtitle_enabled": true 单独放开。
-    """
-    proj = _safe_project(project_name or "")
-    default = bool(PROJECT_DEFAULT_CONFIG.get("subtitle_enabled", False))
-    try:
-        rec = project_store.get_project(proj)
-        if rec:
-            cfg = project_store.read_config(rec["dir_key"])
-            if "subtitle_enabled" not in cfg:
-                return default
-            val = cfg.get("subtitle_enabled")
-            # 宽容解析：字符串 "false"/"0"/"no"/"off" 不能被 bool() 误判为「开」
-            if isinstance(val, str):
-                s = val.strip().lower()
-                if s in ("true", "1", "yes", "on"):
-                    return True
-                if s in ("false", "0", "no", "off", "none", "null", ""):
-                    return False
-                return default
-            return bool(val)
-    except Exception as e:  # noqa: BLE001  开关读取失败按「关闭」处理（安全侧）
-        app.logger.warning(f"读取项目 config.subtitle_enabled 失败（按关闭处理）：{e}")
-    return default
 
 
-def _project_caption_burn_enabled(project_name: str = "") -> bool:
-    """该项目的「字幕/转场 caption」烧制开关（config.json 的 caption_burn_enabled），**默认 True**。
-
-    与 _project_subtitle_enabled 是**两件事**，刻意分开：
-      · subtitle_enabled（默认关）：把人物开口的台词转录成硬字幕——辅助性文字，
-        用户 2026-09-24 明确要求不要；
-      · caption_burn_enabled（默认开）：把剧本 caption 烧进成片——它是**剧情装置**
-        （时空落点、时空回溯、集尾悬念）。参考改编稿正是靠「春秋蝉，逆转时光。」
-        让观众看懂时空跳变；不烧就会看到无过渡的跳切。
-    不想要字幕的项目在其 config.json 写 "caption_burn_enabled": false 即可。
-    """
-    proj = _safe_project(project_name or "")
-    default = bool(PROJECT_DEFAULT_CONFIG.get("caption_burn_enabled", True))
-    try:
-        rec = project_store.get_project(proj)
-        if rec:
-            cfg = project_store.read_config(rec["dir_key"])
-            if "caption_burn_enabled" not in cfg:
-                return default
-            val = cfg.get("caption_burn_enabled")
-            if isinstance(val, str):
-                s = val.strip().lower()
-                if s in ("true", "1", "yes", "on"):
-                    return True
-                if s in ("false", "0", "no", "off", "none", "null", ""):
-                    return False
-                return default
-            return bool(val)
-    except Exception as e:  # noqa: BLE001  开关读取失败按默认处理
-        app.logger.warning(f"读取项目 config.caption_burn_enabled 失败（按默认开启处理）：{e}")
-    return default
 
 
 
@@ -5145,29 +4939,6 @@ def _blocking_spec_text(shot: dict) -> str:
         return ""
 
 
-def _collect_reference_images(character_refs: list, scene_refs: list) -> list:
-    """把前端传来的参考图（可能是 /api/assets/... 的 HTTP 资源路径）解析为本地绝对路径
-
-    修复 P0-4：原实现直接 os.path.exists(HTTP 路径) 恒为 False，参考图永远传不到 H3。
-    """
-    ref_imgs = []
-    for ref in list(character_refs)[:2]:
-        for key in ("front", "base"):
-            p = ref.get(key) if isinstance(ref, dict) else None
-            local = comfyui_client.resolve_local_path(p) if p else None
-            if local and os.path.exists(local):
-                ref_imgs.append(local)
-                break
-        else:
-            app.logger.warning(f"角色参考图不可用: {ref.get('name') if isinstance(ref, dict) else ref}")
-    for ref in list(scene_refs)[:1]:
-        for key in ("front", "base"):
-            p = ref.get(key) if isinstance(ref, dict) else None
-            local = comfyui_client.resolve_local_path(p) if p else None
-            if local and os.path.exists(local):
-                ref_imgs.append(local)
-                break
-    return ref_imgs
 
 
 # 注：本处原为 `_norm_shot_key(key)`。已收敛为 app/shot_key.norm_shot_key 的一行代理

@@ -62,9 +62,24 @@ def main(prefix, modname, note=''):
         return None, None
 
     def const_span(name):
+        """返回常量的完整行区间。
+
+        ⚠️ 早期版本写成 (i, i+1)（假设单行），但 _SB_STRUCTURAL_DEFECT_KEYWORDS 与
+        _OPT_REASONING_MARKERS 是**跨行元组** —— 只抓第一行会得到未闭合的
+        `X = (` 从而 ast.parse 报 '(' was never closed（工具因此中止）。
+        现按括号/方括号/花括号平衡抓取完整定义。
+        """
         for i, l in enumerate(lines):
             if l.startswith(name + ' ='):
-                return (i, i + 1)
+                def bal(x):
+                    return (x.count('(') + x.count('[') + x.count('{')
+                            - x.count(')') - x.count(']') - x.count('}'))
+                depth = bal(l)
+                j = i + 1
+                while depth > 0 and j < len(lines):
+                    depth += bal(lines[j])
+                    j += 1
+                return (i, j)
         return None, None
 
     SEEDS = [n.name for n in tree.body
@@ -99,7 +114,9 @@ def main(prefix, modname, note=''):
     parts, spans = [], []
     for c in consts:
         sp = const_span(c)
-        parts.append(lines[sp[0]].strip()); spans.append(sp)
+        # 必须取完整区间：常量可能是跨行元组（如 _SB_STRUCTURAL_DEFECT_KEYWORDS），
+        # 只取首行会得到未闭合的 `X = (` 导致语法错、工具中止。
+        parts.append(chr(10).join(lines[sp[0]:sp[1]])); spans.append(sp)
     if consts:
         parts += ['', '']
     for nm in sorted(seen, key=lambda x: (span(x)[0] or 0)):
