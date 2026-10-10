@@ -27,6 +27,19 @@ from dialogue_utils import dialogue_text as _dlg_text, normalize_lines as _dlg_l
 import fs_atomic
 import style_kit
 import h3_prompt_kit
+
+
+class ScriptTemplateError(RuntimeError):
+    """提示词模板不可用（app/prompts/script_generate.txt 缺失或为空）。
+
+    ⚠️ 2026-10-10 修复一处自己引入的 NameError：
+    此处原写 raise NeedsHumanError(...)，而 NeedsHumanError 定义在 pipeline.py，
+    但 pipeline 反向 import 本模块 —— 从本模块导入它必然造成循环依赖，
+    所以当时只是"写了个名字"，运行时必炸：
+      WARNING:autopilot:[集间流水线] 下一集剧本预热失败：NameError: name 'NeedsHumanError' is not defined
+    改用本模块自己的异常类型。语义也更准确：这不是「需要人工介入」，
+    而是「模板缺失」—— 属于部署/打包问题。
+    """
 import asset_prompt_kit
 import asset_name_match
 # 提示词模板中心（2026-10-07 外置改造）：REWRITE_RULES 等常量的生效值从这里加载
@@ -1162,7 +1175,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         #    _DEFAULT_SCRIPT_GENERATE，_tpl 永不为空，这个分支从未被执行。
         #    现直接删除，并改为明确报错 —— 模板不可用时宁可让该集停下来，
         #    也不要静默用一份可能与外部模板不一致的旧文本继续生产。
-        raise NeedsHumanError(
+        raise ScriptTemplateError(
             "提示词模板 script_generate 不可用（app/prompts/script_generate.txt "
             "缺失或为空，且代码内兜底未注册）。请检查安装包完整性后重试。")
     label = f"shots#{chunk.get('index')}"

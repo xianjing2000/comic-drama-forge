@@ -4147,7 +4147,12 @@ def check_script(script_path: str = None, script_data: dict = None,
             {"role": "user", "content": content},
         ],
         "temperature": 0,
-        "max_tokens": 1200,
+        # ⚠️ 2026-10-10：原为 1200，实测太小 —— _post_chat 的思考额度下限逻辑是
+        #   「mt < floor 才抬高」，1200 > floor(旧值1024) 故不被抬高，导致模型思考
+        #   吃光额度就截断（finish_reason=length），JSON 解析失败，质检每次失败。
+        #   这里直接给足（与 llm_client.REASONING_ONLY_TOKEN_FLOOR 同量级），
+        #   并让 _post_chat 的 floor 逻辑继续兜底。
+        "max_tokens": 24576,
         "stream": False,
     }
     

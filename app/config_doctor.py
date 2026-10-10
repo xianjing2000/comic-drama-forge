@@ -298,8 +298,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'llm_client.TIMEOUT_MAX_ATTEMPTS',
     },
     'min_tokens_when_thinking': {
-        'default': 1024, 'type': 'int', 'range': (0, 200000), 'group': 'LLM',
-        'desc': '允许思考时的最小 max_tokens（太小必然只剩思考、正文为空）',
+        'default': 24576, 'type': 'int', 'range': (0, 200000), 'group': 'LLM',
+        'desc': '允许思考时的最小 max_tokens。⚠️ 2026-10-10 由 1024 提到 24576：'
+                '实测 1024 太小 —— qc_client.check_script 传 1200，高于下限故不被抬高，'
+                '结果模型思考吃光额度、finish_reason=length 截断、吐不出 JSON，'
+                '剧本质检每次都失败（日志：JSON 解析失败 max_tokens=4000/1200）。'
+                '与 llm_client.REASONING_ONLY_TOKEN_FLOOR=24576 对齐（同一实测依据）。',
         'owner': 'llm_client.MIN_TOKENS_WHEN_THINKING',
         'must_match': ['qc_client.MIN_TOKENS_WHEN_THINKING'],
     },
