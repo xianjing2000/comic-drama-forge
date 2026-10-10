@@ -186,6 +186,9 @@ PLAN_DEFAULTS = {
     # ---- 传给 pipeline 的生产配置 ----
     "style": "",
     "target_shots": 0,             # 0 = 不预设镜数（按原文信息密度判定；显式传值时 clamp 4~40）
+    # ⭐ 2026-10-10：集间流水线开关（界面「一键启动」参数区可勾选）。
+    #    True = 本集烧 GPU 时后台并行预热下一集剧本（纯 LLM，零 GPU，不抢卡）。
+    "prewarm_next_script": True,
     # video_mode 已废弃（2026-10-01 起视频只有整集模式，pipeline 会强制归一为 episode）
     "enable_assets": True,
     "enable_video": True,
@@ -1230,13 +1233,29 @@ def prewarm_next_script(project: str, plan: dict, cur_episode: int) -> bool:
     调用点：``_produce`` 开跑最初派发一次 —— 覆盖本集全流程（资产/分镜/视频）的 GPU
     空档。整个过程 fail-open：任何异常只记日志，绝不影响本集生产。
 
-    开关：``MJSCXT_PREWARM_NEXT_SCRIPT``（默认 1；置 0 关闭）。
+    开关（2026-10-10 起双层）：
+    - **项目计划字段** ``plan['prewarm_next_script']``（默认 True）—— 用户在界面
+      「一键启动」的参数区勾选/取消，是**主要**开关；
+    - 环境变量 ``MJSCXT_PREWARM_NEXT_SCRIPT=0`` —— 调试用强制关闭，
+      **优先级高于计划字段**（用于排查"是不是预热干扰了主线"这类问题）。
 
     :returns: 是否**新派发**了预热线程（False = 无需 / 已在跑 / 已关）
     """
+    # ① 环境变量强制关闭（最高优先级，调试用）
     if str(os.environ.get("MJSCXT_PREWARM_NEXT_SCRIPT") or "1").strip().lower() \
             in ("0", "false", "off", "no"):
         return False
+    # ② 用户在界面上勾选的开关（默认开）
+    try:
+        _flag = (plan or {}).get("prewarm_next_script")
+        if _flag is not None:
+            if isinstance(_flag, str):
+                if _flag.strip().lower() in ("0", "false", "off", "no", ""):
+                    return False
+            elif not _flag:
+                return False
+    except Exception:  # noqa: BLE001  读开关异常不阻断（按默认开启）
+        pass
     try:
         import pipeline
         meta = _novel_meta(project, plan)

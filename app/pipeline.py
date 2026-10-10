@@ -236,6 +236,14 @@ DEFAULT_CONFIG = {
     # ---- 范围 ----
     "episodes": "all",             # "all" 或 [1,2,3]
     "overwrite_script": False,     # 是否覆盖已存在的剧本
+    # ---- 集间流水线（LLM 与 GPU 重叠）----
+    # ⭐ 2026-10-10（用户指定「开始预热做成一个开关让用户选择是否开启」）：
+    #    True = 本集进入 GPU 任务（资产/分镜/视频）期间，后台并行预热**下一集剧本**。
+    #    原理：剧本是纯 LLM、零 GPU，不依赖本集任何产物（只依赖小说正文+设定库），
+    #    故可安全重叠，把几分钟的 LLM 时间从关键路径上摘除。
+    #    关闭后回到严格串行（每一集的剧本都在该集开跑时才生成）。
+    #    ⚠️ 环境变量 MJSCXT_PREWARM_NEXT_SCRIPT=0 仍可强制关闭（调试/排查用，优先级高于本开关）。
+    "prewarm_next_script": True,
     # ---- 各环节开关 ----
     "enable_assets": True,
     "enable_video": True,
@@ -281,6 +289,13 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
             cfg[k] = int(cfg.get(k))
         except (TypeError, ValueError):
             cfg[k] = DEFAULT_CONFIG[k]
+    # 布尔开关：前端可能传字符串/0/1（JSON 类型不可信）→ 统一收敛为 bool
+    for k in ("prewarm_next_script",):
+        v = cfg.get(k)
+        if isinstance(v, str):
+            cfg[k] = v.strip().lower() not in ("0", "false", "off", "no", "")
+        else:
+            cfg[k] = bool(v)
     # 超分倍率：非法值一律回落 2（FlashVSR 只支持 2/3/4，传错会让该步直接跳过）
     try:
         cfg["upscale_scale"] = int(cfg.get("upscale_scale"))
@@ -1600,6 +1615,21 @@ def _prefetch_next_scripts(ctx: dict, limit: int = 1) -> None:
     """
     A = _A()
     try:
+        # ⭐ 2026-10-10：受项目计划开关控制（界面可勾选，默认开）。
+        #    与 autopilot.prewarm_next_script 是同一开关的两个触发点：
+        #    此处 = 每集剧本步骤完成后滚动预取；那边 = 本集开跑时派发。
+        #    env MJSCXT_PREWARM_NEXT_SCRIPT=0 仍可强制关闭。
+        import os as _os
+        if str(_os.environ.get("MJSCXT_PREWARM_NEXT_SCRIPT") or "1").strip().lower() \
+                in ("0", "false", "off", "no"):
+            return
+        _cfg_flag = (ctx.get("config") or {}).get("prewarm_next_script")
+        if _cfg_flag is not None:
+            if isinstance(_cfg_flag, str):
+                if _cfg_flag.strip().lower() in ("0", "false", "off", "no", ""):
+                    return
+            elif not _cfg_flag:
+                return
         if not ctx.get("novel_meta") or not ctx.get("chapter"):
             return
         meta = ctx["novel_meta"]

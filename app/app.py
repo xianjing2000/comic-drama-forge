@@ -10892,7 +10892,10 @@ def api_autonomous_start():
                       if k in ('style', 'target_shots', 'video_mode', 'enable_assets',
                                'enable_keyframe', 'enable_video', 'enable_final',
                                'enable_tts', 'enable_tts_pre', 'enable_mix',
-                               'step_max_retries')}
+                               'step_max_retries',
+                               # ⭐ 2026-10-10：集间流水线开关（界面可勾选，默认开）
+                               #    True = 本集烧 GPU 时后台预热下一集剧本（纯 LLM，不抢卡）
+                               'prewarm_next_script')}
 
     if not novel_id and project_name:
         # 尝试从现有计划获取 novel_id

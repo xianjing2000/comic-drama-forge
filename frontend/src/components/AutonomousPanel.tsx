@@ -64,6 +64,9 @@ export default function AutonomousPanel({
   const [flags, setFlags] = useState({
     enable_assets: true, enable_storyboard: true, enable_video: true,
     enable_final: true, enable_tts: true, enable_tts_pre: true,
+    // ⭐ 2026-10-10：集间流水线开关（用户可选）。True = 本集烧 GPU 时后台并行
+    //    预热下一集剧本（纯 LLM、零 GPU、不依赖本集产物）。默认开启。
+    prewarm_next_script: true,
   });
 
   const load = useCallback(async () => {
@@ -185,6 +188,8 @@ export default function AutonomousPanel({
               ['enable_assets', '资产图'], ['enable_storyboard', '分镜图'],
               ['enable_video', '视频'], ['enable_tts_pre', '参考音色'],
               ['enable_tts', '配音'], ['enable_final', '成片'],
+              // ⭐ 集间流水线：本集烧 GPU 时后台预热下一集剧本（见后端 prewarm_next_script）
+              ['prewarm_next_script', '预热下集剧本'],
             ] as const).map(([k, label]) => (
               <label key={k} className="flex cursor-pointer items-center gap-1.5 text-xs text-ink-2">
                 <input
