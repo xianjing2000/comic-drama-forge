@@ -335,6 +335,48 @@ def _own_start(sb_map: Dict[str, str], key: str, seq: int) -> str:
             or "")
 
 
+#: 集末帧文件名（跨集串帧的输入）：由成片末帧抽取而来，与分镜尾帧并存于同目录
+EPISODE_END_FILENAME = "_episode_end.png"
+
+
+def episode_end_frame_path(keyframes_dir: str) -> str:
+    """本集「成片末帧」的落盘路径（跨集串帧的输入源）。"""
+    return os.path.join(keyframes_dir, EPISODE_END_FILENAME)
+
+
+def export_episode_end_frame(video_path: str, keyframes_dir: str,
+                             ffmpeg_bin: str = "ffmpeg", timeout: int = 120) -> str:
+    """从**整集成片**抽最后一帧，落盘为 keyframes_dir/_episode_end.png。
+
+    为什么用成片末帧而不是「尾帧图」：整集流水线并不产出 shot_NN_end.png
+    （那只在「关键帧」步骤单独生成），但每一集一定会产出成片 —— 成片的最后一帧
+    才是**观众实际看到的收尾画面**，用它做下一集的开场首帧，画面才真正无缝。
+    用户 2026-10-10：「第一集的分镜最后一帧要传到第二集的视频生成第一个分镜里面去」，
+    并明确「第一集不用传尾帧、其他的集都要传」。
+
+    fail-open：ffmpeg 缺失/视频损坏/超时一律只记日志并返回 ""，绝不影响出片主链路。
+    """
+    try:
+        import subprocess
+        if not (video_path and os.path.isfile(video_path) and os.path.getsize(video_path) > 0):
+            return ""
+        os.makedirs(keyframes_dir, exist_ok=True)
+        out = episode_end_frame_path(keyframes_dir)
+        cmd = [ffmpeg_bin, "-hide_banner", "-loglevel", "error",
+               "-sseof", "-0.5", "-i", video_path,
+               "-frames:v", "1", "-q:v", "2", "-y", out]
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        if proc.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0:
+            logger.info("[跨集串帧] 已缓存本集成片末帧：%s", out)
+            return out
+        logger.warning("[跨集串帧] 抽末帧失败（returncode=%s）：%s",
+                       proc.returncode, (proc.stderr or b"")[:200])
+        return ""
+    except Exception as e:  # noqa: BLE001 - 增强特性，失败必须无感
+        logger.warning("[跨集串帧] 抽末帧异常（忽略）：%s", e)
+        return ""
+
+
 def prev_episode_end_frame(keyframes_dir: str) -> str:
     """**上一集最后一镜的尾帧**路径（跨集串帧用，2026-10-10 用户要求）。
 
@@ -367,6 +409,12 @@ def prev_episode_end_frame(keyframes_dir: str) -> str:
         prev_dir = parent if prev_no <= 1 else os.path.join(parent, f"ep{prev_no:02d}")
         if not os.path.isdir(prev_dir):
             return ""
+        _ep_end = episode_end_frame_path(prev_dir)
+        try:
+            if os.path.isfile(_ep_end) and os.path.getsize(_ep_end) > 0:
+                return _ep_end
+        except OSError:
+            pass
         best, best_no = "", 0
         for fn in os.listdir(prev_dir):
             mm = _re.match(r"^shot_(\d+)_end\.png$", fn)

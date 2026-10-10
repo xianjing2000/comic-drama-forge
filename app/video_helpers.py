@@ -1615,6 +1615,17 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                         f"按场次生成完成（{len(_scene_groups)} 场已拼接为整集）")
                 logger.info("[episode][per-scene] 整集拼接完成：%s（%d 场）",
                                 dst, len(_scene_groups))
+                # ⭐ 跨集串帧（2026-10-10 用户要求：「第一集的分镜最后一帧要传到
+                #   第二集的视频生成第一个分镜里面去」；并明确「第一集不用传尾帧、
+                #   其他的集都要传」）。这里在**本集成片落盘后**立刻缓存它的末帧，
+                #   供**下一集第一镜**当首帧。第 1 集只写不读（它没有上一集）。
+                #   fail-open：抽帧失败只记日志，绝不影响出片结果与状态。
+                try:
+                    import keyframe as _kf
+                    _kf.export_episode_end_frame(
+                        dst, _ep_dir(os.path.join(KEYFRAMES_DIR, project_name), _rs_ep))
+                except Exception as _xe:  # noqa: BLE001 - 增强特性，失败绝不影响出片
+                    logger.warning("[跨集串帧] 缓存本集成片末帧失败（忽略）：%s", _xe)
                 with lock:
                     results = generation_state[task_id]["results"]
                     ok = sum(1 for r in results if r.get("success"))
