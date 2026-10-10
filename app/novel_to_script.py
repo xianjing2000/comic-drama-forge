@@ -266,6 +266,37 @@ SYSTEM_BIBLE = ("你是资深漫剧编剧与 AI 绘画提示词工程师，精�
 CHARS_PER_SHOT = _env_pos_int("MJSCXT_CHARS_PER_SHOT", 240, floor=30)
 SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这么多镜）
 
+# ---- 切分粒度自愈（2026-10-10）----
+# 背景：CHARS_PER_SHOT 只是**下给模型的引导口径**，此前没有任何事后校验 ——
+#   模型切多细都照单全收。实测《进境》第2集引导约 15 镜，经「模型超产 + 补局部插入镜
+#   + 覆盖率补镜（只增不删）+ 长台词拆镜」四步累积后落盘 **109 镜**（34 字/镜，
+#   引导密度的 1/7），成片节奏碎成幻灯片，且仅分镜前置就要 3.6 小时以上。
+# 处置：单块分镜产出后做一次**密度体检**，明显过碎就带反馈重切一次；
+#   重切失败、或结果更差，一律保留原结果 —— fail-open，绝不阻断生产。
+OVER_SPLIT_TOLERANCE = 2.0     # 实际镜数 > 引导镜数 × 此倍数 即判过碎
+OVER_SPLIT_MIN_EXPECT = 2.0    # 引导镜数低于此值时不判定（原文太短，1~2 镜是正常的）
+OVER_SPLIT_MIN_SHRINK = 0.7    # 重切后至少要缩到 70% 才考虑采纳（密度仍不达标时）
+
+
+def shots_density_ok(n_shots: int, chars: int,
+                     chars_per_shot: int = None, tolerance: float = None) -> bool:
+    """镜数密度体检（纯函数）：过碎返回 False。
+
+    判据：引导镜数 = 原文长度 / CHARS_PER_SHOT；实际镜数超过「引导 × tolerance」即过碎。
+    原文过短（引导镜数 < OVER_SPLIT_MIN_EXPECT）时一律判为正常 ——
+    短段落本来就只能承载 1~2 镜，用密度去卡它会逼模型灌水。
+    """
+    cps = int(chars_per_shot if chars_per_shot is not None else (CHARS_PER_SHOT or 240))
+    tol = float(tolerance if tolerance is not None else OVER_SPLIT_TOLERANCE)
+    n = int(n_shots or 0)
+    c = int(chars or 0)
+    if n <= 0 or c <= 0 or cps <= 0:
+        return True
+    expect = c / float(cps)
+    if expect < OVER_SPLIT_MIN_EXPECT:
+        return True
+    return n <= expect * tol
+
 # ---- 历史资源红线（2026-09-24 实测；**2026-10-09 起不再是单集上限**）----
 # ⚠️ 背景：整集视频走 H3 连续工作流（84 段一个 prompt，全程约 7 小时）。实测渲染到
 # **第 78 段**时 ComfyUI 崩溃：
@@ -1027,10 +1058,64 @@ def _fallback_bible(outlines: list, novel_title: str, style: str) -> dict:
     }
 
 
+def _heal_over_split(client, bible: dict, outline: dict, chunk: dict, shots: list, label: str,
+                     events: list = None, depth: int = 0, continuity_ctx: dict = None,
+                     cache_dir: str = "", shots_hard_cap: int = 0) -> list:
+    """切分粒度自愈：镜数密度明显过碎时，带反馈重切一次。
+
+    采纳条件（保守 —— 宁可保留原结果，也不冒「重切把内容丢光」的风险）：
+      · 重切镜数更少，且密度已达标；或
+      · 密度仍不达标、但镜数至少缩到 OVER_SPLIT_MIN_SHRINK 以下。
+    其余情况（重切为空 / 镜更多 / 只少一点点）一律保留原结果。
+
+    本函数**永不抛异常**：自愈是锦上添花，绝不能因为它让整集生产失败。
+    """
+    try:
+        chars = int(chunk.get("char_count") or len(str(chunk.get("text") or "")) or 0)
+        if not shots or shots_density_ok(len(shots), chars):
+            return shots
+        expect = max(1, int(round(chars / float(max(1, CHARS_PER_SHOT)))))
+        logger.warning(
+            "%s 分镜过碎：%d 镜 / %d 字 = %.0f 字每镜（引导 %d 字每镜 ≈ %d 镜）→ 自愈重切",
+            label, len(shots), chars, chars / float(len(shots)), CHARS_PER_SHOT, expect)
+        if events is not None:
+            events.append({"label": label, "event": "over_split",
+                           "shots": len(shots), "chars": chars,
+                           "chars_per_shot": round(chars / float(len(shots)), 1),
+                           "expected_shots": expect})
+        hint = ("【上一次切分被判过碎，已作废】%d 字原文切了 %d 镜（平均 %.0f 字/镜）。"
+                "本次请把「同一动作的连续瞬间」「同一时刻同一空间的相邻镜」合并，"
+                "目标约 %d 镜（约 %d 字/镜）。原文的情节与关键信息不得丢失。"
+                % (chars, len(shots), chars / float(len(shots)), expect, CHARS_PER_SHOT))
+        retry = build_shots_for_chunk(
+            client, bible, outline, chunk, 0, events=events, depth=depth,
+            continuity_ctx=continuity_ctx, cache_dir=cache_dir,
+            shots_hard_cap=shots_hard_cap, extra_hint=hint, _no_heal=True)
+        if not retry:
+            logger.warning("%s 自愈重切无产出，保留原 %d 镜", label, len(shots))
+            return shots
+        adopted = len(retry) < len(shots) and (
+            shots_density_ok(len(retry), chars)
+            or len(retry) <= len(shots) * OVER_SPLIT_MIN_SHRINK)
+        if adopted:
+            logger.warning("%s 自愈生效：%d 镜 → %d 镜", label, len(shots), len(retry))
+            if events is not None:
+                events.append({"label": label, "event": "over_split_healed",
+                               "before": len(shots), "after": len(retry)})
+            return retry
+        logger.warning("%s 自愈未改善（%d 镜 → %d 镜），保留原结果",
+                       label, len(shots), len(retry))
+        return shots
+    except Exception as e:  # noqa: BLE001  自愈绝不阻断生产
+        logger.warning("%s 切分粒度自愈异常（保留原结果）：%s", label, e)
+        return shots
+
+
 def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots_target: int,
                           events: list = None, depth: int = 0,
                           continuity_ctx: dict = None, cache_dir: str = "",
-                          shots_hard_cap: int = 0, prev_tail: str = "") -> list:
+                          shots_hard_cap: int = 0, prev_tail: str = "",
+                          extra_hint: str = "", _no_heal: bool = False) -> list:
     """③ 单块写分镜（截断时自动提高 max_tokens；仍截断则把该块再二分后合并）
 
     prev_tail（P1-2 接缝重叠）：上一块的「结尾上下文」预渲染文本（由调用方经
@@ -1120,10 +1205,31 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         _shots_min_text = "数量由你按本块原文的信息密度判定（**不设上下限**）"
         _shots_range_text = ("shots 数组元素个数**不设上下限**"
                              "（既无「至少 N 镜」，也无「不得超过 N 镜」）")
+        # ⚠️ 2026-10-10（用户追加口径）：「不预设镜数」不等于「随便切多细」。
+        #   实测《进境》第2集（原文约 3600 字）被切成 **109 镜**，平均 34 字/镜 ——
+        #   只有引导密度 CHARS_PER_SHOT=240 的 1/7，成片节奏碎成幻灯片，
+        #   且仅「分镜前置」就要 109 × ~2 分钟 ≈ 3.6 小时。
+        #   根因：本分支此前只说「按信息密度判定」，而「密度」没有任何锚点，
+        #   模型把「一个动作的三个瞬间」当成三镜也很"合理"。
+        #   处置：在**不设数字上下限**的前提下，补上「多细算太细」的可判定判据
+        #   与密度锚点（锚点取自 CHARS_PER_SHOT，随 env 同步变化，不写死）。
         _shots_targeting_text = (
-            "**镜数不预设、无上下限**——由你按本块原文的**信息密度**判定：冲突/转折/关键动作/"
-            "金句密集就多切镜，情节单薄就少切镜；既**不要为凑数灌水**（同一件事补插入镜、"
-            "把一个动作拆成几镜），也**不要为省事把原文情节合并丢掉**。")
+            "**镜数不预设、无硬性上下限**——由你按本块原文的**信息密度**判定："
+            "冲突/转折/关键动作/金句密集就多切镜，情节单薄就少切镜。\n"
+            "「切多细算合适」的判据（直接决定成片节奏，务必遵守）：\n"
+            "  · 一个镜头 = 一个**完整的视觉单元**：一次动作的完整过程、"
+            "或一次空间/视线转移、或一句（一组连贯的）台词；\n"
+            "  · ⛔ 不要把**同一个动作**的连续瞬间拆成多镜"
+            "（「手伸进口袋」→「攥紧」→「纸角露出」应合为**一镜**，不是三镜）；\n"
+            "  · ⛔ 不要为同一句台词拆正反打，也不要为同一时刻、同一空间重复给镜；\n"
+            "  · 密度锚点：一镜通常承载原文约 **%d 字**。"
+            "若你的切法平均每镜**不足 %d 字**，说明切得太碎，"
+            "应把同一动作 / 同一时空间的相邻镜合并。\n"
+            "既不要为凑数灌水，也不要为省事把原文情节合并丢掉。"
+            % (CHARS_PER_SHOT, max(30, CHARS_PER_SHOT // 2)))
+    # ★ 自愈重切时注入的额外指令（追加在粒度判据之后，无需改提示词模板）
+    if extra_hint:
+        _shots_targeting_text = _shots_targeting_text + "\n" + str(extra_hint)
     if _hard > 0:
         shots_cap = min(shots_cap, max(shots_target, _hard))
     speech_budget = SHOT_SPEECH_BUDGET_CHARS
@@ -1260,6 +1366,13 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
             events.append({"label": label, "event": "field_drift",
                            "count": len(drift), "kinds": _kinds,
                            "findings": drift[:12]})
+    # ★ 切分粒度自愈（2026-10-10）：密度体检 + 过碎时带反馈重切一次。
+    #   _no_heal=True 表示「本次就是自愈重切」，避免无限递归。
+    if not _no_heal:
+        out = _heal_over_split(client, bible, outline, chunk, out, label,
+                               events=events, depth=depth,
+                               continuity_ctx=continuity_ctx, cache_dir=cache_dir,
+                               shots_hard_cap=shots_hard_cap)
     return out
 
 

@@ -372,6 +372,24 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'desc': ': 拆台词后每段的最小字数（低于此值不值得单独成镜，切了也是碎句）',
         'owner': 'novel_to_script.REF_DIALOGUE_MIN_PART',
     },
+    'over_split_tolerance': {
+        'default': 2.0, 'type': 'float', 'range': (0.0, 100.0), 'group': '剧本',
+        'desc': '切分粒度自愈：实际镜数超过「原文字数 / CHARS_PER_SHOT × 本值」即判为过碎，'
+                '带反馈重切一次。调大=更宽松（容忍更碎的切法）。',
+        'owner': 'novel_to_script.OVER_SPLIT_TOLERANCE',
+    },
+    'over_split_min_expect': {
+        'default': 2.0, 'type': 'float', 'range': (0.0, 1000.0), 'group': '剧本',
+        'desc': '引导镜数低于此值时不做过碎判定 —— 短段落本来就只能承载 1~2 镜，'
+                '用密度卡它会逼模型灌水凑数。',
+        'owner': 'novel_to_script.OVER_SPLIT_MIN_EXPECT',
+    },
+    'over_split_min_shrink': {
+        'default': 0.7, 'type': 'float', 'range': (0.0, 1.0), 'group': '剧本',
+        'desc': '自愈重切后密度仍不达标时，至少要缩到此比例以下才采纳新结果 '
+                '（防止「换掉一批镜头、镜数却没怎么降」）。',
+        'owner': 'novel_to_script.OVER_SPLIT_MIN_SHRINK',
+    },
     'default_preview_scale': {
         'default': 0.5, 'type': 'float', 'range': (0.0, 1.0), 'group': '质检',
         'desc': ': 预演分辨率倍率（相对正式）。',
