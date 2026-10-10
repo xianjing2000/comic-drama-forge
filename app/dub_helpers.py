@@ -11,8 +11,16 @@
 #   只用标准库与 json/re，因此可完全独立成模块。
 # 函数体与下沉前逐字一致。
 import json
+import logging
 import os
 import re
+# 2026-10-11 补齐搬迁时遗漏的模块级名字（自动扫描发现）
+from config import PROJECT_OUTPUT_DIR
+from config import SCRIPT_DIR
+from tts_client import TTSError
+import project_store
+
+logger = logging.getLogger(__name__)
 
 def _dub_resolve_script(data: dict) -> dict:
     """解析配音所用剧本：优先 body.script，其次 script_path（限项目输出目录内），最后自动匹配"""
@@ -114,5 +122,5 @@ def _dub_character_desc(character: str, project_name: str) -> str:
             if str(ch.get("name") or "") == str(character):
                 return str(ch.get("description") or ch.get("tts_voice") or "")
     except Exception as e:  # noqa: BLE001
-        app.logger.debug("角色描述取值失败（忽略）：%s", e)
+        logger.debug("角色描述取值失败（忽略）：%s", e)
     return ""

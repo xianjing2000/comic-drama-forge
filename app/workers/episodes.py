@@ -5,10 +5,10 @@
 #   · novel_to_script / SCRIPT_DIR / NovelParseError  ← 叶子模块
 #   · lock / generation_state                        ← job_state（唯一来源）
 #   · LLMError                                       ← llm_client
-#   · app.logger                                     ← 改为模块 logger
+#   · logger                                     ← 改为模块 logger
 #   · _salvage_episode_script                        ← 同批一并下沉（只被本文件使用）
 
-# 函数体与下沉前逐字一致（仅 app.logger → logger）。
+# 函数体与下沉前逐字一致（仅 logger → logger）。
 import logging
 import os
 
@@ -18,6 +18,19 @@ from job_state import generation_state, lock
 from llm_client import LLMError
 from novel_parser import NovelParseError
 
+# 2026-10-11 补齐搬迁时遗漏的模块级名字（自动扫描发现）
+from config import CONTINUITY_DIR
+from config import NOVELS_DIR
+from novel_parser import read_novel_text
+from routes._shared import _episode_units_for_chapters
+from routes._shared import _novel_key
+from workers.screenplay import _current_llm_client
+import chapter_preflight
+import continuity
+import dialogue_utils
+import json
+import novel_screenplay
+import project_store
 logger = logging.getLogger(__name__)
 
 def _salvage_episode_script(path: str, episode_no: int):

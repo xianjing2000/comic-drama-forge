@@ -4,7 +4,7 @@
 # 本批 8 个对象共 554 行：_dub_worker、_mix_worker 及它们独占的 6 个助手。
 # 前置（已先行完成）：dub_tasks/dub_lock/mix_tasks/mix_lock 已归位到 job_state，
 #   本模块直接 from job_state import，不再依赖 app 实例。
-# 函数体与下沉前逐字一致（唯一替换：app.logger -> logger）。
+# 函数体与下沉前逐字一致（唯一替换：logger -> logger）。
 import logging
 import os
 import shutil
@@ -13,6 +13,29 @@ import time
 
 from job_state import dub_lock, dub_tasks, mix_lock, mix_tasks
 
+# 2026-10-11 补齐搬迁时遗漏的模块级名字（自动扫描发现）
+from artifact_helpers import _purge_rejected_artifacts
+from config import DUB_DIR
+from config import QC_DIR
+from config import TTS_DEFAULT_PARAMS
+from dub_mix import DubMixError
+from dub_mix import mix_out_dir
+from dub_mix import mix_video_with_entries
+from dub_mix import write_mix_report
+from fs_atomic import atomic_write_json
+from routes._shared import _prune_task_registry
+from routes._shared import _qc_load_cfg
+from routes._shared import _safe_project
+from routes._shared import register_final_deliverable
+from routes.tts import _dub_audio_url
+from tts_client import QwenTTSClient
+from tts_client import TTSError
+from tts_client import concat_audio
+from tts_client import probe_audio as probe_audio_info
+import audio_qc
+import prompt_qc
+import qc_client
+import tts_client
 logger = logging.getLogger(__name__)
 
 def _cleanup_scratch_dir(dir_path: str, logger=None) -> None:
@@ -144,6 +167,7 @@ def _audio_qc_lines(project_name: str, lines: list, results: list, cfg: dict,
 
     永不抛异常；批量口径为「记录 + 有限重配」，不阻断整集。
     """
+    from lesson_helpers import _record_audio_qc_lesson, _record_preflight_lesson
     stats = {"enabled": False, "checked": 0, "passed": 0, "failed": 0, "blocked": 0,
              "ai_used": 0, "retried": 0, "recovered": 0, "problems": []}
     if not results:

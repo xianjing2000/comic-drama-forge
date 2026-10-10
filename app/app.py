@@ -231,6 +231,13 @@ app.register_blueprint(scenes_bp)
 from routes.keyframes import keyframes_bp
 app.register_blueprint(keyframes_bp)
 
+# 2026-10-11 助手按域下沉（第三批）：教训库/风格/系统维护各自迁出。
+from lesson_helpers import (_apply_audio_hints, _qc_lesson_from_record,  # noqa: F401, E402
+                             _record_audio_qc_lesson, _record_preflight_lesson, _record_qc_lesson)
+from style_helpers import _style_aspect_confirmed, _style_aspect_guard  # noqa: F401, E402
+from system_helpers import (_COMFYUI_CLEAR_HISTORY_LAST_TS,  # noqa: F401, E402
+                               _COMFYUI_CLEAR_HISTORY_LOCK, _maybe_clear_comfyui_history)
+
 # 2026-10-11 助手按域下沉（第二批）：质检清理/产物回收已迁至 artifact_helpers.py。
 from artifact_helpers import (_COMFYUI_RECLAIM_INTERVAL_SEC, _COMFYUI_RECLAIM_LAST_TS,  # noqa: F401, E402
                                _COMFYUI_RECLAIM_LOCK, _PURGE_REJECTED_ENV, _comfyui_official_dirs,
@@ -6299,83 +6306,8 @@ def _project_caption_burn_enabled(project_name: str = "") -> bool:
     return default
 
 
-def _style_aspect_confirmed(project_name: str) -> dict:
-    """生成前置确认门判据：用户是否已与总控 AI 确认「风格」与「视频比例」。
-
-    单一事实源 = 已应用的总控设定（ai_chat/project_settings.json，按项目）。
-    - 风格确认：settings 的风格基调(style) 或 画风(art_style) 任一非空；
-    - 比例确认：settings 的画面比例(aspect_ratio，即视频画幅，如 9:16) 非空。
-    资产图的画幅已按类型内置写死（见 style_kit.asset_aspect_ratio），不依赖此比例；
-    这里确认比例只为「视频 / 分镜」画幅服务。
-    """
-    try:
-        view = ai_chat.settings_view(AI_SETTINGS_PATH, project_name or "") or {}
-    except Exception as e:  # noqa: BLE001
-        app.logger.warning(f"确认门读取总控设定失败（按未确认处理）：{e}")
-        view = {}
-    s = view.get("settings") or {}
-    style_confirmed = bool((s.get("style") or s.get("art_style") or "").strip())
-    # 2026-09-23（建项目选风格）：用户「新建项目」时下拉/自定义的风格写进 config.json 的
-    # style，也算「风格已确认」——否则用户明明选了风格，生成仍被 409 拦在「尚未确认风格」，
-    # 与「建项目时就能选风格」的体验自相矛盾。总控 AI 敲定（project_settings）仍是第一优先级。
-    if not style_confirmed:
-        try:
-            rec = project_store.get_project(_safe_project(project_name or ""))
-            if rec:
-                cfg_style = str(project_store.read_config(rec["dir_key"]).get("style") or "").strip()
-                style_confirmed = bool(cfg_style)
-        except Exception as e:  # noqa: BLE001
-            app.logger.warning(f"确认门读取 config.style 失败（忽略）：{e}")
-    aspect_confirmed = bool((s.get("aspect_ratio") or "").strip())
-    # 2026-09-23（建项目选比例）：用户「新建项目」时选的画面比例写进 config.json 的
-    # aspect_ratio，也算「比例已确认」，与 style 的同源兜底保持一致。总控 AI 敲定仍是第一优先级。
-    if not aspect_confirmed:
-        try:
-            rec = project_store.get_project(_safe_project(project_name or ""))
-            if rec:
-                cfg_ar = str(project_store.read_config(rec["dir_key"]).get("aspect_ratio") or "").strip()
-                aspect_confirmed = bool(cfg_ar)
-        except Exception as e:  # noqa: BLE001
-            app.logger.warning(f"确认门读取 config.aspect_ratio 失败（忽略）：{e}")
-    missing = []
-    if not style_confirmed:
-        missing.append("风格")
-    if not aspect_confirmed:
-        missing.append("视频比例")
-    return {"confirmed": style_confirmed and aspect_confirmed,
-            "style_confirmed": style_confirmed, "aspect_confirmed": aspect_confirmed,
-            "missing": missing, "settings": s}
 
 
-def _style_aspect_guard(project_name: str, override_style: str = ""):
-    """生成入口前置校验门（2026-09-22 需求）。
-
-    用户未与总控 AI 确认「风格 / 视频比例」时拦截生成：返回 409 + 可读提醒响应；
-    已确认则返回 None（放行）。各生成端点在解析出 project_name 后调用它。
-    前端 client.ts readError 会自动弹出 error + guide 文案，提示去总控确认。
-
-    ``override_style``：个别入口（如托管 /api/autonomous/start）允许调用方**显式传风格**
-    （plan_overrides.style）——此时视「风格」为已确认，但「视频比例」仍须总控确认。
-    """
-    chk = _style_aspect_confirmed(project_name)
-    if override_style and not chk["style_confirmed"]:
-        chk["style_confirmed"] = True
-        chk["missing"] = [m for m in chk["missing"] if m != "风格"]
-        chk["confirmed"] = chk["style_confirmed"] and chk["aspect_confirmed"]
-    if chk["confirmed"]:
-        return None
-    _names = "、".join(chk["missing"])
-    return jsonify({
-        "success": False,
-        "requires_confirm": True,
-        "error": f"尚未与总控 AI 确认{_names}，暂不开展生成。",
-        "guide": ("请先在「AI 对话 · 创作总控」里与 AI 敲定" + _names
-                  + "（风格：画风/基调；视频比例：画面画幅，如 9:16 / 16:9 / 1:1），"
-                    "点击「应用设定」落盘后再开始生成。"),
-        "missing": chk["missing"],
-        "style_confirmed": chk["style_confirmed"],
-        "aspect_confirmed": chk["aspect_confirmed"],
-    }), 409
 
 
 @app.route('/api/storyboards/generate', methods=['POST'])
@@ -8337,76 +8269,8 @@ def _write_artifact_meta(artifact_path: str, *, kind: str, project_name: str,
             pass
 
 
-def _qc_lesson_from_record(rec: dict) -> dict:
-    """从一条质检历史记录里取出「缺陷」，供教训库沉淀。
-
-    ⚠️ `_qc_record_verdict` 返回的记录把 score/reason/issues 放在**顶层**，
-    **没有** `verdict` 子对象。此前写入教训时误读 `rec["verdict"]`（恒为 None → {}），
-    于是教训库里躺着的全是 score=0 / reason="" / issues=[] 的空记录，
-    召回时自然什么建议都给不出来 —— 重试就变成了「换种子瞎撞」。
-    这里对两种形态都做兼容，避免再被字段形态坑一次。
-    """
-    if not isinstance(rec, dict):
-        return {}
-    inner = rec.get("verdict") if isinstance(rec.get("verdict"), dict) else {}
-    score = rec.get("score")
-    if score is None:
-        score = inner.get("score")
-    issues = list(rec.get("issues") or inner.get("issues") or [])
-    issues += list(rec.get("critical_issues") or inner.get("critical_issues") or [])
-    issues += list(rec.get("style_issues") or inner.get("style_issues") or [])
-    issues = [str(x).strip() for x in issues if str(x).strip()]
-    reason = str(rec.get("reason") or inner.get("reason") or "").strip()
-    if not issues and reason:
-        issues = [reason]
-    return {"score": score if score is not None else 0, "issues": issues[:20], "reason": reason}
 
 
-def _record_qc_lesson(project_name: str, kind: str, prompt: str, rec: dict,
-                      root_dir: str = "") -> dict:
-    """把一次「质检不达标」沉淀成教训（供下次重试时改写提示词）。
-
-    风格由 ``_project_style()`` 内部取（plan 的 style > AI 设定 > config.style），
-    这样 6 个调用点不用各自找 style —— 它们本来就都在同一个项目上下文里。
-    """
-    lesson_src = _qc_lesson_from_record(rec)
-    # 记录当时的视觉风格：召回时按「同风格加权 / 异风格降权」使用。
-    # 没有它就无法回答「生成相同风格的提示词时有没有参考历史教训」——
-    # 旧教训一律 context={}，跨画风的缺陷会串味（用 A 画风的标准要求 B 画风的图）。
-    try:
-        _qc_style = _project_style(project_name) or ""
-    except Exception as _se:  # noqa: BLE001
-        app.logger.warning("取项目风格失败（教训按无风格记录）：%s", _se)
-        _qc_style = ""
-    # 风格不达标：额外注入一条「明确的风格强化指令」，确保召回时能直接指导模型修正风格，
-    # 而不是只给一条「风格不符」的缺陷描述。
-    # ⚠️ 风格名必须写成占位符 {style}，**不能在记录时把项目风格写死**：
-    #    教训库是跨项目复用的，写死会让 A 项目（中国古风玄幻）的教训被 B 项目
-    #    （国漫偏写实）召回时强行要求 B 采用 A 的风格 —— 那是主动伤害。
-    #    实际替换发生在 prompt_memory.suggestions(..., style=当前项目风格)。
-    if (rec or {}).get("style_mismatch"):
-        style_hint = ("画面风格与目标风格不符，必须严格采用「{style}」"
-                      "的视觉风格、画风、渲染方式与配色，不得偏离")
-        existing = lesson_src.get("issues") or []
-        lesson_src["issues"] = [style_hint] + [i for i in existing if i != style_hint]
-    if not lesson_src.get("issues") and not lesson_src.get("reason"):
-        return {}
-    try:
-        got = prompt_memory.record(project=project_name, kind=kind, prompt=prompt,
-                                   issues=lesson_src["issues"], reason=lesson_src["reason"],
-                                   score=lesson_src.get("score"),
-                                   # 2026-10-09：新增可选 root_dir 便于**隔离测试**（默认仍是项目输出目录，
-                                   # 行为不变）。此前测试只能落真实教训库、再反手清理 —— 见报告第 116 节。
-                                   root_dir=root_dir or PROJECT_OUTPUT_DIR, style=_qc_style)
-        if got:
-            app.logger.info("[教训库] %s 记录 %d 条缺陷（kind=%s score=%s style=%s）：%s",
-                            project_name, len(lesson_src["issues"]), kind,
-                            lesson_src.get("score"), _qc_style or "-",
-                            lesson_src["issues"][:2])
-        return got or {}
-    except Exception as mem_err:  # noqa: BLE001
-        app.logger.warning("记录质检教训失败：%s", mem_err)
-        return {}
 
 
 #: 优化器「思考过程」泄漏特征（2026-10-06 分镜图事故）。
@@ -8657,30 +8521,6 @@ def _optimize_prompt_from_qc(kind: str, prompt: str, rec: dict, style: str = "")
         return None
 
 
-def _record_preflight_lesson(project_name: str, prompt_original: str, pf: dict,
-                             gate: dict) -> dict:
-    """把一次「提示词预检不通过 / 有缺陷」沉淀成 ``kind="prompt"`` 教训。
-
-    ``prompt_original`` 必须是**自愈前**（也**不含召回叠加块**）的原始提示词，作为稳定
-    phash 键。收敛 keyframe / asset / storyboard 三处预检的沉淀逻辑，避免复制粘贴。
-    """
-    pf = pf if isinstance(pf, dict) else {}
-    verdict = pf.get("verdict") if isinstance(pf.get("verdict"), dict) else {}
-    gate = gate if isinstance(gate, dict) else {}
-    rec = {
-        "issues": [str(x).strip() for x in (verdict.get("issues") or []) if str(x).strip()],
-        "critical_issues": [str(x).strip() for x in (verdict.get("critical_issues") or [])
-                            if str(x).strip()],
-        "reason": str(pf.get("reason") or gate.get("reason") or "").strip(),
-        "score": verdict.get("score"),
-        "stage": "prompt_preflight",
-        "label": str(pf.get("label") or gate.get("label") or ""),
-    }
-    if not rec["issues"] and rec["reason"]:
-        rec["issues"] = [rec["reason"]]
-    if not rec["issues"] and not rec["reason"]:
-        return {}
-    return _record_qc_lesson(project_name, "prompt", prompt_original or "", rec)
 
 
 def _qc_style_of(project_name: str) -> str:
@@ -9441,89 +9281,12 @@ from job_state import dub_lock  # noqa: F401  2026-10-11 归位到 job_state
 #      在旧流程里要等到成片验收才暴露的问题。
 # 两者都**不阻断生成**：整集生产不能被单句质检拖死，结论如实记录、逐句可定位即可。
 
-def _record_audio_qc_lesson(project_name: str, ln: dict, verdict: dict) -> dict:
-    """把一句「配音成品质检不达标」沉淀成 ``kind="audio"`` 教训。
-
-    提示词键用**自愈前**的台词原文（``audio_orig_text``，回退当前 ``ln["text"]``）：
-    它正是 TTS 的实际输入，phash 稳定；预检已自愈过 text 时取自愈前的原文，避免指纹漂移。
-    ⚠️ 沉淀的 issues **只进教训库，绝不改台词**（音频类召回是计划级纠偏，见 _apply_audio_hints）。
-    """
-    text_key = ln.get("audio_orig_text") or ln.get("text") or ""
-    if not text_key:
-        return {}
-    verdict = verdict if isinstance(verdict, dict) else {}
-    rec = {
-        "issues": [str(x).strip() for x in
-                   (list(verdict.get("issues") or []) +
-                    list(verdict.get("critical_issues") or [])) if str(x).strip()],
-        "critical_issues": [str(x).strip() for x in (verdict.get("critical_issues") or [])
-                            if str(x).strip()],
-        "reason": str(verdict.get("reason") or "").strip(),
-        "score": verdict.get("score"),
-        "audio": True,
-    }
-    if not rec["issues"] and not rec["reason"]:
-        return {}
-    try:
-        return _record_qc_lesson(project_name, "audio", text_key, rec)
-    except Exception as e:  # noqa: BLE001 - 沉淀失败绝不影响配音
-        app.logger.warning(f"配音教训沉淀失败（忽略）：{e}")
-        return {}
 
 
 
 
 
 
-def _apply_audio_hints(ln: dict, hints: list, project_name: str = "") -> None:
-    """音频类召回的**计划级纠偏**（设计 D4：音频建议绝不拼进 ``ln["text"]``，会被 TTS 念出来）。
-
-    逐条扫描 hints（缺陷描述），按特征做确定性纠偏，只动 plan 的说话人/音色模式/期望时长：
-      - 含「旁白」「speaker」「角色」：若本句说话人是旁白兜底（剧本 dialogue 没登记 speaker），
-        且能拿到该镜在剧本里登记的 speaker，则回填 ``ln["character"]``，避免角色台词被旁白念；
-      - 含「情绪」「语气」「instruct」：``voice.mode == "preset"`` 时切到 ``design``，
-        并确保 ``instruct`` 携带该句情绪（preset 的 CustomVoice 会忽略 instruct，只有
-        VoiceDesign 真正按 instruct 控制语气）；
-      - 含「时长」「截断」：记录 ``ln["audio_expect_sec"]``（期望时长）供后续质检比对，不阻断；
-      - 其它：仅留痕（hints 由调用方写入 ``ln["audio_hints"]`` 审计），不改 plan。
-
-    纯就地修改、永不抛异常、不改 tts_client.py（build_dub_plan 保持纯计划构建）。
-    """
-    hints = [str(h).strip() for h in (hints or []) if str(h).strip()]
-    if not hints:
-        return
-    try:
-        joined = " ".join(hints)
-        voice = ln.get("voice") or {}
-        # —— 说话人回填：旁白兜底 + hint 提示该句其实是角色台词 → 按剧本登记的 speaker 纠偏 ——
-        if (("旁白" in joined or "speaker" in joined or "角色" in joined)
-                and str(ln.get("character") or "") == tts_client.NARRATION_SPEAKER):
-            speaker = ""
-            try:
-                speaker = _dub_line_speaker_from_script(ln, project_name)
-            except Exception:  # noqa: BLE001
-                speaker = ""
-            if speaker and speaker != tts_client.NARRATION_SPEAKER:
-                ln["character"] = speaker
-        # —— 情绪/语气：preset 忽略 instruct → 切 design 并携带情绪 ——
-        if ("情绪" in joined or "语气" in joined or "instruct" in joined.lower()):
-            emotion = str(ln.get("emotion") or "").strip()
-            if emotion and not tts_client._is_neutral_emotion(emotion):
-                desc = ""
-                try:
-                    desc = _dub_character_desc(ln.get("character"), project_name)
-                except Exception:  # noqa: BLE001
-                    desc = ""
-                voice = dict(voice, mode="design",
-                             instruct=tts_client._emotion_instruct(emotion, desc))
-                ln["voice"] = voice
-        # —— 时长/截断：记录期望时长供质检比对（不阻断）——
-        if "时长" in joined or "截断" in joined:
-            expect = _audio_line_expect_sec(ln)
-            if expect > 0:
-                ln["audio_expect_sec"] = round(float(expect), 2)
-    except Exception as e:  # noqa: BLE001 - 纠偏失败绝不影响配音
-        app.logger.warning(f"配音教训纠偏失败（忽略）：{e}")
 
 
 def _apply_audio_lessons(plan_lines: list, project_name: str) -> int:
@@ -10079,44 +9842,8 @@ def spa_fallback(path):
 
 # ComfyUI「任务历史」自动清理（面板只增不减 → 易被误读成「生成了大量废图」）：
 # 与上面的回收同构 —— 模块级节流 + 全容错，默认间隔取 config 值（5 分钟）。
-_COMFYUI_CLEAR_HISTORY_LAST_TS = 0.0
-_COMFYUI_CLEAR_HISTORY_LOCK = threading.Lock()
 
 
-def _maybe_clear_comfyui_history(where: str = "") -> bool:
-    """按节流清空 ComfyUI **任务历史列表**（不是磁盘产物）。
-
-    为什么要做：ComfyUI 界面「任务历史」面板只增不减，质检每失败一次重跑就多一条
-    记录，跑几轮后几百条 → 用户会以为「生成了大量废图」。实测面板 162 条时磁盘上
-    真正残留的废弃分镜图 **0 张**（清之前 /history 162 条 → 清完 0 条）。
-
-    语义边界（重要）：
-      · 只调 `POST /history {"clear":true}`，**绝不删任何 output 文件**；
-      · 不影响正在执行/排队中的任务（它们结束后会各自追加新记录）；
-      · 只应在**任务收尾**调用 —— 有任务在飞时清掉历史，会让 `wait_for_completion`
-        的轮询查不到自己那条记录而误判超时。
-
-    开关 `MJSCXT_CLEAR_COMFYUI_HISTORY=0` 可整体关闭；节流 5 分钟（见 config）。
-    永不抛异常、永不阻断生产。
-    """
-    global _COMFYUI_CLEAR_HISTORY_LAST_TS
-    if not CLEAR_COMFYUI_HISTORY:
-        return False
-    try:
-        now = time.time()
-        with _COMFYUI_CLEAR_HISTORY_LOCK:
-            if now - _COMFYUI_CLEAR_HISTORY_LAST_TS < CLEAR_COMFYUI_HISTORY_INTERVAL_SEC:
-                return False
-            # 先占用时间戳：真正清理失败也不要在同一分钟内反复重试刷屏。
-            _COMFYUI_CLEAR_HISTORY_LAST_TS = now
-        ok = comfyui_client.clear_history()
-        if ok:
-            app.logger.info("[任务历史] 已清空 ComfyUI 任务历史面板（收尾：%s）", where or "未知")
-        return ok
-    except Exception as e:  # noqa: BLE001  可观测性优化，绝不能阻断生产
-        app.logger.warning("ComfyUI 任务历史清理异常（不影响生产）：%s: %s",
-                           type(e).__name__, e)
-        return False
 
 
 

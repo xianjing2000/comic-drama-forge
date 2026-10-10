@@ -5,9 +5,9 @@
 #   8 个函数：_purge_* (4) + _reject_artifact + _maybe_reclaim_comfyui_output
 #             + _comfyui_official_dirs + _mark_history_file_purged
 #   4 个常量：_PURGE_REJECTED_ENV、_COMFYUI_RECLAIM_LAST_TS/INTERVAL_SEC/LOCK
-# 闭包实测自洽：app 只被用于 app.logger（已改为模块 logger），
+# 闭包实测自洽：app 只被用于 logger（已改为模块 logger），
 #   4 个常量只被批内函数使用，因此搬迁后不会出现「两份绑定」。
-# 函数体与下沉前逐字一致（唯一替换：app.logger -> logger）。
+# 函数体与下沉前逐字一致（唯一替换：logger -> logger）。
 import datetime
 import json
 import logging
@@ -16,6 +16,24 @@ import shutil
 import threading
 import time
 
+from config import CHARACTERS_DIR
+
+# 2026-10-11 补齐搬迁时遗漏的模块级名字（自动扫描发现）
+from config import COMFYUI_OUTPUT_DIR
+from config import FINAL_DIR
+from config import ITEMS_DIR
+from config import KEYFRAMES_DIR
+from config import PROJECT_OUTPUT_DIR
+from config import PROJECT_TRASH_DIR
+from config import QC_DIR
+from config import SCENES_DIR
+from config import STORYBOARDS_DIR
+from config import VIDEOS_DIR
+from fs_atomic import atomic_write_json
+from routes._shared import _safe_project
+from routes._shared import comfyui_client
+from routes.projects import _move_with_retry
+import qc_client
 logger = logging.getLogger(__name__)
 
 _PURGE_REJECTED_ENV = "MJSCXT_PURGE_REJECTED"

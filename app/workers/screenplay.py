@@ -8,7 +8,7 @@
   · _current_llm_client           ← 延迟 import routes._shared 的实现
       （那里是唯一口径；workers 不该另建一套，否则又会出现
         「两处定义、改一处漏一处」）
-  · app.logger                    ← 改为模块 logger（本次唯一的行为调整：
+  · logger                    ← 改为模块 logger（本次唯一的行为调整：
       日志归类名从 app 变为 workers.screenplay，级别与内容不变）
 
 业务逻辑与下沉前一字不差：章节正文 → LLM 场次剧本 →
