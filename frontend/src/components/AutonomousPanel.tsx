@@ -67,6 +67,9 @@ export default function AutonomousPanel({
     // ⭐ 2026-10-10：集间流水线开关（用户可选）。True = 本集烧 GPU 时后台并行
     //    预热下一集剧本（纯 LLM、零 GPU、不依赖本集产物）。默认开启。
     prewarm_next_script: true,
+    // ⭐ 资产提示词预热：本批资产生成期间后台把**全部**资产的增强提示词先算好
+    //    （只填 prompt_enhance 缓存，纯 LLM 零 GPU）。默认开启。
+    prewarm_asset_prompt: true,
   });
 
   const load = useCallback(async () => {
@@ -190,6 +193,7 @@ export default function AutonomousPanel({
               ['enable_tts', '配音'], ['enable_final', '成片'],
               // ⭐ 集间流水线：本集烧 GPU 时后台预热下一集剧本（见后端 prewarm_next_script）
               ['prewarm_next_script', '预热下集剧本'],
+              ['prewarm_asset_prompt', '预热资产提示词'],
             ] as const).map(([k, label]) => (
               <label key={k} className="flex cursor-pointer items-center gap-1.5 text-xs text-ink-2">
                 <input
