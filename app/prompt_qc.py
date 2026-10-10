@@ -344,6 +344,126 @@ def _has_shot_content(ctx) -> bool:
     return bool(_txt(ctx.get("description")) or _txt(ctx.get("visual_detail"))
                 or _txt(ctx.get("storyboard_prompt_zh")))
 
+# --------------------------------------------------------------------------- #
+# 内容完成度检查（2026-10-10 用户指定）
+# --------------------------------------------------------------------------- #
+# 为什么需要：骨架检查只保证「格式齐全」，不保证「内容对得上」—— 提示词可以六段
+# 齐全、九宫格齐整，却漏掉本镜的关键动作或空间位置。用户实测症状：「人物突然出现在
+# 别的地方」（剧本写了位移，分镜提示词里没有，模型就自行换位置）。
+#
+# 判据刻意宽松（宁漏不误杀），只查四类可确定性提取的要素：
+#   ① 空间位置（画面左/中/右、前景/后景）—— 缺失是「人物瞬移」的直接成因
+#   ② 主体（角色名 / <Subject N> 指代）
+#   ③ 关键动作（description 的「→」分解步骤）
+#   ④ 关键道具
+# 另含 ⑤ 跨镜空间连续性（需调用方传 prev_ctx）。命中记 issue，不阻断。
+
+_POS_WORDS = (
+    ('画面左', '画面左', '左侧', '左中', '左前', '左后', 'left'),
+    ('画面右', '画面右', '右侧', '右中', '右前', '右后', 'right'),
+    ('画面中', '画面正中', '正中', '中央', 'center'),
+    ('前景', '前景', '后景', '背景', '虚化', 'foreground', 'background'),
+)
+
+_MOVE_WORDS = ('走向', '走到', '移到', '来到', '转身', '起身', '退到', '上前',
+               '靠近', '离开', '跨', '俯身', '坐下', '站起')
+
+
+def _extract_positions(text: str) -> List[str]:
+    t = str(text or '')
+    out: List[str] = []
+    for fam in _POS_WORDS:
+        if any(w.lower() in t.lower() for w in fam):
+            out.append(fam[0])
+    return out
+
+
+def _extract_actions(text: str) -> List[str]:
+    ''''从 description 的「→」分解里提取关键动作短语'''
+    t = str(text or '')
+    if '→' not in t and '->' not in t:
+        return []
+    parts = re.split(r'→|->', t)
+    out: List[str] = []
+    for p in parts[1:]:
+        seg = re.sub(r'^[：:、,，。\s]+', '', p).strip()
+        seg = re.sub(r'[（(][^）)]*[）)]', '', seg)
+        seg = seg.strip('。；;、,，')
+        if len(seg) >= 2:
+            out.append(seg[:12])
+    return list(dict.fromkeys(out))
+
+
+def _extract_props(ctx) -> List[str]:
+    out: List[str] = []
+    if isinstance(ctx, dict):
+        for it in (ctx.get('items_in_shot') or ctx.get('items') or []):
+            nm = str(it if isinstance(it, str) else (it or {}).get('name') or '').strip()
+            if nm:
+                out.append(nm)
+    return list(dict.fromkeys(out))
+
+
+def _content_coverage(prompt: str, ctx, prev_ctx=None) -> List[str]:
+    """内容完成度：本镜要求的内容是否都进了提示词（返回 issue 列表）"""
+    if not isinstance(ctx, dict) or not prompt:
+        return []
+    issues: List[str] = []
+    desc = ' '.join(_txt(ctx.get(k)) for k in ('description', 'visual_detail',
+                                              'storyboard_prompt_zh'))
+    if not desc.strip():
+        return []
+    p = prompt.lower()
+
+    pos = _extract_positions(desc)
+    if pos:
+        missing = []
+        for f in pos:
+            fam = next((x for x in _POS_WORDS if x[0] == f), (f,))
+            if not any(w.lower() in p for w in fam):
+                missing.append(f)
+        if missing:
+            issues.append(
+                '提示词缺少本镜要求的【空间位置】声明（%s）：位置不受控会让同一角色在不同格'
+                '/不同镜里出现在不同地方（用户实测「人物突然出现在别的地方」）' % '、'.join(missing))
+
+    names = [str(n).strip() for n in (ctx.get('characters') or []) if str(n or '').strip()]
+    if not names and isinstance(ctx.get('characters_in_shot'), (list, tuple)):
+        names = [str(n).strip() for n in ctx['characters_in_shot'] if str(n or '').strip()]
+    if names and '<subject' not in p:
+        miss_names = [n for n in names if n.lower() not in p]
+        if miss_names:
+            issues.append('提示词未声明本镜出场主体（%s）：模型只能自行想象'
+                          % '、'.join(miss_names))
+
+    acts = _extract_actions(desc)
+    if acts:
+        core = []
+        for a in acts:
+            k = re.sub(r'^(缓缓|轻轻|慢慢|猛地|突然|随即|然后|接着)', '', a)
+            if len(k) >= 2:
+                core.append(k[:6])
+        miss_acts = [a for a in core if a and a.lower() not in p]
+        if core and len(miss_acts) >= max(1, len(core) // 2):
+            issues.append('提示词未覆盖本镜要求的【关键动作】（缺 %d/%d 步：%s）：动作不全'
+                          '会让画面停在起点状态'
+                          % (len(miss_acts), len(core), '、'.join(miss_acts[:4])))
+
+    miss_props = [x for x in _extract_props(ctx) if x.lower() not in p]
+    if miss_props:
+        issues.append('提示词未声明本镜关键道具（%s）' % '、'.join(miss_props[:4]))
+
+    if isinstance(prev_ctx, dict):
+        ppos = _extract_positions(' '.join(_txt(prev_ctx.get(k)) for k in
+                                          ('description', 'visual_detail')))
+        if pos and ppos and set(pos) != set(ppos) and not any(w in desc for w in _MOVE_WORDS):
+            issues.append('本镜空间位置（%s）与上一镜（%s）不同，但描述里没有位移动作'
+                          '（走向/走到/移到…）：这是「人物突然出现在别处」的典型成因'
+                          % ('、'.join(pos), '、'.join(ppos)))
+    return issues
+
+
+
 
 # --------------------------------------------------------------------------- #
 # 分镜图提示词检查
@@ -519,6 +639,16 @@ def _check_storyboard(prompt: str, ctx, style, ref_count: Optional[int] = None,
     hits = [w for w in _QUALITY_FLUFF if w.lower() in prompt.lower()]
     if hits:
         issues.append("含质量类空词（无信息量且挤占语义）：" + "、".join(hits[:3]))
+    # ⭐ 2026-10-10（用户指定「质检提示词是否完成了这一分镜要求的内容」）：
+    #    上面全是**格式**检查（段是否齐、协议对不对）；这里补**内容**检查 ——
+    #    本镜 description 要求的主体/位置/动作/道具是否真进了提示词，
+    #    以及与上一镜的空间连续性（「人物突然出现在别处」的直接判据）。
+    #    调用方若在 ctx 里给了 prev_shot（上一镜的 ctx），会一并做跨镜比对。
+    try:
+        issues.extend(_content_coverage(prompt, ctx, ctx.get("prev_shot")
+                                        if isinstance(ctx, dict) else None))
+    except Exception as _cc_e:  # noqa: BLE001
+        logger.debug("内容完成度检查异常（忽略，不影响预检）：%s", _cc_e)
     return {"issues": issues, "fatal": fatal}
 
 
