@@ -21,6 +21,8 @@ if _APP not in sys.path:
 import style_kit  # noqa: E402
 import comfyui_client as CC  # noqa: E402
 import storyboard_helpers as SB  # noqa: E402
+import prompt_qc as Q  # noqa: E402
+import style_kit as S  # noqa: E402  （别名，供新增用例使用）
 
 
 class TestRoundToMultiple(unittest.TestCase):
@@ -109,6 +111,87 @@ class TestStoryboardHelpers(unittest.TestCase):
             out = SB._blocking_spec_text(arg)
             self.assertIsInstance(out, str, '_blocking_spec_text 应恒返回 str（入参 %r）' % (arg,))
 
+
+class TestPromptTidy(unittest.TestCase):
+    """prompt_qc._tidy：自愈后留下的标点垃圾清理。"""
+
+    def test_mixed_punctuation_normalized(self):
+        """⚠️ docstring 记录的真实缺陷：删词后留下「，,。」全角+半角混排。
+
+        只按「同一字符重复」去重抓不到它（([。；，])\\1+ 匹配不到「，,。」），
+        所以必须按「任意标点串归一到最重终止符」处理。"""
+        self.assertEqual(Q._tidy('你好，,。世界'), '你好。世界')
+        self.assertEqual(Q._tidy('文字，、,;。'), '文字。')
+
+    def test_punctuation_run_collapses_to_terminator(self):
+        self.assertEqual(Q._tidy('a。！？；b'), 'a。b')
+
+    def test_all_punctuation_returns_empty(self):
+        self.assertEqual(Q._tidy('，，，'), '')
+        self.assertEqual(Q._tidy(''), '')
+
+    def test_strips_leading_and_trailing(self):
+        self.assertEqual(Q._tidy('  ，测试。， '), '测试。')
+        self.assertEqual(Q._tidy('结尾标点，'), '结尾标点')
+
+
+class TestExtractActions(unittest.TestCase):
+    """prompt_qc._extract_actions：从「→」分解里取关键动作。"""
+
+    def test_no_arrow_returns_empty(self):
+        self.assertEqual(Q._extract_actions('无箭头'), [])
+        self.assertEqual(Q._extract_actions(''), [])
+
+    def test_skips_first_segment(self):
+        """箭头**之后**的段才是动作（首段是起点）。"""
+        self.assertEqual(Q._extract_actions('站起→转身→走出门'), ['转身', '走出门'])
+
+    def test_short_segments_dropped(self):
+        """长度 < 2 的段丢弃；括号备注剔除后变短也算。"""
+        self.assertEqual(Q._extract_actions('a→b→a'), [])
+        self.assertEqual(Q._extract_actions('A（注）→B'), [])
+
+    def test_dedupes_preserving_order(self):
+        self.assertEqual(Q._extract_actions('起点->目标动作->目标动作'), ['目标动作'])
+
+
+class TestTranslateTokenEn(unittest.TestCase):
+    """style_kit._translate_token_en：中文风格 token → 英文短语。"""
+
+    def test_never_leaves_chinese_in_english(self):
+        """⚠️ 历史缺陷：「2D现代都市风」翻完只剩「2D风」，英文提示词里混进中文。
+
+        这对图像模型是噪声源，必须保证输出短语**不含任何中文字符**。"""
+        for tok in ('2D现代都市风', '中国古风', '国漫3D渲染', '写实摄影风', '古风'):
+            for w in S._translate_token_en(tok):
+                self.assertFalse(any('\u4e00' <= c <= '\u9fff' for c in w),
+                                 '「%s」译出的 %r 仍含中文' % (tok, w))
+
+    def test_longest_key_priority(self):
+        """「中国古风」不能被更短的「古风」先吃掉。"""
+        out = S._translate_token_en('中国古风')
+        self.assertIn('ancient Chinese style', out)
+
+    def test_empty_token(self):
+        self.assertEqual(S._translate_token_en(''), [])
+
+
+class TestSanitizePromptEn(unittest.TestCase):
+    """style_kit.sanitize_prompt_en：剥掉模型自写的质量/风格声明。
+
+    docstring 说明：风格与质量声明一律剥掉，改由 with_style_en 在末尾统一给，
+    保证风格只出现一次（模型自写会与程序后缀重复）。"""
+
+    def test_strips_quality_words(self):
+        self.assertEqual(
+            S.sanitize_prompt_en('masterpiece, best quality, a girl with sword'),
+            'a girl with sword')
+
+    def test_strips_style_declaration(self):
+        self.assertEqual(S.sanitize_prompt_en('Chinese animated style, a boy'), 'a boy')
+
+    def test_empty(self):
+        self.assertEqual(S.sanitize_prompt_en(''), '')
 
 if __name__ == '__main__':
     unittest.main()
