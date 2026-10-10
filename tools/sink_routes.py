@@ -64,6 +64,7 @@ STDLIB = set(sys.stdlib_module_names) if hasattr(sys, 'stdlib_module_names') els
 
 # 生成的蓝图头部已 import 的名字（无需再解析）
 BUILTIN_OK = {
+    'Image',  # PIL（head 里 import）
     'BP',  # refs 计算时 @app.route( 的占位符
     'Blueprint', 'jsonify', 'request', 'send_file', 'abort', 'render_template',
     'redirect', 'send_from_directory', 'Response', 'make_response', 'url_for',
@@ -116,7 +117,7 @@ def route_of(n):
     return None
 
 
-def main(prefix, modname, note=''):
+def main(prefix, modname, note='', extras=None):
     hits = []
     for n in tree.body:
         if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -130,6 +131,28 @@ def main(prefix, modname, note=''):
     print('  匹配 %s* 的路由 = %d 个' % (prefix, len(hits)))
     if not hits:
         print('  [XX] 无匹配'); return 1
+    # --extra：把指定名字（常量/助手）与路由一起搬进蓝图。
+    # 用途：这些对象只被本域路由使用，但 sink_routes 的闭包只覆盖「函数」，
+    # 常量与实例需显式指定（如 _OUTFIT_VIEW_STEMS、script_gen）。
+    extras = extras or []
+    extra_blocks = []
+    extra_spans = []
+    for nm in extras:
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == nm:
+                extra_blocks.append(chr(10).join(lines[n.lineno - 1:n.end_lineno]))
+                extra_spans.append((n.lineno - 1, n.end_lineno))
+                break
+            if isinstance(n, ast.Assign):
+                if any(isinstance(x, ast.Name) and x.id == nm for x in n.targets):
+                    extra_blocks.append(chr(10).join(lines[n.lineno - 1:n.end_lineno]))
+                    extra_spans.append((n.lineno - 1, n.end_lineno))
+                    break
+    if extras and len(extra_blocks) != len(extras):
+        print('  [XX] extras 中有名字未找到定义'); return 1
+    if extra_blocks:
+        print('  附件对象 %d 个: %s' % (len(extra_blocks), extras))
+
     names = [h[0].name for h in hits]
     if any(x in ('index', 'static_assets') for x in names):
         print('  [XX] 匹配到受保护视图 —— 中止'); return 1
@@ -159,8 +182,10 @@ def main(prefix, modname, note=''):
         elif isinstance(x, ast.ExceptHandler) and x.name:
             defined.add(x.name)
     import builtins
+    # 注意条件顺序：isinstance 必须最先判断（x 可能是 Module，没有 .id）
     refs = sorted({x.id for x in ast.walk(ast.parse(body_txt))
                    if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load)
+                   and x.id not in set(extras or [])
                    and x.id not in defined and x.id not in dir(builtins)
                    and not x.id.startswith('__')})
 
@@ -196,6 +221,7 @@ def main(prefix, modname, note=''):
         'import logging',
         'from flask import Blueprint, jsonify, request, send_file, abort, current_app  # noqa: F401',
         'import os    # noqa: F401',
+        'from PIL import Image  # noqa: F401',
         "import sys   # noqa: F401",
         "import re    # noqa: F401",
         "import time  # noqa: F401",
@@ -213,6 +239,8 @@ def main(prefix, modname, note=''):
         'import uuid  # noqa: F401',
     ]
     head += imports
+    if extra_blocks:
+        head += [''] + extra_blocks
     head += ['', 'logger = logging.getLogger(__name__)', '',
              "%s_bp = Blueprint('%s', __name__)" % (modname, modname), '', '']
 
@@ -252,6 +280,7 @@ def main(prefix, modname, note=''):
         while s > 0 and lines[s - 1].startswith('@'):
             s -= 1
         spans2.append((s, n.end_lineno))
+    spans2 = spans2 + extra_spans
     for s, e in sorted(set(spans2), reverse=True):
         del lines[s:e]
 
@@ -284,4 +313,10 @@ if __name__ == '__main__':
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(2)
-    sys.exit(main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ''))
+    args = [a for a in sys.argv[1:] if not a.startswith("--extra")]
+    extras = []
+    for a in sys.argv[1:]:
+        if a.startswith("--extra=") or a.startswith("--extra"):
+            val = a.split("=", 1)[1] if "=" in a else ""
+            extras = [x.strip() for x in val.split(",") if x.strip()]
+    sys.exit(main(args[0], args[1], args[2] if len(args) > 2 else "", extras))
