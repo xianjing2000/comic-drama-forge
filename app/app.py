@@ -231,6 +231,11 @@ app.register_blueprint(scenes_bp)
 from routes.keyframes import keyframes_bp
 app.register_blueprint(keyframes_bp)
 
+# 2026-10-11 助手下沉：集级配置助手 已迁至 episode_helpers.py。
+from episode_helpers import (  # noqa: F401, E402
+    _OUTFIT_RECORD_FILE, _bigram_overlap, _episode_frame_ratios,
+    _episode_outfit_overrides, _episode_qc_desc, _episode_schema_defaults)
+
 # 2026-10-11 助手下沉：镜头辅助助手 已迁至 shot_helpers.py。
 from shot_helpers import (  # noqa: F401, E402
     _chapter_text_for_script, _shot_coverage_map)
@@ -609,24 +614,6 @@ from routes._shared import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_N
 
 
 
-def _episode_schema_defaults(project_name: str, shots: list) -> dict:
-    """⑥ 下游链路自动引用剧本自动判定的「镜头数 / 每集时长」字段。
-
-    - 镜头缺 duration 时按项目配置的 duration_per_shot 兜底；
-    - 返回 episode_stats（shot_count / duration_sec / episode_plan）供接口回显与后续步骤使用。
-    """
-    cfg = {}
-    try:
-        cfg = project_store.read_config(project_name)
-    except Exception as e:  # noqa: BLE001
-        app.logger.warning(f"读取项目配置失败（{project_name}）：{e}")
-    per_shot = cfg.get("duration_per_shot") or 5
-    for s in shots or []:
-        if not isinstance(s, dict):
-            continue
-        if not s.get("duration"):
-            s["duration"] = per_shot
-    return novel_to_script.build_episode_stats(shots)
 
 
 # ===== 项目管理（A：每部小说 = 一个独立项目） =====
@@ -2922,7 +2909,6 @@ def api_generate_assets():
 #: 服装描述追加进提示词的标记（幂等判据，见 _append_outfit_prompt）
 _OUTFIT_PROMPT_MARK = "；本套服装："
 #: 服装档案文件名（生成发起时先落一份 outfit_key/desc 记录，查询端点回显描述用）
-_OUTFIT_RECORD_FILE = "outfit.json"
 #: 变体档位（与主设定目录的切分产物同名，来自 sheet_split 链路）
 _OUTFIT_VIEW_STEMS = ("front", "left", "back", "half")
 
@@ -3257,93 +3243,8 @@ def api_character_outfit_generate():
                     "outfit_key": outfit_key, "character": character})
 
 
-def _bigram_overlap(a: str, b: str) -> float:
-    """字符 2-gram 重叠率（|A∩B| / |B|）：服装文本与变体描述的模糊匹配打分。"""
-    a = re.sub(r"\s+", "", str(a or ""))
-    b = re.sub(r"\s+", "", str(b or ""))
-    if len(a) < 2 or len(b) < 2:
-        return 0.0
-    ga = {a[i:i + 2] for i in range(len(a) - 1)}
-    gb = {b[i:i + 2] for i in range(len(b) - 1)}
-    return len(ga & gb) / max(1, len(gb))
 
 
-def _episode_outfit_overrides(project_name: str, episode_no: int) -> dict:
-    """跨集一致性巩固（2026-10-02）：把本集各角色的服装状态解析成衣柜变体 key。
-
-    服装文本来源（按优先级）：本集 state_in.character_states[].outfit（continuity
-    按集登记的服装状态）→ bible.current_outfit。变体匹配：outfits/<key>/outfit.json
-    的 desc 与服装文本做 2-gram 重叠打分，最高分且 >0 才采用 —— 分不清就不指定，
-    走主设定图（宁缺毋滥，绝不因猜错服装而错挂参考图）。
-    :return: {角色名: outfit_key}；无 state / 无变体 / 匹配不上 → {}（零回归）
-    """
-    try:
-        from config import CONTINUITY_DIR as _cont_dir
-        from continuity import load_state as _load_ep_state
-        _st = _load_ep_state(_cont_dir, project_name, int(episode_no)) or {}
-    except Exception:  # noqa: BLE001
-        _st = {}
-    want: dict = {}
-    for cs in ((_st.get("state_in") or {}).get("character_states") or []):
-        if isinstance(cs, dict) and str(cs.get("name") or "").strip():
-            want[str(cs.get("name")).strip()] = str(cs.get("outfit") or "").strip()
-    if not want:
-        try:
-            from continuity import load_bible as _load_bible
-            _bible = _load_bible(_cont_dir, project_name) or {}
-            for c in (_bible.get("characters") or []):
-                if isinstance(c, dict) and str(c.get("name") or "").strip():
-                    want[str(c.get("name")).strip()] = str(
-                        c.get("current_outfit") or "").strip()
-        except Exception:  # noqa: BLE001
-            return {}
-    want = {k: v for k, v in want.items() if v}
-    if not want:
-        return {}
-
-    proj_char_root = os.path.join(CHARACTERS_DIR, project_name)
-    if not os.path.isdir(proj_char_root):
-        return {}
-    out: dict = {}
-    try:
-        _char_dirs = os.listdir(proj_char_root)
-    except OSError:
-        return {}
-    for char_name in _char_dirs:
-        outfit_root = os.path.join(proj_char_root, char_name, _OUTFITS_DIRNAME)
-        if not os.path.isdir(outfit_root):
-            continue
-        text = want.get(char_name) or ""
-        # 别名容错：want 的键可能带别名，做一次包含匹配
-        if not text:
-            text = next((v for k, v in want.items()
-                         if k in char_name or char_name in k), "")
-        if not text:
-            continue
-        best_key, best_score = "", 0.0
-        try:
-            _keys = os.listdir(outfit_root)
-        except OSError:
-            continue
-        for key in _keys:
-            rec = os.path.join(outfit_root, key, _OUTFIT_RECORD_FILE)
-            desc = ""
-            try:
-                if os.path.isfile(rec):
-                    with open(rec, "r", encoding="utf-8") as _f:
-                        desc = str((json.load(_f) or {}).get("desc") or "")
-            except Exception:  # noqa: BLE001
-                desc = ""
-            if not desc:
-                continue
-            _s = _bigram_overlap(desc, text)
-            if _s > best_score:
-                best_key, best_score = key, _s
-        if best_key and best_score > 0:
-            out[char_name] = best_key
-    if out:
-        app.logger.info("[服装变体] 本集服装覆盖：%s", out)
-    return out
 
 
 @app.route('/api/assets/character/outfits', methods=['GET'])
@@ -7159,29 +7060,8 @@ def _optimize_prompt_from_qc(kind: str, prompt: str, rec: dict, style: str = "")
 
 
 
-def _episode_frame_ratios(segs: list, max_frames: int = None) -> list:
-    """D-05（P1）整集按段抽帧的占比列表 —— 实现见 ``qc_coverage.episode_frame_ratios``。
-
-    抽成独立零依赖模块（``app/qc_coverage.py``）以便离线单测
-    （``verify_episode_qc_coverage.py``）无需 Flask/requests 即可验证覆盖率。
-    """
-    return qc_coverage.episode_frame_ratios(segs, max_frames=max_frames)
 
 
-def _episode_qc_desc(shots: list, limit: int = qc_coverage.DEFAULT_DESC_LIMIT) -> str:
-    """构造整集质检用的「镜头信息」摘要 —— 实现见 ``qc_coverage.episode_qc_desc``。
-
-    为什么不用 comfyui_client 传进来的 ``shot_desc``：整集模式下它传的是
-    **所有段的 H3 提示词全文拼接**（每段都是六段式结构，几十段叠在一起），
-    又长又难判读，还挤占上下文。整片质检真正需要的是「这一集有哪些镜头、
-    各自什么景别和内容」，这里按镜头生成紧凑摘要。
-
-    D-05（P1）：``limit`` 由 12 提到 60 —— 原来 40 镜的整集只把前 12 镜给模型，
-    中后段镜头对模型**完全不可见**，与抽帧漏检叠加后整集质检形同虚设。
-    另：一旦真的截断，必须在串里**显式声明「其余未提供」**，让模型知道信息不完整，
-    而不是误以为整集只有 limit 个镜头。
-    """
-    return qc_coverage.episode_qc_desc(shots, limit=limit, warn=app.logger.warning)
 
 
 
