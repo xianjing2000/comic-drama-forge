@@ -385,7 +385,19 @@ def thinking_token_floor(max_tokens: int, reasoning_effort: str = "") -> int:
     except (TypeError, ValueError):
         return max_tokens
     re_ = str(reasoning_effort or "").strip().lower()
-    if not re_ or re_ not in REASONING_EFFORT_DOWNGRADE_ORDER:
+    # ⚠️ 2026-10-10（用户：「模型在正常思考，要无视思考内容不要反复重试」）：
+    #    原实现在「未配置档位」时直接返回原值，理由是「普通模型不需要这个水位」。
+    #    但本项目实测的模型（agnes / GLM 系）是 always-on reasoning：**不注入档位**
+    #    恰恰是最常见的状态（日志里写「最低思考档（未注入）」），结果起始额度给不够，
+    #    必然先空正文、再走一轮 2-7 分钟的失败重试才能补上——用户明确反对这种消耗。
+    #    现改为：**未配置档位时同样抬到思考水位**（一步到位，避免「先失败再补」）。
+    #    代价是普通非思考模型会多占一些配额上限；但上限只是天花板（模型该停就停），
+    #    而反复失败重试消耗的是真实时间，两害相权取其轻。
+    #    可用环境变量 MJSCXT_THINKING_FLOOR_ALWAYS=0 恢复旧行为（仅配置档位时抬）。
+    if re_ and re_ not in REASONING_EFFORT_DOWNGRADE_ORDER:
+        return mt   # 档位值非法（如拼写错误）→ 不抬，交给下游报错，避免掩盖配置问题
+    if not re_ and str(os.environ.get("MJSCXT_THINKING_FLOOR_ALWAYS", "1")).strip().lower() \
+            in ("0", "false", "off", "no"):
         return mt
     if mt >= REASONING_ONLY_TOKEN_FLOOR:
         return mt
