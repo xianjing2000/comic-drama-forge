@@ -42,6 +42,12 @@ GATEWAY_UNAVAILABLE_CODES = (500, 502, 503, 504)
 UPSTREAM_UNAVAILABLE_MARKERS = (
     "no available workers", "all circuits open", "upstream_error",
     "no available channel", "service unavailable",
+    # ⚠️ 2026-10-10 实测结论：**不要**把网关那句
+    #     "All N routed attempt(s) failed with upstream provider errors"
+    # 加进这张表。它看着像「上游全挂、重试无用」，但本机日志实测：
+    #   502 第 1/3 次 57 条 → 第 2/3 次 20 条 → 第 3/3 次 15 条，
+    # 即 65% 的 502 在第一次退避（3s）后就恢复 —— 上游是「抖」不是「挂」。
+    # 把它判成「上游不可用」会让这些本可自愈的请求直接判死并累计熔断，反而更糟。
 )
 GATEWAY_FAILFAST_THRESHOLD = 2      # 连续 N 次「上游不可用」→ 熔断
 GATEWAY_CIRCUIT_COOLDOWN_SEC = 600  # 熔断冷却时长；期间直接快速失败
@@ -565,8 +571,12 @@ class LLMClient:
             if resp.status_code in HTTP_TRANSIENT_CODES:
                 body = resp.text or ""
                 last_err = LLMError(f"接口返回 HTTP {resp.status_code}：{body[:200]}")
-                logger.warning(f"LLM 接口瞬时不可用（HTTP {resp.status_code}，"
-                               f"第 {idx}/{attempts} 次），将退避后重试")
+                # 2026-10-10：原告警不带模型/网关，事后翻日志无法回答「是哪个上游在抖」。
+                # 补上定位三要素（模型 / 网关 / 上游反馈），都不含任何凭据。
+                logger.warning("LLM 接口瞬时不可用（HTTP %s，第 %d/%d 次，模型 %s，网关 %s），"
+                               "将退避后重试；上游反馈：%s",
+                               resp.status_code, idx, attempts, self.model or "-",
+                               _gateway_origin(url), (body[:160].replace("\n", " ") or "-"))
                 if not local and _is_upstream_unavailable(resp.status_code, body):
                     upstream_bad = True
                     upstream_detail = f"HTTP {resp.status_code}：{body[:200]}"
