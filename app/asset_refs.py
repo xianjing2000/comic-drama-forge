@@ -591,8 +591,16 @@ def _h3_shot_ref_components(shot: dict, char_idx: dict, item_idx: dict, scene_id
                     or _entry.get("description") or ""})
 
     # ---- 本镜物品（与角色图重复的丢弃，保持旧口径）----
+    _canon = []
     for _it in (_resolve_item_names(shot, item_idx, "H3视频段") or []):
         _entry = item_idx.get(_it) or {}
+        # ⭐⭐ 2026-10-11：把物品表面的确切文字收集为「本剧权威设定」，交给
+        #    h3_prompt_kit.canon_facts_block 注入提示词。
+        #    修的是用户实测的「画面守则写四十七层、配音却说七层楼」——
+        #    此前 H3 提示词里没有任何事实基准，模型只能凭上下文猜数字/公司名。
+        _st = str(_entry.get("surface_text") or "").strip()
+        if _st:
+            _canon.append(f"{_it}：{_st}")
         _p = _entry.get("image")
         if not _p or _p in _seen_paths:
             continue
@@ -600,6 +608,8 @@ def _h3_shot_ref_components(shot: dict, char_idx: dict, item_idx: dict, scene_id
         out.append({"kind": "item", "name": _it, "path": _p,
                     "appearance": _entry.get("appearance")
                     or _entry.get("description") or ""})
+    if _canon:
+        shot["_canon_facts"] = _canon
 
     # ---- 本镜场景（按机位取档）----
     _loc, _scene_entry = _resolve_scene_entry(shot, scene_idx, "H3视频段")

@@ -1559,6 +1559,36 @@ def build_ref2va(shot: dict, picture_defs: Sequence[Tuple[str, str]],
     return "\n\n".join(f"{name}:\n{body}" for name, body in sections)
 
 
+def canon_facts_block(shot: dict) -> str:
+    """把本剧「权威设定」拼成一段提示词（供 H3 约束画面文字与配音内容）。
+
+    ⭐⭐ 2026-10-11 用户实测反馈：画面里守则纸写「共四十七层」（来自小说原文，正确），
+    但**配音却说「七层楼」** —— 视觉与听觉自相矛盾。
+
+    根因：H3 提示词里从来没有「本剧事实基准」，模型只能凭上下文猜数字/公司名，
+    于是配音里冒出了「七层」「天河科技」这类与画面冲突的内容。
+
+    数据来源就用**已经正确的** items[].surface_text（实证：守则八条 + 员工卡文字
+    在物品资产图里逐字准确），所以不需要额外提炼环节，也不会引入新的不一致。
+
+    调用方（asset_refs._h3_shot_ref_components）把该镜出场物品的 surface_text
+    挂到 ``shot["_canon_facts"]``，本函数只负责排版；无该字段时返回空串，
+    对既有行为零影响。
+    """
+    facts = shot.get("_canon_facts") if isinstance(shot, dict) else None
+    if not facts:
+        return ""
+    if isinstance(facts, dict):
+        facts = [f"{k}：{v}" for k, v in facts.items() if str(v).strip()]
+    facts = [str(f).strip() for f in (facts or []) if str(f).strip()]
+    if not facts:
+        return ""
+    return (". This episode\u0027s authoritative on-screen facts (the numbers, names and "
+            "wording below are the only correct ones; keep spoken references consistent "
+            "with them and never invent alternative figures or company names): "
+            + " | ".join(facts) + ".")
+
+
 def build_base(shot: dict, mode: str = "T2VA", duration: Any = None, style: str = "") -> str:
     """构建 base 模式三段式提示词（无参考图时使用）"""
     shot = shot or {}
@@ -1569,6 +1599,10 @@ def build_base(shot: dict, mode: str = "T2VA", duration: Any = None, style: str 
         dur_f = 4.0
     mode = str(mode or "T2VA").upper()
     body = build_detailed_description(shot, dur_f, style)
+    # ⭐ 2026-10-11：注入本剧权威设定（画面文字 / 配音数字与名称的单一事实来源）
+    _cf = canon_facts_block(shot)
+    if _cf:
+        body = body + _cf
     head = f"[{mode}] " if mode else ""
     sections = [
         ("integrated_multimodal_description", head + body),
