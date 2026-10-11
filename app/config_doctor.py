@@ -284,9 +284,15 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'h3_prompt_kit.BEAT_MAX_SEC',
     },
     'h3_segment_max_sec': {
-        'default': 4.0, 'type': 'float', 'range': (0.0, 60.0), 'group': 'H3 提示词',
-        'desc': ': 故生成期必须强制切段。',
+        # ⭐⭐ 2026-10-11 用户口径「取消长镜切段」：4.0 → 12.0。
+        #   segment_durations 保证 duration <= max_sec 时恒返回单段，而单镜上限
+        #   SHOT_DURATION_MAX=8，故 12.0 等效「永不切段」。
+        #   ⚠️ 这里必须与 h3_prompt_kit.H3_SEGMENT_MAX_SEC 同值 —— REGISTRY.default
+        #   会反向覆盖代码常量（与覆盖率门槛那次同因），只改代码会被回写成 4.0。
+        'default': 12.0, 'type': 'float', 'range': (0.0, 60.0), 'group': 'H3 提示词',
+        'desc': ': 单次生成的时长上限（秒）。≤该值时单段直出；超过才切段。默认 12 = 不切段。',
         'owner': 'h3_prompt_kit.H3_SEGMENT_MAX_SEC',
+        'must_match': ['h3_prompt_kit.H3_SEGMENT_MAX_SEC'],
     },
     'h3_segment_min_sec': {
         'default': 1.5, 'type': 'float', 'range': (0.0, 60.0), 'group': 'H3 提示词',
