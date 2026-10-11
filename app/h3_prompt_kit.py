@@ -293,14 +293,28 @@ def speaker_slots(lines: Sequence[Dict[str, str]]) -> Dict[str, str]:
     return slots
 
 
+#: ⭐ 2026-10-11：「静音类」措辞必须从音效串里剥掉。
+#:   用户实测「130-164s 灵异高潮段完全无声」——那几镜的 audio_cues 写的是
+#:   「室内极静，空调低频嗡鸣，纸张轻响」「纤维撕裂极细声」这类**以静为主**的描述，
+#:   H3 照字面领会就真的把整段渲染成静音，后面的具体音效（嗡鸣/轻响）也跟着消失。
+#:   静是**相对**的（相对环境底噪而言很小），不是「没有声音」，所以这里把静音词删掉，
+#:   只留下真正要发声的那几个音效；并在 soundscape 末尾补一句「必须有可闻底噪」，
+#:   防止模型把「安静的场景」理解成「静音」。
+_SILENT_WORDS = ("极静", "寂静", "死寂", "安静", "无声", "全静", "静默", "沉寂",
+                 "极细声", "极其细微", "几乎听不见", "微不可闻")
+
+
 def _clean_sfx(text: str) -> str:
-    """去掉音效串里的旁白/配乐标注，只留环境与动作音"""
+    """去掉音效串里的旁白/配乐标注与**静音类措辞**，只留真正要发声的环境与动作音。"""
     t = _PAREN_NOTE_RE.sub("", str(text or ""))
     t = re.sub(r"^(音效|配乐|BGM|环境音)\s*[:：]\s*", "", t.strip(), flags=re.IGNORECASE)
     for prefix in ("旁白", "画外音"):
         if t.startswith(prefix):
             t = t[len(prefix):].lstrip("：: ")
-    return t.strip(" 。；;，,")
+    for _w in _SILENT_WORDS:
+        t = t.replace(_w, "")
+    t = re.sub(r"[，,]{2,}", "，", t)
+    return t.strip(" ，。；;，,")
 
 
 # --------------------------------------------------------------------------- #
@@ -349,6 +363,9 @@ def build_soundscape(shot: dict, scene_hint: str = "") -> str:
         parts.append(f"breathing and fabric rustle matched to the 「{emotion}」 mood")
     if not parts:
         parts.append("a quiet ambient room tone, with breathing and fabric rustle clearly audible")
+    # ⭐ 2026-10-11：显式要求「整段始终有可闻底噪」，防模型把安静场景渲染成静音
+    parts.append("with a continuous audible room tone underneath — this segment must never "
+                 "be rendered as pure silence")
     body = ", ".join(parts).rstrip("。；;，,")
     if lines:
         # 2026-09-26：⚠️ 此前这里把台词前 12 字写成「The echo of "台词"」，导致台词
