@@ -3761,12 +3761,18 @@ class ComfyUIClient:
         # ⭐ 2026-10-11：清掉画面描述里的「文字元描述词」（乱码 → 不可辨认的字符）。
         #   用浅拷贝，避免污染调用方持有的 shot（它还要用于质检/落盘）。
         shot = dict(shot or {})
-        if shot.get("description"):
-            shot["description"] = ComfyUIClient._clarify_ink(
-                ComfyUIClient._strip_text_meta(shot["description"]))
-        if shot.get("visual_detail"):
-            shot["visual_detail"] = ComfyUIClient._clarify_ink(
-                ComfyUIClient._strip_text_meta(shot["visual_detail"]))
+        # ⭐ 2026-10-11 系统排查补全：分镜提示词实际会用 19 个 shot 字段，其中带
+        #   「文字/帧/动作」语义的有 6 个 —— description / visual_detail / first_frame /
+        #   last_frame / action / surface_text。此前只清了前两个，而 first_frame、
+        #   last_frame（首尾帧描述）和 action 同样会被**逐字写进提示词**，
+        #   所以「乱码」「小字」「符号」这类元描述词从这几条路照样能漏进去。
+        #   现统一按同一套清洗（元描述词 + 墨迹澄清）处理。
+        #   ⚠️ surface_text 不清洗：它是**要求模型照抄的确切文字**（如「09:00」「2704」），
+        #      清洗反而会破坏要写的字。
+        for _fld in ("description", "visual_detail", "first_frame", "last_frame", "action"):
+            _v = shot.get(_fld)
+            if _v:
+                shot[_fld] = ComfyUIClient._clarify_ink(ComfyUIClient._strip_text_meta(_v))
         camera = str(shot.get("camera") or "中景").strip()
         # A1：景别优先读权威字段 shot_type，缺失回退解析 camera 复合串（旧剧本零回归）
         cam_key = shot_framing(shot)        # "" = 本镜没给景别（camera 只有机位/运镜）
