@@ -1733,6 +1733,50 @@ def clean_shot_meta_words(shots: list) -> int:
         return 0
 
 
+#: 资产提示词字段（会流进资产生成提示词）
+_ASSET_PROMPT_FIELDS = ("reference_prompt_zh", "appearance")
+
+
+def clean_asset_meta_words(bible: dict) -> int:
+    """清洗资产参考提示词里的元描述词（原地修改），返回改动的资产条数。
+
+    与 clean_shot_meta_words 同一套词表、同一个理由：
+    「小字」「乱码」这类词描述的是「这里有没有字 / 字多大」，不是「要写哪几个字」，
+    但扩散模型会照字画出来。
+    实测命中：物品「楼层安全守则」的 reference_prompt_zh ——
+        「…黑体标题，下方纵向编号八条小字，第三第五条旁有红色圆珠笔潦草批注…」
+    ⚠️ 不清理 surface_text：那是要求资产图逐字呈现的确切文字（八条守则），
+       它与「小字」这类描述性词恰是相反的东西。
+    """
+    try:
+        n = 0
+        groups = ((bible.get("characters") or []) + (bible.get("items") or [])
+                  + (bible.get("scenes") or []))
+        for a in groups:
+            if not isinstance(a, dict):
+                continue
+            changed = False
+            for fld in _ASSET_PROMPT_FIELDS:
+                v = a.get(fld)
+                if not v:
+                    continue
+                t = str(v)
+                for _a, _b in _META_WORD_MAP:
+                    if _a in t:
+                        t = t.replace(_a, _b)
+                if t != str(v):
+                    a[fld] = t
+                    changed = True
+            if changed:
+                n += 1
+        if n:
+            logger.info("已清洗 %d 条资产参考提示词（元描述词）", n)
+        return n
+    except Exception as e:  # noqa: BLE001 - 清洗失败不影响出片
+        logger.warning("资产提示词清洗失败（忽略，不影响主流程）：%s", e)
+        return 0
+
+
 def inject_surface_text_into_shots(shots: list, bible: dict) -> int:
     """把物品 / 场景的 surface_text 回填进引用它们的镜头。
 
@@ -3964,6 +4008,8 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     #    必须放在这里而不是各消费点：分镜侧（comfyui_client）与视频侧（h3_prompt_kit）
     #    都要读 description，只补一处另一处照样泄漏（实测 H3 侧漏 12/60 镜）。
     clean_shot_meta_words(shots)
+    # 2026-10-11: asset side, same word list (hit: rule sheet reference_prompt_zh "八条小字")
+    clean_asset_meta_words(bible)
 
     # ---- 单集镜头数：不再截断（2026-10-09 用户口径）----
     # 曾经这里会把超过 MAX_SHOTS_PER_EPISODE(78) 的镜头**硬截断**（丢尾部情节）。
