@@ -1010,7 +1010,18 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
             #    于是改用画外音复述画面/背景），改为官方「no one speaks / no voice-over」。
             # 2026-10-09 官方/本地模板口径：无声拍写 `No dialogue.`，后续拍
             # `No further dialogue.`（旧的解释性长句反而容易诱导模型自造语音）。
-            _nod = "No dialogue." if idx == 1 else "No further dialogue."
+            # ⭐⭐ 2026-10-11 用户实测反馈：「h3 生成的语音没有什么大问题，感觉是提示词
+            #    的问题导致的」——前 10 秒（shot1/shot2 均为无台词镜、description 里
+            #    0 个说话类词）仍出现自制语音。
+            #    本文件 build_soundscape 早在 2026-10-08 就实测出结论：
+            #      「实测『No one speaks』这种温和声明挡不住 H3 —— 它在无声段仍会自制语音」
+            #    并在那里改成了逐项硬禁；但 **detailed_description 这一路没同步改**，
+            #    于是同一个「无台词」信号在两处强弱不一，H3 只认强的那一处。
+            #    现统一为硬性禁用，且**保持短句**（遵循 2026-10-09 的教训：长解释句
+            #    会描述「谁在说话」反而诱导模型自造语音 —— 所以只做否定枚举，不解释）。
+            _nod = ("No dialogue. No speaking, no whispering, no voice-over."
+                    if idx == 1 else
+                    "No further dialogue. No speaking, no voice-over.")
             line = head + clause + " " + _nod
         out.append(line)
 
