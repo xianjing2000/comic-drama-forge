@@ -1677,14 +1677,26 @@ _META_WORD_MAP = (
 )
 
 #: 需要清洗的镜头字段（= 会进提示词的画面类描述字段）
-#: ⚠️ motion 必须在列：系统排查发现 shot49/50/58 的「符号/数字」正是从 motion 漏进
-#:   提示词的（comfyui_client:3960 与 h3_prompt_kit:983/1757 都读它），
-#:   而 description 那几条路已清 —— 漏一个字段就等于没清。
+#: 清洗字段 = 「权威清单」∪「实测消费点」的并集（两套都核对过，不靠猜）：
+#:
+#:   权威清单 asset_prompt_kit._SHOT_TEXT_FIELDS（注释：都会流进分镜提示词或质检口径）:
+#:       description / visual_detail / storyboard_prompt_zh / prompt_h3 / action
+#:   ⭐ storyboard_prompt_zh 的优先级**高于** description（comfyui_client:3933
+#:      `desc = storyboard_prompt_zh or description`）—— 即它会顶替画面主体；
+#:      漏掉它等于「有它值的镜头完全没清」。
+#:   ⭐ prompt_h3 是 H3 视频段的专用提示词（同属权威清单），同样必须清。
+#:
+#:   实测消费点补充（逐个 grep 调用点得到）：
+#:       first_frame / last_frame —— comfyui_client:3963/3966 写进首尾帧描述；
+#:       motion —— comfyui_client:3960 与 h3_prompt_kit:983/1757 都读它
+#:                 （shot49/50/58 的「符号/数字」正是从这里漏的）。
+#:
 #: ⚠️ dialogue / dialogue_text **不在列**：台词是给人听的（如 shot49「这不是数字……」），
 #:   清洗会篡改台词内容。
 #: ⚠️ edit_reason 不在列：已确认两个消费点都不读它，不进提示词。
-_META_CLEAN_FIELDS = ("description", "visual_detail", "first_frame", "last_frame",
-                      "action", "motion")
+#: ⚠️ surface_text 不在列：那是要求模型照抄的确切文字（09:00 / 2704 / 守则八条）。
+_META_CLEAN_FIELDS = ("description", "visual_detail", "storyboard_prompt_zh", "prompt_h3",
+                      "action", "motion", "first_frame", "last_frame")
 
 
 def clean_shot_meta_words(shots: list) -> int:
