@@ -92,6 +92,119 @@ import os
 import prompt_memory
 import qc_client
 import random
+#: ⭐⭐ 2026-10-12 用户口径：「角色是群像、后续剧情也与他无关时**不用生成三视图**，
+#:    直接生成一张多人图就行了 —— 这样设计是不是好一点」。
+#:    确实是更好的成本分级。判据必须来自**已落盘的剧本事实**（同 _scene_shot_count 的
+#:    思路：确定性、可复现、零 LLM 成本），而不是让模型每次judge。
+#:
+#: 群像名字标记：命中即认为「原文里他就是一群人」（外门围观弟子 / 路人甲 / 侍卫…）。
+#: ⚠️ 这只是启发式之一，**不单独作为判据** —— 还要看他有没有台词、有多少镜。
+#:    例如「外门围观弟子」命中「弟子/围观」→ 群像；而「林清雪」不命中 → 正常评估。
+_CROWD_NAME_MARKERS = (
+    "群演", "群像", "围观", "路人", "群众",
+    "弟子", "侍卫", "侍从", "随从", "护卫", "士兵",
+    "乘客", "行人", "店员", "服务员", "保安", "杂役", "学徒",
+)
+
+#: 角色被视为「需要单独出镜」的镜头数门槛。
+#: 低于它、且一句台词都没有 → 只当群像（出合影即可，不烧三视图）。
+CHARACTER_TIER_MIN_SHOTS = int(os.getenv("MJSCXT_CHAR_MIN_SHOTS", "4"))
+
+
+def _character_tier(project_name: str, char: dict, episode_no=None) -> str:
+    """判定角色级别：``primary`` / ``supporting`` / ``crowd``；读不到剧本返回 ``unknown``。
+
+    用户口径（2026-10-12）：群像角色且后续剧情与他无关 → **不生成三视图**，
+    改用一张多人合影。这能省掉大量生成时间与显存，且一张图里所有人画风天然统一。
+
+    判据（全部来自剧本事实，确定性、零 LLM 成本）：
+      1. 角色/bible 里**显式写死的 tier** → 直接采纳（用户手改过就永远听他的）；
+      2. 本集**有台词** → 必然有对口型的单人特写 → supporting；
+         （对应「后续哪怕只有一句台词，也不能只从合影裁脸」这条前提）
+      3. 本集**镜头数 ≥ CHARACTER_TIER_MIN_SHOTS** → 会被反复单独看到 → supporting；
+      4. 名字命中群像标记词 → crowd；
+      5. 其余 → crowd（只在群像场出现）。
+    ``unknown`` 表示读不到剧本（尚未生成）→ 调用方**按旧行为生成**，绝不用它卡住资产。
+    """
+    try:
+        # 1) 显式覆盖优先
+        for k in ("tier", "character_tier", "role_tier"):
+            v = str((char or {}).get(k) or "").strip().lower()
+            if v in ("primary", "supporting", "crowd"):
+                return v
+        name = str((char or {}).get("name") or "").strip()
+        if not name:
+            return "unknown"
+        import shared_episode
+        script = shared_episode._load_script_for(project_name, episode_no)
+        if not isinstance(script, dict):
+            return "unknown"
+        shots = [s for s in (script.get("shots") or []) if isinstance(s, dict)]
+        if not shots:
+            return "unknown"
+        appear = [s for s in shots if name in (s.get("characters_in_shot") or [])]
+        # 2) 有台词 → 必须能单独出镜（对口型）
+        for s in appear:
+            for d in (s.get("dialogue") or []):
+                if isinstance(d, dict) and str(d.get("speaker") or "").strip() == name:
+                    return "supporting"
+        # 3) 镜头数达标 → 单独出镜次数足够多
+        if len(appear) >= CHARACTER_TIER_MIN_SHOTS:
+            return "supporting"
+        # 4) 名字像群像 → crowd
+        if any(m in name for m in _CROWD_NAME_MARKERS):
+            return "crowd"
+        # 5) 少量镜头且无台词 → 也按群像处理（只在群像场出现）
+        return "crowd"
+    except Exception as e:  # noqa: BLE001 - 判定失败按旧行为（生成），不拦资产
+        logger.debug("角色级别判定失败（按正常生成处理）：%s", e)
+        return "unknown"
+
+
+def _crowd_names_for(project_name: str, episode_no=None) -> list:
+    """列出本集所有「群像」角色名 —— 合影要按这份名单把人都画进去。
+
+    为什么必须给全名单：合影是这群人的「定妆照」，下游群像镜头直接拿它当参考图。
+    只写「一群人」会让模型自由发挥，画面里可能根本没有剧本真正要的那几个角色，
+    参考图就失去意义（这一点与用户提的「合影要带上主角/已知角色，否则会跑偏」同理）。
+
+    兜底：读不到剧本 / 判定异常 → 返回空列表，调用方回落「非群像」路径（照常出四区
+    三视图），绝不因为读不到剧本把资产卡住。
+    """
+    try:
+        # ⚠️ 2026-10-12 实测踩坑：**不能用剧本的 characters** —— 那里只有「本集出场的
+        #    少数几人」（实测某个 7 角色的项目，剧本里只列了 4 个），拿它当合影名单会
+        #    漏掉同集其他群像角色，合影里就少了人。角色全集在 **bible**（跨集累积）。
+        chars = []
+        try:
+            from config import CONTINUITY_DIR as _cd
+            import continuity as _cont
+            _bible = _cont.load_bible(_cd, project_name) or {}
+            chars = [c for c in (_bible.get("characters") or []) if isinstance(c, dict)]
+        except Exception as _be:  # noqa: BLE001
+            logger.debug("读取 bible 失败，回落剧本角色表：%s", _be)
+        if not chars:
+            import shared_episode
+            script = shared_episode._load_script_for(project_name, episode_no)
+            chars = [c for c in ((script or {}).get("characters") or [])
+                     if isinstance(c, dict)]
+        if not chars:
+            return []
+        out = []
+        for c in chars:
+            if not isinstance(c, dict):
+                continue
+            nm = str(c.get("name") or "").strip()
+            if not nm or nm in out:
+                continue
+            if _character_tier(project_name, c, episode_no) == "crowd":
+                out.append(nm)
+        return out
+    except Exception as e:  # noqa: BLE001 - 判定失败不拦资产
+        logger.debug("群像名单收集失败（按非群像处理）：%s", e)
+        return []
+
+
 def _scene_shot_count(project_name: str, scene_name: str, episode_no=None) -> int:
     """该场景在本集剧本里**承载的镜头数** —— 判断是否需要多视角九宫格的客观信号。
 
@@ -767,6 +880,18 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                             _refs = _scene_relation_refs(asset, project_name)
                             if _refs:
                                 _base_kw["ref_images"] = _refs
+                        elif asset_type == "character":
+                            # ⭐⭐ 2026-10-12 用户口径（群像分级出图）：
+                            #   「角色是群像、后续剧情也与他无关时不用生成三视图，
+                            #    直接生成一张多人图就行了」。
+                            #   判定口径见 _character_tier（全部来自已落盘剧本事实）。
+                            #   命中群像 → 出「多人合影」，并把本集**所有**群像角色名给进去，
+                            #   保证画面里真的是剧本要的那几个人（而非模型自由发挥）。
+                            _tier = _character_tier(project_name, asset)
+                            if _tier == "crowd":
+                                _crowd = _crowd_names_for(project_name)
+                                if _crowd:
+                                    _base_kw["crowd_names"] = _crowd
                         base_files = gen_base(prompt_zh, seed=seed, style=gen_style,
                                               size=gen_size, filename_prefix=_gen_prefix,
                                               **_base_kw)

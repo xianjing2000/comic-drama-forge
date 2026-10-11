@@ -2380,13 +2380,28 @@ class ComfyUIClient:
 
     def generate_character_base(self, prompt_zh: str, seed: int = None,
                                 style: str = "", size=None,
-                                filename_prefix: str = None) -> List[str]:
+                                filename_prefix: str = None,
+                                crowd_names=None) -> List[str]:
+        """生成角色基础图。
+
+        ``crowd_names``（2026-10-12 新增）：非空即表示**这是群像角色** —— 不出四区
+        三视图，改出一张「多人合影」设定图（用户口径：「角色是群像、后续剧情也与他
+        无关时不用生成三视图，直接生成一张多人图就行了」）。判据/分层见
+        ``asset_worker._character_tier``；此处只负责按决定好的形态出图。
+        """
         logger.info(f"生成角色基础图: {prompt_zh[:50]}...")
-        # 角色基础图 = 设定集（三视图横排）。必须确定性注入「全身 + 横排三视图」版式硬约束：
-        # 剧本层提示词只写外貌特征、不含构图约束（风格词也由程序追加，版式同属构图维度），
-        # 不注入则模型默认半身/胸像构图且三格版式不可控，多视角与分镜一致性都会崩坏
-        # （2026-09-19 实测：三视图出成半身，且同图内人物身高比例不一致）。
-        prompt_zh = self._ensure_fullbody_prompt(prompt_zh, style)
+        if crowd_names:
+            # 群像路径：一张多人合影，画风天然统一（同图生成，光影色调不会各画各的）。
+            # ⚠️ 与四区三视图互斥：合影里没有「正/侧/背」分区，下游也不做切分。
+            logger.info("角色基础图走【群像合影】版式（%d 人）：%s",
+                        len(list(crowd_names)), "、".join(list(crowd_names))[:80])
+            prompt_zh = self._ensure_crowd_prompt(prompt_zh, style, names=crowd_names)
+        else:
+            # 角色基础图 = 设定集（三视图横排）。必须确定性注入「全身 + 横排三视图」版式硬约束：
+            # 剧本层提示词只写外貌特征、不含构图约束（风格词也由程序追加，版式同属构图维度），
+            # 不注入则模型默认半身/胸像构图且三格版式不可控，多视角与分镜一致性都会崩坏
+            # （2026-09-19 实测：三视图出成半身，且同图内人物身高比例不一致）。
+            prompt_zh = self._ensure_fullbody_prompt(prompt_zh, style)
         # ⭐ 2026-10-06（用户指定）：角色未明说国籍/人种时，**一律默认中国人（亚洲面孔）**。
         # 扩散模型在"没写国籍"时会按自身偏置默认出欧美面孔；这里确定性补默认约束，
         # 仅当提示词未出现「外国/西方/欧美/黑人/白人/混血」等明说非华人词时才追加，避免误伤。
@@ -2455,6 +2470,60 @@ class ComfyUIClient:
         suffix = (ComfyUIClient._CHARACTER_SHEET_CN_LAYOUT
                   .replace("{labels_part}", labels_part))
         # 剧本层提示词常以「三视图。」收尾，直接拼会得到「三视图。，…」的脏标点
+        base = base.rstrip("。，,.;； ")
+        sep = "" if base.endswith((".", "！", "?", "？")) else "。"
+        return (base + sep + suffix) if base else suffix
+
+    #: ⭐⭐ 2026-10-12 用户口径：「角色是群像、后续剧情也与他无关时**不用生成三视图**，
+    #:    直接生成一张多人图就行了」。
+    #:
+    #:    为什么这样更好（不只是省成本）：
+    #:      · 省一次完整的三视图设定图生成（四区版式比单人立绘更贵）；
+    #:      · **画风天然统一** —— 一张图里所有人一起生成，光影/色调/画风不会各画各的，
+    #:        正好满足「所有角色与主角画风一致」的要求；
+    #:      · 这张合影本身就是这个群像的「定妆照」，以后群像镜头直接拿它当参考图。
+    #:
+    #:    ⚠️ 使用前提（对应 asset_worker._character_tier 的判定口径）：
+    #:      只有**确认后续不会有单人特写 / 台词**的角色才走这条路径。
+    #:      判据来自已落盘剧本：有台词、或镜头数达标的，一律仍走四区三视图。
+    #:
+    #:    ⚠️ 幂等：marker = "群像合影"（suffix 字面子串）。
+    # ⚠️ 必须写成**隐式拼接的单个字符串**（相邻字面量之间不能有逗号）——
+    #    2026-10-12 实测踩坑：写成带逗号的括号序列会变成 tuple，
+    #    后续 .replace() 直接 AttributeError: tuple has no attribute replace。
+    _CROWD_SHEET_CN_LAYOUT = (
+        "群像合影，人物群像设定图，多人同框，同一画面内并列展示{count}位人物："
+        "{names_part}，白色背景，清晰中文文字排版标注每位人物的姓名，"
+        "所有人物处于**同一光线、同一色调、同一画风**下（这是本图的核心要求），"
+        "全身可见，人物之间保持自然间距、不互相遮挡面部，"
+        "严禁把任何一个人画成单独的三视图或四区设定表（本图只要一张多人合影）"
+    )
+
+    @staticmethod
+    def _ensure_crowd_prompt(prompt_zh: str, style: str = "", names=None) -> str:
+        """给**群像角色**的参考图提示词补「多人合影」版式约束（幂等）。
+
+        用户口径见上方 _CROWD_SHEET_CN_LAYOUT 注释。与 _ensure_fullbody_prompt 的区别：
+          四区三视图 → 单人、正/侧/背、供后续单人特写复用；
+          群像合影   → 多人同框、画风锁定、供群像镜头复用。
+
+        为什么要显式列出名字：画面里要有中文姓名标注，且下游靠这张图做群像镜头的
+        参考 —— 只写「一群人」会让模型自由发挥，无法保证包含剧本里那些角色。
+
+        幂等 marker = "群像合影"。
+        """
+        text = str(prompt_zh or "").strip()
+        marker = "群像合影"
+        if marker in text or "人物群像设定图" in text:
+            return text
+        base = style_kit.with_reference_style(text, style) if style else text
+        if marker in base or "人物群像设定图" in base:
+            return base
+        _names = [str(n).strip() for n in (names or []) if str(n).strip()]
+        names_part = ("、".join(_names)) if _names else "剧本中出场的诸位群像人物"
+        suffix = (ComfyUIClient._CROWD_SHEET_CN_LAYOUT
+                  .replace("{count}", str(max(1, len(_names))))
+                  .replace("{names_part}", names_part))
         base = base.rstrip("。，,.;； ")
         sep = "" if base.endswith((".", "！", "?", "？")) else "。"
         return (base + sep + suffix) if base else suffix
