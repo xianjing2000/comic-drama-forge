@@ -92,7 +92,11 @@ def _reject_artifact(paths, project: str = "", reason: str = "", kind: str = "")
     except Exception:  # noqa: BLE001
         trash_abs = ""
 
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # ⚠️ 本文件是 `import datetime`（模块），不是 `from datetime import datetime`，
+    #    所以必须写 datetime.datetime.now()。2026-10-12 实测：写成 datetime.now() 会在
+    #    「资产不合格基础图清理」时抛 AttributeError: module 'datetime' has no attribute 'now'，
+    #    导致质检不合格的产物清理不掉（异常被上层吞成一条 warning，问题被掩盖更久）。
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     trash_root = os.path.join(PROJECT_TRASH_DIR, "qc_reject",
                               f"{stamp}_{_safe_project(project or 'project')}")
     enabled = _purge_rejected_enabled()

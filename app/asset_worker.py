@@ -90,6 +90,7 @@ import consistency
 from job_state import (generation_state, lock)  # noqa: F401
 import os
 import prompt_memory
+import uuid   # 服装变体任务 id 生成（outfit_<项目>_<key>_<uuid8>）
 import qc_client
 import random
 #: ⭐⭐ 2026-10-12 用户口径：「角色是群像、后续剧情也与他无关时**不用生成三视图**，
