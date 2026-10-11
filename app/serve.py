@@ -31,6 +31,38 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 
+def _reexec_in_utf8_mode() -> None:
+    """确保进程运行在 Python UTF-8 模式下；否则带 -X utf8 重新执行自己（最多一次）。
+
+    ⭐⭐⭐ 2026-10-12 与 _force_utf8_stdio 配套，用于彻底封闭「中文目录」这一类问题。
+
+    为什么光有 _force_utf8_stdio 还不够：它只改 stdio 的编码，**改不了**
+    `open()` 的默认编码 —— Python 的「文件系统/IO 默认编码」由 UTF-8 模式决定，
+    而源码里存在 38 处未显式传 encoding 的 open()（读配置、读剧本、写 json 等）。
+    实测（真建中文目录）：
+        PYTHONUTF8=0 → open(中文文件) 抛 UnicodeDecodeError: gbk codec ...
+        PYTHONUTF8=1 → 同一句代码自动按 UTF-8 读，内容正确。
+    也就是说：只要进程进到 UTF-8 模式，那 38 处**一处都不用改**。
+
+    本系统有多个启动入口，环境变量注入情况不一：
+        electron spawn      → main.js 已注入 PYTHONUTF8/PYTHONIOENCODING ✅
+        计划任务 / run_serve.bat / 手工 python serve.py → 没有 ❌
+    这里做一次自举把入口差异抹平：非 UTF-8 模式就 execv 自己一次。
+    防重入用环境变量标记，且重入失败直接放行（还有 _force_utf8_stdio 兜底），
+    绝不允许出现启动死循环。
+    """
+    if getattr(sys.flags, "utf8_mode", 0):
+        return
+    if os.environ.get("MJSCXT_UTF8_REEXEC") == "1":
+        return  # 已重入过仍不是 utf8（例如宿主禁用了）→ 放弃，避免循环
+    os.environ["MJSCXT_UTF8_REEXEC"] = "1"
+    os.environ["PYTHONUTF8"] = "1"
+    try:
+        os.execv(sys.executable, [sys.executable, "-X", "utf8"] + list(sys.argv))
+    except Exception:  # noqa: BLE001 重入不可用（受限环境）→ 继续跑，靠 stdio 兜底
+        pass
+
+
 def _force_utf8_stdio() -> None:
     """把 stdio 强制成 UTF-8（幂等，尽早调用）。
 
@@ -57,7 +89,8 @@ def _force_utf8_stdio() -> None:
             pass
 
 
-_force_utf8_stdio()
+_reexec_in_utf8_mode()   # 先确保 UTF-8 模式（会 execv 重入一次）
+_force_utf8_stdio()      # 再兜底 stdio 编码（重入失败时仍保中文不崩）
 
 
 def _load_flask_app():
