@@ -140,6 +140,19 @@ def _scene_needs_multiview(project_name: str, scene_name: str, episode_no=None) 
     return need
 
 
+from character_helpers import (  # noqa: E402
+    _character_base_prompt, _find_script_character,
+)
+# ⭐ 2026-10-11：这两个都由 character_helpers 定义，app.py:326 是三个一起导入的，
+#    asset_worker 此前一个都没导入 —— 用了却未导入的只有「服装变体」分支会走到，
+#    所以主链路一直没暴露。本次按静态分析（AST 扫"模块内无定义/无导入的名字"）
+#    一次性补齐，避免修完一个又冒一个。
+# ⭐ 2026-10-11 修复：[服装变体] 出图失败 NameError: name '_find_script_character' is not defined
+#    该函数定义在 character_helpers，asset_worker 使用了它却没导入 ——
+#    与 shared_episode 缺 import os 同类（模块拆分时漏了依赖）。
+#    只在「服装变体」分支触发，故此前未被主链路暴露。
+
+
 import scene_grid
 import sheet_split
 import shutil
