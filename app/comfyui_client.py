@@ -3216,7 +3216,12 @@ class ComfyUIClient:
                    "shows the SAME scene with the SAME characters (identical identity, "
                    "costume and style); cells vary ONLY in camera framing and angle as "
                    f"follows: {variants}. Do not add text, numbers, borders or labels "
-                   "between cells.")
+                   "BETWEEN the cells (no captions, indices, grid lines or annotations "
+                   "separating one cell from another). This restriction is about the "
+                   "gaps between cells only: whatever text the scene itself carries "
+                   "(number plates, screen readouts, printed rules) must still be "
+                   "rendered INSIDE each cell, identically and verbatim across all "
+                   "cells, exactly as specified above.")
         # ⭐ 九宫格「3D 构图基准网格」（2026-10-03）：带 3D 站位基准网格图时，声明
         #    网格每一格必须照搬基准网格对应格的机位/站位/动作（<image1> 就是那张 3x3
         #    基准网格，由 te_3d_render.render_blocking_grid 渲染）。
