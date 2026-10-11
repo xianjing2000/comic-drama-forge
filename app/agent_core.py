@@ -610,10 +610,20 @@ _TOOL_INDEX = "\n".join(f"- {t['name']}: {t['description']}" for t in TOOLS)
 SYSTEM_PROMPT = """你是这部漫剧的**总控导演 AI**，有权直接操作系统里的全部生产功能。
 
 工作方式（重要）：
-- 你**不需要请示用户**，也不许问「要不要我帮你做？」。收到指令后自己判断要动哪些环节，
-  直接调用工具执行，最后用中文汇报「做了什么 + 结果 + 下一步建议」。
+- 只读与轻量动作（get_status / get_progress / get_qc_summary / list_* / 改配置等
+  risk=safe|write 的工具）**不需要请示**：收到指令自己判断该动哪些环节，直接调用，
+  最后用中文汇报「做了什么 + 结果 + 下一步建议」。
+- ⭐⭐⭐ **昂贵动作必须先给计划、等用户确认**（risk=expensive：produce_episode /
+  retry_shot / retry_shot_video / upscale_video / export_project 等）。
+  第一次**不要直接调用**：先把「要做什么」摆给用户 —— 项目名、第几集、会依次跑哪些步骤
+  （剧本 → 配音先行 → 资产 → 分镜 → 视频 → 超分 → 成片）、大致耗时与消耗 ——
+  然后**停下等他回一句「确认」**。用户确认后再调用。
+  ⚠️ 系统也会强制拦：未确认时昂贵工具直接返回 needs_confirmation（不会执行），
+     你收到该结果时**不要重试、不要用别的工具绕开**，照上面的方式把计划讲给用户听。
+  ⚠️ 一次整集生产可能烧掉数小时 GPU。「先跑起来再说」在这一步是**错误**的，
+     用户必须有机会在开跑前否掉计划（换项目 / 改集数 / 调整范围）。
 - 信息不够时（比如没说第几集）**自己取合理默认值**（默认第 1 集 / 当前集），
-  执行完在汇报里说明你取了什么默认值。
+  在计划里说明你取了什么默认值，让他一并确认。
 - 先查后做：不确定项目状态时，先用 get_status / get_progress / get_qc_summary 等只读工具看一眼，
   再决定动什么。只读工具不花钱不烧卡，多用没关系。
 - 一次决策里可以并行调用多个**互不依赖**的只读工具。
@@ -836,6 +846,25 @@ def execute_tool(name: str, args: dict, ctx: dict, stats: dict, job_id: str = ""
         return {"ok": False, "blocked": True,
                 "error": f"急停开关已触发（{_KILL['reason'] or '手动刹车'}），本轮后续动作全部中止"}
 
+    # ⭐⭐ 2026-10-12 用户反馈：「现在怎么不让用户确认计划就开始跑了」。
+    #    根因：SYSTEM_PROMPT 明确要求「你不需要请示用户…直接调用工具执行」，
+    #    于是 AI 读到「生产第一集」就立刻跑 produce_episode —— 用户全程没有确认机会，
+    #    实测直接开跑了一个 42 章的大项目（用户当时想建的是「简短一点的项目」）。
+    #    原有护栏只有「本轮昂贵动作次数上限」，拦不住「第一次就把一整集全速跑完」。
+    #    本闸门把「起跑权」交还用户：昂贵动作必须在本轮用户消息里出现**明确的确认词**，
+    #    否则只返回 needs_confirmation（不执行），让 AI 把计划摆给用户等他点头。
+    if tool["expensive"] and not ctx.get("plan_confirmed"):
+        return {
+            "ok": False,
+            "blocked": True,
+            "needs_confirmation": True,
+            "error": ("这是**昂贵动作**（会烧 GPU / 耗时很久），必须由用户先确认计划才能执行。"
+                      "现在还没有拿到用户的确认。请立刻停止执行，改为把「即将做什么」简短列给用户："
+                      "项目名、第几集、会依次跑哪些步骤（剧本→配音先行→资产→分镜→视频→超分→成片）、"
+                      "大致耗时与消耗；然后明确请他回一句「确认」再开始。"
+                      "**不要**再次尝试调用本工具，**不要**用别的工具绕开确认。"),
+        }
+
     if tool["expensive"] and stats.get("expensive", 0) >= MAX_EXPENSIVE:
         return {"ok": False, "blocked": True,
                 "error": f"本轮昂贵动作已达上限 {MAX_EXPENSIVE} 次，拒绝执行 {name}。"
@@ -1031,7 +1060,15 @@ def _fallback_parse_actions(text: str):
 def run_job(job: dict, ep: dict, history: list, timeout: int):
     """agent 主循环（在后台线程里跑）"""
     project = job["project"]
-    ctx = {"project": project, "episode": None}
+    # 2026-10-12：判定本轮用户消息是否构成「对昂贵动作的确认」。
+    # ⚠️ 只认**明确的确认词**，且必须作为独立语义单元出现 —— 不能因为消息里含
+    #    「开始」就放行（「开始生产第一集」是指令，不是对计划的确认）。
+    _um = str(job.get("message") or "").strip()
+    _confirm_words = ("确认", "确定", "同意", "批准", "没问题", "就这样", "开跑", "跑吧",
+                      "开始吧", "执行吧", "可以开始", "confirm", "go ahead", "yes")
+    _plan_confirmed = any(w in _um for w in _confirm_words) and len(_um) <= 40
+    ctx = {"project": project, "episode": None,
+           "plan_confirmed": _plan_confirmed, "user_message": _um[:200]}
     stats = {"expensive": 0}
     started = time.time()
     text_mode = False
