@@ -1609,20 +1609,43 @@ def renumber_scenes(shots: list) -> int:
 #: 根因是这类文字不属于任何 item，走的 items/scenes 两条回填路径都取不到。
 _SCREEN_TIME_RE = re.compile(r"(?:锁屏|屏幕|屏显|状态栏|时间|显示)\s*[：:为是]?\s*(\d{1,2}[:：]\d{2})")
 
+#: 引号内确切文字：剧本里凡是用「」/""/“” 括起来、且明确挂在某个载体上的字，
+#: 就是**画面必须逐字呈现**的内容。
+#: ⚠️ 2026-10-11 排查发现：shot9「切到地图输入『观澜路四十七号』」、
+#:   shot51「门牌『2704』」、shot7「标题『面试』」都写了确切文字，
+#:   但 shots[].surface_text 仍是 None → 出图时无人可依 → 模型自由编字。
+#:   这里把这些引号内容抽出来回填（只认有明确载体的，避免把台词/比喻误当画面文字）。
+_QUOTED_TEXT_RE = re.compile(r"[「『\u201c\"]([^」』\u201d\"]{1,24})[」』\u201d\"]")
+#: 载体词：出现这些词说明本镜有「承载文字的实体」，引号内容才可信为画面文字
+_TEXT_CARRIER_WORDS = ("门牌", "招牌", "标牌", "铭牌", "告示", "公告", "横幅", "招牌字",
+                       "输入", "标题", "抬头", "名字", "字样", "屏", "显示", "界面")
+
 
 def _extract_screen_text(desc: str) -> str:
-    """从画面描述里抠出**屏显文字**（时间/数字）；没有则返回空串。
+    """从画面描述里抠出**画面必须呈现的确切文字**；没有则返回空串。
 
-    只处理"屏幕上明确可读的那几个字"，让 surface_text 有确切内容可写 ——
-    这样出图时是「照抄 09:00」而不是让模型自由发挥（实测会画成 247）。
+    两条来源（按可信度排序）：
+      1. 屏显时间（「锁屏09:00」「状态栏09:00」）—— 用户实测过被画成 247；
+      2. 有明确载体的引号内容（「门牌『2704』」「标题『面试』」「输入『观澜路四十七号』」）。
+    只认这两类，**绝不臆造**；宁可返回空串也不编一个不存在的文字。
     """
     t = str(desc or "")
     if not t:
         return ""
+    out = []
     m = _SCREEN_TIME_RE.search(t)
     if m:
-        return m.group(1).replace("：", ":")
-    return ""
+        out.append(m.group(1).replace("：", ":"))
+    if any(w in t for w in _TEXT_CARRIER_WORDS):
+        for q in _QUOTED_TEXT_RE.findall(t):
+            q = str(q).strip()
+            # 排除误抓：纯符号/太长/像台词的（含句读的短句通常是对白）
+            if not q or len(q) > 12:
+                continue
+            if any(ch in q for ch in "。！？，、；："):
+                continue
+            out.append(q)
+    return "、".join(dict.fromkeys(out))
 
 
 def inject_surface_text_into_shots(shots: list, bible: dict) -> int:
