@@ -3640,6 +3640,27 @@ class ComfyUIClient:
         cell.save(out_path, "PNG")
         return out_path
 
+    #: ⭐⭐ 2026-10-11：画面描述里的「文字元描述词」→ 换成不指向具体字形的说法。
+    #:   用户实测：「手机通知文字有错字（约 32s，f_005）：『发件人乱乱码加陌生公司域名』
+    #:   —— 多了一个『乱』字」。
+    #:   根因：剧本 description 写的是「发件人乱码加陌生公司域名」，这是在**描述
+    #:   「这里有一串不可读的字」这件事**，而扩散模型会把「乱码」当**要写的字**画出来。
+    #:   与「原文/文字/字样/某某/XX/TBD」是同一类坑（那条黑名单此前只覆盖了资产侧）。
+    #:   替换成「不可辨认的字符」：语义不变，但不含任何可被逐字绘制的字形。
+    _TEXT_META_DESC = (
+        ("乱乱码", "不可辨认的字符"),
+        ("乱码", "不可辨认的字符"),
+        ("字迹潦草无法辨认", "笔迹潦草难辨"),
+    )
+
+    @staticmethod
+    def _strip_text_meta(text: str) -> str:
+        """把画面描述里的「文字元描述词」换成不可绘制的说法（见上方说明）。"""
+        t = str(text or "")
+        for _a, _b in ComfyUIClient._TEXT_META_DESC:
+            t = t.replace(_a, _b)
+        return t
+
     @staticmethod
     def build_storyboard_prompt(shot: dict, ref_labels: List[str] = None,
                                 has_blocking_image: bool = False,
@@ -3700,6 +3721,13 @@ class ComfyUIClient:
         扁平长提示词里景别约束被画面内容稀释。景别/机位是**取景级硬约束**，
         必须最靠前、独立成句。
         """
+        # ⭐ 2026-10-11：清掉画面描述里的「文字元描述词」（乱码 → 不可辨认的字符）。
+        #   用浅拷贝，避免污染调用方持有的 shot（它还要用于质检/落盘）。
+        shot = dict(shot or {})
+        if shot.get("description"):
+            shot["description"] = ComfyUIClient._strip_text_meta(shot["description"])
+        if shot.get("visual_detail"):
+            shot["visual_detail"] = ComfyUIClient._strip_text_meta(shot["visual_detail"])
         camera = str(shot.get("camera") or "中景").strip()
         # A1：景别优先读权威字段 shot_type，缺失回退解析 camera 复合串（旧剧本零回归）
         cam_key = shot_framing(shot)        # "" = 本镜没给景别（camera 只有机位/运镜）
