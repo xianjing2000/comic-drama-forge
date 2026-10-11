@@ -33,6 +33,41 @@ logger = logging.getLogger(__name__)
 
 status_api_bp = Blueprint('status_api', __name__)
 
+@status_api_bp.route('/api/system/identity')
+def api_system_identity():
+    """返回本进程的「数据根指纹」——供 Electron 判断能否复用已有后端。
+
+    ⭐⭐ 2026-10-11 用户要求：「两个服务进程并存这个问题要解决，就和打开你现在运行
+    一样，检测到已打开的程序直接显示窗口就行了」。
+
+    ## 为什么之前会并存
+    main.js 的 resolvePort() 写着「桌面版**永不复用外部后端**」：旧逻辑只要端口上
+    有健康 Flask 就直接复用，结果项目数据写到了**别的进程的数据根**，用户表现是
+    「桌面版每次打开都是空项目」。为了堵这个坑，改成「默认端口被占用就另找空闲
+    端口」→ 于是手工起的服务与桌面版服务同时存在，互抢租约（日志里的
+    「正在被另一个执行体生产」即由此而来）。
+
+    ## 正确解法
+    复用前**校验数据根是否一致**：一致 → 直接复用（单实例，符合用户预期）；
+    不一致 → 仍走另找端口（保住原设计要防的数据根混淆）。
+    本接口就是那个判据。
+    """
+    try:
+        from config import PROJECT_DATA_DIR as _PDD
+        data_dir = os.path.normcase(os.path.abspath(str(_PDD or "")))
+        fp = hashlib.sha256(data_dir.encode("utf-8", "replace")).hexdigest()[:16]
+        return jsonify({
+            "app": "mjscxt",
+            "data_dir": str(_PDD or ""),
+            "fingerprint": fp,
+            "pid": os.getpid(),
+            "port": int(os.environ.get("APP_PORT") or 0),
+        })
+    except Exception as e:  # noqa: BLE001 - 可观测性接口自身绝不能抛
+        logger.warning("system/identity 生成失败：%s", e)
+        return jsonify({"app": "mjscxt", "error": str(e)}), 500
+
+
 @status_api_bp.route('/api/status')
 def api_status():
     comfyui_status = comfyui_client.get_status()

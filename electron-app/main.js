@@ -277,7 +277,56 @@ async function findFreePort() {
 // 表现为「桌面版每次打开都是空项目」。现在：
 // - 只有“本进程自己 spawn 且 childAlive”才复用（见 startBackend）；
 // - 若默认端口被占用，直接找下一个空闲端口，始终保证桌面版有自己的后端与数据根。
-async function resolvePort() {
+// 探测某端口上的后端「身份」（数据根指纹）。返回 null = 那里不是本项目后端。
+function probeBackendIdentity(port) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    let req;
+    try {
+      req = require('node:http').get(
+        { host: '127.0.0.1', port, path: '/api/system/identity', timeout: 2500 },
+        (res) => {
+          let data = '';
+          res.on('data', (c) => { data += c; });
+          res.on('end', () => {
+            try {
+              const j = JSON.parse(data);
+              finish(j && j.app === 'mjscxt' ? j : null);
+            } catch (e) { finish(null); }
+          });
+        }
+      );
+    } catch (e) { return finish(null); }
+    req.on('error', () => finish(null));
+    req.on('timeout', () => { try { req.destroy(); } catch (e) {} finish(null); });
+  });
+}
+
+function sameDataDir(a, b) {
+  if (!a || !b) return false;
+  try {
+    return path.resolve(String(a)).toLowerCase() === path.resolve(String(b)).toLowerCase();
+  } catch (e) { return false; }
+}
+
+// ⭐⭐ 2026-10-11 用户要求：「两个服务进程并存这个问题要解决，就和打开你现在运行一样，
+//    检测到已打开的程序直接显示窗口就行了」。
+//
+// 之前的做法是**永不复用外部后端**（见上方注释：旧版会因端口上有健康 Flask 就复用，
+// 导致数据写到别的数据根、桌面版打开是空项目），于是默认端口被占就另找空闲端口 ——
+// 代价是「手工起的服务 + 桌面版服务」同时存在，互抢租约（日志里的
+// 「正在被另一个执行体生产」即由此而来）。
+//
+// 现在补上缺失的判据：**复用前先校验数据根一致**。
+//   · 指纹一致 → 直接复用（单实例，符合用户预期：「检测到已打开就直接显示」）；
+//   · 不一致   → 仍另找空闲端口（保住原设计要防的数据根混淆）。
+async function resolvePort(wantDataDir) {
+  const ident = await probeBackendIdentity(DEFAULT_PORT);
+  if (ident && sameDataDir(ident.data_dir, wantDataDir)) {
+    bootLog('singleInstance: reuse backend on ' + DEFAULT_PORT + ' (same data root)');
+    return { port: DEFAULT_PORT, reuse: true };
+  }
   if (await isPortListening(DEFAULT_PORT)) {
     const port = await findFreePort();
     return { port, reuse: false };
@@ -668,7 +717,17 @@ async function startBackend() {
     if (!fs.existsSync(layout.servePy)) {
       throw new Error(`找不到后端入口 ${layout.servePy}（请确认已运行 build:win 打包或项目路径正确）`);
     }
-    const { port } = await resolvePort();
+    const { port, reuse } = await resolvePort(layout.dataDir);
+    // ⭐ 单实例：复用已在运行的、同一数据根的后端 —— 不起新进程，直接连它
+    if (reuse) {
+      logLines.length = 0;
+      backend.port = port;
+      backend.reused = true;
+      backend.child = null;
+      backend.starting = false;
+      pushLog('out', '[single-instance] reused existing backend on port ' + port + ' (same data root)');
+      return backend;
+    }
     logLines.length = 0;
     backend.port = port;
     const childEnv = {
