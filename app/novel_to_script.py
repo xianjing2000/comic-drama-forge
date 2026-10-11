@@ -1603,6 +1603,28 @@ def renumber_scenes(shots: list) -> int:
         return 0
 
 
+#: 屏显文字识别：手机/显示器屏幕上的时间与数字。
+#: ⚠️ 只认**描述里明确写出的**写法，绝不臆造（找不到就返回空，行为与旧版一致）。
+#: 背景：用户实测 f_005 的状态栏被 H3 画成「247」，而剧本写的是「锁屏09:00」，
+#: 根因是这类文字不属于任何 item，走的 items/scenes 两条回填路径都取不到。
+_SCREEN_TIME_RE = re.compile(r"(?:锁屏|屏幕|屏显|状态栏|时间|显示)\s*[：:为是]?\s*(\d{1,2}[:：]\d{2})")
+
+
+def _extract_screen_text(desc: str) -> str:
+    """从画面描述里抠出**屏显文字**（时间/数字）；没有则返回空串。
+
+    只处理"屏幕上明确可读的那几个字"，让 surface_text 有确切内容可写 ——
+    这样出图时是「照抄 09:00」而不是让模型自由发挥（实测会画成 247）。
+    """
+    t = str(desc or "")
+    if not t:
+        return ""
+    m = _SCREEN_TIME_RE.search(t)
+    if m:
+        return m.group(1).replace("：", ":")
+    return ""
+
+
 def inject_surface_text_into_shots(shots: list, bible: dict) -> int:
     """把物品 / 场景的 surface_text 回填进引用它们的镜头。
 
@@ -1643,6 +1665,15 @@ def inject_surface_text_into_shots(shots: list, bible: dict) -> int:
                 if t:
                     texts.append(t)
                     break
+            # ⭐⭐ 2026-10-11 用户实测：「状态栏'247'这个也是剧本和分镜导致的」。
+            #    手机/显示器屏幕上的**时间、数字、状态栏文字**不属于任何 item，
+            #    所以上面两条路都取不到 → shots[].surface_text 仍是 None →
+            #    H3 自由发挥，于是「锁屏 09:00」被画成「247」，与开场自相矛盾。
+            #    这里从 description 里把**屏显文字**抠出来（只认明确的时刻/数字写法，
+            #    不臆造），补进 surface_text，让画面对齐剧本设定。
+            _screen = _extract_screen_text(str(sh.get("description") or ""))
+            if _screen:
+                texts.append(_screen)
             if texts:
                 sh["surface_text"] = "\n".join(dict.fromkeys(texts))
                 n += 1
