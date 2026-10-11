@@ -21,6 +21,27 @@ import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, Upsc
 const FOCUS_RING =
   'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas';
 
+/**
+ * 后端异常消息脱敏（2026-10-12）。
+ *
+ * 用户反馈工作台的失败态「太丑」—— 实测截图里整屏都是一行内部绝对路径，例如
+ *   「第1集尚未生成：C:\Users\liujianghua\AppData\Roaming\mjscxt-desktop\
+ *     mjscxt-data\output\scripts\逆天系统_全书\第1集.json」
+ * 这类路径对用户零价值（他不需要知道自己的 AppData 在哪），还挤爆版面。
+ * 这里统一把 Windows / POSIX 绝对路径替换成占位符，只保留可读的语义部分。
+ */
+function sanitizeErrorMessage(msg: string): string {
+  if (!msg) return '';
+  return String(msg)
+    // Windows 绝对路径（含盘符），保留到空白或中文标点为止
+    .replace(/[A-Za-z]:\\[^\s：:，,；;）)]+/g, '[本地文件路径]')
+    // POSIX 绝对路径
+    .replace(/\/(?:[^\s：:，,；;）)\/]+\/)+[^\s：:，,；;）)]*/g, '[本地文件路径]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 300);
+}
+
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
 import AutonomousPanel from '@/components/AutonomousPanel';
@@ -1061,12 +1082,49 @@ function OverviewTab({
   }
 
   if (detailError) {
+    // 2026-10-12：拆开「尚未生成」与「真的出错」—— 前者是**生产过程中的正常态**，
+    //   旧实现把它当成红色错误态（ErrorState）甩给用户，还把后端异常里的
+    //   **绝对文件路径** 原样当描述显示（用户反馈：「这个界面需要优化现在太丑了」）。
+    //   现在：尚未生成 → 友好空态 + 明确的下一步；其他才是错误态，且描述做脱敏。
+    const notGenerated = /尚未生成|不存在|No such file/i.test(detailError);
+    const epNo = lastDetailEpRef.current;
+    if (notGenerated) {
+      return (
+        <div className="space-y-4">
+          <Button variant="ghost" onClick={goBack}>
+            {t('wb.backToList')}
+          </Button>
+          <div className="rounded-lg border border-line bg-surface p-6">
+            <EmptyState
+              icon={<FileText className="h-10 w-10" />}
+              title={epNo != null ? t('wb.episodeNotGenerated', { n: epNo }) : t('wb.episodeNotGeneratedNoN')}
+              description={t('wb.episodeNotGeneratedHint')}
+              action={(
+                <div className="flex items-center gap-3">
+                  <Button onClick={goBack}>{t('wb.startGenerate')}</Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() => {
+                      const n = lastDetailEpRef.current;
+                      if (n != null) loadEpisodeDetail(n);
+                    }}
+                  >
+                    {t('common.retry')}
+                  </Button>
+                </div>
+              )}
+            />
+          </div>
+        </div>
+      );
+    }
     // 硬失败：单集详情整块取不到数据，用 ErrorState 顶掉内容区（不是把已渲染内容盖掉）
     return (
       <div className="space-y-4">
         <ErrorState
           title={t('project.loadingFailed')}
-          description={detailError}
+          description={t('wb.loadDetailFailedHint')}
+          code={sanitizeErrorMessage(detailError)}
           onRetry={() => {
             const n = lastDetailEpRef.current;
             if (n != null) loadEpisodeDetail(n);
