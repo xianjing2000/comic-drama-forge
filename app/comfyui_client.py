@@ -4435,10 +4435,26 @@ class ComfyUIClient:
         passed = False
         last_seg_report: List[dict] = []
         last_error: str = ""
+        # 2026-10-12: retry reason classes. Seed means different things for each.
+        #   "quality"   - QC failed (content) -> changing seed is correct (new dice).
+        #   "transport" - link failure (ComfyUI returned no file / missing file /
+        #                 generation exception) -> unrelated to seed; changing it only
+        #                 invalidates the ComfyUI segment cache, so every already-
+        #                 finished segment is regenerated from scratch.
+        #   Measured waste before the fix: scene 1 (28 shots / 146s / 47% of the
+        #   episode) had completed at 19:15, then the 1st QC failure changed the seed
+        #   and re-ran the whole episode; at 23:07 the 2nd attempt failed with
+        #   "ComfyUI returned no video file" (pure transport) and changed the seed
+        #   AGAIN, wasting scene 1 a second time. ~6h GPU burned across retries.
+        retry_kind = "quality"
 
         for attempt in range(max_retries + 1):
             attempts_used = attempt + 1
-            if attempt > 0:
+            if attempt > 0 and retry_kind == "transport":
+                logger.info("[H3-episode] attempt %d retry (transport failure, KEEPING seed %s "
+                            "so the already-finished segments stay cached)",
+                            attempt + 1, cur_seed)
+            elif attempt > 0:
                 # ⚠️ 必须是真随机数，不能写 None：_inject_seed 对 None 直接 `return []`
                 #    （= 不注入），于是沿用工作流 JSON 里的**字面量 seed**；而前端的
                 #    `control_after_generate: randomize` 属于 widgets_values，API 模式不提交。
@@ -4481,6 +4497,8 @@ class ComfyUIClient:
                 raise
             except Exception as e:
                 last_error = str(e)
+                # 生成异常 = 链路层失败：保持种子，让段缓存可复用
+                retry_kind = "transport"
                 logger.warning(f"[H3-episode] 第 {attempt + 1} 次生成异常: {e}")
                 continue
 
@@ -4488,9 +4506,12 @@ class ComfyUIClient:
             last_prompt_id = result.get("prompt_id") or last_prompt_id
             last_seg_report = result.get("segments") or []
             if not files:
+                # 未返回文件 = 链路层失败（与种子无关）：保持种子重试
+                retry_kind = "transport"
                 logger.warning(f"[H3-episode] 第 {attempt + 1} 次：ComfyUI 未返回视频文件")
                 continue
             if not os.path.isfile(files[0]):
+                retry_kind = "transport"
                 logger.warning(f"[H3-episode] 第 {attempt + 1} 次：文件不存在 {files[0]}")
                 continue
 
@@ -4537,6 +4558,8 @@ class ComfyUIClient:
                         qc_results[-1]["retry_stopped"] = True
                         qc_results[-1]["retry_stopped_features"] = _ep_detail
                         break
+                # QC 不通过 = 质量层失败：换种子才是正确的（换骰子）
+                retry_kind = "quality"
                 logger.warning(f"[H3-episode] 第 {attempt + 1} 次整片 QC 不通过"
                                f"（reason={(_v.get('reason') or '-')})，"
                                f"{'重试' if attempt < max_retries else '放弃'}")
