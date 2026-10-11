@@ -4057,10 +4057,30 @@ class ComfyUIClient:
             "Keep the shape, material and colour of every referenced prop unchanged.",
             "Keep the environment and atmosphere consistent with the scene reference.",
         ]
-        preserve.append(
-            "The image must not contain any text, subtitles, dialogue text, watermark, "
-            "logo or sign (in particular no \"AI generated\" mark in the bottom-right "
-            "corner).")
+        # ⭐⭐⭐ 2026-10-11 系统排查发现的**根本矛盾**（用户：「很多都是提示词和分镜的问题」）：
+        #   本段是"最强措辞"的无文字硬禁令，可它与同一条提示词里的文字需求**直接打架**：
+        #     · surface_text 要求写出「09:00」「2704」这类确切文字；
+        #     · 文字道具提权要求以物品图为底、逐字保留守则八条。
+        #   模型面对「前面要写、后面禁止写」只能二选一，而 PRESERVE 措辞最强 →
+        #   文字被抹掉或改画成乱码。这正是「物品资产文字明明是逐字正确的、成品却乱码」
+        #   和「状态栏 247」在提示词层的共同根因 —— 只补 surface_text 而不解除禁令是治不好的。
+        #   现改为**条件化**：本镜确实有要呈现的文字时，禁令收缩为「除指定文字外不得有其他文字」，
+        #   既保住「不出现字幕/水印/乱加字」，又不再否定该写的字。
+        _shot_text = str(shot.get("surface_text") or "").strip()
+        _has_hero = bool(shot.get("_hero_item"))
+        if _shot_text or _has_hero:
+            preserve.append(
+                "The ONLY text permitted in the image is the text that the referenced "
+                "props are specified to carry above (for example number plates, screen "
+                "readouts, ID cards and printed rules) — reproduce exactly those "
+                "characters, verbatim and legible. Do not add any other text, "
+                "subtitles, dialogue text, watermark, logo or sign, and do not place "
+                "any \"AI generated\" mark in the bottom-right corner.")
+        else:
+            preserve.append(
+                "The image must not contain any text, subtitles, dialogue text, watermark, "
+                "logo or sign (in particular no \"AI generated\" mark in the bottom-right "
+                "corner).")
         sections.append("\n".join(preserve))
 
         return "\n\n".join(sections)
