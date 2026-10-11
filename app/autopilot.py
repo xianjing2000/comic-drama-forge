@@ -1242,6 +1242,17 @@ def prewarm_next_script(project: str, plan: dict, cur_episode: int) -> bool:
     if str(os.environ.get("MJSCXT_PREWARM_NEXT_SCRIPT") or "1").strip().lower() \
             in ("0", "false", "off", "no"):
         return False
+    # ⭐⭐ 2026-10-11 用户口径：「跨集预热是在生产计划是多集时才开启」。
+    #   单集计划（episodes=[1]）下预热下一集纯属白烧 LLM 配额，且与"只跑第一集"
+    #   的意图直接冲突（实测会自作主张生成第2/3集剧本）。
+    #   判定：episodes 为 "all" 或 长度>1 的列表 → 多集；其余（含 [1] / 单值 / 缺省）
+    #   一律视为单集，直接不开。
+    _eps = (plan or {}).get("episodes")
+    _eps_s = str(_eps).strip().lower()
+    _multi = (_eps_s == "all") or (
+        isinstance(_eps, (list, tuple)) and len([x for x in _eps if str(x).strip()]) > 1)
+    if not _multi:
+        return False
     # ② 用户在界面上勾选的开关（默认开）
     try:
         _flag = (plan or {}).get("prewarm_next_script")

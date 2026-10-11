@@ -530,22 +530,16 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
             except Exception as _pw_e:  # noqa: BLE001  预热整体失败不影响生产
                 logger.warning('[资产提示词预热] 调度失败（忽略，不影响生产）：%s', _pw_e)
 
-        # 开关（与 prewarm_next_script 同口径：env 可强制关，其次读配置）
+        # ⭐⭐ 2026-10-11 用户口径：「**本集预热要一直开启，不管什么情况**」。
+        # ---------------------------------------------------------------------
+        # 原实现有两条关闭通道：env MJSCXT_PREWARM_ASSET_PROMPT=0（调试用）
+        # 与 plan.prewarm_asset_prompt=False（界面勾选）。按用户口径**两条都去掉** ——
+        # 本集预热不存在"需要关掉"的场景：
+        #   · 它只往 prompt_enhance 缓存里填结果，**不落产物、不写教训库、不碰 results**；
+        #   · 它是**纯 LLM 调用**，不抢 GPU，与出图**并行**反而缩短本集总耗时；
+        #   · 关掉它毫无收益，只会让正式出图时干等 LLM（批越大越明显）。
+        # 因此这里恒为 True，不做任何条件判断 —— 保留变量是为了下面的 if 可读性。
         _pw_on = True
-        try:
-            if str(os.environ.get('MJSCXT_PREWARM_ASSET_PROMPT') or '1').strip().lower() \
-                    in ('0', 'false', 'off', 'no'):
-                _pw_on = False
-            else:
-                _pw_cfg = None
-                try:
-                    _pw_cfg = (ctx or {}).get('config') if isinstance(ctx, dict) else None
-                except Exception:  # noqa: BLE001
-                    _pw_cfg = None
-                if isinstance(_pw_cfg, dict) and _pw_cfg.get('prewarm_asset_prompt') is False:
-                    _pw_on = False
-        except Exception:  # noqa: BLE001
-            _pw_on = True
         if _pw_on and assets:
             try:
                 threading.Thread(target=_prewarm_asset_prompts,

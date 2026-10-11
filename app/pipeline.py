@@ -1835,6 +1835,14 @@ def _prefetch_next_scripts(ctx: dict, limit: int = 1) -> None:
         if str(_os.environ.get("MJSCXT_PREWARM_NEXT_SCRIPT") or "1").strip().lower() \
                 in ("0", "false", "off", "no"):
             return
+        # ⭐ 2026-10-11 用户口径：跨集预热只在「生产计划是多集」时才开
+        #   （此处与 autopilot.prewarm_next_script 是同一开关的两个触发点，必须同口径）
+        _eps = (ctx.get("config") or {}).get("episodes")
+        _eps_s = str(_eps).strip().lower()
+        _multi = (_eps_s == "all") or (
+            isinstance(_eps, (list, tuple)) and len([x for x in _eps if str(x).strip()]) > 1)
+        if not _multi:
+            return
         _cfg_flag = (ctx.get("config") or {}).get("prewarm_next_script")
         if _cfg_flag is not None:
             if isinstance(_cfg_flag, str):
