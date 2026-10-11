@@ -1540,6 +1540,69 @@ def estimate_shot_duration(shot: dict) -> float:
                      min(SHOT_DURATION_MAX, required_shot_duration(shot))) * 2) / 2.0
 
 
+def renumber_scenes(shots: list) -> int:
+    """按「场次标题的变化点」把 scene_no 连续重排，返回被修正的镜头数。
+
+    ⭐⭐ 2026-10-11 用户发现的问题：补生成（coverage 补齐）的镜头会**重新从 1 编号**，
+    与前面已有场次重号。实测第1集：
+        shot41  scene_no=5  location=天合大厦A座外景   （第5场）
+        shot59  scene_no=1  location=天合大厦A座外景   （补生成，重号回 1）
+        shot42  scene_no=6  location=大厅前台
+        shot60  scene_no=2  location=大厅前台           （补生成，重号回 2）
+
+    ## 为什么有害（不是显示问题）
+    video_helpers._vbuilt 是 **dict[scene_no] -> {...}**（按场次号缓存该场的提示词
+    构建结果）。重号会让两场抢同一个 key，后写覆盖前写 → 后台预构建的提示词错配；
+    分组遍历本身走列表顺序不受影响，但走缓存快路径的那一次会拿错。
+    另外场次数从 12 虚增到 14，同一场景被多渲染一遍。
+
+    ## 为什么按「标题变化」而不是按 location 归并
+    同一 location 在不同时间可以是不同场次（示例里「旧电梯」就出现两次：
+    第8场与第12场，但**标题文本相同**，说明这是真·同一场被拆开）。
+    按 location 归并会把「场9 → 场10 → 场9」这种回退造出来（我第一版就踩了这个坑）。
+    正确口径：**场次标题的实质内容变化，才算换场**。
+
+    ## 判据
+    先剥掉标题里的「【第N场】」前缀再比较（补生成的镜头带着错的旧前缀，
+    不剥前缀会把「同一场」看成不同场）；前缀为空时回落用 location。
+    组内所有镜头统一写成「【第N场】+ 实质内容」，保证编号与标题自洽。
+    """
+    if not shots:
+        return 0
+    try:
+        import re as _re
+        _prefix = _re.compile(r"^\s*【\s*第\s*\d+\s*场\s*】\s*")
+
+        def _body(_s):
+            _h = _prefix.sub("", str(_s.get("scene_heading") or ""))
+            if not _h:
+                _h = str(_s.get("location") or "")
+            return _re.sub(r"\s+", "", _h)
+
+        _no = 0
+        _prev = None
+        _fixed = 0
+        for _s in shots:
+            if not isinstance(_s, dict):
+                continue
+            _b = _body(_s)
+            if _b != _prev:
+                _no += 1
+                _prev = _b
+            try:
+                _cur = int(_s.get("scene_no") or 0)
+            except (TypeError, ValueError):
+                _cur = 0
+            if _cur != _no:
+                _fixed += 1
+            _s["scene_no"] = _no
+            _s["scene_heading"] = "【第%d场】%s" % (_no, _b)
+        return _fixed
+    except Exception as _e:  # noqa: BLE001  重排失败不影响主流程（保持原编号）
+        logger.warning("场次号重排失败（忽略，保留原编号）：%s", _e)
+        return 0
+
+
 def inject_surface_text_into_shots(shots: list, bible: dict) -> int:
     """把物品 / 场景的 surface_text 回填进引用它们的镜头。
 
@@ -3748,6 +3811,12 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
             logger.warning(f"第 {chunk['index']} 子块分镜失败，已兜底 {len(fb)} 镜：{e}")
 
     shots = _norm_shots(all_shots, bible, 1)
+    # ⭐⭐ 2026-10-11：按场次标题变化连续重排 scene_no —— 补生成的镜头会重新从 1 编号，
+    #    造成同场重号（video_helpers._vbuilt 按 scene_no 做 key，重号会互相覆盖）。
+    _rs_fixed = renumber_scenes(shots)
+    if _rs_fixed:
+        logger.info("第%s集：已重排 %d 个镜头的场次号（消除补生成导致的重号）",
+                    episode_no, _rs_fixed)
     # ⭐ 2026-10-10：把资产级的确切文字（物品 surface_text / 场景告示）回填进镜头，
     #   否则出图侧拿不到 shot 的 surface_text 字段 → 模型自己编字（用户实测缺陷）。
     inject_surface_text_into_shots(shots, bible)
