@@ -222,7 +222,12 @@ def _build_asset_index(assets: list, project_name: str, kind: str) -> dict:
             _first_existing_asset_image(asset_dir_for_name),
         )
         entry = {"name": name, "image": local, "_dir": asset_dir_for_name,
-                 "url": f"/api/assets/{kind}s/{project_name}/{name}/front.png"}
+                 "url": f"/api/assets/{kind}s/{project_name}/{name}/front.png",
+                 # ⭐⭐ 2026-10-11：把 surface_text 带进索引，供「文字道具特写提权」判据使用。
+                 #   此前 entry 只有 name/image/_dir/url —— 剧本里的 surface_text 到了索引层
+                 #   就丢了，导致 qc_helpers._text_item_closeup 永远判不出「文字道具」，
+                 #   提权逻辑形同虚设（实测提权 0/60）。
+                 "surface_text": str(payload.get("surface_text") or "").strip()}
         # 2026-09-25 景别对档：把**逐视角**路径也挂进来，供 `_pick_char_view`
         # 按镜头景别取「半身档 / 全身档」。角色资产自 sheet_split 改造后是
         # front/left/right/back/half 五个独立文件（少任何一个都合法）。

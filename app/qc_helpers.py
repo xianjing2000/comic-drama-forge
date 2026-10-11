@@ -209,6 +209,37 @@ def _shot_outfit_dir(shot: dict, character_name: str, char_dir: str) -> str:
     return ""
 
 
+def _text_item_closeup(shot: dict, item_idx: dict, items_in: list) -> str:
+    """判定「文字道具特写镜」并返回该物品名；否则返回空串。
+
+    ⭐⭐ 2026-10-11 用户实测：「文字道具乱码不是已经生成了相关物品吗」。
+    实证：物品资产图 assets/items/*/base.png 的文字**完全正确**（「楼层安全守则」
+    八条条款 + 红线标注全部准确，surface_text 机制是生效的），但成品画面里仍是乱码。
+
+    根因在**槽位顺序**：官方规格里 image1 是 edit target（模型以它为底图改），
+    而道具此前排在最后（角色/场景之后）→ 模型只当它是形状参考，然后**自己重新写字**
+    → 必然乱码。
+
+    修法：本镜是「以带 surface_text 的道具为画面主体」的特写/俯拍镜时，
+    把该物品图提到 image1 当 edit target，模型就会在它基础上改、保留文字。
+    判定用「物品有 surface_text」+「景别/描述是特写类」，保守触发：
+    不满足时行为与原先完全一致。
+    """
+    if not items_in:
+        return ""
+    hero = ""
+    for _n in items_in:
+        _e = item_idx.get(_n) or {}
+        if str(_e.get("surface_text") or "").strip():
+            hero = _n
+            break
+    if not hero:
+        return ""
+    _blob = str(shot.get("camera") or "") + " " + str(shot.get("description") or "")
+    _KEY = ("特写", "俯拍", "近景", "纸面", "屏幕", "填满", "推到", "推向")
+    return hero if any(_k in _blob for _k in _KEY) else ""
+
+
 def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
                                project_name: str = None) -> list:
     """为单个镜头分配参考图（Qwen-Image-2.1 reference stack，最多 9 张）
@@ -279,6 +310,24 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
     # 本镜景别决定角色参考图取「半身档」还是「全身档」（画幅与景别同向，消除对抗）。
     _want_half = _framing_wants_half_shot(shot)
 
+    # ⭐⭐ 2026-10-11 文字道具特写镜：物品图提为 image1（edit target）
+    #    见 _text_item_closeup 说明 —— 道具原本排最后，模型只当形状参考然后重写文字。
+    #    提到首位后模型以它为底图改，表面文字得以保留。
+    _hero_item = _text_item_closeup(shot, item_idx, items_in)
+    _hero_path = ""
+    if _hero_item:
+        _hero_path = str((item_idx.get(_hero_item) or {}).get("image") or "")
+        if _hero_path and _hero_path not in used_paths:
+            used_paths.add(_hero_path)
+            refs.append(("文字道具主体",
+                         f"参考图1（image1）是本镜画面主体的道具「{_hero_item}」的设定图，"
+                         f"**它表面的文字是本镜必须逐字保留的内容**：请以这张图为基础绘制，"
+                         f"保持其形状、材质、配色**以及表面文字的排列与内容完全一致**，"
+                         f"不得重新编排文字、不得改写字形、不得省略任何一条。",
+                         _hero_path))
+            logger.info("[分镜参考图] shot=%s 文字道具特写：物品「%s」提为 image1",
+                        shot.get("shot_id"), _hero_item)
+
     # ---- <image1>…<image3>：角色身份锚点（逐个独立，禁止特征串味）----
     # 官方要点：多角色时每人一张图 + 明确「independently / Do not merge facial features」，
     # 否则最常见的失败就是 A 的脸跑到 B、B 的衣服跑到 C。
@@ -297,13 +346,15 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
             continue
         used_paths.add(img)
         _zoom = "半身近景" if _want_half else "全身"
-        if i == 0:
+        # 编号按「已占用槽位数」算：文字道具提权后角色会顺延，文案必须跟着对
+        _slot = len(refs) + 1
+        if _slot == 1:
             refs.append(("主角色",
                          f"参考图1（<image1>）是角色「{name}」的身份锚点（{_zoom}视图）："
                          f"保持其面部身份、发型与体型不变", img))
         else:
             refs.append(("次角色",
-                         f"参考图{i + 1}（<image{i + 1}>）是角色「{name}」的身份锚点（{_zoom}视图）："
+                         f"参考图{_slot}（<image{_slot}>）是角色「{name}」的身份锚点（{_zoom}视图）："
                          f"独立保持其面部身份与发型，不得与其他角色特征混用", img))
 
     # ---- <imageN>：场景（角色之后，作为环境锚点）----
@@ -320,6 +371,8 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
     # ---- <imageN>：道具（镜头内物品，可多个但最多 2 张，避免挤占角色槽位）----
     item_refs = []
     for cand in items_in:
+        if cand == _hero_item:      # 已提为 image1 的 edit target，不重复占槽
+            continue
         if len(item_refs) >= 2:
             break
         img = item_idx.get(cand, {}).get("image")
