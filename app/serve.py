@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 import sys
@@ -567,6 +568,100 @@ def _boot_comfyui_heartbeat() -> None:
         logger.warning("ComfyUI 心跳启动失败（不影响启动）：%s", e)
 
 
+#: 单实例锁的文件句柄 —— 必须一直持有到进程结束，OS 会在进程退出时自动释放锁。
+#: 绝不能在拿到锁后关闭它（关掉就等于主动释放，第二个进程立刻就能进来）。
+_LOCK_FH = None
+
+
+def _acquire_single_backend_lock() -> bool:
+    """同一数据根只允许**一个**后端进程存活。取不到锁就返回 False（调用方应退出）。
+
+    ⭐⭐⭐ 2026-10-12 事故复盘（这是必须根治的那一个）：
+      桌面版后端（5211）与我手工起的后端（5299）**同时存活**、共用同一个
+      `MJSCXT_DATA_DIR`。两者都跑 pipeline，`task_lease` 会把对方的租约视为
+      「过期」并回收，然后**自动把那集重跑一遍** —— 实测「逆天系统_全书#ep1」与
+      「进境_整本小说#ep1」被反复重跑，两个后端还都往**同一个 serve_stdout.log**
+      写日志，于是日志交织在一起，看起来就像「项目串了 / 又启动了别的项目」，
+      实际是纯浪费 GPU（项目数据本身是隔离的，已核验）。
+
+    为什么用 OS 文件锁而不是 PID 文件：
+      · PID 文件在进程被强杀（任务管理器 / taskkill）时会残留，形成"僵尸锁"，
+        下次启动会误判"已有后端在跑"而拒绝启动；
+      · msvcrt/flock 的锁由**操作系统**在其进程终止时释放，不存在残留问题。
+
+    逃生口：设 MJSCXT_ALLOW_MULTI_BACKEND=1 可显式允许多开（调试/数据迁移用）。
+    fail-open：数据根未配置、或锁机制本身出错时一律放行，绝不因为锁把服务挡住。
+    """
+    global _LOCK_FH
+    if (os.getenv("MJSCXT_ALLOW_MULTI_BACKEND") or "").strip() == "1":
+        logger.info("MJSCXT_ALLOW_MULTI_BACKEND=1：已显式允许多个后端并行，跳过单实例锁")
+        return True
+    d = (os.getenv("MJSCXT_DATA_DIR") or "").strip()
+    if not d:
+        return True  # 无数据根概念（开发态）→ 不拦
+    try:
+        os.makedirs(d, exist_ok=True)
+        lp = os.path.join(d, ".backend.lock")
+        fh = open(lp, "a+", encoding="utf-8")
+        if os.name == "nt":
+            import msvcrt
+            try:
+                # 先保证文件至少 1 字节：Windows 的 locking 不能锁零长度区域。
+                fh.seek(0, os.SEEK_END)
+                if fh.tell() == 0:
+                    fh.write(" ")
+                    fh.flush()
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                fh.close()
+                return False
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                fh.close()
+                return False
+        _LOCK_FH = fh  # 持有到进程结束（勿手动 close）
+        # 身份信息写**另一个文件**：2026-10-12 实测发现，在持有 msvcrt 锁的同一
+        # 文件上再 seek/truncate/write 会被"锁区间"干扰，写进去的内容读出来是空的
+        # → 提示里说不清"已有后端在哪个地址"。锁只管锁，身份单独落盘，互不干扰。
+        try:
+            with open(os.path.join(d, ".backend.owner.json"), "w", encoding="utf-8") as of:
+                of.write(json.dumps({
+                    "pid": os.getpid(),
+                    "port": _env_int("APP_PORT", 5210),
+                    "host": os.getenv("APP_HOST") or "127.0.0.1",
+                    "data_dir": d,
+                    "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }, ensure_ascii=False))
+        except Exception:  # noqa: BLE001 身份信息写不进去不影响持锁
+            pass
+        return True
+    except Exception as e:  # noqa: BLE001 锁机制自身故障 → fail-open
+        logger.warning("单实例锁初始化失败（按放行处理）：%s", e)
+        return True
+
+
+def _describe_existing_backend() -> str:
+    """读 .backend.lock，给出"已有后端在哪"，便于用户直接打开它而不是干等。"""
+    d = (os.getenv("MJSCXT_DATA_DIR") or "").strip()
+    if not d:
+        return ""
+    try:
+        with open(os.path.join(d, ".backend.owner.json"), "r", encoding="utf-8") as fh:
+            info = json.loads(fh.read().strip() or "{}")
+        port = info.get("port")
+        host = info.get("host") or "127.0.0.1"
+        pid = info.get("pid")
+        if port:
+            return f"http://{host}:{port}（pid={pid}，启动于 {info.get('started_at') or '?'}）"
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def main() -> int:
     restart_count = 0
 
@@ -579,6 +674,19 @@ def main() -> int:
     except RuntimeError as e:
         logger.error("启动被安全护栏拦截（F-02）：%s", e)
         return 2
+
+    # ⭐⭐⭐ 单实例锁（2026-10-12）：同一数据根只允许一个后端进程。
+    # 必须在重启循环**之外**：锁是按进程持有的，循环里重复获取没有意义；
+    # 也必须在 _boot_qc_migration / autopilot 之前 —— 那些动作会动生产数据/占 GPU，
+    # 一旦已经确认"有后端在跑"，就不该再往前走一步。
+    if not _acquire_single_backend_lock():
+        _where = _describe_existing_backend()
+        logger.error(
+            "检测到同一数据根已有后端在运行%s。"
+            "本进程退出 —— 两个后端共存会互相回收任务租约、把同一集反复重跑，纯浪费 GPU。"
+            "（如需并行，请显式设置 MJSCXT_ALLOW_MULTI_BACKEND=1）",
+            ("：" + _where) if _where else "")
+        return 3
 
     # 质检存量迁移：**服务真正启动时**执行一次（幂等）。放在重启循环之外 —— 只在
     # 真正干活的进程里触发一次，不随 _safe_run 反复执行。⚠️ 绝不放模块级（见函数 docstring）。
