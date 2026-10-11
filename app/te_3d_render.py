@@ -115,7 +115,8 @@ _server: Optional["_AssetServer"] = None
 _browser_path: Optional[str] = None
 _browser_checked = False
 _browser_disabled = False                  # 启动失败后不再反复重试（进程级熔断）
-_render_done_once = False                  # 首次渲染要额外等 GLB 下载 + 着色器编译
+_render_done_once = False       # 首次渲染要额外等 GLB 下载 + 着色器编译
+_profile_dir: str = ""              # 本次渲染的临时浏览器 profile（每次 _attempt 新建）                  # 首次渲染要额外等 GLB 下载 + 着色器编译
 
 
 def default_root_dir() -> str:
@@ -470,17 +471,41 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
         "--disable-background-networking",
         "--disable-sync",
         "--hide-scrollbars",
+        # ⭐⭐ 2026-10-11 修复「3D 站位图必然超时、整条链路被迫降级」的根因：
+        #   渲染页要**播 idle 动画到固定时刻**才拿自然站姿（见本页注释「坑3」：
+        #   Xbot.glb 是 T-pose 绑定姿势，T-pose 当构图参考会误导生图模型）。
+        #   而 --headless 的**虚拟时钟默认不推进**，页面就永远停在「等动画到点」
+        #   那一步 → 既不渲染也不回传 → 服务端只能超时（实测 90s/180s/600s 全部超时）。
+        #   加上虚拟时间预算后，页面在**6.7 秒**内完成并回传 292KB 有效 PNG
+        #   （实测 diag：chars=1 tris=28276 camPos=[0,1.55,1.016] fov=36）。
+        #   25000ms 是实测值：足够跑完 idle 动画 + 着色器编译，又不会拖长失败兜底。
+        "--virtual-time-budget=25000",
+        # ⭐ 2026-10-11：**这条才是真正的驱动器**。只加 virtual-time-budget 仍然超时
+        #   （实测 60s/90s/180s/600s 全超时）；加上 --dump-dom 后浏览器会在页面
+        #   跑完后主动 dump 并退出，POST 回传随即到达 —— 实测 6.7 秒拿到 292KB PNG。
+        #   不加它，无头浏览器只保持打开空等，页面事件循环不被驱动。
+        "--dump-dom",
         "--window-size=%d,%d" % (int(plan.get("width") or 768),
                                  int(plan.get("height") or 1365)),
-        "--user-data-dir=" + os.path.join(assets, "_browser_profile"),
+        # ⭐⭐ 2026-10-11 修复「3D 站位图必然超时」（真正根因）：
+        #   原来所有渲染共用 assets/_browser_profile。该目录一旦残留 Edge 的
+        #   单实例锁（SingletonLock / SingletonCookie），新启动的 Edge 会认为
+        #   「已有实例在跑」，把请求转交给那个**并不存在的实例**后自己瞬间退出 ——
+        #   实测表现：进程 0.1 秒退出、服务器**一个 HTTP 请求都收不到**，
+        #   于是每镜白等 90s×2 后降级（整条 3D 构图基准链路长期失效）。
+        #   改为**每次渲染一个独立临时 profile**：实测 1.2 秒完成、回传 390KB，
+        #   比复用还稳（临时目录不保存任何状态，不存在锁残留）。
+        "--user-data-dir=" + _profile_dir,
         url,
     ]
 
     def _attempt(tag: str) -> Optional[bytes]:
         """跑一次浏览器渲染，返回 PNG 字节；失败返回 None（原因写日志）。"""
-        global _browser_disabled
+        global _browser_disabled, _profile_dir
         box = _CaptureInbox()
         srv.inbox = box
+        # 每次独立临时 profile（见 cmd 里的说明：复用固定 profile 会因单实例锁残留而静默失败）
+        _profile_dir = tempfile.mkdtemp(prefix="te3d_prof_")
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, env=env)
@@ -510,6 +535,11 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
             return png
         finally:
             _terminate(proc)
+            try:
+                shutil.rmtree(_profile_dir, ignore_errors=True)
+            except Exception:  # noqa: BLE001
+                pass
+            _profile_dir = ""
 
     try:
         if atomic_write_json is not None:
