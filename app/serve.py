@@ -31,6 +31,35 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 
+def _force_utf8_stdio() -> None:
+    """把 stdio 强制成 UTF-8（幂等，尽早调用）。
+
+    ⭐⭐⭐ 2026-10-12 修复「桌面版无法在中文目录运行」：
+      Windows 上 Python 的 sys.stdout/stderr 默认编码跟随**系统 locale**
+      （简体中文 = cp936/GBK）。安装目录、数据目录、日志内容只要含中文，
+      任何一次 print / logging 就会抛 UnicodeEncodeError，进程随即退出 ——
+      表现就是「装在中文路径下就打不开 / 一闪而过 / 后端起不来」。
+
+    为什么光靠 main.js 传 PYTHONUTF8/PYTHONIOENCODING 还不够：
+      · 计划任务、run_serve.bat、手工 `python serve.py` 等入口没有那两个变量；
+      · 本文件后面还会把 sys.stdout 换成 _Tee（tee 到**原始** stdio），
+        如果原始流仍是 GBK，tee 照样会炸。
+      所以这里自己做一层兜底：把两个流 reconfigure 成 utf-8 + errors=replace，
+      「宁可显示成问号，也不要因为一个中文路径把整个后端打死」。
+    幂等：重复调用无副作用（reconfigure 可重复执行）。
+    """
+    for _name in ("stdout", "stderr"):
+        _s = getattr(sys, _name, None)
+        try:
+            if _s is not None and hasattr(_s, "reconfigure"):
+                _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 某些流（已重定向/被包裹）不支持
+            pass
+
+
+_force_utf8_stdio()
+
+
 def _load_flask_app():
     """按文件路径稳健加载 app/app.py 里的 Flask 实例。
 

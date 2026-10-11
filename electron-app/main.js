@@ -735,6 +735,18 @@ async function startBackend() {
       APP_HOST: '127.0.0.1',
       APP_PORT: String(port),
       PYTHONUNBUFFERED: '1',
+      // ⭐⭐⭐ 2026-10-12 修复「桌面版无法在中文目录运行」：
+      //   Windows 上 Python 的 stdout/stderr 默认跟随**系统 locale 编码**
+      //   （简体中文 Windows = cp936/GBK）。安装目录、数据目录或日志内容一旦含中文，
+      //   任何一次 print/logging 就会抛 UnicodeEncodeError，后端进程随即死掉 ——
+      //   表现就是「装在中文路径下就打不开/闪退」。
+      //   下面两项分别关闭这层不确定性：
+      //     PYTHONUTF8=1        → 开启 Python UTF-8 模式（PEP 540），
+      //                           文件系统编码、stdio 编码全部按 UTF-8 处理；
+      //     PYTHONIOENCODING    → 显式钉死 stdio 编码与错误策略，防止被系统 locale 覆盖。
+      //   两者叠加后，路径含中文（甚至路径里有生僻字/emoji）都不会再影响启动。
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8:replace',
       // 不手动转发 COMFYUI_* / MJSCXT_* —— 应用自带 env_loader 会读 .env
     };
     // 可写数据目录：打包态指向 userData（Program Files 只读），开发态不设（源根可写）
