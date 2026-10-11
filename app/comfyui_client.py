@@ -3653,6 +3653,28 @@ class ComfyUIClient:
         ("字迹潦草无法辨认", "笔迹潦草难辨"),
     )
 
+    #: ⭐⭐ 2026-10-11：色差澄清表。用户实测「上一格纸上还没洞，下一格突然出现**带血洞**」
+    #:   —— 剧本写的其实是「红色圆珠笔批注…末笔戳破纸面留小洞」，全片 0 镜提到「血」；
+    #:   是 H3 把「红色圆珠笔」的红色理解成了血迹。
+    #:   这类「颜色 + 载体」的歧义（红笔/红墨水 vs 血、红漆 vs 血）在扩散模型上反复出现，
+    #:   所以在提示词层直接跟一句「是墨迹不是血」把它钉死；只在该词确实出现时才加，
+    #:   不给无关镜头引入新概念。
+    _INK_NOT_BLOOD = (
+        ("红色圆珠笔", "红色圆珠笔（普通墨水，绝非血迹）"),
+        ("红笔", "红笔（普通墨水，绝非血迹）"),
+        ("红色墨水", "红色墨水（普通墨水，绝非血迹）"),
+    )
+
+    @staticmethod
+    def _clarify_ink(text: str) -> str:
+        """澄清「红色笔迹 ≠ 血迹」（见上方说明）。仅命中关键词时改写。"""
+        t = str(text or "")
+        for _a, _b in ComfyUIClient._INK_NOT_BLOOD:
+            if _a in t:
+                t = t.replace(_a, _b)
+                break
+        return t
+
     @staticmethod
     def _strip_text_meta(text: str) -> str:
         """把画面描述里的「文字元描述词」换成不可绘制的说法（见上方说明）。"""
@@ -3725,9 +3747,11 @@ class ComfyUIClient:
         #   用浅拷贝，避免污染调用方持有的 shot（它还要用于质检/落盘）。
         shot = dict(shot or {})
         if shot.get("description"):
-            shot["description"] = ComfyUIClient._strip_text_meta(shot["description"])
+            shot["description"] = ComfyUIClient._clarify_ink(
+                ComfyUIClient._strip_text_meta(shot["description"]))
         if shot.get("visual_detail"):
-            shot["visual_detail"] = ComfyUIClient._strip_text_meta(shot["visual_detail"])
+            shot["visual_detail"] = ComfyUIClient._clarify_ink(
+                ComfyUIClient._strip_text_meta(shot["visual_detail"]))
         camera = str(shot.get("camera") or "中景").strip()
         # A1：景别优先读权威字段 shot_type，缺失回退解析 camera 复合串（旧剧本零回归）
         cam_key = shot_framing(shot)        # "" = 本镜没给景别（camera 只有机位/运镜）
