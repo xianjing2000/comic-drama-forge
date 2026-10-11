@@ -1648,6 +1648,79 @@ def _extract_screen_text(desc: str) -> str:
     return "、".join(dict.fromkeys(out))
 
 
+#: ⭐⭐ 2026-10-11：画面描述里的「文字元描述词」与「颜色歧义词」的**单一清洗点**。
+#:   背景（系统排查结论）：同一个坑在**多个消费点**各自漏 ——
+#:     · 分镜侧（comfyui_client.build_storyboard_prompt）读 description/visual_detail/
+#:       first_frame/last_frame/action；
+#:     · 视频侧（h3_prompt_kit.build_detailed_description）**也读 description**。
+#:   只补其中一处，另一处照样把元描述词写进提示词（实测 H3 侧泄漏 12/60 镜：
+#:   shot2「乱码/不可读」、shot13「小字」、shot22「红色圆珠笔」…）。
+#:   与其在每个消费点重复实现、且每加一个消费点就漏一次，不如在**剧本落盘前清一次**。
+#:
+#:   ⚠️ surface_text **绝不清洗** —— 它是要模型照抄的确切文字（09:00 / 2704 / 守则八条）。
+#:   ⚠️ dialogue 也不清洗 —— 台词是给人听的，且已由 h3_prompt_kit 单独规范化。
+_META_WORD_MAP = (
+    ("乱乱码", "不可辨认的字符"),
+    ("字迹潦草无法辨认", "笔迹潦草难辨"),
+    ("无法辨认", "难以辨清"),
+    ("不可读", "读不出内容"),
+    ("乱码", "不可辨认的字符"),
+    ("字样", "字面样式"),
+    ("字迹", "笔迹"),
+    ("小字", "细小的印刷体"),
+    ("符号", "标记"),
+    ("字符", "字形"),
+    ("数字", "数码"),
+    ("红色圆珠笔", "红色圆珠笔（普通墨水，绝非血迹）"),
+    ("红笔", "红笔（普通墨水，绝非血迹）"),
+    ("红色墨水", "红色墨水（普通墨水，绝非血迹）"),
+)
+
+#: 需要清洗的镜头字段（= 会进提示词的画面类描述字段）
+#: ⚠️ motion 必须在列：系统排查发现 shot49/50/58 的「符号/数字」正是从 motion 漏进
+#:   提示词的（comfyui_client:3960 与 h3_prompt_kit:983/1757 都读它），
+#:   而 description 那几条路已清 —— 漏一个字段就等于没清。
+#: ⚠️ dialogue / dialogue_text **不在列**：台词是给人听的（如 shot49「这不是数字……」），
+#:   清洗会篡改台词内容。
+#: ⚠️ edit_reason 不在列：已确认两个消费点都不读它，不进提示词。
+_META_CLEAN_FIELDS = ("description", "visual_detail", "first_frame", "last_frame",
+                      "action", "motion")
+
+
+def clean_shot_meta_words(shots: list) -> int:
+    """清洗镜头画面描述里的元描述词 / 颜色歧义词（原地修改），返回改动的镜头数。
+
+    见 _META_WORD_MAP 上方说明：这是**唯一清洗点**，保证分镜侧与视频侧拿到的
+    都是干净描述；surface_text 与 dialogue 不动。任何异常都不影响主流程。
+    """
+    try:
+        n = 0
+        for sh in shots or []:
+            if not isinstance(sh, dict):
+                continue
+            changed = False
+            for fld in _META_CLEAN_FIELDS:
+                v = sh.get(fld)
+                if not v:
+                    continue
+                t = str(v)
+                for _a, _b in _META_WORD_MAP:
+                    if _a in t:
+                        t = t.replace(_a, _b)
+                if t != str(v):
+                    sh[fld] = t
+                    changed = True
+            if changed:
+                n += 1
+        if n:
+            logger.info("已清洗 %d 个镜头的画面描述（元描述词 / 颜色歧义），"
+                        "保证分镜与视频提示词不把「乱码」「小字」这类词当字画出来", n)
+        return n
+    except Exception as e:  # noqa: BLE001 - 清洗失败不影响出片
+        logger.warning("画面描述清洗失败（忽略，不影响主流程）：%s", e)
+        return 0
+
+
 def inject_surface_text_into_shots(shots: list, bible: dict) -> int:
     """把物品 / 场景的 surface_text 回填进引用它们的镜头。
 
@@ -3874,6 +3947,11 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     # ⭐ 2026-10-10：把资产级的确切文字（物品 surface_text / 场景告示）回填进镜头，
     #   否则出图侧拿不到 shot 的 surface_text 字段 → 模型自己编字（用户实测缺陷）。
     inject_surface_text_into_shots(shots, bible)
+    # ⭐⭐ 2026-10-11：**唯一清洗点** —— 清掉画面描述里的元描述词（乱码/小字/符号…）
+    #    与颜色歧义词（红色圆珠笔 → 墨迹非血迹）。
+    #    必须放在这里而不是各消费点：分镜侧（comfyui_client）与视频侧（h3_prompt_kit）
+    #    都要读 description，只补一处另一处照样泄漏（实测 H3 侧漏 12/60 镜）。
+    clean_shot_meta_words(shots)
 
     # ---- 单集镜头数：不再截断（2026-10-09 用户口径）----
     # 曾经这里会把超过 MAX_SHOTS_PER_EPISODE(78) 的镜头**硬截断**（丢尾部情节）。
