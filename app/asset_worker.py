@@ -106,31 +106,52 @@ _CROWD_NAME_MARKERS = (
     "乘客", "行人", "店员", "服务员", "保安", "杂役", "学徒",
 )
 
-#: 角色被视为「需要单独出镜」的镜头数门槛。
-#: 低于它、且一句台词都没有 → 只当群像（出合影即可，不烧三视图）。
-CHARACTER_TIER_MIN_SHOTS = int(os.getenv("MJSCXT_CHAR_MIN_SHOTS", "4"))
+#: ⭐⭐ 2026-10-12 用户指定「四档成本分级」（产出由全到简，成本递减）：
+#:     primary    → 四区 character sheet（正/侧/背 + 面部特写 + 配色板 + 细节/比例）
+#:     supporting → 双格设定图（正面 + 侧面）—— 够用且省掉另外两区
+#:     minor      → 单张正面立绘
+#:     crowd      → 多人合影（同批群像共用一张）
+#:   阈值全部可用环境变量覆盖，便于按项目调。
+
+#: primary 门槛：镜头数 ≥ 此值 → 贯穿全剧的主角（必须给最完整的设定图）。
+CHARACTER_PRIMARY_MIN_SHOTS = int(os.getenv("MJSCXT_CHAR_PRIMARY_SHOTS", "15"))
+
+#: supporting 门槛：镜头数 ≥ 此值，**或**台词数 ≥ 台词门槛 → 主要配角（经常单独出镜）。
+CHARACTER_SUPPORT_MIN_SHOTS = int(os.getenv("MJSCXT_CHAR_SUPPORT_SHOTS", "6"))
+CHARACTER_SUPPORT_MIN_LINES = int(os.getenv("MJSCXT_CHAR_SUPPORT_LINES", "4"))
+
+#: 兼容旧名（历史代码/文档引用过）：等价于 supporting 的镜头门槛。
+CHARACTER_TIER_MIN_SHOTS = CHARACTER_SUPPORT_MIN_SHOTS
 
 
 def _character_tier(project_name: str, char: dict, episode_no=None) -> str:
-    """判定角色级别：``primary`` / ``supporting`` / ``crowd``；读不到剧本返回 ``unknown``。
+    """判定角色级别：``primary`` / ``supporting`` / ``minor`` / ``crowd``。
 
-    用户口径（2026-10-12）：群像角色且后续剧情与他无关 → **不生成三视图**，
-    改用一张多人合影。这能省掉大量生成时间与显存，且一张图里所有人画风天然统一。
+    用户口径（2026-10-12 四档成本分级）：
+      primary    → 四区 character sheet（贯穿全剧，一致性是生命线，给最全的）
+      supporting → 双格设定图（正面 + 侧面）—— 经常单独出镜，但用不到面部特写/配色板
+      minor      → 单张正面立绘 —— 只露一两次脸，够用
+      crowd      → 多人合影（同批群像共用一张；画风天然统一）
 
     判据（全部来自剧本事实，确定性、零 LLM 成本）：
       1. 角色/bible 里**显式写死的 tier** → 直接采纳（用户手改过就永远听他的）；
-      2. 本集**有台词** → 必然有对口型的单人特写 → supporting；
-         （对应「后续哪怕只有一句台词，也不能只从合影裁脸」这条前提）
-      3. 本集**镜头数 ≥ CHARACTER_TIER_MIN_SHOTS** → 会被反复单独看到 → supporting；
-      4. 名字命中群像标记词 → crowd；
-      5. 其余 → crowd（只在群像场出现）。
-    ``unknown`` 表示读不到剧本（尚未生成）→ 调用方**按旧行为生成**，绝不用它卡住资产。
+      2. 读不到剧本 → ``unknown``（调用方按旧行为出四区，绝不因此卡住资产）；
+      3. 镜头数 ≥ CHARACTER_PRIMARY_MIN_SHOTS → primary；
+      4. 镜头数 ≥ SUPPORT_MIN_SHOTS 或 台词数 ≥ SUPPORT_MIN_LINES → supporting；
+      5. **只要出镜过（≥1 镜）或有台词** → minor ——
+         对应「后续哪怕只有一句台词，也不能只从合影裁脸」这条前提：
+         有独立戏份就必须有属于自己的图，只是不用给最全的版面；
+      6. 名字命中群像标记词，或**一镜未出** → crowd（只活在群像场里）。
+
+    实测分层（进境_整本小说 / 60 镜）：羡进 46 镜 → primary；灰制服女人 7 镜 4 台词
+    → supporting；便利店女店员 3 镜 3 台词、红工牌女人 3 镜 2 台词 → minor；
+    陈默/林栖/无脸员工 0 镜 → crowd。
     """
     try:
         # 1) 显式覆盖优先
         for k in ("tier", "character_tier", "role_tier"):
             v = str((char or {}).get(k) or "").strip().lower()
-            if v in ("primary", "supporting", "crowd"):
+            if v in ("primary", "supporting", "minor", "crowd"):
                 return v
         name = str((char or {}).get("name") or "").strip()
         if not name:
@@ -143,18 +164,22 @@ def _character_tier(project_name: str, char: dict, episode_no=None) -> str:
         if not shots:
             return "unknown"
         appear = [s for s in shots if name in (s.get("characters_in_shot") or [])]
-        # 2) 有台词 → 必须能单独出镜（对口型）
+        # 台词数（同一角色在多句台词里分别计数）
+        _lines = 0
         for s in appear:
             for d in (s.get("dialogue") or []):
                 if isinstance(d, dict) and str(d.get("speaker") or "").strip() == name:
-                    return "supporting"
-        # 3) 镜头数达标 → 单独出镜次数足够多
-        if len(appear) >= CHARACTER_TIER_MIN_SHOTS:
+                    _lines += 1
+        # 3) 主角
+        if len(appear) >= CHARACTER_PRIMARY_MIN_SHOTS:
+            return "primary"
+        # 4) 主要配角
+        if len(appear) >= CHARACTER_SUPPORT_MIN_SHOTS or _lines >= CHARACTER_SUPPORT_MIN_LINES:
             return "supporting"
-        # 4) 名字像群像 → crowd
-        if any(m in name for m in _CROWD_NAME_MARKERS):
-            return "crowd"
-        # 5) 少量镜头且无台词 → 也按群像处理（只在群像场出现）
+        # 5) 有独立戏份（出镜过或有台词）→ 次要角色，仍单独出图
+        if appear or _lines > 0:
+            return "minor"
+        # 6) 一镜未出 → 群像（只活在合影里）
         return "crowd"
     except Exception as e:  # noqa: BLE001 - 判定失败按旧行为（生成），不拦资产
         logger.debug("角色级别判定失败（按正常生成处理）：%s", e)
@@ -892,6 +917,12 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                                 _crowd = _crowd_names_for(project_name)
                                 if _crowd:
                                     _base_kw["crowd_names"] = _crowd
+                                # 名单为空（读不到 bible/剧本）→ 不传，回落四区，不误伤
+                            elif _tier in ("supporting", "minor"):
+                                # 主要配角 → 双格正侧；次要角色 → 单张正面立绘。
+                                # primary 与 unknown **不传 tier** —— 一律走四区设定集，
+                                # 保证「读不到剧本时按旧行为」这条底线不被破坏。
+                                _base_kw["tier"] = _tier
                         base_files = gen_base(prompt_zh, seed=seed, style=gen_style,
                                               size=gen_size, filename_prefix=_gen_prefix,
                                               **_base_kw)

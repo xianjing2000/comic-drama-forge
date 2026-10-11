@@ -2381,25 +2381,38 @@ class ComfyUIClient:
     def generate_character_base(self, prompt_zh: str, seed: int = None,
                                 style: str = "", size=None,
                                 filename_prefix: str = None,
-                                crowd_names=None) -> List[str]:
-        """生成角色基础图。
+                                crowd_names=None, tier: str = "") -> List[str]:
+        """生成角色基础图。按**四档成本分级**决定出图形态。
 
-        ``crowd_names``（2026-10-12 新增）：非空即表示**这是群像角色** —— 不出四区
-        三视图，改出一张「多人合影」设定图（用户口径：「角色是群像、后续剧情也与他
-        无关时不用生成三视图，直接生成一张多人图就行了」）。判据/分层见
-        ``asset_worker._character_tier``；此处只负责按决定好的形态出图。
+        2026-10-12 用户指定（判据见 ``asset_worker._character_tier``）：
+          primary    → 四区 character sheet（正/侧/背 + 面部特写 + 配色板 + 细节/比例）
+          supporting → 双格设定图（正面 + 侧面）
+          minor      → 单张正面全身立绘
+          crowd      → 多人合影（``crowd_names`` 给出同批群像名单）
+        ``tier`` 为空 / unknown 时一律走 primary 的四区版式 —— 读不到剧本时按旧行为，
+        宁可多出信息，也不要用一个猜出来的档位把角色画残。
         """
         logger.info(f"生成角色基础图: {prompt_zh[:50]}...")
+        _tier = str(tier or "").strip().lower()
         if crowd_names:
             # 群像路径：一张多人合影，画风天然统一（同图生成，光影色调不会各画各的）。
             # ⚠️ 与四区三视图互斥：合影里没有「正/侧/背」分区，下游也不做切分。
             logger.info("角色基础图走【群像合影】版式（%d 人）：%s",
                         len(list(crowd_names)), "、".join(list(crowd_names))[:80])
             prompt_zh = self._ensure_crowd_prompt(prompt_zh, style, names=crowd_names)
+        elif _tier == "minor":
+            # 次要角色：单张正面全身立绘（省掉正/侧/背多格与设定集版面）。
+            logger.info("角色基础图走【单张正面立绘】版式（次要角色）")
+            prompt_zh = self._ensure_solo_prompt(prompt_zh, style)
+        elif _tier == "supporting":
+            # 主要配角：双格（正面 + 侧面）。够他单独出镜的形体一致性，但省掉另三区。
+            logger.info("角色基础图走【双格正侧设定图】版式（主要配角）")
+            prompt_zh = self._ensure_pair_prompt(prompt_zh, style)
         else:
-            # 角色基础图 = 设定集（三视图横排）。必须确定性注入「全身 + 横排三视图」版式硬约束：
-            # 剧本层提示词只写外貌特征、不含构图约束（风格词也由程序追加，版式同属构图维度），
-            # 不注入则模型默认半身/胸像构图且三格版式不可控，多视角与分镜一致性都会崩坏
+            # primary / unknown：角色基础图 = 设定集（三视图横排）。必须确定性注入
+            # 「全身 + 横排三视图」版式硬约束：剧本层提示词只写外貌特征、不含构图约束
+            # （风格词也由程序追加，版式同属构图维度），不注入则模型默认半身/胸像构图
+            # 且三格版式不可控，多视角与分镜一致性都会崩坏
             # （2026-09-19 实测：三视图出成半身，且同图内人物身高比例不一致）。
             prompt_zh = self._ensure_fullbody_prompt(prompt_zh, style)
         # ⭐ 2026-10-06（用户指定）：角色未明说国籍/人种时，**一律默认中国人（亚洲面孔）**。
@@ -2498,6 +2511,70 @@ class ComfyUIClient:
         "全身可见，人物之间保持自然间距、不互相遮挡面部，"
         "严禁把任何一个人画成单独的三视图或四区设定表（本图只要一张多人合影）"
     )
+
+    #: ⭐⭐ 2026-10-12 四档成本分级里「主要配角」的版式：**双格设定图**（正面 + 侧面）。
+    #:    比四区 sheet 省掉「面部特写+配色板」「局部细节」「身高比例」三区 ——
+    #:    主要配角经常单独出镜、需要正侧两面的形体一致性，但用不到设定集级别的信息量。
+    #:    marker = "角色设定双视图"。
+    _PAIR_SHEET_CN_LAYOUT = (
+        "角色设定双视图，人物设定表，白色背景，清晰中文文字排版，"
+        "画面左右分两格：左格「正面」全身立绘，右格「侧面」全身立绘。"
+        "两格必须是同一角色（五官/发型/服装/配色/体型完全一致）。"
+        "画面文字内容必须清晰显示：「正面」「侧面」{labels_part}。"
+        "构图左右对称、人物等高等大，纯白背景，无场景无道具，自然光照，高清纹理。"
+    )
+
+    #: ⭐⭐ 同分级里「次要角色」的版式：**单张正面全身立绘**（只露一两次脸，够用）。
+    #:    marker = "单人全身立绘"。
+    _SOLO_CN_LAYOUT = (
+        "单人全身立绘，人物设定图，白色背景，清晰中文文字排版，"
+        "正面朝向镜头，自然站姿，全身完整可见（头顶到脚底都不出画），"
+        "画面文字内容必须清晰显示姓名与身份{labels_part}。"
+        "纯白背景，无场景无道具，自然光照，高清纹理，细节丰富。"
+    )
+
+    @staticmethod
+    def _ensure_pair_prompt(prompt_zh: str, style: str = "") -> str:
+        """给**主要配角**补「双格设定图（正面 + 侧面）」版式（幂等）。
+
+        四档分级见 asset_worker._character_tier 的 docstring：
+          primary → 四区 sheet / supporting → **本函数据此出双格** / minor → 单图 / crowd → 合影。
+        """
+        text = str(prompt_zh or "").strip()
+        marker = "角色设定双视图"
+        if marker in text or "人物设定表" in text or "character sheet" in text:
+            return text
+        base = style_kit.with_reference_style(text, style) if style else text
+        if marker in base or "人物设定表" in base or "character sheet" in base:
+            return base
+        labels = ComfyUIClient._extract_trait_labels(text)
+        labels_part = ("，以及该角色特征标签：" + "、".join(labels)) if labels else ""
+        suffix = ComfyUIClient._PAIR_SHEET_CN_LAYOUT.replace("{labels_part}", labels_part)
+        base = base.rstrip("。，,.;； ")
+        sep = "" if base.endswith((".", "！", "?", "？")) else "。"
+        return (base + sep + suffix) if base else suffix
+
+    @staticmethod
+    def _ensure_solo_prompt(prompt_zh: str, style: str = "") -> str:
+        """给**次要角色**补「单张正面全身立绘」版式（幂等）。
+
+        ⚠️ 为什么次要角色也**不**从合影里裁：用户提的前提 2 —— 只要他有哪怕一次独立
+        出镜，从合影裁出来的脸在单独镜头里就会走样。所以给他一张自己的单图，
+        只是不给「正面/侧面/面部特写/配色板」那么全的版面。
+        """
+        text = str(prompt_zh or "").strip()
+        marker = "单人全身立绘"
+        if marker in text or "人物设定表" in text or "character sheet" in text:
+            return text
+        base = style_kit.with_reference_style(text, style) if style else text
+        if marker in base or "人物设定表" in base or "character sheet" in base:
+            return base
+        labels = ComfyUIClient._extract_trait_labels(text)
+        labels_part = ("（" + "、".join(labels) + "）") if labels else ""
+        suffix = ComfyUIClient._SOLO_CN_LAYOUT.replace("{labels_part}", labels_part)
+        base = base.rstrip("。，,.;； ")
+        sep = "" if base.endswith((".", "！", "?", "？")) else "。"
+        return (base + sep + suffix) if base else suffix
 
     @staticmethod
     def _ensure_crowd_prompt(prompt_zh: str, style: str = "", names=None) -> str:
