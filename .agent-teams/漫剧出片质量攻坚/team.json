@@ -572,14 +572,16 @@
         "t10",
         "t11",
         "t12",
-        "t13"
+        "t13",
+        "t14",
+        "t15"
       ],
       "attempt": 0,
       "createdAt": 1791780375678,
-      "updatedAt": 1791783377519,
+      "updatedAt": 1791783839731,
       "kind": "verification",
       "round": 1,
-      "objective": "对 T1-T6 + T10 全部实现做独立验证，不接受实现者自述，只认可复现证据。\n\n验证范围：T1 canon 设定表与注入 / T2 跨集台词去重 / T3 道具参考图与过渡镜 /\nT4 角色音色参考链路 / T6 文字道具后期叠加 / T10 H3 视频层设定表注入。\n\n## 并发干扰的处理（重要，来自 T1 执行者的实测反馈）\n团队成员会同时改文件并跑全量测试，可能出现『某次全量跑恰好撞上队友正在改文件』导致的假失败。\n实测案例：13:12 一次全量跑出现 2 例失败，来自队友 13:11:40 新建的 tests/test_voice_bank_refs.py，\n与失败无关的模块被误判。应对：\n  · 若发现失败用例集中在单个新建测试模块，先确认该模块是否正在被队友修改；\n  · 可用隔离复跑排除干扰：python .local\\_run_tests_excluding.py <模块名>（T1 执行者实测隔离跑 299 例全绿）；\n  · 最终判定必须以『所有写入者都已停下之后』的一次干净全量跑为准，并在报告里写明这一次的时间点。\n\n## 四副本路径口径（已由 Captain 实测确认，按此比对，不要用通配写法）\n① <workspace>/app                              = C:\\Users\\liujianghua\\WorkBuddy\\2026-09-09-16-55-22\\漫剧生成系统\\app\n② <workspace>/electron-app/_backend/app\n③ C:\\mjscxt_p139\\resources\\backend            ← ⚠️ app 模块【平铺】在此目录下，没有 backend/app/ 子目录\n④ %APPDATA%\\mjscxt-desktop\\resource-mirror\\app\n注意：③ 的路径容易写错成 backend/app/xxx.py，实际应为 backend/xxx.py。\n\n## 已知的漂移容忍项（不要误报为失败）\ntools/check_app_sync.py 会报 p139/backend 与 resource-mirror 存在 pipeline.py / video_postprocess.py 漂移 ——\n这是因为队友正在并发修改这些文件（本轮实现任务尚未全部结束）。\n判定时机：必须在全部写入者停下后复检；若那时仍有漂移，才是真问题。",
+      "objective": "对 T1 / T2 / T3 / T4 / T6 / T10 / T11 / T12 / **T13** 全部实现做独立验证，\n不接受实现者自述，只认可复现证据。\n\n验证范围：\n  · T1  canon 设定表与注入\n  · T2  跨集台词去重\n  · T3  道具固定参考图与渗血洞过渡镜\n  · T4  角色音色参考链路固化\n  · T6  文字道具后期叠加\n  · T10 H3 视频层设定表注入（含带参考图主路径 build_ref2va 的覆盖）\n  · T11 配置通道一致性\n  · T12 常量登记（H3_CANON_MAX_CHARS / quality_stage.AUDIO_HARD_SILENT_RATIO）\n  · **T13 tests/test_mutation_guards.py 加载方式修复**（由 verifier 本人实现，必须由本任务独立复核，\n        重点核查：加载名不含 tests. 前缀、连跑多次结果稳定、变异拦截强度未被削弱）\n\n## 环境路径口径（已由 Captain 实测确认，t7 执行者此前找错过，务必按此执行）\n四副本【全部存在】，逐个核对不存在『本工作区内不存在』的情况：\n  ① <workspace>/app\n     = C:\\Users\\liujianghua\\WorkBuddy\\2026-09-09-16-55-22\\漫剧生成系统\\app\n  ② <workspace>/electron-app/_backend/app\n  ③ C:\\mjscxt_p139\\resources\\backend   ← 平铺结构，app 模块直接在此目录下，没有 backend/app/ 子目录\n  ④ %APPDATA%\\mjscxt-desktop\\resource-mirror\\app\n\n生产日志目录【存在】，路径为：\n  %APPDATA%\\mjscxt-desktop\\mjscxt-data\\logs\\serve_stdout.log\n  注意：不是在 <workspace>/logs 下，也不是在 C:\\mjscxt_p139\\logs 下。\n  真实数据根是 %APPDATA%\\mjscxt-desktop\\mjscxt-data\\，<workspace>/output 是空壳。\n\n## 并发干扰的处理\n  · 若失败用例集中在单个新建测试模块，先确认该模块是否正被队友修改；\n  · 可用隔离复跑排除：python .local\\_run_tests_excluding.py <模块名>；\n  · 最终判定必须以『所有写入者都停下之后』的一次干净全量跑为准，并在报告写明该时间点。\n\n## 已知的合法漂移（不要误报）\n  · tools/check_app_sync.py 的 CHECK_EXIT 可能为 1，仅因 dist/ 便携版打包产物陈旧（checker 自身声明允许陈旧）；\n    判定时应关注 app/ 下的真实面，而非 dist/。\n  · 本仓库存在另一条并行工作流在提交改动（同一 git 身份 xianjing2000），\n    因此 git log 里的提交不完全来自本团队；归属判断应基于文件内容与本团队任务的 changedPaths，而非提交作者。",
       "acceptance": [
         "逐项跑通每个实现任务声明的 verify 命令并记录退出码",
         "最终全量测试在『全部写入者停下后』跑一次干净结果，与基线对比（T1 完成时为 325 passed, 1 skipped；若后续任务新增测试则以此为滚动基线），任何回退都要指出具体失败用例与所属模块",
@@ -620,6 +622,17 @@
             "verify": [
               "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\""
             ]
+          }
+        },
+        {
+          "at": 1791783782690,
+          "by": "captain",
+          "reason": "t13 由 verifier 成员本人执行实现，按纪律他未自我 approve 并主动提示需要独立复核；\n同时 t13 是所有实现任务中唯一未纳入验证范围的一项（原 objective 只列 T1-T6+T10）。\n这里把 t13 的改动正式纳入 t7 的验证范围，避免『执行者自证』的空档。\n另修正 t7 执行者此前报告的两处环境认知偏差（四副本路径与日志目录），避免验证跑空。",
+          "fields": [
+            "objective"
+          ],
+          "previous": {
+            "objective": "对 T1-T6 + T10 全部实现做独立验证，不接受实现者自述，只认可复现证据。\n\n验证范围：T1 canon 设定表与注入 / T2 跨集台词去重 / T3 道具参考图与过渡镜 /\nT4 角色音色参考链路 / T6 文字道具后期叠加 / T10 H3 视频层设定表注入。\n\n## 并发干扰的处理（重要，来自 T1 执行者的实测反馈）\n团队成员会同时改文件并跑全量测试，可能出现『某次全量跑恰好撞上队友正在改文件』导致的假失败。\n实测案例：13:12 一次全量跑出现 2 例失败，来自队友 13:11:40 新建的 tests/test_voice_bank_refs.py，\n与失败无关的模块被误判。应对：\n  · 若发现失败用例集中在单个新建测试模块，先确认该模块是否正在被队友修改；\n  · 可用隔离复跑排除干扰：python .local\\_run_tests_excluding.py <模块名>（T1 执行者实测隔离跑 299 例全绿）；\n  · 最终判定必须以『所有写入者都已停下之后』的一次干净全量跑为准，并在报告里写明这一次的时间点。\n\n## 四副本路径口径（已由 Captain 实测确认，按此比对，不要用通配写法）\n① <workspace>/app                              = C:\\Users\\liujianghua\\WorkBuddy\\2026-09-09-16-55-22\\漫剧生成系统\\app\n② <workspace>/electron-app/_backend/app\n③ C:\\mjscxt_p139\\resources\\backend            ← ⚠️ app 模块【平铺】在此目录下，没有 backend/app/ 子目录\n④ %APPDATA%\\mjscxt-desktop\\resource-mirror\\app\n注意：③ 的路径容易写错成 backend/app/xxx.py，实际应为 backend/xxx.py。\n\n## 已知的漂移容忍项（不要误报为失败）\ntools/check_app_sync.py 会报 p139/backend 与 resource-mirror 存在 pipeline.py / video_postprocess.py 漂移 ——\n这是因为队友正在并发修改这些文件（本轮实现任务尚未全部结束）。\n判定时机：必须在全部写入者停下后复检；若那时仍有漂移，才是真问题。"
           }
         }
       ]
@@ -871,12 +884,12 @@
     {
       "id": "t11",
       "subject": "修复托管/自主配置通道对布尔开关的静默丢弃",
-      "status": "in_progress",
+      "status": "completed",
       "assignee": "audio-eng",
       "dependencies": [],
       "attempt": 1,
       "createdAt": 1791782194825,
-      "updatedAt": 1791782242156,
+      "updatedAt": 1791783747705,
       "kind": "implementation",
       "round": 1,
       "objective": "修复『配置写了却不生效、且没有任何提示』的通道不一致问题，避免用户以为已经关掉/打开某个开关，实际并未生效。\n\n## 背景：T4 已修复的同类问题（作为参照）\napp/pipeline.py:311-326 normalize_config 原先用 bool(v)，而 bool('false') == True，\n导致前端传 'false'/'0' 被静默当成开启。T4 已把所有布尔开关改为字符串真值解析。\n本任务要解决的是【剩下的一半】：即使解析正确，某些键在国际托管链路上仍然到不了执行层。\n\n## 已核实的缺陷（T4 执行者实测，直接采信）\n· app/autopilot.py:185-205 的 PLAN_DEFAULTS 只放行 enable_tts_pre；\n  app/routes/autopilot.py:280 的 set_plan 按 `k in PLAN_DEFAULTS` 过滤 →\n  enable_tts / enable_mix 写入计划时被静默丢弃。\n· app/routes/autonomous.py:32-45 的入参白名单仍放行 'enable_tts','enable_tts_pre','enable_mix'，\n  与 PLAN_DEFAULTS 的实际接受集合不一致 → 通过校验但最终被丢弃，属于『假通道』。\n· app/autopilot.py:203-205 还有注释明说这些键会被静默忽略。\n· config.H3_AUDIO_SOURCE（app/config.py:812）全仓库零消费者（只在 docs/system_design.md:159 被引用）。\n\n## 本轮口径（用户 2026-10-12 指示）\n「先以 H3 原生音轨为准，tts 先只生成角色音色参考音频」\n→ enable_mix 在本轮【保持关闭】是符合预期的；本任务要修的是【通道一致性】，\n   不是把 mix 打开。即：写进去要能生效、写不进去要能报错或明确告知，不能静默吞掉。\n   对 enable_tts：用户可能会关它来停掉参考音，这个开关必须真正可控。",
@@ -920,7 +933,65 @@
       ],
       "attemptId": "46b9f389-ebce-4df0-87f5-0600cf64a0d9",
       "reassigning": false,
-      "output": "开始：核对三条配置通道的接受集合，修静默丢弃，补 tests/test_config_channels.py。"
+      "output": "# T11 交付：托管/自主配置通道的一致性修复（不再静默丢弃）\n\n## 0 结论\n三条通道现在共用同一套判定（autopilot.split_plan_patch）：enable_tts 真正可控、enable_mix 可写但默认仍 False（本轮口径）；\n「写了不生效」一律显式回报（计划接口整笔 400 + reasons；一键启动进 ignored/warning + 后端日志）；H3_AUDIO_SOURCE 定为保留字段并加运行时 warning。\n全量：**Ran 461 tests, OK (skipped=1), exit 0**（连续 4 次绿）。\n\n## 1 三方通道对照表（不一致项已消除）\n| 通道 | 位置 | 修复前 → 修复后 |\n|---|---|---|\n| A 计划默认 | app/autopilot.py PLAN_DEFAULTS | 23 键（缺 enable_tts/enable_mix）→ **25 键**（补 enable_tts=True、enable_mix=False） |\n| B 计划接口 | app/routes/autopilot.py plan_set + enable | 旧：k in PLAN_DEFAULTS **静默过滤**（未知键丢掉仍 200）→ 新：autopilot.split_plan_patch，未知键**整笔 400** + rejected/reasons/accepted_keys |\n| C 一键启动 | app/routes/autonomous.py start | 旧：另一张手写白名单（含 enable_keyframe/prewarm_asset_prompt/video_mode 等计划不接受的键＝假通道）→ 新：同一个 split_plan_patch，未知键进 ignored/rejected/warning + 日志 |\n\n## 2 round-trip 实测（写入→接口读回→plan.json）\n- POST plan/t11_ev {enable_tts:false, enable_tts_pre:false} → 200；GET plan 读回 enable_tts=**False** enable_tts_pre=**False**；plan.json 同样 False。\n- 再写 True/True/True → 200；读回 **True/True/True**（随后按本轮口径把 enable_mix 恢复 **False**）。\n- /api/autopilot/enable {project, enable_mix:false} → 200 success=true，plan.enable_mix=**False**、enabled=true。\n- T11 前：enable_tts 写进去是 200 OK 但计划里根本没这个键。\n\n## 3 「写了但不生效」的反馈实测\n- POST plan {enable_tts:true, enable_keyframe:true} → **400**：error=\"不支持的字段（未写入任何内容）：enable_keyframe\"，rejected={enable_keyframe:true}，reasons 给「尾帧（keyframe）步骤已于 2026-10-05 移出 STEP_SEQUENCE…」，accepted_keys=25 键；计划前后无变化（不做部分生效）。\n- POST autonomous/start {enable_tts:false, enable_keyframe:true, prewarm_asset_prompt:true, enable_storyboard:true} → 200 且有效键照常生效（start_autonomous 实收 {\"enable_tts\": false}），响应带 rejected/ignored/warning（逐键原因）+ 后端 warning 日志。\n- /api/autopilot/enable 非法键 → 400 rejected={enable_keyframe:true}。\n\n## 4 H3_AUDIO_SOURCE：保留字段（零消费者），并让它「有声」\n理由写进 app/config.py:808-827：现行链路是「公共参考音色 + audioMode=generate」（真实决策点 comfyui_client.py:5460-5475），\nsource＝参考音频原样 mux、与 generate 互斥（docs/system_design.md R1/R4）。运行时实测（子进程，PYTHONIOENCODING=utf-8）：\nH3_AUDIO_SOURCE=1 → stderr 打出「当前没有消费者（保留字段，不会改变视频生成的音轨走法）…」；不设该变量时 stderr 为空。\n零消费者守卫：单测扫描 app/*.py 断言该名字只出现在 config.py。\n\n## 5 改动与同步\nin-scope 改动：app/autopilot.py（PLAN_DEFAULTS 补两键、PLAN_RETIRED_KEYS、split_plan_patch、set_plan→set_plan_report；\n删掉 set_plan 里「video_mode 写回项目配置」的空转分支）、app/routes/autopilot.py、app/routes/autonomous.py、app/config.py、\ntests/test_config_channels.py（19 用例）。四副本逐文件 SHA256 一致（含 captain 冻结工作树提交后的最新 config.py）。\n（tests/test_voice_bank_refs.py 里 T4 的一条 characterization 断言随之更新 —— 不在 inScope，但硬约束要求全绿，已在输出中注明。）\n\n## 6 验证\n- `& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\"` → **Ran 461 tests, OK (skipped=1), EXIT=0**（轮询期间连续 3 次 + 最终 1 次）。\n- `-p \"test_config_channels.py\"` → Ran 19 tests OK。\n- py_compile 通过 5 个文件；pyflakes 该解释器未安装。\n- 证据文件：.local/t11_evidence.txt（对照表/round-trip/反馈/H3 warning/最终全量原始输出）。\n\n## 7 遗留（不在 inScope）\n- app/agent_core.py:341-342 的 update_plan 工具描述仍写「enable_tts / enable_mix / video_mode 已废弃…设置了也不会生效」，\n  现在 enable_tts/enable_mix 可写、只有 video_mode 会被 400 —— 该文案会误导 AI 总控。\n- 前端 AutonomousPanel.tsx:195-196 仍渲染 enable_tts 等复选框（enable_storyboard/prewarm_asset_prompt 现会出现在 warning 里，前端可据此提示）。\n- apply_creative_settings（agent_core.py:353）仍是「用别的键名会被后端丢弃（不报错也不生效）」的旧语义，与本次口径不一致。",
+      "changedPaths": [
+        "app/autopilot.py",
+        "app/config.py",
+        "app/routes/autopilot.py",
+        "app/routes/autonomous.py",
+        "tests/test_config_channels.py"
+      ],
+      "acceptanceResults": [
+        {
+          "criterion": "三条通道对同一组开关的接受集合一致：PLAN_DEFAULTS 接受的键、routes/autopilot.py 的过滤、routes/autonomous.py 的白名单 —— 给出三方对照表，不一致项已消除",
+          "status": "passed",
+          "evidence": "通道A=autopilot.PLAN_DEFAULTS（25 键，补回 enable_tts=True/enable_mix=False）；通道B=routes/autopilot.py plan_set/enable 改调 autopilot.split_plan_patch（未知键整笔 400）；通道C=routes/autonomous.py 删除手写白名单改调同一 split_plan_patch。实测把 25 键+1 非法键一起 POST plan → 400 且响应 accepted_keys == sorted(PLAN_DEFAULTS)（True）、rejected={enable_keyframe}、计划内无该键。单测 test_routes_have_no_second_key_list 断言两个路由文件里不再出现引号形式的键清单。"
+        },
+        {
+          "criterion": "写入被接受的键后能从计划里读回（round-trip 验证 enable_tts / enable_tts_pre 至少各一例，给出实际读回值）",
+          "status": "passed",
+          "evidence": "POST plan {\"enable_tts\":false,\"enable_tts_pre\":false} → 200 accepted=[\"enable_tts\",\"enable_tts_pre\"]；GET plan 读回 enable_tts=False enable_tts_pre=False（plan.json 落盘同 False）；再写 True/True → 读回 True/True；enable_mix 默认 False → 写 True 读回 True → 恢复 False。/enable 通道 200 且 plan.enable_mix=False enabled=true。原始输出见 .local/t11_evidence.txt 第 3 节。"
+        },
+        {
+          "criterion": "对『写了但不生效』的情况给出明确反馈：要么接受，要么显式报错/警告；不得静默丢弃（给出实测证据）",
+          "status": "passed",
+          "evidence": "计划接口：POST {enable_tts:true, enable_keyframe:true} → HTTP 400，error 列明 enable_keyframe，带 rejected/reasons/accepted_keys，且计划前后无变化（不做部分生效）。一键启动：含 3 个非法键 → HTTP 200 且有效键生效，响应带 rejected=[3键]/ignored={键:原因}/warning=\"以下入参未生效：…\"，同时 _app_logger().warning 记日志；start_autonomous 实收 {\"enable_tts\": false}。set_plan 非 strict 亦 logger.warning 列出被拒键。"
+        },
+        {
+          "criterion": "H3_AUDIO_SOURCE 的处理给出结论：要么接上消费者，要么标注为保留字段并说明原因（不要留着零消费者的死配置不解释）",
+          "status": "passed",
+          "evidence": "结论＝保留字段、刻意不接线，理由写在 app/config.py:808-827（现行是「公共参考音色+audioMode=generate」，真实决策点 comfyui_client.py:5460-5475；source 与 generate 互斥，见 docs/system_design.md R1/R4）。运行时实测：子进程 H3_AUDIO_SOURCE=1 → stderr 打出「当前没有消费者（保留字段…）」；不设时 stderr 为空。零消费者守卫：单测扫描 app/*.py 断言该名字只出现在 config.py（实测 config.py 自身）。"
+        },
+        {
+          "criterion": "新增单测覆盖：接受集合一致性、round-trip、被拒键的反馈行为",
+          "status": "passed",
+          "evidence": "tests/test_config_channels.py 19 用例全绿：TestAcceptSet 4（每个 PLAN_DEFAULTS 键被接受/音频三键可写/retired 键带原因被拒/未知键兜底原因）；TestRoundTrip 5（enable_tts、enable_tts_pre、enable_mix round-trip + 非 strict 上报 + strict 整笔不写）；TestRouteChannels 7（plan 接受并读回、未知键 400 且未部分写入、只读回显键忽略、autonomous ignored/warning 且有效键透传、/enable 拒绝与接受、路由无第二份键清单）；TestH3AudioSourceReserved 3。无网络/GPU/ComfyUI 依赖，Flask 仅进程内 test_client，且已把 autopilot._ensure_thread 打掉避免起守护线程。"
+        },
+        {
+          "criterion": "不改动 app/pipeline.py（T4 刚改过，避免写冲突）",
+          "status": "passed",
+          "evidence": "本轮编辑只落在 app/autopilot.py、app/routes/autopilot.py、app/routes/autonomous.py、app/config.py、tests/test_config_channels.py（另 tests/test_voice_bank_refs.py 一处断言联动）。app/pipeline.py 在 T11 期间由其他队友改动（其内容已非我 T4 留下的 6E637281…），我未触碰该文件。"
+        },
+        {
+          "criterion": "全量测试保持全绿（当前 325 passed, 1 skipped）",
+          "status": "passed",
+          "evidence": "契约命令：& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\" → Ran 461 tests, OK (skipped=1), EXIT=0（轮询期间连续 3 次 + 最终 1 次均 OK）。过程中出现的两次红灯均来自他人 in-flight 改动，已定位并上报后清除：① h3_prompt_kit.H3_CANON_MAX_CHARS 未登记（→T12 修复）；② quality_stage.AUDIO_HARD_SILENT_RATIO 未登记（→T12 代登记）。t11 自身改动从未导致失败（排除该两条时其余全绿 exit 0）。"
+        }
+      ],
+      "commandsRun": [
+        {
+          "command": "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\"",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "Ran 461 tests in 9.973s — OK (skipped=1)；同一命令在 13:34-13:45 连续 4 次均为 OK"
+        },
+        {
+          "command": "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_config_channels.py\"",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "Ran 19 tests — OK（T11 新增单测）"
+        }
+      ]
     },
     {
       "id": "t12",
@@ -1003,11 +1074,11 @@
     {
       "id": "t13",
       "subject": "修复 tests/test_mutation_guards.py 的测试加载方式（导致全量随机变红）",
-      "status": "in_progress",
+      "status": "completed",
       "dependencies": [],
       "attempt": 1,
       "createdAt": 1791783377414,
-      "updatedAt": 1791783444727,
+      "updatedAt": 1791783678825,
       "kind": "implementation",
       "round": 1,
       "objective": "修复「全量测试随机变红」的基础设施缺陷，让所有人的干净全量跑结果可信。\n\n## 失败现象（Captain 与两名成员独立复现）\n  FAIL: test_good_seg_sort_key_passes (test_mutation_guards.TestMutationsAreCaught)\n  AssertionError: False is not true : 真实用例应全绿，\n    [(<unittest.loader._FailedTest testMethod=tests>, 'ImportError: Failed to import test module: tests')]\n全量结果：Ran 461 tests / 1 FAIL；而 content-eng 在更早时点观测到同一命令 Ran 454 tests / OK (skipped=1) / exit 0。\n\n## 根因（已定位到具体行）\ntests/test_mutation_guards.py:57 与 :82 用\n    _ut.TestLoader().loadTestsFromName(\"tests.test_video_concat_audio.TestSegSortKey\")\n把 tests 当作包来加载。但本项目 tests/ 是非包布局 —— 实测 `python -m unittest tests.<任何>` 直接报\n    ModuleNotFoundError: No module named 'tests'\n该文件只把 _APP 与 _HERE(=tests/ 目录) 插进了 sys.path（L27-31），\n因此正确写法应是【不带 tests. 前缀】的模块名，例如 test_video_concat_audio.TestSegSortKey。\n\n## 为什么它会『有时绿有时红』\nloadTestsFromName 的解析结果依赖当时 sys.path 与已 import 的模块状态，\n所以它随『哪个测试文件先跑、谁先往 sys.path 放了什么』而变 —— 属顺序敏感。\n这也是多名成员在同一时段得到不同全量结论的原因。\n\n## 这个文件的来历（诚实说明）\n文件头注释自述是『t22 的诚实性要求』，为早前某轮工作所加，不在本团队任何任务的 inScope 内。\n它一直是个定时炸弹，本轮多线并行把它暴露了出来。",
@@ -1041,10 +1112,164 @@
       "assignee": "verifier",
       "attemptId": "c8ebee28-15f1-47a8-9ad4-45644077ba4d",
       "reassigning": false,
-      "output": "开始验证：先读取 tests/test_mutation_guards.py 现状与 git 状态"
+      "output": "已修复 tests/test_mutation_guards.py 的加载方式并完成验证。\n改动：L81/L88 的 loadTestsFromName 参数由 \"tests.test_video_concat_audio.TestSegSortKey\" 改为 \"test_video_concat_audio.TestSegSortKey\"，另加 6 行非包布局说明注释。sha256 前 505FCD21... 后 C449D417...（仅 1 文件、+9/-2 行）。\n证据：①单文件 discover Ran 4 OK exit0；②直接执行文件方式修复前 FAILED exit1 → 修复后 OK exit0；③同 sys.path 下旧名 cases=1(_FailedTest)、新名 cases=7(0 失败)；④变异拦截独立实验 BASELINE=True / WEAKENED-MUTANT=False / GOOD=True；⑤全量连跑 3 次 + commit 后 1 次全部 Ran 461 / OK (skipped=1) / exit 0。\n说明：本 implementation 任务由 verifier 成员执行（scheduler 分派），我未做自我 approve；证据可复现，若需独立复核请另派成员。\n风险提示：改后工作树被 teammate 的 commit 2ea6bb9(13:39:28) 一并提交（非我提交）；同期 app/config.py、app/te_3d_render.py 由其他成员改动；ws/app、p139/resources/backend、resource-mirror/app 三个副本目录在本工作区内不存在，无法在此核对四副本同步（Everything 索引不可用）。",
+      "changedPaths": [
+        "tests/test_mutation_guards.py"
+      ],
+      "acceptanceResults": [
+        {
+          "criterion": "test_mutation_guards.py 里不再出现 `tests.` 前缀的 loadTestsFromName 调用（给出改动前后对照）",
+          "status": "passed",
+          "evidence": "改动前 tests/test_mutation_guards.py:76 与 :83 = \"tests.test_video_concat_audio.TestSegSortKey\"；改动后 L81/L88 = \"test_video_concat_audio.TestSegSortKey\"，且全 tests/ 目录 grep 'tests\\\\.test_' 命中 0 条（修复前命中 2 条，均在 L76/L83）。git diff 见报告附件（+9/-2）。"
+        },
+        {
+          "criterion": "该文件在两种调用方式下都能正确加载用例：① discover 方式（-s tests）② 直接指定文件名方式；各贴出实际结果",
+          "status": "passed",
+          "evidence": "① & python -m unittest discover -s tests -p \"test_mutation_guards.py\" -v → 4 个用例全 ok / Ran 4 tests / OK / EXIT_A=0（修复前同命令：FAIL test_good_seg_sort_key_passes, ImportError No module named 'tests', Ran 4/FAILED/exit 1）。② 直接文件名 & python tests\\test_mutation_guards.py → Ran 4 tests / OK / EXIT=0（修复前：同一 runner 跑 git HEAD 副本 tests/_t13_verify_before.py → Ran 4 / FAILED (failures=1) / EXIT_BEFORE=1）。注：`python -m unittest <name>` 形式的第二种写法在本机嵌入式 Python 下 sys.path 不含 cwd（path0=<python313.zip>），故不代表文件缺陷。"
+        },
+        {
+          "criterion": "四个用例（含 test_good_seg_sort_key_passes）全部通过，且 test_seg_sort_key_old_impl_is_caught 等『必须变红』的用例仍然保持其变异拦截能力（不得为了让对照用例变绿而削弱变异断言）",
+          "status": "passed",
+          "evidence": "discover -v 输出 4 条均 `... ok`。独立核查脚本（临时目录，不入库）：OLD keys=[(0,4),(0,4),(0,4)] vs NEW keys=[(0,10),(0,2),(0,3)]（老实现确实可区分）；BASELINE(真注入老实现) success=True；把 _old_seg_sort_key 削弱成真实现后 WEAKENED-MUTANT success=False（failures 指向 test_mutation_guards.py line 79 断言）→ 拦截断言未被削软；GOOD-CONTROL success=True。"
+        },
+        {
+          "criterion": "连续跑 3 次全量，结果稳定一致（贴出 3 次的 Ran/OK/exit 行），不再出现时而 454 时而 461 的漂移",
+          "status": "passed",
+          "evidence": "RUN 1: exit=0 sec=14 :: Ran 461 tests in 12.937s || OK (skipped=1)；RUN 2: exit=0 sec=14 :: Ran 461 tests in 13.002s || OK (skipped=1)；RUN 3: exit=0 sec=14.3 :: Ran 461 tests in 13.342s || OK (skipped=1)。（输出中的 ERROR:config_paths_check / ai_credentials_db / pipeline 行是测试内部故意打印的负例日志，非失败。）另在并发 commit 2ea6bb9 之后补跑 1 次：Ran 461 tests in 12.267s / OK (skipped=1) / POST_COMMIT_EXIT=0。"
+        },
+        {
+          "criterion": "不改动任何 app/ 下的产品代码",
+          "status": "passed",
+          "evidence": "本次全部写操作仅为：tests/test_mutation_guards.py（3 次 edit，同一文件）+ 两个 %TEMP% 下的临时校验脚本（已删除）；未对 app/ 下任何路径执行写/删/移动。工作树中 app/config.py、app/te_3d_render.py 的改动来自其他成员（mtime 13:38:21 / 13:38:45，我的会话 13:36 开始但未触碰），并已被 teammate 的 commit 2ea6bb9 收录；文件 sha256 前后未变：505FCD213E0FAEF062EBFDD7BDDB294F13BDA797257E2547B03EF7E153BEFB72 → C449D417AD3A594A4E928B679899C94A1D07351A357B50A86450D712F5DCC32E。"
+        },
+        {
+          "criterion": "只改这一个测试文件；若发现 tests/ 下其他文件有同类问题，在报告中列出但不要越界修改",
+          "status": "passed",
+          "evidence": "全工作区 glob **/test_mutation_guards.py 只命中 tests/test_mutation_guards.py 一份；修改前 grep 全 tests/ 目录的 'tests\\\\.test_' 仅命中该文件 L76/L83，其余测试文件 0 命中 → 无其他同类问题（无需越界修改）。验证用临时文件 tests/_t13_verify_before.py 已删除（Test-Path → False），最终 git status 中 tests/ 下无我的残留文件。"
+        }
+      ],
+      "commandsRun": [
+        {
+          "command": "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\"",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "连跑 3 次：Ran 461 tests / OK (skipped=1) / exit 0 ×3（12.937s、13.002s、13.342s）；commit 2ea6bb9 后再跑 1 次仍 Ran 461 / OK (skipped=1) / exit 0。"
+        },
+        {
+          "command": "& python -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_mutation_guards.py\" -v",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "修复后 Ran 4 tests / OK / EXIT_A=0；修复前同命令 FAIL test_good_seg_sort_key_passes（ImportError: Failed to import test module: tests）/ FAILED / exit 1。"
+        },
+        {
+          "command": "& python -W ignore::ResourceWarning tests\\test_mutation_guards.py",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "修复后 Ran 4 tests / OK / EXIT=0；修复前（git HEAD 同内容副本）Ran 4 tests / FAILED (failures=1) / exit 1。"
+        },
+        {
+          "command": "& python C:\\Users\\liujianghua\\AppData\\Local\\Temp\\t13_verify_mutation.py",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "BASELINE=True / WEAKENED-MUTANT=False / GOOD-CONTROL=True；OLD keys [(0,4),(0,4),(0,4)] vs NEW keys [(0,10),(0,2),(0,3)]。"
+        }
+      ]
+    },
+    {
+      "id": "t14",
+      "subject": "补齐音频静音判据的跨模块等值声明（ratio + dB 两条）",
+      "status": "pending",
+      "assignee": "audio-eng",
+      "dependencies": [
+        "t12"
+      ],
+      "attempt": 0,
+      "createdAt": 1791783821011,
+      "updatedAt": 1791783821011,
+      "kind": "implementation",
+      "round": 1,
+      "objective": "把「同一静音判据在两个模块各定义一份」这件事显式锁死，避免只锁一半导致判定自相矛盾。\n\n## 背景（audio-eng 在 t11 中分析确认，Captain 核实后采纳）\nquality_stage.py:262-263 的 A 层 near-silent 判定是一个 or 表达式，同时依赖两个常量：\n  · quality_stage.py:187  AUDIO_HARD_SILENT_RATIO = 0.15  ↔ audio_qc.py:62  HARD_SILENT_RATIO = 0.15\n  · quality_stage.py:186  AUDIO_NEAR_SILENT_DB    = -50.0 ↔ audio_qc.py:56  NEAR_SILENT_MEAN_DB = -50.0\n两者同名同义（都判「整段无声/近无声」），只有作用域是「单段 / 整轨」，值必须一起改。\n**只锁 ratio 不锁 dB 的话，A 层判定会在『改了一处』之后自相矛盾：dB 判死、ratio 判活。**\n（这正是 Captain 前一轮裁决疏漏之处，由 audio-eng 指出。）\n\n## 盲区说明（为什么之前的 orphan 扫描只发现了 ratio）\nconfig_doctor.orphan_candidates() 的关键词表（约 :934-938）只认 THRESHOLD/RATIO/MAX_/MIN_/DURATION 之类的词，\nAUDIO_NEAR_SILENT_DB / NEAR_SILENT_MEAN_DB 不含这些词 → 永远不会被报为孤儿，属『双盲区』，只能人工声明。\n本轮【不要】改关键词表（把 '_DB'/'DB_' 加进去会一次性暴露一批历史常量，须单独评估）。\n\n## 语义依据（audio-eng 提供）\n  · audio_qc.py:272-274「有声占比 < 15% → 漏配音/TTS 未发声（fatal）」\n  · quality_stage.py:262-263（A 层 near-silent：dB 或 ratio 命中即判）与 :394（整轨静音结论）\n  · quality_stage.py:177-187 段注释明说这层是补「mix 停用后成片没有音频门禁」的同一判据\n\n## 依赖说明\n本任务与 t12 都要改 app/config_doctor.py，已按系统要求串行化（依赖 t12）。\nt12 只登记 h3_canon_max_chars 与 quality_stage.AUDIO_HARD_SILENT_RATIO（后者未声明 must_match），\n本任务在 t12 落定后继续补 dB 那一半与 ratio 的 must_match。",
+      "inScope": [
+        "app/config_doctor.py",
+        "app/audio_qc.py",
+        "app/quality_stage.py",
+        "tests/test_config.py"
+      ],
+      "outOfScope": [
+        "app/pipeline.py",
+        "app/canon.py",
+        "app/h3_prompt_kit.py",
+        "app/agent_core.py",
+        "frontend/"
+      ],
+      "acceptance": [
+        "quality_stage.AUDIO_HARD_SILENT_RATIO 已声明 must_match: ['audio_qc.HARD_SILENT_RATIO']（替换掉那行『本任务不替他人声明』的注释）",
+        "audio_qc.NEAR_SILENT_MEAN_DB 已在 REGISTRY 建立条目，且 quality_stage.AUDIO_NEAR_SILENT_DB 声明 must_match: ['audio_qc.NEAR_SILENT_MEAN_DB']",
+        "给出『改一处是否两处一起变』的实测：用 apply_to_runtime() 或等价机制验证两组常量确实联动（贴出改动前后两边的值）",
+        "config_doctor 的 orphan 扫描与 must_match 校验全绿；test_config.py 全绿（贴 Ran/OK 与退出码）",
+        "**不得**改动 orphan 关键词表（保持现状）",
+        "不改动任何一处常量的数值（ratio 仍 0.15、dB 仍 -50.0）",
+        "四副本同步完成并给出 4 份 SHA256（③ 是 C:\\mjscxt_p139\\resources\\backend 平铺结构）"
+      ],
+      "verify": [
+        "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\""
+      ],
+      "deliverables": [
+        "app/config_doctor.py",
+        "app/audio_qc.py"
+      ],
+      "nonGoals": [
+        "不改 orphan 扫描器的关键词表",
+        "不调整静音判据的数值或判定逻辑",
+        "不动 agent_core / 前端文案（见 t15）"
+      ]
+    },
+    {
+      "id": "t15",
+      "subject": "修正 enable_tts/enable_mix「已废弃」的过时文案（面向 AI 总控）",
+      "status": "claimed",
+      "dependencies": [],
+      "attempt": 1,
+      "createdAt": 1791783821034,
+      "updatedAt": 1791783821046,
+      "kind": "implementation",
+      "round": 1,
+      "objective": "修正会误导 AI 总控的过时描述：t11 之后这两个开关的真实行为已改变，但文案还停留在旧世界。\n\n## 已核实的过时点（audio-eng 在 t11 报告）\n  · app/agent_core.py:341-342 的 update_plan 文案仍写 enable_tts / enable_mix『已废弃、设置了也不生效』\n    —— t11 之后恰恰相反：两者都可写可读，只有 video_mode 会被 400 拒绝。\n  · frontend/AutonomousPanel.tsx:195-196 复选框同理（本任务不改前端，仅记录）。\n\n## 为什么值得修\n这段文案是给【AI 总控】读的 —— 它会据此决定要不要设置这两个开关。\n文案说『已废弃』会让 AI 主动放弃设置；说『可写、enable_mix 本轮默认 False』才是事实。\n错误的元信息比缺失的元信息更坏：它会让自动化做出确定性错误决策。\n\n## t11 之后的事实基线（写文案以此为准）\n  · 三通道已统一走 autopilot.split_plan_patch\n  · enable_tts：可写、可读回；本轮口径下参考音色链路仍以 H3 原生音轨为准\n  · enable_mix：可写，但本轮默认仍为 False（用户口径：先以 H3 原生音轨为准）\n  · 未知键：计划接口整笔 400 并带 reasons；一键启动 ignored/warning 并写后端日志\n  · config.H3_AUDIO_SOURCE 是保留字段（理由见 config.py:808-827），显式打开时打 warning",
+      "inScope": [
+        "app/agent_core.py"
+      ],
+      "outOfScope": [
+        "frontend/",
+        "app/pipeline.py",
+        "app/autopilot.py",
+        "app/routes/autonomous.py",
+        "app/config_doctor.py"
+      ],
+      "acceptance": [
+        "agent_core.py 中不再出现『enable_tts/enable_mix 已废弃』这类与事实相反的表述（给出改动前后对照）",
+        "新文案准确描述三通道统一后的事实：可写、可读回；enable_mix 本轮默认 False；未知键的两种拒绝/忽略行为",
+        "若 agent_core 有面向 AI 的行为指引，需同步说明『写未知键会收到 400 或 warning』，避免 AI 反复试错",
+        "前端 AutonomousPanel.tsx:195-196 的问题【只记录不修改】，在报告中列出供后续前端任务处理",
+        "新增或更新相应单测（若该文案有测试覆盖；无则说明为何不需要）",
+        "全量测试保持全绿（贴 Ran/OK 与退出码）"
+      ],
+      "verify": [
+        "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\""
+      ],
+      "deliverables": [
+        "app/agent_core.py"
+      ],
+      "nonGoals": [
+        "不改前端",
+        "不改配置通道逻辑（t11 已完成）",
+        "不新增开关"
+      ],
+      "assignee": "audio-eng",
+      "attemptId": "01bea956-17dd-49e1-93ba-b10fa20d12d6",
+      "reassigning": false
     }
   ],
-  "taskSeq": 13,
+  "taskSeq": 15,
   "phase": "running",
   "approvedAt": 1791781069260
 }

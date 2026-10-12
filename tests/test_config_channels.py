@@ -196,8 +196,14 @@ class TestRouteChannels(unittest.TestCase):
         self.assertEqual(passed, {'enable_tts': False})
 
     def _enable(self, payload):
-        """/enable 前面有一道 AI 配置门禁（测试环境没有 AI 配置）→ 这里只为通道判定放行门禁。"""
-        with mock.patch.object(route_ap, '_ai_gate_or_400', lambda *a, **k: None):
+        """/enable 前面有一道 AI 配置门禁（测试环境没有 AI 配置）→ 这里只为通道判定放行门禁。
+
+        ⚠️ 同时把 autopilot._ensure_thread 打掉：enable() 会拉起托管守护线程，
+        测试进程里那条线程会一直扫 enabled_projects()（进而 _A() 抛「宿主模块 app 尚未加载」），
+        给整个测试会话制造噪音与竞态 —— 本用例只验通道判定，不需要真起线程。
+        """
+        with mock.patch.object(route_ap, '_ai_gate_or_400', lambda *a, **k: None), \
+             mock.patch.object(autopilot, '_ensure_thread', lambda *a, **k: None):
             return self.client.post('/api/autopilot/enable', json=payload)
 
     def test_enable_endpoint_rejects_unknown_key(self):

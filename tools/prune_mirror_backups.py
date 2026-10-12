@@ -95,7 +95,11 @@ def plan_deletions(entries, keep: int = 3, days: int = 0, now=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="清理运行时镜像里的代码回溯快照（默认 dry-run）")
-    ap.add_argument("--dir", default=None, help="镜像目录（默认 %APPDATA%\\mjscxt-desktop\\resource-mirror\\app）")
+    # ⚠️ % 必须转义成 %%：argparse 会对 help 文本做 %-格式化，
+    #    未转义的 %APPDATA% 会被当成占位符 → ValueError（Python 3.14 起强制）。
+    #    这是 t22 报的 5 个全量 ERROR 的根因，也是 CI 门禁起不来的原因。
+    ap.add_argument("--dir", default=None,
+                    help="镜像目录（默认 %%APPDATA%%\\mjscxt-desktop\\resource-mirror\\app）")
     ap.add_argument("--keep", type=int, default=3, help="每个基础文件保留最近几个快照（默认 3）")
     ap.add_argument("--days", type=int, default=0, help="超过该天数的快照一律删（0=不限）")
     ap.add_argument("--apply", action="store_true", help="真正删除（默认只预览）")

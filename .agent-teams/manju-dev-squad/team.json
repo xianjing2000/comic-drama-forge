@@ -58,7 +58,7 @@
       "provider": "wb-vision",
       "model": "cn:deepseek-v4.1-flash",
       "joinedAt": 1791780911210,
-      "status": "working"
+      "status": "idle"
     },
     {
       "id": "cabc2490-0f89-454b-8453-f16fe0f62c34",
@@ -112,7 +112,7 @@
       "provider": "wb-vision",
       "model": "cn:deepseek-v4.1-flash",
       "joinedAt": 1791782710492,
-      "status": "working"
+      "status": "idle"
     },
     {
       "id": "9a82b9d9-7bf9-4372-aac2-a3684daa38a8",
@@ -139,7 +139,7 @@
       "provider": "wb-vision",
       "model": "cn:deepseek-v4.1-flash",
       "joinedAt": 1791782925064,
-      "status": "idle"
+      "status": "working"
     }
   ],
   "tasks": [
@@ -405,7 +405,7 @@
       "profileSeedId": "T4",
       "subject": "独立验证 t1-t15 全部审计结论（全功能域 + 设计层 + 前端）",
       "description": "对全部任务逐条复核（含横切层）：\n  t1 分段导出/单镜返工方案 ｜ t2 面板雷同量化 ｜ t3 性能画像\n  t5 提示词工程链路 ｜ t6 质检与质量门 ｜ t7 基础设施与流水线\n  t8 一致性/连续性+前端 ｜ t9 资产/参考图 ｜ t10 配音/音频 ｜ t11 超分/成片\n  t12 项目设计审计（架构层） ｜ t13 代码审核（质量层）\n\n复核要点：结论是否被证据支撑、是否遗漏反例、是否与生产现状矛盾、\n任何「声称已验证但实际未运行」的内容。\n产出：每条标注 通过 / 存疑 / 驳回 + 复核方式与反证；汇总必须修的阻塞项清单（按严重度排序）。\n约束：只读复核。",
-      "status": "claimed",
+      "status": "completed",
       "dependencies": [
         "t1",
         "t2",
@@ -424,10 +424,65 @@
       ],
       "attempt": 1,
       "createdAt": 1791780768250,
-      "updatedAt": 1791783528768,
+      "updatedAt": 1791783802998,
       "reassigning": false,
       "assignee": "audio-dev",
-      "attemptId": "3595073d-d118-498c-a82c-a2ebcf09f887"
+      "attemptId": "3595073d-d118-498c-a82c-a2ebcf09f887",
+      "output": "t4 独立复核完成（只读，changedPaths 空，未改任何文件）。复核对象 t1-t15 共 14 项（t4 本身除外）。\n\n【复核方法】四类证据，逐条标注覆盖度：①四副本 sha1 对照（工作区 / electron-app/_backend / %APPDATA% resource-mirror / C:\\mjscxt_p139 生产镜像）+ git HEAD 与提交历史；②源码与 AST 精确核对（行号内容、列表长度、grep 计数）；③端到端重跑（concat 四场景真实 ffmpeg 夹具、守卫脚本、面板 test_client）；④生产真实数据复算（serve_stdout.log 37597 行、_perf_samples.csv、panel_plans、deliverables 等）。\n\n【逐条判定】\n· t1 分段导出 —— 通过（P0 已被修复）。原断言 export_mode 默认 segments 当时成立；**现已被提交 2ea6bb9（fix: 提交 export_mode 回退为 all）修复**，四处副本 + HEAD 均为 `or \"all\"`，sha1 全一致（C9CEB02500）。附注：报告称 video_helpers 的 seg 落盘/concat/recompose 是「死代码」措辞不严谨 —— _recompose_episode_video 定义在 video_helpers.py:95 且被 :477 调用，应表述为「segments 模式下默认不可达」。\n· t2 面板雷同 —— 存疑（仅数据源复验）。生产 panel_plans 实测 46 个文件，与报告「46 个」精确吻合；但本轮未复算其雷同度量化指标（覆盖不足，非结论错误）。\n· t3 性能画像 —— 通过。_perf_samples.csv 100 行 / _long 15 行（报告 95/13，采样持续增长，mtime 13:03）；首行数据 gpu_util=84%、64.69W、ComfyUI WS=11611.7MB、Private=23818MB、sys_free=5.12GB、commit=48.39GB 与报告峰值（11929/23730/49.6GB/P10 4.2GB）同量级；serve_stdout.log 37597 行（报告 37000+）；四份 docs 报告全部存在。峰值未逐点复算。\n· t5 提示词链路 —— 通过。F2（手指畸变词只在 qc_client）当时成立，**现已被 t18 修复**（sb_helpers 现含手指 10 处 / 六指 1 / 多指 1）；F3 成立且**至今未修**：判据串「格间差异」现散在 prompt_qc.py、qc_client.py、storyboard_helpers.py、prompts/storyboard_grid_main.txt 四处。\n· t6 质检与质量门 —— 通过。生产日志实测「软放行」85 行、「分镜质检未达标但已软放行入库」75 行（报告 84/74，日志持续增长）；AST 复算 qc_client.CRITICAL_ISSUE_KEYWORDS=95 与报告精确一致；AUDIO_CRITICAL_KEYWORDS=35。\n· t7 基础设施 —— 通过（H2 仍未修）。H2 成立且**至今未修**：task_lease.py:222/231-232 有 lost 字段与置位，而 pipeline.py 全文件无任何 `.lost` 检查。H1（busy 被当失败）**现已修**：pipeline.py:2131 返回 status=busy，autopilot.py:618/642 有显式 busy 分支，未复现原缺陷。tools/check_app_sync.py 为报告新增且本轮实际可用。\n· t8 一致性/连续性 —— 存疑（抽样）。novel_to_script.py:271 SHOTS_PER_CHUNK_MIN=6、:3463 max(SHOTS_PER_CHUNK_MIN, ceil(n/CHARS_PER_SHOT)) 与报告一致（报告引 267/3441，漂移 4/22 行）；其长报告未全量复算。\n· t9 资产/参考图 —— 通过。_CROWD_WEAK_MARKERS 全 app 仅 1 处（asset_worker.py:119 定义）✓ 死常量成立；_character_tier 三处命中（:142 定义、:246 **传了** episode_no、:936 **漏传**）✓ B4 精确成立；其 datetime 发现已被采纳修复（routes/storyboard_api.py:261-265 现为 datetime.datetime.now() 并留注释）。\n· t10 配音/音频 —— 通过（**自我复核，独立性受限**，请 captain 视作非独立证据）。复核一致项：config.py:801/802 H3_EMIT_AUDIO=True / H3_STRIP_AUDIO=False；audio_qc 三个入口；成片零质检结论。已被后续修复项：成片音频门禁已由 t19 补齐；H3_AUDIO_SOURCE 不再静默零消费（config.py:823-827 现打印「没有消费者」warning）。\n· t11 超分/成片 —— 通过（三条缺陷均已修）。端到端重跑 concat 真实夹具（当前代码）：A[有,有] 同参 4.021s 音轨 48k/2ch（与报告一致）；**B[有,无] 现为 4.000s 完整音轨 24k/1ch（报告当时为 2.021s 后段无声）**；**C[无,有] 现为 4.000s 音轨（报告当时输出完全无音轨）**；**E[有,无,异参] 现成功 6.000s（报告当时重编码整图失败并留 0 字节残件）** → t16 修复有效且可复现。其额外发现 probe_tts 不可达代码**已消除**（现 690-697 短函数，无 return 后死代码）。\n· t12 项目设计审计 —— 通过（数字微漂移）。复算 tools/audit_depgraph.py：循环依赖 6 组与 C1-C6 一致（C1 continuity/coverage/novel_to_script/script_consistency，C2 agent_core/autopilot/project_store，C3 ai_config/ai_credentials_db）；分层倒置 47 条**精确一致**；routes.projects ← 5 个核心模块（报告 4）、routes.tts ← 3 个（报告 2）→ 因后续提交新增 import，方向不变。180 模块/924 边/80141 行**未复算**（工具未输出该统计）。\n· t13 代码审核 —— 通过（1 条仍未修）。AST 复算 qc_client 95 条 / sb_helpers 40 条，与报告「两表两侧完全一致」吻合（t6 报告的 27 条为其修改前状态，无矛盾）；**副作用②成立且至今未修**：git ls-files 仍跟踪 app/prompts/storyboard_grid_main.txt.bak-20261012（全库被跟踪的 .bak 仅此 1 个）。其 REJECT 依据的 3ffc7a6 两条 P0 已被 2ea6bb9 回退默认值化解。8 个提交的逐行 diff 未复审。\n· t14 前端审计 —— 通过。app/**/*.py 中 render_template( 出现 = 0 ✓；app/static/index.html 引用 /assets/index-DwpQUn-w.js 与 index-CPFQlIZT.css ✓；app/templates 已不存在（t15 归档）。R2（pack_backend.js 静默降级）本轮未读，未复验。\n· t15 前端实施 —— 通过（6 项断言全部实测吻合）。app/templates 不存在 ✓；archive/frontend_legacy_templates_20261012/app_templates 存在 ✓；archive/code_backups_20261012 存在 ✓；frontend/src 下 .bak* = 0 ✓；frontend/src_backup 不存在 ✓；app/static/index.html mtime = 2026-10-12 00:17:26（与「全程未被触碰」一致）。\n\n【必须修的阻塞项】（按严重度，均为只读复核发现，本轮未修）\n1. P0 · t7-H2（仍未修）：Lease.lost 从不检查 —— task_lease.py:222/231-232 置位 lost，pipeline.py 全文件零引用。租约易主后旧执行体可能继续写同一批产物（并发写坏成片）。建议在 run_episode 步骤边界加 lost 检查并中止。\n2. P1 · t9-B4（仍未修）：asset_worker.py:936 `_character_tier(project_name, asset)` 漏传 episode_no（:246 传了）→ _load_script_for(project, None) 取第 1 集，跨集主角可能被判 crowd，误伤外形档位。\n3. P1 · t5-F3 + t13 脆弱性（仍未修）：判据串「格间差异 / 分镜9（ / 口型」跨 4 文件复制（prompt_qc.py、qc_client.py、storyboard_helpers.py、prompts/storyboard_grid_main.txt）→ 提示词一处改动引发 QC 回归的同类事故（d7af64b）会重演。建议提常量 + 加「模板必须含该字样」断言。\n4. P1 · t13-副作用②（仍未修）：app/prompts/storyboard_grid_main.txt.bak-20261012 仍被 git 跟踪（全库唯一 .bak）→ git rm --cached 即可（.gitignore 对已跟踪文件无效）。\n5. P2 · t9-B3（仍未修）：_CROWD_WEAK_MARKERS 是死常量（asset_worker.py:119 唯一出现）→ 弱群像词规则实际不生效，crowd 判级由通用规则决定。\n6. P2 · segments 路径整体不可靠（已止损未修）：默认值已回退 all（2ea6bb9）规避 P0；但 video_helpers.py:95/477/489 + t17 的失效标记仍在，重新启用 segments 前需完整回归（含单镜返工重拼 E2E）。\n7. P2 · 流程建议：多条审计结论与代码版本强耦合（t1/t5/t10/t11/t13 共 5 条在 5e5a4ae、2ea6bb9 之后失效或被修）。建议今后审计报告标注「验证时 HEAD」，复核时先对四副本 sha1。\n\n【未复验清单（诚实声明覆盖度）】t2 雷同度量化；t3 内存/GPU 峰值逐点复算；t8 全表；t12 的 180 模块/924 边/80141 行；t13 的 8 提交逐行 diff 复审；t14 的 R2 静默降级（pack_backend.js:93-108）。以上均未发现反证，但不得视为已通过。",
+      "changedPaths": [],
+      "acceptanceResults": [
+        {
+          "criterion": "对 t1-t15 全部审计结论逐条复核并标注 通过/存疑/驳回",
+          "status": "passed",
+          "evidence": "14 条逐条判定（t4 自身除外）：通过 11（t1/t3/t5/t6/t7/t9/t10/t11/t12/t13/t14/t15 之中除 t2/t8 外）、存疑 2（t2 仅复验数据源、t8 抽样）、驳回 0；每条附复核方式与反证/漂移说明"
+        },
+        {
+          "criterion": "结论是否被证据支撑（行号/计数/实测可复算）",
+          "status": "passed",
+          "evidence": "AST 复算词表 95/40 与报告精确一致；grep 复算死常量 1 处、_character_tier 漏传 episode_no 精确命中 :936；依赖图复算 6 组循环 + 47 条分层倒置精确一致；panel_plans 46 个精确吻合；日志软放行 85/75 与 84/74 吻合"
+        },
+        {
+          "criterion": "是否遗漏反例 / 与生产现状矛盾",
+          "status": "passed",
+          "evidence": "发现并定位 5 条版本漂移（t1 默认值、t5-F2、t7-H1、t10 H3_AUDIO_SOURCE、t11 probe_tts 均已被 5e5a4ae/2ea6bb9/t16/t18/t19 修复）——即「结论当时成立、现状已变」，不是造假；t1 的「死代码」措辞经复核应改为「默认不可达」；t11 三条 concat 缺陷用真实 ffmpeg 夹具端到端复跑确认已修（B 4.000s/C 4.000s/E 成功 6.000s）"
+        },
+        {
+          "criterion": "任何「声称已验证但实际未运行」的内容",
+          "status": "passed",
+          "evidence": "抽查各任务声称的验证手段均可复现：tools/check_app_sync.py 实跑有效；verify_* 守卫实跑（step_final 38/0、quality_stage 47/0 等）；端点用 test_client 实跑；concat 用真实 ffmpeg 夹具实跑；未发现「声称跑过但脚本/工具不存在或必然失败」的项"
+        },
+        {
+          "criterion": "汇总必须修的阻塞项清单（按严重度排序）",
+          "status": "passed",
+          "evidence": "7 项：P0 t7-H2（lease.lost 从不检查，仍未修）；P1 t9-B4（_character_tier 漏 episode_no）、t5-F3+t13（判据串 4 处复制）、t13-副作用②（.bak 仍被 git 跟踪）；P2 t9-B3（死常量）、segments 路径不可靠（已止损）、审计结论版本耦合流程建议"
+        }
+      ],
+      "commandsRun": [
+        {
+          "command": "python tools/audit_depgraph.py（复算依赖图）",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "6 组循环依赖与 t12 的 C1-C6 一致；分层倒置 47 条精确一致；routes.projects←5（报告 4）/routes.tts←3（报告 2）微漂移"
+        },
+        {
+          "command": "python tools/check_app_sync.py --quiet-ok（四副本漂移）",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "复核实测四副本对 comfyui_client.py 的 sha1 全一致（C9CEB02500），export_mode 默认四处 + HEAD 均为 all"
+        },
+        {
+          "command": "ffmpeg 真实夹具 + app/video_postprocess.concat_videos 四场景重跑",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "A 4.021s/48k/2ch；B 4.000s/24k/1ch（原 2.021s）；C 4.000s + 音轨存在（原无音轨）；E 成功 6.000s（原整图失败 + 0 字节残件）→ t16 修复可复现"
+        },
+        {
+          "command": "AST/grep 复算词表、死常量、调用点、git ls-files、生产日志计数",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "CRITICAL_ISSUE_KEYWORDS=95、_SB_STRUCTURAL_DEFECT_KEYWORDS=40、_CROWD_WEAK_MARKERS 仅 1 处、_character_tier:936 漏传、.bak 仍被跟踪 1 个、软放行 85/75 行、日志 37597 行、panel_plans 46"
+        }
+      ]
     },
     {
       "id": "t5",
@@ -1944,28 +1999,123 @@
       "id": "t23",
       "subject": "数据库设计审计：schema/迁移/索引/并发/备份，与「JSON+SQLite 混用」的收敛设计",
       "description": "定位：**数据层**设计审计。项目目前是「JSON 文件 + SQLite + 内存字典」三套并存，\n且 t12 已指出 state 重启即丢。本任务要把数据层查清并给出收敛设计。\n\n**已掌握线索（需逐条核实并给路径:行号）**：\n  · SQLite：app/schema.py（19 处命中）、app/task_store.py（7 处）、ai_credentials_db.py、config_center.py；\n    数据文件实测：output/tasks.db(48KB)、output/storyboards/tasks.db(0KB)；\n  · JSON 落盘：数据根下 ai_config.json / qc_config.json / watermark_config.json / comfyui_dir.json；\n    output/qc/*/quality_state.json、lessons.jsonl、attempts.json、dead_letter.json；\n  · 内存态：job_state.py 的 generation_state/dub_tasks/mix_tasks（82 处裸写/20 文件）；\n  · t12 发现：schema.py 有 19 处命中，task_store(SQLite) 是唯一全生命周期落盘真相，\n    但 TaskQueue 未接线（/api/status wired:false）；同名常量 DEFAULT_TTL_SEC 两处值不同（604800 vs 900）。\n\n**产出**：\n1) **真实数据模型清单**：所有表/文件、字段、主键/索引、写入者与读取者；\n2) **schema 与迁移**：是否存在版本化迁移机制？加字段/改结构时如何保证旧数据可读？\n   若无迁移机制，给出**最小可行迁移方案**；\n3) **并发与事务**：SQLite 的写入并发策略（WAL？超时？连接管理？），\n   多线程/多进程同时写（预取线程、托管守护、心跳）是否会导致 database is locked 或丢写；\n4) **一致性风险**：JSON 与 SQLite 双写不同步的场景，崩溃点在哪，如何收敛（给出优先级）；\n5) **备份与恢复**：现有备份机制（含 mirror 快照）能否恢复任务台账；给出恢复演练步骤；\n6) **收敛设计建议**：明确「什么状态放 SQLite、什么放 JSON、什么只放内存」的判据，\n   以及 82 处内存裸写如何收敛为单入口。\n\n**约束**：只读审计（**不得修改任何 .db / .json 数据文件**，生产正在使用）；\n不得重启或中断生产。如需查询 SQLite，一律用**只读模式**打开。\n证据：附路径:行号、只读查询语句与结果摘要。",
-      "status": "in_progress",
+      "status": "completed",
       "assignee": "db-designer",
       "dependencies": [],
       "attempt": 1,
       "createdAt": 1791782732241,
-      "updatedAt": 1791782795232,
+      "updatedAt": 1791783659568,
       "kind": "work",
       "attemptId": "5fe4cac8-5398-45e9-89c6-84faed8066b4",
       "reassigning": false,
-      "output": "开始只读数据层审计"
+      "output": "t23 数据库设计审计完成（全程只读：所有 SQLite 以 mode=ro + PRAGMA query_only=1 打开；未改任何 .db/.json；未重启生产；并发实验仅在 %TEMP% 临时库）。\n产出：docs/数据库设计审计_T23_20261012.md（约 27.6KB，6 项产出 + 3 附录：只读查询语句与结果、受控并发实验、未做/未验证清单）。\n\n【关键结论】\n1) 两个真实数据根各有独立 tasks.db：生产=%APPDATA%\\mjscxt-desktop\\mjscxt-data\\output\\tasks.db(65536B, WAL, integrity_check=ok)；开发+全部测试=工作区 output\\tasks.db(49152B)。来源 electron-app/main.js:181-193 + .backend.owner.json(pid 35580, data_dir=mjscxt-data)。\n2) 同名库 schema 已分叉：生产有 schema_version=2 @2026-10-10 18:14:47、units 带 FK(ON DELETE CASCADE)、6 个显式索引；开发库无 schema_version 表、units 无 FK、仅 3 个索引。\n3) SQLite 不是任务真相：生产 tasks/units 均 0 行，而生产已跑到分镜 46/46（storyboard_manifest.json total=46 success_count=46 @13:11:12；panel_plans/shot_01..46）。真台账=JSON+内存。task_store TaskQueue 确认未接线（shared_tasks.py:75 wired=False）。\n4) 无版本化迁移机制：schema.py:42 SCHEMA_VERSION 只写不读（:204-210），结构变更只有 CREATE TABLE IF NOT EXISTS（对已有表无效）；app/ 下 ALTER TABLE 仅 schema.py:158,162 一次性的 units 外键重建。同一 DDL 有 4 份手抄副本且已漂移（schema.py:70-73 丢 NOT NULL DEFAULT）。已给最小可行方案（migrations.py + PRAGMA user_version + 结构探测 + SQLite 在线 backup + 迁移前强制备份 + doctor 报红 + 与生产互斥）。\n5) 并发实测（%TEMP%\\dbconcur_probe2.py）：8 连接 x 25 次写（200 次）→ 0 locked、0 丢失；WAL 下持长读事务并发写成功；4 进程 x 20 写全 ok。风险不是当前配置，而是 WAL 静默回落：journal_mode=delete 时同一场景立即 OperationalError: database is locked，而 ai_credentials_db.py:89-92 只 logger.debug，schema/config_center 的 _connect 不 catch。\n6) 可复现数据丢失缺陷（P0）：task_store.py:148 create 用 INSERT OR REPLACE，生产库 FK CASCADE 生效 → 同一 task_id 再次 create 会静默清空该任务全部 units（断点续跑进度）。实测 E4: units 1→0。触发路径 routes/keyframes.py:260 task_id=f\"keyframe_{project}_{int(time.time())}\" 秒级分辨率。修法：ON CONFLICT DO UPDATE（照抄 ai_credentials_db.py:227-236）+ task_id 改 uuid。\n7) 一致性风险另列 7 条：D2 内存态重启即丢（P0，generation_state 承担了不该承担的关键状态）；D3 AI 凭证三写（json+secrets.enc+tasks.db）；D4 配置中心 DB 与模块 JSON 双写且不回写 JSON（实测 JSON=1024 / DB=24576）；D5 测试污染真数据根（证据 app_settings note='test-restore' @2026-10-12 13:31:10，根因 config 单例使 MJSCXT_DATA_DIR 隔离失效，ai_credentials_db.py:48-52 已记录同类事故）；D6 manifest.qc 是 Python repr 非 JSON；D7 common_util.write_json 固定 .tmp + 失败静默 与 fs_atomic 并存；D8 DEFAULT_TTL_SEC 同名不同义（task_lease 900 vs comfyui_job_store 604800）。\n8) 备份与恢复：生产 tasks.db 无任何备份；唯一库副本是 %APPDATA%\\mjscxt-desktop\\resource-mirror.bak-before1402-20261010081652\\output\\tasks.db（镜像副作用，2026-10-08/10）。JSON 侧 .bak 机制健全（dead_letter.json.bak 仍保有 09:52:46 的 ep1 死信，活文件已被清成 {}）。已给 6 步恢复演练 SOP（在线备份 API → 拷贝 JSON 台账 → integrity_check+行数比对 → 隔离根 MJSCXT_DATA_DIR + 临时端口复起 → 覆盖前必须删残留 -wal/-shm → 验收判据）。\n9) 纠正任务线索：『82 处内存裸写/20 文件』与实测不符。AST 全量统计=95 处/15 文件（generation_state 69 + dub/mix 15 + episodes 4 + screenplay 4 + job_state 初始化 3），业务侧 92 处 100% 有锁，唯 3 处无锁是 job_state.py:21,29,32 模块级初始化。真问题是进程内私有+重启即丢，不是缺锁。已给单入口收敛三步法（task_state.py 门面 → SQLite 镜像（需先修 D1 + 统一 uuid + 跑迁移）→ 反向校验使影子变真相），验收口径=杀进程重启后 /api/generation/status 能答『已完成 42/46、当前 43』。\n\n【对上游的意义】D1 必须在任何『接线持久化队列』之前修复，否则一接线就静默丢断点续跑进度；D5 必须先修，否则一切数据一致性承诺无效。附录 C 明确列出未做/未验证项。",
+      "changedPaths": [
+        "docs/数据库设计审计_T23_20261012.md"
+      ],
+      "acceptanceResults": [
+        {
+          "criterion": "1) 真实数据模型清单：所有表/文件、字段、主键/索引、写入者与读取者",
+          "status": "passed",
+          "evidence": "报告 §1.1-§1.4：四份 tasks.db 实测表/行数/索引/FK；四张 SQLite 表逐列 + 写者/读者路径行号；JSON/JSONL 12 类逐项；内存态 4 类 + AST 变更点分布"
+        },
+        {
+          "criterion": "2) schema 与迁移：是否存在版本化机制 + 无机制时的最小可行方案",
+          "status": "passed",
+          "evidence": "报告 §2：SCHEMA_VERSION 只写不读(schema.py:42,204-210)，ALTER TABLE 仅 schema.py:158,162；两端 schema 分叉实测（附录 A.2）；migrations.py 六条要求"
+        },
+        {
+          "criterion": "3) 并发与事务：WAL/超时/连接管理/多线程多进程是否 locked 或丢写",
+          "status": "passed",
+          "evidence": "报告 §3 + 附录 B E1/E2/E3/E5：WAL+timeout=15 下 200 并发写 0 locked 0 丢失；非 WAL 时立刻 locked；风险定为 WAL 静默回落并给出 busy_timeout / WAL 回读校验建议"
+        },
+        {
+          "criterion": "4) 一致性风险：JSON 与 SQLite 双写不同步场景、崩溃点、收敛优先级",
+          "status": "passed",
+          "evidence": "报告 §4 的 D1-D8，每条含崩溃点与收敛动作，按 P0/P1/P2 排序；D1 有可复现实测（附录 B E4）"
+        },
+        {
+          "criterion": "5) 备份与恢复：现有机制能否恢复任务台账 + 恢复演练步骤",
+          "status": "passed",
+          "evidence": "报告 §5.1 备份资产清点表（结论：生产 tasks.db 无备份；唯一库副本为镜像副作用）+ §5.2 六步恢复演练 SOP + §5.3 最小补齐建议"
+        },
+        {
+          "criterion": "6) 收敛设计建议：SQLite/JSON/内存判据 + 内存裸写收敛为单入口",
+          "status": "passed",
+          "evidence": "报告 §6.1 四类判据表 + §6.2 三步法（含接线顺序约束）+ §6.3 P0/P1/P2 路线图"
+        },
+        {
+          "criterion": "约束：只读审计，不修改任何 .db/.json，不中断生产",
+          "status": "passed",
+          "evidence": "所有查询用 file:...?mode=ro + PRAGMA query_only=1；并发实验在 %TEMP%\\dbconcur_probe2 临时库；未重启任何进程（生产 pid 35580 于 13:17:33 启动后持续运行）"
+        },
+        {
+          "criterion": "证据：附路径:行号、只读查询语句与结果摘要",
+          "status": "passed",
+          "evidence": "正文每处结论带 app/*.py:行号；附录 A 列只读 SQL/PRAGMA 与实测输出；附录 B 列实验脚本与 6 段结果"
+        }
+      ],
+      "commandsRun": [
+        {
+          "command": "python - (只读) sqlite3.connect('file:<tasks.db>?mode=ro', uri=True) + PRAGMA query_only=1，四份 tasks.db 结构与行数",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "生产 tasks.db tables=[ai_credentials,app_settings,schema_version,tasks,units] rows=3/2/1/0/0；开发根无 schema_version；PRAGMA integrity_check=ok"
+        },
+        {
+          "command": "python - (只读) PRAGMA foreign_key_list(units) / index_list(tasks,units)",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "PROD units FK=[(0,0,'tasks','task_id','id','NO ACTION','CASCADE','NONE')]；PROD 6 索引 vs DEV 3 索引"
+        },
+        {
+          "command": "python %TEMP%\\dbconcur_probe2.py（受控并发/一致性实验，仅临时库）",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "E1 200 并发写 locked=0；E3 非 WAL+长读事务→database is locked；E4 INSERT OR REPLACE+FK CASCADE→units 1→0；E5 4 进程 x20 写全 ok"
+        },
+        {
+          "command": "python - (AST 静态核验内存态变更点与锁覆盖，只读)",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "total mutation sites across 15 files: 95 ; unguarded: 3（均为 job_state.py 模块级初始化）"
+        },
+        {
+          "command": "Get-FileHash 对比工作区 app/*.py ↔ C:\\mjscxt_p139\\resources\\backend 与 %APPDATA%\\mjscxt-desktop\\resource-mirror\\app（只读）",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "job_state.py / schema.py / task_store.py / config_center.py 四处 SHA256 与源码根一致"
+        },
+        {
+          "command": "Get-ChildItem 清点 tasks.db 副本与备份资产（只读）",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "生产根无 .bak；唯一位于 resource-mirror.bak-before1402.../output/tasks.db(40960B)"
+        }
+      ],
+      "supplementalEvidence": [
+        {
+          "at": 1791783659622,
+          "by": "db-designer",
+          "attempt": 1,
+          "attemptId": "5fe4cac8-5398-45e9-89c6-84faed8066b4",
+          "note": "只读约束下的补充：① 审计期间开发根 output/tasks.db 的 mtime 从 13:27:07 变为 13:37:14，说明确有其他成员/测试在写该库 —— 更凸显 D5（测试污染真数据根）的紧迫性；② 未在活库执行 wal_checkpoint / ANALYZE / VACUUM / PRAGMA optimize；③ 报告附录 C 已列明未做/未验证项：生产根不存在 output/qc/<项目>/<集>/quality_state.json 故该路径未做实机验证；未逐文件核验 130 个模块的镜像一致性。"
+        }
+      ]
     },
     {
       "id": "t24",
       "subject": "验证门（测试工程师）：独立复核 t1/t2/t3/t5-t19 与 t20-t23 的全部结论",
       "description": "本任务取代原 t4（t4 因成员变更导致 assignee 悬空失效，保留为历史记录，不再执行）。\n\n**复核范围**：\n  功能域：t1 分段导出方案｜t2 面板雷同｜t3 性能画像｜t5 提示词链路｜t6 质检门｜t7 基础设施\n         t8 一致性/前端｜t9 资产｜t10 音频｜t11 超分/成片\n  横切域：t12 架构分层｜t13 代码审核｜t14 前端审计｜t15 前端实施\n  P0 修复：t16 concat 音轨｜t17 交付物失效+劫持｜t18 质检词表+软放行｜t19 成片音频门禁\n  专业域：t20 需求分析｜t21 架构设计｜t22 测试体系｜t23 数据库设计\n\n**测试工程师的复核纪律（与普通审计不同）**：\n  1) **不采信任何「自述已完成」** —— 每条修复必须自己重跑其 verify 命令并贴原始输出；\n  2) 对可自动化的结论**写成可重复执行的断言**（tests/ 或 verify_*.py 风格），而非一次性观察；\n  3) 每条结论标注：可自动化回归 / 只能人工目检 / 无法验证（说明原因）；\n  4) **主动构造反例**：对每个修复尝试找出「让它失效的输入」（边界、缺文件、空列表、\n     并发、异常返回值），记录是否真被拦住；\n  5) 输出**必须修的阻塞项清单**（按严重度），与**已确认可靠结论清单**分开。\n\n**特别核查项（本会话已暴露的真实教训）**：\n  · t16 修复的 concat 音轨一致性，是否覆盖「部分有音轨」全部排列组合；\n  · t17 修复的 `read_json_strict(_mapf, {})` —— 原 bug 是缺 default 被宽 except 吞成静默失败，\n    请确认同类「宽 except 吞掉真错误」在其他新代码里是否还有；\n  · t18 的 `_panel_dup_hit` 正则是否会被否定语境绕过（构造「未达面板雷同」「不存在雷同」等输入）；\n  · 我在本会话引入的 segments 默认值现已回退为 all —— 请确认无残留影响。\n\n约束：只读复核 + 可新增 tests/ 下测试；不得改 app/ 生产代码；不得重启或中断生产。\n证据：每条附实际命令与原始输出摘要（不得转述）。",
-      "status": "pending",
+      "status": "in_progress",
       "assignee": "test-engineer",
       "dependencies": [],
-      "attempt": 0,
+      "attempt": 1,
       "createdAt": 1791782947712,
-      "updatedAt": 1791782947712,
-      "kind": "work"
+      "updatedAt": 1791783668489,
+      "kind": "work",
+      "attemptId": "89b753f4-89e5-4f71-83a1-5b862b896115",
+      "reassigning": false,
+      "output": "开始独立复核：先建档各任务的可重跑 verify 命令与原始输出。"
     },
     {
       "id": "t25",
@@ -1985,12 +2135,12 @@
     {
       "id": "t26",
       "subject": "全栈修复：分镜排序 500 + 服装变体落盘失败，并接上前端拖拽入口（成对交付）",
-      "status": "in_progress",
+      "status": "completed",
       "assignee": "media-dev",
       "dependencies": [],
       "attempt": 1,
       "createdAt": 1791783180811,
-      "updatedAt": 1791783214857,
+      "updatedAt": 1791783838433,
       "kind": "implementation",
       "objective": "修复 media-dev 复核确认的两个功能 bug，并**成对**补上前端入口（不得只修后端）。\n\nBug 1（分镜拖拽排序）：routes/storyboard_api.py 顶部是 `import datetime`(:18)，\n:261 却写 `datetime.now()` → AttributeError 必 500；抛错点在 save_episode_script(:263) 之前\n→ shots 顺序与 metadata.shot_order 双双不落盘，**排序 0 生效**。\n★ 且前端 client.ts:478 定义了 storyboard.reorder 但**全前端 0 个调用点** ——\n  只修后端用户依然没有可用入口。\n\nBug 2（服装变体落盘）：routes/assets_api.py:19 同样 `import datetime`，:331 写 `datetime.now()`，\n被 :333 的 except 静默吞成 warning → outfit.json 永远写不出来，desc 回显失效。\n\n同仓正确写法参考：app/artifact_helpers.py:96、keyframe.py:647（均为 datetime.datetime.now()）。",
       "inScope": [
@@ -2032,19 +2182,92 @@
         "不扩大范围去改其它域的页面"
       ],
       "attemptId": "a1edf20c-0b78-4e1e-af1a-b8cf96e8bcd9",
-      "reassigning": false
+      "reassigning": false,
+      "output": "t26 完成：后端两个 bug 已修 + 前端成对补上排序入口（拖拽手柄 + ↑/↓，乐观更新/失败回滚），并做了错误脱敏收口。\n\n【Bug 1 分镜排序 500】app/routes/storyboard_api.py:265 改 `datetime.datetime.now()`（文件顶部是 `import datetime` 模块导入）。\n· 修前探针实测 AttributeError: module 'datetime' has no attribute 'now'（=接口恒 500）；修后 200 + success，\n  从**磁盘重读**落盘文件验证 shots 顺序与 metadata.shot_order 均已写入（此前抛错点在 save_episode_script 之前，两者都不落盘）。\n【Bug 2 服装变体档案】app/routes/assets_api.py:342 同上修法；并把「写失败被 except 吞成 warning」改成显式回报\n（响应加 record_written / warning 字段，异常只进日志），生成链路仍不受影响（200 started）。\n【前端成对交付】ui/index.tsx 新增 ReorderControls（手柄拖拽 + ↑/↓ 两个按钮；HTML5 拖拽在触屏/无障碍不可靠，故两套都做）；\nProjectWorkbenchPage.tsx 卡片头部接入 + 卡片作为拖拽落点；storyboardApi.reorder 调用点从 **0 → 1**；\napplyShotOrder 乐观更新→await→失败整表回滚；排序在途时暂停 5s 静默轮询回灌（否则刚拖完就被旧顺序冲掉）。\nclient.ts 无需改动：reorder 方法早已存在，缺的是调用点（本次补上）。\n【文案/脱敏】locales/zh-CN.json + en-US.json 新增 sb.order.* 10 键（含生成中交错提醒）；新 UI 代码区去注释后 CJK 命中 0；\n后端 3 处、前端 7 处错误展示不再透传绝对路径/异常原文（前端走 sanitizeErrorMessage）。\n【两处同步】app/routes 两份改动已 Copy 到 electron-app/_backend/app/routes（该镜像路径不在 t26 声明 inScope 内，故未列入 changedPaths，但同步已完成且校验 sha256 一致）。\n\n验证（全部在本轮最终内容上执行，契约命令之外另加行为级探针）：\n· 契约命令 1/2/3 全 exit 0；隔离构建产物进 ../.frontend_build_tmp，app/static 前后指纹一致（66 文件 / 3063526 字节，未触碰）。\n· 追加证据 A（Python 离线探针，抽真实函数源码执行，零生产接触）：12 项断言 ALL PASS —— 修前 500/修后落盘、服装档案落盘 + desc 回显、\n  写失败显式回报且 warning 不含路径、缺镜入参仍 400。\n· 追加证据 B（Node 行为探针，tsc 编译从页面原样抽出的 applyShotOrder/moveShot/dropShotOn/sanitizeErrorMessage/sbError）：19 项断言 ALL PASS。\n\n遗留（未在本次动，需 captain 决策）：①工作区 app/ 与 electron-app/_backend 两侧已同步，但**运行中的生产后端** C:\\mjscxt_p139\\resources\\backend\n下的这两份仍是 10-10 的旧版 → 修复要等该副本部署/重启才生效（不影响当前生产：该接口今天本来就 500，无回归）；\n②canvas 卡片与 grid-apply 的**数据字段** storyboard.path / video.path / applied 仍返回本机绝对路径（属数据而非错误提示，改动会破坏现有消费方），\n若要一并收口请另开任务。\n\n备注：本轮工作期间他人提交的 HEAD(2ea6bb9) 已把我当时的改动一并落库，故 git status 看不到这些文件的未提交差异\n（工作区内容与 HEAD 一致，已用 git hash-object 核对）。",
+      "changedPaths": [
+        "app/routes/storyboard_api.py",
+        "app/routes/assets_api.py",
+        "frontend/src/pages/ProjectWorkbenchPage.tsx",
+        "frontend/src/components/ui/index.tsx",
+        "locales/zh-CN.json",
+        "locales/en-US.json"
+      ],
+      "acceptanceResults": [
+        {
+          "criterion": "分镜拖拽排序接口不再 500，shots 顺序与 metadata.shot_order 真正落盘（重启/重读后保持）",
+          "status": "passed",
+          "evidence": "storyboard_api.py:265 改 datetime.datetime.now()。离线探针（AST 抽真实函数源码执行）：修前写法抛 AttributeError: module 'datetime' has no attribute 'now'；修后返回 200 + success:True + shot_order 回显；随后从磁盘重读落盘 JSON 得 shots=['shot_03','shot_01','shot_02']、metadata.shot_order 同值、shot_order_updated_at=2026-10-12 13:36:25（顺序与元数据都真正落盘）；缺镜入参仍 400 + 可读原因（无回归）。"
+        },
+        {
+          "criterion": "前端存在可用的分镜排序入口（拖拽或上移/下移），带乐观更新 + 失败回滚",
+          "status": "passed",
+          "evidence": "ui/index.tsx 新增 ReorderControls（拖拽手柄 + ↑/↓）；ProjectWorkbenchPage.tsx 卡片头部接入、卡片作为拖拽落点（高亮），storyboardApi.reorder 调用点 0→1。Node 行为探针（tsc 编译从页面原样抽出的 applyShotOrder/moveShot/dropShotOn）：乐观先 setCards 新顺序 → 请求体 {project_name:'P1',episode_no:1,order:[...]} → 成功 toast.success('sb.order.saved') 且不额外重拉；失败则第二次 setCards 回滚为原顺序 + toast.error + busy 复位；↑↓ 越界不发请求、拖 c 到 a 位得 ['shot_c','shot_a','shot_b']、拖到自己不发请求；本地列表与后端不一致走保守分支（重拉画布 + staleList 提示）。19 项断言 ALL PASS。"
+        },
+        {
+          "criterion": "排序相关文案走 locales（/api/i18n），组件内不硬编码中文",
+          "status": "passed",
+          "evidence": "locales/zh-CN.json 与 en-US.json 的 sb.order.* 各新增 10 键（hint/moveUp/moveDown/dragHandle/saving/saved/saveFailed/saveFailedRollback/staleList/generatingWarn），json.load 校验通过，探针断言两语言 10 键齐全且非空；页面使用 7 键、ReorderControls 使用 3 键，全部命中 locale；对新 UI 代码区（ReorderControls 全体、排序提示块、三个排序函数、卡片控件块）去注释后做 CJK 检测，命中 0 行。"
+        },
+        {
+          "criterion": "服装变体 outfit.json 能正常写出，desc 回显生效（不再被 except 静默吞掉）",
+          "status": "passed",
+          "evidence": "assets_api.py:342 改 datetime.datetime.now()（修前同写法抛 AttributeError，被 except 吞掉后 outfit.json 永远写不出）。探针抽取真实 api_character_outfit_generate 执行：HTTP 200 + status:started + record_written:true，临时目录下 outfit.json 实写（desc='黑色长风衣，湿发'、created_at=2026-10-12 13:36:25）；再抽取真实 _outfit_desc_of 回读该档案 → desc 回显 = 写入值；强制写失败时仍 200 started（不阻断生成）但 record_written:false 且响应带 warning（不再静默）。"
+        },
+        {
+          "criterion": "错误提示不向前端透传绝对路径或原始异常文本",
+          "status": "passed",
+          "evidence": "后端：storyboard_api.py 排序落盘失败改稳定文案（异常仅 logger.error exc_info）；grid-apply 候选图缺失不再回 {grid_png} 绝对路径；九宫格后台任务失败态不再写 str(e)（改固定文案）。assets_api.py 上传图片不可解码处不再回 {_ie} 原文（PIL 消息含 tmp 绝对路径），只保留异常类名。前端：新增 sbError()=sanitizeErrorMessage 包装，覆盖画布拉取、单镜图/视频重做、整集视频、视频模式保存、批量重做逐镜原因、九宫格生成/应用共 7 处。探针断言失败回滚文案含 '[本地文件路径]' 且不含 AppData/liujianghua。说明：canvas 的 storyboard.path/video.path 与 grid-apply 的 applied 是数据字段而非错误提示，未改（改会破坏现有消费方）。"
+        },
+        {
+          "criterion": "app/*.py 改动已同步 electron-app/_backend/app 两处（sha256 一致）",
+          "status": "passed",
+          "evidence": "Copy-Item 同步 app/routes/{storyboard_api,assets_api}.py → electron-app/_backend/app/routes/ 后 Get-FileHash -Algorithm SHA256：storyboard_api.py 两侧同为 6EA5F907234DE33B…、assets_api.py 两侧同为 11F10607B0E8C1F8…；递归清点确认工作区内这两份文件各只有 2 个副本，无第三份漏同步。"
+        }
+      ],
+      "commandsRun": [
+        {
+          "command": "cd C:\\Users\\liujianghua\\WorkBuddy\\2026-09-09-16-55-22\\漫剧生成系统 && python -c \"import ast,io; [ast.parse(io.open('app/'+f,encoding='utf-8').read()) for f in ['routes/storyboard_api.py','routes/assets_api.py']]; print('syntax OK')\"",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "stdout: syntax OK（无 stderr）"
+        },
+        {
+          "command": "cd C:\\Users\\liujianghua\\WorkBuddy\\2026-09-09-16-55-22\\漫剧生成系统/frontend && npm run type-check",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "> tsc --noEmit —— 无任何 TS 报错（新增 ReorderControls 及页面接入均通过）"
+        },
+        {
+          "command": "cd C:\\Users\\liujianghua\\WorkBuddy\\2026-09-09-16-55-22\\漫剧生成系统/frontend && npx vite build --outDir ../.frontend_build_tmp --emptyOutDir && echo \"隔离构建 OK（未触碰 app/static）\"",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "✓ built in 1.83s；产物落在 ../.frontend_build_tmp（index-CxGtXXUl.js 469.80 kB / index--fXm_LlM.css 47.40 kB）；构建前后 app/static 指纹完全一致（count=66 bytes=3063526，未触碰生产目录）"
+        },
+        {
+          "command": "python %TEMP%\\t26_probe.py（离线探针：AST 抽取真实 storyboard_api/assets_api 函数源码注入替身后执行）",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "12 项断言 ALL PASS：修前 AttributeError / 修后 200+落盘并重读校验 / 服装档案落盘+desc 回显 / 写失败显式回报且 warning 无路径 / 缺镜 400。零生产接触（全部走临时目录与替身）。"
+        },
+        {
+          "command": "tsc snippet.ts --outDir out && node check.cjs（前端行为探针：从 TSX 原样抽出的 applyShotOrder/moveShot/dropShotOn/sanitizeErrorMessage/sbError）",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "19 项断言 ALL PASS（乐观更新、失败回滚与脱敏、↑↓ 边界、拖拽落点、保守分支、两语言 locale 键齐全）"
+        }
+      ]
     },
     {
       "id": "t27",
       "subject": "全栈修复：交付页 stale 硬阻断 + 过期文案纠正 + 错误展示统一（F1-F6）",
-      "status": "pending",
+      "status": "claimed",
       "assignee": "video-pipeline-dev",
       "dependencies": [
         "t26"
       ],
-      "attempt": 0,
+      "attempt": 1,
       "createdAt": 1791783216059,
-      "updatedAt": 1791783216059,
+      "updatedAt": 1791783838485,
       "kind": "implementation",
       "objective": "把 t17 的后端修复补上缺失的**前端一半**，并纠正一处正在误导用户的文案矛盾。\n（依赖 t26：两者都要改 locales/*.json，按序列化避免并发改同一文件。）\n\nF1 交付页 stale 硬阻断：OutputReviewTab.tsx:352-358 的 approve disabled 只判 busy 与 accepted，\n   **完全不看 meta.stale / meta.incomplete_shots** → 用户点「通过」后弹 500 原始报错。\n   需：disabled 加 stale 条件 + 黄条升级为「已过期，需重新合成」+ 提供「重新合成」动作。\nF2 ★文案矛盾（必须一并修）：locales/zh-CN.json:455 的 deliver.staleRerenderHint =\n   「，成片已重做，请重新验收」，而 t17 之后 stale 的语义恰恰是「尚未重做，需重新合成」\n   （mark_deliverable_stale 把 review 降回 pending、note 指向重新合成）。\n   OutputReviewTab.tsx:311-319 把这句直接拼在黄条上 → **界面在骗用户**。zh-CN + en-US 双份。\nF3 后端把 PipelineError 映射成 409（routes/autopilot.py，t17 记录的边界①）→ 前端按 code 展示可读原因。\nF4 deliver.noDeliverables 空态补 action（OutputReviewTab.tsx:232-236；ui/index.tsx:71 注释已写明该槽位用途）；\n   同页 207 行硬编码中文需走 locales。\nF5 单镜返工入口消费 t17 新增的 outputs_invalidated →「成片/超分已失效，需重新合成」明确状态与一键跳转。\nF6 错误展示统一（**按场景区分，不可一刀切**）：\n   · ProjectWorkbenchPage.tsx:1825 纯文本 {error} → 真缺口，换 ErrorState；\n   · :2851 红条无 code 无重试 → 真缺口，补 code + 重试；\n   · :3954 是 3944-3945 注释明示的**刻意软失败行内条** → 保留设计意图，只补「重试」；\n   · QualityPanel.tsx:186 错误与空态混用同行 + 硬编码中文 → 真缺口；\n   · LiveExecutionFeed.tsx:251 → 同上（t8 报告已列）。\n   根因侧：后端 40+ 处把异常原文（含 FileNotFoundError 绝对路径）拼进 error\n   （consistency.py:121、agent.py:128、autopilot.py:473/485/601、prompts.py、system.py、tasks.py、\n   episodes.py、tts.py、export.py …）→ 收敛为可读原因 + 错误码，与前端 ErrorState 闭环。",
       "inScope": [
@@ -2085,7 +2308,9 @@
         "不在生产运行期间执行默认 npm run build",
         "不手改 app/static",
         "不重构整页 UI"
-      ]
+      ],
+      "attemptId": "ab6b0828-6601-4d2e-b04c-0d3e9a54c688",
+      "reassigning": false
     },
     {
       "id": "t28",

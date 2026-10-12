@@ -144,9 +144,22 @@ class TaskStore:
         with self._lock:
             conn = self._conn()
             try:
+                # ⚠️ 绝不能用 INSERT OR REPLACE（2026-10-12 数据层审计 T23 实测的数据丢失 bug）：
+                #    SQLite 的 OR REPLACE 语义是「先 DELETE 再 INSERT」，而生产库的 units 表
+                #    带 FK `ON DELETE CASCADE`（schema.py:62-69 已生效）→ 同一 task_id 二次 create
+                #    会**静默清空该任务的全部 units**（= 断点续跑进度），实测 units 1 → 0。
+                #    触发点真实存在：routes/keyframes.py:260 用
+                #    `task_id=keyframe_{project}_{秒级时间戳}` —— 同一秒内重建即命中。
+                #    改为 upsert（ON CONFLICT DO UPDATE）：
+                #    · id 冲突时**保留原 created_at**，只更新内容与 updated_at；
+                #    · 不触发 DELETE，因此不会级联删掉 units。
                 conn.execute(
-                    "INSERT OR REPLACE INTO tasks (id, project, kind, label, payload, status, "
-                    "progress, total, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO tasks (id, project, kind, label, payload, status, "
+                    "progress, total, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT(id) DO UPDATE SET "
+                    "project=excluded.project, kind=excluded.kind, label=excluded.label, "
+                    "payload=excluded.payload, status=excluded.status, progress=excluded.progress, "
+                    "total=excluded.total, updated_at=excluded.updated_at",
                     (tid, project, kind, label,
                      json.dumps(payload or {}, ensure_ascii=False),
                      ST_PENDING, 0, total, now, now))

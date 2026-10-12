@@ -195,12 +195,16 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         #   AUDIO_HARD_SILENT_RATIO = 0.15（其原注释：「与 audio_qc.HARD_SILENT_RATIO 同口径」），
         #   但未登记 REGISTRY → doctor 的 orphan_candidates() 报孤儿、test_config 整组变红。
         #   ⚠️ 本条只做「登记」这一件事：值 0.15 与语义均取自 quality_stage.py 现文件，未改动它。
-        #   该常量的语义归口属于**音频/质检线**（与上面 audio_qc.HARD_SILENT_RATIO 同口径）；
-        #   若确认二者必须恒等，建议由该线负责人补上
-        #   must_match: ['audio_qc.HARD_SILENT_RATIO']（本任务不替他人声明跨模块等值不变式）。
+        #   该常量的语义归口属于**音频/质检线**（与上面 audio_qc.HARD_SILENT_RATIO 同口径）。
+        #   must_match 由 Captain 2026-10-12 裁决补上，依据三条：
+        #     ① 两处同值（audio_qc.py:62 与 quality_stage.py:187 都是 0.15）；
+        #     ② 本 REGISTRY 已有 6 处 must_match 先例（:65/:71/:301/:317/:352/:573）；
+        #     ③ 本文件 :43 的字段文档写明 must_match 就是「跨模块重复定义的显式声明」。
+        #   实测（内存态试算，未改文件）：补上后 doctor ok=True、duplicates=0、warnings 无新增。
         'default': 0.15, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
         'desc': 'quality_stage 判「整段硬性静音」的有声占比阈值（与 audio_qc 同口径，0~1）',
         'owner': 'quality_stage.AUDIO_HARD_SILENT_RATIO',
+        'must_match': ['audio_qc.HARD_SILENT_RATIO'],
     },
     'probe_timeout': {
         'default': 300, 'type': 'int', 'range': (0, 100000), 'group': '音频',
