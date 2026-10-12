@@ -13,6 +13,7 @@ from flask import Blueprint, current_app, jsonify, request
 qc_bp = Blueprint('qc', __name__)
 
 import audio_qc
+import prompt_protocol
 import prompt_qc
 from config import DUB_DIR, FINAL_DIR, PROJECT_DATA_DIR, QC_DIR, STORYBOARDS_DIR
 from dub_mix import mix_out_dir, probe_audio_info as mix_probe_audio
@@ -821,6 +822,50 @@ def api_qc_project_summary():
         "history": shots,
         "qc_dir": qc_dir,
     })
+@qc_bp.route('/api/qc/prompt-cache/stats', methods=['GET'])
+def api_qc_prompt_cache_stats():
+    """提示词预检缓存的统计 / 诊断（只读；`force=1` 强取）。
+
+    为什么要有这个端点：预检缓存此前「看不见」—— 是否生效、命中率多少、跨模式有没有
+    串味，日志与接口里都查不到（2026-10-12 t11 登记 prompt_qc_cache_stats 零调用点）。
+    本函数是最薄的一层：统计口径全部来自 qc_client（它再复用 prompt_protocol 的字段表 /
+    命中率 / 措辞），本文件不另立一套数字。
+
+    `force=1`：**强取** —— 先无条件做一次预检缓存隔离（旧配置下的结论一律作废），
+    再忽略 qc_client 的周期限流取数。返回的一定是**当前配置**下的数字，而不是另一套
+    模式留下的旧结论（2026-10-12 t24 的根治点：缓存键已含 prompt_mode / prompt_enabled）。
+
+    失败一律不 500：观测接口不该影响质检；取不到就 `success=false` + 空 stats。
+    """
+    force = str(request.args.get('force') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    try:
+        cfg = _qc_load_cfg()
+    except Exception as _e:  # noqa: BLE001 —— 读配置失败不影响读缓存统计
+        _app_logger().debug(f"读取质检配置失败（预检缓存统计按无 cfg 处理）：{_e}")
+        cfg = None
+    if force:
+        try:
+            # 强取语义：无条件失效一次，保证下面这行数字来自「当前配置」而不是上次的缓存
+            qc_client.prompt_qc_cache_isolation_check(cfg, force=True)
+        except Exception as _e:  # noqa: BLE001
+            _app_logger().debug(f"预检缓存强制失效失败（忽略）：{_e}")
+    stats = {}
+    try:
+        # 传 cfg：顺带跑「配置切换 → 清空预检缓存」的隔离检查，再取数字
+        stats = qc_client.log_prompt_qc_cache_stats(
+            source="接口 /api/qc/prompt-cache/stats", force=force, cfg=cfg)
+    except Exception as _e:  # noqa: BLE001
+        _app_logger().debug(f"预检缓存统计输出失败（忽略）：{_e}")
+    if not stats:
+        stats = qc_client.prompt_qc_cache_stats()
+    if not stats:
+        return jsonify({"success": False, "stats": {},
+                        "error": "预检缓存统计不可用（prompt_qc 未加载或被裁剪）"})
+    return jsonify({"success": True, "force": bool(force), "stats": stats,
+                    "line": prompt_protocol.format_prompt_qc_cache_diag(
+                        stats, source="接口 /api/qc/prompt-cache/stats")})
+
+
 @qc_bp.route('/api/qc/frames/<path:filename>')
 def api_qc_frame_file(filename):
     """回显视频质检抽帧图（只读）"""

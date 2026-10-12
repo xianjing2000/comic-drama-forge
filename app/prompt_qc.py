@@ -95,7 +95,8 @@ from prompt_protocol import (  # noqa: F401
     SB_MARK_REF_USAGE_LEGACY, SB_MARK_STYLE, SB_MARK_STYLE_LEGACY, SB_MARK_TASK,
     SB_PRESERVE_BLANKET,
     GRID_ZH_TEMPLATE_NAME, assert_grid_zh_template_markers,
-    missing_grid_zh_template_markers)
+    missing_grid_zh_template_markers,
+    prompt_qc_cfg_decision_key)
 #: 参考图编号标记：官方协议的核心，提示词里**必须**用 <imageN> 而非自然语言指代
 SB_IMAGE_TAG_RE = re.compile(r"<image\s*(\d+)\s*>", re.IGNORECASE)
 #: 自然语言指代参考图（官方明确禁用，会产生歧义）
@@ -1413,8 +1414,13 @@ def _crit_kind(msg) -> str:
 #
 # 设计：
 #   · key 覆盖全部影响判决的输入：kind / style / ref_count / expect_refs /
+#     **cfg 的判决字段（prompt_enabled / prompt_mode，口径见
+#     prompt_protocol.prompt_qc_cfg_decision_key）** /
 #     **ctx 的 8 个语义字段（与 prompt_enhance 同口径）** / prompt 全文。
 #     任一变化 -> 不同 key -> 重新预检（不会拿旧结论套新输入）。
+#     ⚠️ 2026-10-12（t24）：cfg 判决字段是**补上**的 —— 此前键里没有模式/开关，
+#     同一提示词先按 warn 判、再按 block 判会命中同一条目，block 直接复用 warn 的
+#     「放行」结论（t11 最小复现：缓存开 len=11/cache_hit=True，缓存关 len=82 正确）。
 #   · 进程内 FIFO 淘汰（上限 _PF_CACHE_SIZE），线程安全（预取线程与主线程并发读写）。
 #   · **只缓存、不改任何判定逻辑**：命中即原样返回上次结论。
 #   · fail-open：缓存自身异常时退化为「不缓存」，绝不影响预检语义。
@@ -1425,6 +1431,9 @@ _PF_LOCK = threading.Lock()
 _PF_CACHE_SIZE = 256
 _PF_HIT = {"n": 0}
 _PF_MISS = {"n": 0}
+#: 最近一次缓存查询的键摘要 + 提示词类型（诊断用；字段名与 prompt_protocol 的
+#: PROMPT_QC_CACHE_STAT_FIELDS 对齐，便于接口/日志「对账到底查了哪份输入」）。
+_PF_LAST = {"key": "", "kind": ""}
 
 
 def _pf_cache_enabled() -> bool:
@@ -1433,10 +1442,15 @@ def _pf_cache_enabled() -> bool:
 
 
 def prompt_qc_cache_stats() -> dict:
-    # 预检缓存的命中统计（供日志与诊断使用）
+    # 预检缓存的命中统计（供日志与诊断使用）。
+    # 字段口径的单一来源是 prompt_protocol.PROMPT_QC_CACHE_STAT_FIELDS
+    # （enabled/hit_rate 由消费端 qc_client 补齐，本函数只生产 size/capacity/hit/miss
+    #  + 最近一次查询的 last_key/last_kind）。
     with _PF_LOCK:
         return {"size": len(_PF_CACHE), "hit": _PF_HIT["n"], "miss": _PF_MISS["n"],
-                "capacity": _PF_CACHE_SIZE}
+                "capacity": _PF_CACHE_SIZE,
+                "last_key": _PF_LAST.get("key", ""),
+                "last_kind": _PF_LAST.get("kind", "")}
 
 
 def _ctx_brief_for_cache(ctx) -> str:
@@ -1456,15 +1470,28 @@ def _ctx_brief_for_cache(ctx) -> str:
 
 
 def _pf_cache_key(kind: str, prompt: str, ctx, style: str,
-                  ref_count, expect_refs) -> str:
-    # 构造预检缓存键：把影响判决的输入全量纳入，避免串味。
+                  ref_count, expect_refs, cfg=None) -> str:
+    # 构造预检缓存键：把影响判决的输入**全量**纳入，避免串味。
+    # ⚠️ 2026-10-12（t24）：cfg 的判决字段必须进键（prompt_enabled / prompt_mode）。
+    #    判决只取决于它们（prompt_qc_ready / prompt_qc_mode），而它们的取值口径由
+    #    prompt_protocol.PROMPT_QC_CFG_DECISION_KEYS / prompt_qc_cfg_decision_key 单点提供
+    #    —— 本函数不再自己拼字典，改了字段集合只需改那一处。
+    #    ⚠️ **签名与调用点必须成对改**：只加签名不传实参 = 仍然串味（t11 本轮踩过）。
+    #    只取两个判决字段而不是整个 cfg：cfg 里的 base_url/超时/密钥逐镜可能变，全量入键
+    #    会把命中率打到 0（本就不可变的内容也不必进键）。
     try:
         brief = _ctx_brief_for_cache(ctx)
     except Exception:
         brief = ""
+    try:
+        cfg_part = prompt_qc_cfg_decision_key(cfg)
+    except Exception:
+        # fail-open：拿不到 cfg 标识时退化为「不含 cfg」的旧口径（只少命中，不多串味）
+        cfg_part = ""
     basis = "|".join((
         str(kind or ""), str(style or ""),
         str(ref_count), str(expect_refs),
+        cfg_part,
         brief, str(prompt or ""),
     ))
     return hashlib.sha1(basis.encode("utf-8", "ignore")).hexdigest()
@@ -1506,11 +1533,17 @@ def preflight(kind: str, prompt: str, ctx: dict = None, style: str = "",
     # 这是「资产完成即预热分镜提示词 / 分镜完成即预热视频提示词」能真正省时的前提。
     #
     # 落地口径：只缓存、不改判定；任何异常都退化为直接调用原实现（fail-open）。
+    # 键的构成见 _pf_cache_key —— **含 cfg 的判决字段**（prompt_enabled / prompt_mode），
+    # 故 warn / repair / block 三模式各占一条目，不会互相顶替（2026-10-12 t24）。
     try:
         if not _pf_cache_enabled():
             return _preflight_uncached(kind, prompt, ctx=ctx, style=style, cfg=cfg,
                                        ref_count=ref_count, expect_refs=expect_refs)
-        _ck = _pf_cache_key(kind, prompt, ctx, style, ref_count, expect_refs)
+        # ⚠️ cfg 必须传进来（与 _pf_cache_key 的签名成对）：漏传 = 键里没有模式/开关，
+        #    跨模式会命中同一条目（2026-10-12 t24 根治）。
+        _ck = _pf_cache_key(kind, prompt, ctx, style, ref_count, expect_refs, cfg=cfg)
+        _PF_LAST["key"] = _ck[:12]
+        _PF_LAST["kind"] = str(kind or "")
         _hit = _pf_cache_get(_ck)
         if _hit is not None:
             _hit["cache_hit"] = True
