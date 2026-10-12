@@ -124,6 +124,10 @@ _PANEL_DUP_RES = (_PANEL_DUP_RE,) + _PANEL_DUP_SYN_RES
 #:   真缺陷命中    97 → 123 条；真缺陷放过(FN) 64 → 38 条
 #:   逆天系统_全书里「修复前 passed=False 且判据 False、修复后命中」= 11 条
 #:   （t24 §B3 报的是 9 条 score≈45，本实现把该族 11 条全覆盖）
+#: ⭐ 2026-10-12（t17：t5 复核驳回 B/D/A 三项）后的同一语料、t5 的 A 表口径：
+#:   FP(A) 4 → 3（**无新增**，再修掉 1 条达标误判）；FN(A) 3 → 3、FN(B) 10 → 10
+#:   （**不引入新增漏判**）；硬判语漏判 0 → 0；t5 的 9 条软边界输入 9/9 命中；
+#:   D 的 2 条残留误判（「…不足以判为面板雷同」「无色块/撕裂/面板雷同」）已修。
 #: 回退：把 _PANEL_DUP_SYN_RES 从 _PANEL_DUP_RES 里摘掉即回到「只认面板/九宫格/格间」。
 #: 否定语境词表**分两级**（2026-10-12 t24 验证门实测修复）：
 #:
@@ -153,9 +157,28 @@ _PANEL_DUP_NEG_STRONG = ("未出现", "不存在", "没有发现", "未发现", 
 #: 句子边界：窗口内遇到这些标点即截断，避免**前一句的否定词污染本句**。
 #:   反例（真实语料）："完全未出现。', '面板雷同：九宫格中≥4格均为空镜" ——
 #:   「未出现」属于上一句，若跨句继承就会放过这条真缺陷。
-_PANEL_DUP_SEP = "，。；、,.;：:!！?？｜|\"'“”‘’"
+#:
+#: ⭐ 2026-10-12（t17 / t5 驳回 B）**软边界补齐**：原集合只有硬句读，于是
+#:   「本镜无畸变（面板雷同）」里的「无」跨过全角括号继续吞掉「面板雷同」
+#:   → 真缺陷被放过（软放行闸门判「无结构性缺陷」）。t5 用 9 条绕过用例证明：
+#:   ac27d91（WEAK 3 字）全命中、44d3977（3→6）全漏 —— 窗口越宽，越依赖**边界**
+#:   来切断否定继承。
+#:   补齐 13 类软边界：换行 \n、制表 \t、（）、「」、『』、．、·、/、——（—）、《》。
+#: ⚠️ 「/」同时是**列举连接符**（「无色块/撕裂/面板雷同」）：把它当硬截断会让
+#:   列举式否定失效 → 另由 _panel_dup_list_neg 兜住（见该函数注释）。
+_PANEL_DUP_SEP = "，。；、,.;：:!！?？｜|\"'“”‘’（）「」『』《》．·/—\n\t"
+#: **硬**句读子集（不含软边界）：用于「整条判语主干」与「后置窗口」的边界判断。
+#: 与 _PANEL_DUP_SEP 分开，是因为软边界只切断**否定继承**，不是语义上的句子边界。
+_PANEL_DUP_HARD_SEP = "，。；、,.;：:!！?？｜|\"'“”‘’"
 #: 弱否定词：只在前 3 字紧邻窗口生效（放宽会吞真缺陷，见上方说明）。
 _PANEL_DUP_NEG_WEAK = ("无", "没有", "不")
+#: 后置**判定性**否定（t17 / t5 驳回 D 之二）：否定短语落在词根**后面**的写法。
+#:   「存在轻微面板重复倾向，**不足以判为**面板雷同」—— 整句是达标结论，但否定
+#:   短语在词根之后，前缀窗口天然覆盖不到（t5 已证伪「需要另一类改动」的说法：
+#:   同句内、无句读跨隔，按后缀否决即可）。
+#: ⚠️ 只收**语义无歧义的判定性否定**：绝不能收「未达/未出现/未构成」这类会出现在
+#:   真缺陷句里的词 —— 「面板雷同，未达可直接使用标准」必须仍是缺陷（实测仍 True）。
+_PANEL_DUP_NEG_TAIL = ("不足以判为", "不足以")
 
 #: 同义族的**弱化语境**排除（2026-10-12 t8 实测调参，只作用于 _PANEL_DUP_SYN_RES）：
 #:   · 前缀 4 词：命中点前 6 字以内（与弱否定同窗口）。
@@ -202,6 +225,57 @@ def _panel_dup_next_clause(txt: str, pos: int) -> str:
     return seg[i:j]
 
 
+def _panel_dup_pre_hard(txt: str, pos: int, width: int = 8) -> str:
+    """命中点之前 **width 字**、且只按**硬句读**截断的前缀。
+
+    与 _PANEL_DUP_SEP 截断的区别：软边界（/（）「」…）会切断**否定继承**，
+    但不应切断**弱化语境**的继承 —— 否则「仅第7/9格构图高度重复」里的「仅」被
+    「/」挡掉，一条**达标**判语（轻微瑕疵）会被重新判成缺陷
+    （t17 实测：弱化判定若用软边界截断的前缀，FP 从 4 升到 5）。
+    """
+    seg = txt[max(0, pos - width):pos]
+    cut = -1
+    for _s in _PANEL_DUP_HARD_SEP:
+        _p = seg.rfind(_s)
+        if _p > cut:
+            cut = _p
+    return seg[cut + 1:]
+
+
+def _panel_dup_list_neg(txt: str, pos: int) -> bool:
+    """整条判语是**列举式否定**结论时返回 True（如「无色块/撕裂/面板雷同」）。
+
+    t17 / t5 驳回 D 之一：「无」与词根隔着列举符「/」（距 7 字），既超出弱否定
+    窗口、又被「/」截断 → 被误判成缺陷。判据是「**这条判语的主干**就是一个由
+    列举符连接、以弱否定词起首的结论」：
+      · 命中点之前不得有硬句读（否则它只是长句里的片段，否定是否统辖全部列举项
+        无法从局部文本判定）；
+      · 必须含列举符「/」；且整段起首是弱否定词（无/没有/不）。
+    ⚠️ 刻意**不覆盖**（可复现反例）：「…渲染正常，无色块/撕裂/面板雷同，整体可用；
+    仅个别格手部略糊。」—— 同一措辞出现在长句里，本函数返回 False，该条仍判缺陷
+    （生产 image_18）。放宽到「任意位置」会让这类长句被放过，实测 t5 A 表口径的
+    FN(A) 3→4，故按「主干」收敛。
+    """
+    pre = txt[:pos]
+    if not pre.strip():
+        return False
+    if any(_s in pre for _s in _PANEL_DUP_HARD_SEP):
+        return False
+    if "/" not in pre:
+        return False
+    return any(pre.lstrip().startswith(n) for n in _PANEL_DUP_NEG_WEAK)
+
+
+def _panel_dup_tail_scope(txt: str, pos: int) -> str:
+    """命中点之后到**本句末**（。；!！?？ 止）的文字，供后置否定判定用。"""
+    end = len(txt)
+    for _s in "。；!！?？":
+        _p = txt.find(_s, pos)
+        if _p >= 0:
+            end = min(end, _p)
+    return txt[pos:end]
+
+
 def _panel_dup_hit(txt: str) -> bool:
     """判定文本是否含**未被否定**的「面板雷同 / 面板重复」类表述。
 
@@ -210,14 +284,20 @@ def _panel_dup_hit(txt: str) -> bool:
       · 同义族  ：4 条精确子模式（姿态族 / 复合族 / 单一族 / 强度族）。
 
     否定语境判定（见 _PANEL_DUP_NEG_STRONG 的说明）：
-      · 前 6 字命中弱否定词 → 视为达标结论；
-      · 前 8 字命中强否定短语 → 视为达标结论；
+      · 命中点前 6 字窗口内命中弱否定词 → 视为达标结论；
+      · 同一窗口内命中强否定短语 → 视为达标结论；
       · 词根**中间的修饰位**恰好是一个纯否定词（「格间**无**雷同」「构图**不**重复」）
         → 同样是达标结论（注意：修饰位为空串的「面板雷同」是**真缺陷**，不能误伤）；
+      · 整条判语是列举式否定（「无色块/撕裂/面板雷同」）→ 达标
+        （见 _panel_dup_list_neg）；
+      · 命中点**之后**、同句内出现判定性否定（「…不足以判为面板雷同」）→ 达标
+        （见 _PANEL_DUP_NEG_TAIL）；
       · 都不命中 → 真缺陷，返回 True。
 
     同义族另加一层**弱化语境**排除（见 _PANEL_DUP_SYN_SOFT 的说明）；
     带前缀族不受该层影响，行为与扩面前逐字一致。
+    弱化前缀按**硬句读**取窗口（_panel_dup_pre_hard）—— 用软边界截断会把
+    「仅第7/9格构图高度重复」里的「仅」挡掉，把达标判语重新判成缺陷。
     """
     for m in _panel_dup_spans(txt):
         near6 = txt[max(0, m.start() - 6):m.start()]
@@ -229,6 +309,13 @@ def _panel_dup_hit(txt: str) -> bool:
                 _cut = _pos
         if _cut >= 0:
             near6 = near6[_cut + 1:]
+        # 列举式否定（整条判语主干）：见 _panel_dup_list_neg 的注释
+        if _panel_dup_list_neg(txt, m.start()):
+            continue
+        # 后置判定性否定：见 _PANEL_DUP_NEG_TAIL 的注释
+        if any(n in _panel_dup_tail_scope(txt, m.end())
+               for n in _PANEL_DUP_NEG_TAIL):
+            continue
         if any(n in near6 for n in _PANEL_DUP_NEG_WEAK):
             continue
         if any(n in near6 for n in _PANEL_DUP_NEG_STRONG):
@@ -242,7 +329,8 @@ def _panel_dup_hit(txt: str) -> bool:
         # 同义族专属：VLM 判**通过**时描述轻微瑕疵的句式不判缺陷
         # （带前缀族不走这一层，见 _PANEL_DUP_SYN_SOFT 的说明）。
         if m.re in _PANEL_DUP_SYN_RES:
-            if any(w in near6 for w in _PANEL_DUP_SYN_SOFT):
+            if any(w in _panel_dup_pre_hard(txt, m.start(), 6)
+                   for w in _PANEL_DUP_SYN_SOFT):
                 continue
             if any(w in _panel_dup_next_clause(txt, m.end())
                    for w in _PANEL_DUP_SYN_SOFT_TAIL):
