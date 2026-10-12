@@ -26,6 +26,15 @@
 任务状态机
 ----------
 pending → running → (done | failed | interrupted | cancelled)
+
+接线状态（t16/t43/t56 结论）
+--------------------------
+本模块是**文档化预留/半成品**：tasks / units 表结构已建，但 TaskStore / TaskQueue
+**未接入生产写入链路**（tasks 表当前 0 行，见 schema.TABLE_NOTES）。
+- 断点续跑**实际**由 `is_unit_done`（产物文件落盘即完成判据）承担，走 routes/tasks.py；
+- 单 GPU 并发**实际**由 `gpu_task_gate` 的进程级 Semaphore(TASK_QUEUE_CONCURRENCY) 承担。
+TaskQueue.submit / start / join 仅作 `.status()` 可观测性与测试/嵌入用途，
+勿据此认为生产已接线。
 """
 from __future__ import annotations
 

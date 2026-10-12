@@ -29,7 +29,7 @@ from fs_atomic import atomic_write_json, read_json_strict
 logger = logging.getLogger(__name__)
 
 
-class AISemoryEntry:
+class AIMemoryEntry:
     """单条记忆条目"""
 
     def __init__(
@@ -69,7 +69,7 @@ class AISemoryEntry:
         }
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "AISemoryEntry":
+    def from_dict(cls, data: Dict[str, Any]) -> "AIMemoryEntry":
         mem = cls(
             mem_id=data.get("mem_id", ""),
             mem_type=data.get("mem_type", "insight"),
@@ -142,7 +142,7 @@ class AIPatternRecognizer:
 class AIEvolutionEngine:
     """自进化引擎 - 基于历史数据优化生产"""
 
-    def __init__(self, memory_system: "AISemorySystem"):
+    def __init__(self, memory_system: "AIMemorySystem"):
         self.memory = memory_system
         self.pattern_recognizer = AIPatternRecognizer()
 
@@ -237,7 +237,7 @@ class AIEvolutionEngine:
         }
         return suggestions.get(category, "持续优化生产流程")
 
-    def _find_common_tags(self, memories: List[AISemoryEntry]) -> List[str]:
+    def _find_common_tags(self, memories: List[AIMemoryEntry]) -> List[str]:
         """找出成功产出的共同标签"""
         tag_counts = {}
         for mem in memories:
@@ -266,12 +266,12 @@ class AIEvolutionEngine:
         return optimized
 
 
-class AISemorySystem:
+class AIMemorySystem:
     """AI 记忆系统主类"""
 
     def __init__(self, root_dir: str = None):
         self.root_dir = root_dir or os.path.join(os.getcwd(), "output", "memory")
-        self.entries: List[AISemoryEntry] = []
+        self.entries: List[AIMemoryEntry] = []
         self.lock = threading.Lock()
         self.evolution = AIEvolutionEngine(self)
         self.pattern_recognizer = AIPatternRecognizer()
@@ -305,7 +305,7 @@ class AISemorySystem:
         loaded = []
         for item in (data.get("entries") or []):
             if isinstance(item, dict):
-                loaded.append(AISemoryEntry.from_dict(item))
+                loaded.append(AIMemoryEntry.from_dict(item))
         self.entries = loaded
         if loaded:
             logger.info("Loaded %d memories from disk", len(loaded))
@@ -334,10 +334,10 @@ class AISemorySystem:
         confidence: float = 1.0,
         tags: Optional[List[str]] = None,
         source: Optional[str] = None,
-    ) -> AISemoryEntry:
+    ) -> AIMemoryEntry:
         """添加新记忆"""
         mem_id = self._generate_id(mem_type, content)
-        entry = AISemoryEntry(
+        entry = AIMemoryEntry(
             mem_id=mem_id,
             mem_type=mem_type,
             content=content,
@@ -356,7 +356,7 @@ class AISemorySystem:
 
     def search_by_pattern(
         self, query: str, mem_type: Optional[str] = None, limit: int = 10
-    ) -> List[AISemoryEntry]:
+    ) -> List[AIMemoryEntry]:
         """基于模式搜索记忆"""
         results = []
         query_lower = query.lower()
@@ -390,7 +390,7 @@ class AISemorySystem:
         return results[:limit]
 
 
-    def list_all(self, mem_type: Optional[str] = None, limit: int = 100) -> List[AISemoryEntry]:
+    def list_all(self, mem_type: Optional[str] = None, limit: int = 100) -> List[AIMemoryEntry]:
         """列出所有记忆"""
         with self.lock:
             if mem_type:
@@ -404,7 +404,7 @@ class AISemorySystem:
         prompt: str,
         issues: List[str],
         category: str,
-    ) -> AISemoryEntry:
+    ) -> AIMemoryEntry:
         """记录质检教训"""
         content = f"在项目 {project} 第 {episode} 集中，使用提示词时遇到以下问题：{'、'.join(issues[:3])}"
         context = {
@@ -436,7 +436,7 @@ class AISemorySystem:
         prompt: str,
         highlights: List[str],
         category: str,
-    ) -> AISemoryEntry:
+    ) -> AIMemoryEntry:
         """记录成功经验"""
         content = f"项目 {project} 第 {episode} 集成功产出，关键要素：{'、'.join(highlights[:3])}"
         context = {
@@ -505,7 +505,7 @@ class AISemorySystem:
         with self.lock:
             before = len(self.entries)
 
-            def _keep(e: AISemoryEntry) -> bool:
+            def _keep(e: AIMemoryEntry) -> bool:
                 ctx = e.context if isinstance(e.context, dict) else {}
                 proj = str(ctx.get("project") or "").strip()
                 return proj not in vals
@@ -535,7 +535,7 @@ class AISemorySystem:
         """计算文本哈希"""
         return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
 
-    def _calculate_relevance(self, entry: AISemoryEntry, query: str) -> float:
+    def _calculate_relevance(self, entry: AIMemoryEntry, query: str) -> float:
         """计算相关度"""
         score = 0.0
         query_lower = query.lower()
@@ -577,22 +577,28 @@ class AISemorySystem:
 
 
 # 全局单例
-_instance: Optional[AISemorySystem] = None
+_instance: Optional[AIMemorySystem] = None
 _instance_lock = threading.Lock()
 
 
-def get_memory_system(root_dir: str = None) -> AISemorySystem:
+def get_memory_system(root_dir: str = None) -> AIMemorySystem:
     """获取全局记忆系统实例"""
     global _instance
     with _instance_lock:
         if _instance is None or _instance.root_dir != (root_dir or _instance.root_dir):
-            _instance = AISemorySystem(root_dir)
+            _instance = AIMemorySystem(root_dir)
         return _instance
+
+
+# t56：历史拼写别名（原类名 AISemoryEntry/AISemorySystem → 改正为 AIMemory*）。
+# grep 全仓确认无外部引用，但保留别名以免历史/插件代码按旧名 import 时崩溃。
+AISemoryEntry = AIMemoryEntry
+AISemorySystem = AIMemorySystem
 
 
 if __name__ == "__main__":
     # 测试
-    mem = AISemorySystem()
+    mem = AIMemorySystem()
 
     # 记录一些教训
     mem.record_lesson(

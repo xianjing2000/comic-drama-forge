@@ -1216,17 +1216,12 @@ class PromptMemory:
     _normalize_lesson = staticmethod(_normalize_lesson)
 
 
-# ===================== 已废弃：空壳别名 =====================
+# ===================== 已废弃：增强版别名 =====================
 
-class PromptMemoryEnhanced(PromptMemory):
-    """已废弃：统一为 PromptMemory，仅为 isinstance 兼容保留。
-
-    不再定义 `__init__`、不再持有独立 `_path`，也不再有独立的模块级单例；
-    增强能力（record_with_context / suggestions_with_priority /
-    decay_old_lessons / get_learning_curve / list_with_context）已整体折入
-    `PromptMemory`。
-    """
-    pass
+# t56：原为空壳子类（isinstance 对 get_enhanced_memory 的返回值恒 False，因后者返回
+# 父类 PromptMemory 实例 —— 「isinstance 兼容」形似实则无效）。改为类别名，
+# isinstance(x, PromptMemoryEnhanced) 与 isinstance(x, PromptMemory) 完全等价，兼容真实。
+PromptMemoryEnhanced = PromptMemory
 
 
 # ===================== 模块级单例 =====================

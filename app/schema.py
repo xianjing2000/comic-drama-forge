@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 #: 当前 schema 版本。任何结构变更都要 +1 并在下方注释记录。
 #: v1 (2026-10-10): 建立本模块；补 idx_tasks_project_status / idx_tasks_created_at / idx_units_task；
 #:                  units 增加 FOREIGN KEY ... ON DELETE CASCADE；_connect 开启 PRAGMA foreign_keys。
+#: v2 (历史): 变更记录在代码演进中未留存（t12 审查发现版本号=2 但注释只记到 v1）。
+#:                  当前 TABLES / INDEXES 即权威结构；t33 起 task_store 复用本模块作为
+#:                  tasks/units 单一来源（结构未变，版本号保持 2）。
 SCHEMA_VERSION = 2
 
 #: 建表语句（IF NOT EXISTS，幂等）。
