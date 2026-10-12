@@ -110,21 +110,26 @@ def _ensure_schema() -> None:
 # ===================== 加解密（复用 secret_store 主密钥） =====================
 
 def _cipher(plain: str) -> str:
-    """加密明文密钥 → Fernet 密文。加密不可用时返回空串（调用方需降级）。"""
+    """加密明文密钥 → Fernet 密文。加密不可用时 **fail-loud 抛异常**，绝不落明文。
+
+    t18（数据安全）：原实现在 Fernet 不可用 / 加密失败时把明文 api_key 落库，
+    违背「库内零明文」承诺 —— 任何能读 tasks.db 的人都能看到明文密钥。
+    改为：加密不可用或失败一律抛 RuntimeError 上抛，由保存路由据此响亮降级
+    （提示改用环境变量 MJSCXT_API_KEY_*）；调用方 migrate_from_legacy 已按
+    单模块 try/except 兜底，不会阻断其它模块的迁移。
+    """
     if not plain:
         return ""
+    store = secret_store.get_store(_PROJECT_ROOT)
+    if not store._fernet:
+        raise RuntimeError(
+            "AI 凭证加密不可用（缺 cryptography 或主密钥），已拒绝明文落库；"
+            "请配置 MJSCXT_SECRET_KEY 或改用环境变量 MJSCXT_API_KEY_*")
     try:
-        store = secret_store.get_store(_PROJECT_ROOT)
-        # 借用 SecretStore 实例的 Fernet 实例加密（与 secrets.enc 同一主密钥）
-        if store._fernet:
-            return store._fernet.encrypt(plain.encode("utf-8")).decode("ascii")
-        # 主密钥不可用：降级存明文（响亮告警，不阻断）
-        logger.error("ai_credentials 加密不可用（缺 cryptography 或主密钥），"
-                     "本次以明文落库（请配置 MJSCXT_SECRET_KEY 后重新保存）")
-        return plain
+        return store._fernet.encrypt(plain.encode("utf-8")).decode("ascii")
     except Exception as e:  # noqa: BLE001
-        logger.warning("ai_credentials 加密失败，降级明文落库：%s", e)
-        return plain
+        raise RuntimeError(
+            "AI 凭证加密失败，已拒绝明文落库：%s: %s" % (type(e).__name__, e)) from e
 
 
 # Fernet token 的固定前缀（version byte 0x80 的 base64 头），用于识别真密文

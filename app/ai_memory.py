@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # 原子写（删除项目时按项目键摘除 memories.json 条目后写回，2026-10-06）。
 # fs_atomic 只依赖标准库，可被任意业务模块顶层 import，无循环导入风险。
-from fs_atomic import atomic_write_json
+from fs_atomic import atomic_write_json, read_json_strict
 
 logger = logging.getLogger(__name__)
 
@@ -283,27 +283,48 @@ class AISemorySystem:
         self._load()
 
     def _load(self):
-        """从磁盘加载记忆"""
-        memory_file = os.path.join(self.root_dir, "memories.json")
-        if os.path.exists(memory_file):
-            try:
-                with open(memory_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                self.entries = [AISemoryEntry.from_dict(e) for e in data.get("entries", [])]
-                logger.info(f"Loaded {len(self.entries)} memories from disk")
-            except Exception as e:
-                logger.error(f"Failed to load memories: {e}")
+        """从磁盘加载记忆（fail-open：损坏先 .bak 恢复，仍失败按空记忆启动，绝不丢磁盘数据）。
 
-    def _save(self):
-        """保存到磁盘"""
+        t18（数据安全）：原实现 _save 直接 open(...,"w") 覆盖写（无临时名/fsync/.bak），
+        崩溃/断电留下半截 JSON；_load 又 except Exception 静默吞掉 → 下次加载丢光、
+        再写盘即永久清空全部记忆。现改用 read_json_strict（三态读取器）：
+          · 文件缺失 → 空记忆（正常初始态）；
+          · 解析成功 → 载入；
+          · 解析失败 → 先尝试 .bak（最后一份好版本）恢复并原子写回活文件；
+            .bak 也无 → fail-open 空启动，但磁盘损坏文件原样保留（下次 _save
+            用 atomic_write_json 不会把坏内容盖到 .bak 上）。
+        """
         memory_file = os.path.join(self.root_dir, "memories.json")
         try:
-            data = {"entries": [e.to_dict() for e in self.entries], "updated_at": datetime.now().isoformat()}
-            with open(memory_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.debug(f"Saved {len(self.entries)} memories to disk")
-        except Exception as e:
-            logger.error(f"Failed to save memories: {e}")
+            data = read_json_strict(memory_file, None)
+        except Exception as e:  # noqa: BLE001 - fail-open：读不到绝不阻断启动
+            logger.error("加载记忆失败（按空记忆启动，磁盘数据保留可恢复）：%s", e)
+            return
+        if not isinstance(data, dict):
+            return
+        loaded = []
+        for item in (data.get("entries") or []):
+            if isinstance(item, dict):
+                loaded.append(AISemoryEntry.from_dict(item))
+        self.entries = loaded
+        if loaded:
+            logger.info("Loaded %d memories from disk", len(loaded))
+
+    def _save(self):
+        """保存到磁盘（原子写：唯一临时名 + fsync + .bak 快照 + os.replace 重试）。
+
+        t18（数据安全）：原实现直接 open(memory_file,"w") 覆盖写，崩溃/断电留下半截 JSON。
+        现改用 fs_atomic.atomic_write_json：发布前先把「当前可解析的活文件」快照到 .bak
+        （活文件损坏时绝不把坏内容盖到 .bak 上），再唯一临时名 + fsync + replace 原子发布。
+        """
+        memory_file = os.path.join(self.root_dir, "memories.json")
+        try:
+            data = {"entries": [e.to_dict() for e in self.entries],
+                    "updated_at": datetime.now().isoformat()}
+            atomic_write_json(memory_file, data)
+            logger.debug("Saved %d memories to disk", len(self.entries))
+        except Exception as e:  # noqa: BLE001
+            logger.error("Failed to save memories: %s", e)
 
     def add_memory(
         self,

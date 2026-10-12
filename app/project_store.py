@@ -607,6 +607,41 @@ def _project_alias_names(rec: dict) -> list:
     return names
 
 
+def _is_project_entry(entry: str, n: str) -> bool:
+    """判断 entry 是否属于项目 n（精确边界匹配，杜绝前缀误删）。
+
+    t18（数据安全）：原实现 entry.startswith(n + "_") 会把另一项目「剑心_特别版」
+    的目录也当成本项目前缀命中 —— 删「剑心」时会把「剑心_特别版」的全部产物软删。
+    改为「全等 + 已知变体后缀」的精确边界：
+      · 全等：<项目>/
+      · 分集目录：<项目>_第N集/
+      · 连字符变体：<项目>-…（历史命名）
+      · 单文件剧本：<项目>_YYYYMMDD_HHMMSS.json
+      · 水印成片：<项目>_..._wm.mp4
+    其余任何「下划线前缀但后缀非已知形态」的 entry（如另一项目「剑心_特别版」）
+    一律不命中。
+    """
+    if not n:
+        return False
+    if entry == n:
+        return True
+    if entry.startswith(n + "-"):
+        return True
+    if not entry.startswith(n + "_"):
+        return False
+    suffix = entry[len(n) + 1:]  # 去掉「<项目>_」
+    # 分集目录：第N集
+    if re.match(r"^第\d+集", suffix):
+        return True
+    # 单文件剧本 / 时间戳变体：YYYYMMDD_HHMMSS（后接 . 或结尾）
+    if re.match(r"^\d{8}_\d{6}(\.|$)", suffix):
+        return True
+    # 水印成片：以 _wm.mp4 结尾
+    if suffix.endswith("_wm.mp4"):
+        return True
+    return False
+
+
 def _match_project_entries(root: str, names: list) -> list:
     """在 root 下找出属于该项目的全部条目（子目录**和**文件）。
 
@@ -615,7 +650,7 @@ def _match_project_entries(root: str, names: list) -> list:
     - ``<项目名>_第N集/``          —— 分集时每集一个子目录，互不覆盖
     - ``<项目名>_<时间戳>.json``    —— 整本转换的单文件剧本（落在 output/scripts 下）
     - ``<项目名>_..._wm.mp4``      —— 水印成片（落在 output/watermark 下，是文件不是目录）
-    统一按「精确名 / 前缀」聚合，保证既不串项目、也不漏分集目录与单文件产物。
+    按「精确边界」（见 _is_project_entry）聚合，保证既不串项目、也不漏分集目录与单文件产物。
     """
     if not root or not os.path.isdir(root):
         return []
@@ -625,7 +660,7 @@ def _match_project_entries(root: str, names: list) -> list:
         if not (os.path.isdir(full) or os.path.isfile(full)):
             continue
         for n in names:
-            if entry == n or entry.startswith(n + "_") or entry.startswith(n + "-"):
+            if _is_project_entry(entry, n):
                 hit.append(full)
                 break
     return hit
