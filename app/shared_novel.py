@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import os
 
-import autopilot
 import novel_to_script
 import project_store
 from config import NOVELS_DIR
@@ -68,6 +67,7 @@ def _episode_units_for_chapters(novel_meta: dict, chapters: list) -> list:
     selected = [int(c.get("index") or 0) for c in (chapters or [])]
     if not selected:
         return []
+    import autopilot  # noqa: E402  延迟导入：消除 shared_novel→autopilot 隐性分层环
     try:
         all_chapters, text = autopilot.chapters_and_text(novel_meta)
     except Exception as e:  # noqa: BLE001

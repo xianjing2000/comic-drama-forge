@@ -42,9 +42,6 @@ import shot_key
 from comfyui_client import ComfyUIClient
 from config import PROJECT_OUTPUT_DIR
 from shared_base import _app_logger
-import ai_chat
-import autopilot
-import style_kit
 from config import AI_SETTINGS_PATH
 
 
@@ -221,6 +218,7 @@ def _apply_project_settings(style: str, project_name: str = "") -> str:
     - 未应用过任何设定时原样返回 style，行为与改造前一致。
     """
     base = (style or "").strip()
+    import ai_chat  # noqa: E402  延迟导入：消除 shared_project→ai_chat 隐性分层环
     try:
         brief = (ai_chat.settings_view(AI_SETTINGS_PATH, project_name).get("style_brief") or "").strip()
         if not brief and (project_name or "").strip():
@@ -246,6 +244,8 @@ def _project_style(project_name: str = "") -> str:
     退回 config.style，让「建项目时选风格」这条路径真正闭环。
     """
     proj = _safe_project(project_name or "")
+    import autopilot  # noqa: E402  延迟导入：消除隐性分层环
+    import style_kit  # noqa: E402  延迟导入：消除隐性分层环
     try:
         brief = (autopilot.get_plan(proj) or {}).get("style") or ""
     except Exception as e:  # noqa: BLE001

@@ -1,52 +1,33 @@
 # -*- coding: utf-8 -*-
-import shot_key
-import re
+# ⭐ 2026-10-12 清理拆分残留死 import（t32）：
+#   保留三类 —— ① 剩余未下沉函数的真依赖（prompt_memory/get_novel/video_watermark/
+#   quality_stage/preview_gate 等）；② 被其它 routes 模块 `from routes._shared import X`
+#   中转引用的 config 常量与业务模块（ai_config/qc_client/novel_to_script/list_novels/
+#   UpscaleError/AI_CONFIG_PATH/QC_CONFIG_PATH/COMFYUI_OUTPUT_DIR/abort/threading 等）；
+#   ③ shared_* 再导出（见下方）。
+#   已删 25 个零调用方死 import（ai_chat/autopilot/pipeline/style_kit/task_store/
+#   analytics/ComfyUIClient/shot_key/LLMClient/FailoverLLMClient 等），
+#   routes._shared 不再「拉起全业务层」。
+import os
+import threading
+
 import prompt_memory
-from flask import current_app, jsonify, request
+from flask import abort, jsonify, request
 from werkzeug.exceptions import HTTPException
 import project_store
-from config import NOVELS_DIR, PROJECT_OUTPUT_DIR
-from novel_parser import get_novel
+from config import (NOVELS_DIR, PROJECT_OUTPUT_DIR, VIDEOS_DIR, DUB_DIR,
+                    AI_CONFIG_PATH, LLM_CONFIG_PATH, QC_CONFIG_PATH,
+                    COMFYUI_OUTPUT_DIR, FINAL_DIR, UPSCALE_DIR,
+                    WATERMARK_CONFIG_PATH)
+from novel_parser import get_novel, list_novels
+
 import ai_config
-from llm_client import LLMClient, LLMError
-from novel_parser import list_novels
-import time
-import autopilot
 import novel_to_script
-import logging
-import os
-import shutil
-from config import AI_CONFIG_PATH, AI_MODULES, LLM_CONFIG_PATH, LLM_REQUEST_TIMEOUT
-from llm_client import FailoverLLMClient
-
-
 import qc_client
-from config import QC_CONFIG_PATH
-
-from config import DUB_DIR
-
-import ai_chat
-import style_kit
-import threading
-from config import AI_SETTINGS_PATH, COMFYUI_OUTPUT_DIR, FINAL_DIR, QC_DIR, UPSCALE_DIR, VIDEOS_DIR
-from flask import abort, send_file
-from upscale_client import UpscaleError
-
 import video_watermark
-from config import WATERMARK_CONFIG_PATH
-import analytics
-import task_store
-from config import TASKS_DB_PATH
-
-import json
-import pipeline
 import preview_gate
-from config import SCRIPT_DIR
-from upscale_client import probe_video as probe_video_info
-
-from comfyui_client import ComfyUIClient
-
 import quality_stage
+from upscale_client import UpscaleError
 
 # ⭐ 2026-10-10 拆分第 1 步：日志器 + 文件搬移已上移到 app/shared_base.py。
 # 为什么先抽这三个：它们**零业务依赖**（只用标准库 + flask），且 _app_logger 是

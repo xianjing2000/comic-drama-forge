@@ -21,8 +21,6 @@ import json
 import os
 
 import novel_to_script
-import pipeline
-import preview_gate
 import project_store
 from config import SCRIPT_DIR, VIDEOS_DIR
 from upscale_client import probe_video as probe_video_info
@@ -137,6 +135,8 @@ def register_final_deliverable(project_name: str, episode_no, video_path: str,
 
     返回 {"registered": bool, "reason": str, "stats": {...}, "item": {...}}
     """
+    import pipeline  # noqa: E402  延迟导入：消除 shared_episode→pipeline 隐性分层环
+    import preview_gate  # noqa: E402  延迟导入：消除隐性分层环
     # 铁律（2026-09-29）：预演产物**永不可交付**。这里给一个**友好拒绝**（不抛异常），
     # 让调用方能直接把原因显示给用户；同一不变量在 pipeline.record_deliverable 上还有
     # 一道硬闸门（防绕过）。
