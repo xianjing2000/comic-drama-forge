@@ -30,6 +30,9 @@ from character_helpers import _find_script_character
 from config import ASSET_VIEW_STEMS
 from config import CHARACTERS_DIR
 from config import PROJECT_OUTPUT_DIR
+from config import CONTINUITY_DIR
+from config import SCRIPT_DIR
+from config import STORYBOARDS_DIR
 from episode_helpers import _OUTFIT_RECORD_FILE
 from fs_atomic import atomic_write_json
 from job_state import generation_state
@@ -43,6 +46,7 @@ from routes._shared import _project_style
 from routes._shared import _safe_project
 from routes._shared import _safe_upload_name
 from routes._shared import _serve_safe
+from shared_project import _ep_dir as _ep_dir_for
 from storyboard_helpers import _write_artifact_meta
 from style_helpers import _style_aspect_guard
 import sheet_split
@@ -93,6 +97,169 @@ logger = logging.getLogger(__name__)
 
 assets_api_bp = Blueprint('assets_api', __name__)
 
+# ======================================================================
+# 跨集覆盖防护（2026-10-13 t16 P0-①，用户口径：「点一下按钮改掉全历史」）
+#
+# 事实（t12 评估实测）：角色设定图是**项目级**产物 ——
+#   output/assets/characters/<项目>/<角色>/base.png
+# 全项目共用一份；第 1/2/3 集取到的路径与 sha256 逐字节相同。
+# 因此 overwrite=true 重画某个角色 = **改写整个项目从第 1 集起的人物形象基准**，
+# 此前没有任何提示：前端「单点重新生成」按钮（ProjectWorkbenchPage.tsx 的
+# regenerate()）就是裸 overwrite: true。
+#
+# 本段把这件事变成**显式两步**：先算影响范围，跨集必须二次确认。
+# 采用「二次确认」而不是「版本化新指纹」的理由见 _overwrite_scope 的 docstring。
+# ======================================================================
+
+#: 二次确认用的真值集合（与 qc_client._as_bool 同口径的宽容布尔）
+_CONFIRM_TRUE = ('1', 'true', 'yes', 'y', 'on', '是', '有')
+
+
+def _as_bool_flag(v) -> bool:
+    """宽容布尔：true/1/yes/on/y/是/有（忽略大小写与空白）判真，其余判假。"""
+    if isinstance(v, bool):
+        return v
+    return str(v or '').strip().lower() in _CONFIRM_TRUE
+
+
+def _episodes_of_project(project_name: str) -> list:
+    """项目已有剧本的集号（升序）。**只读**；异常一律返回已解析到的部分。"""
+    out = set()
+    try:
+        d = os.path.join(SCRIPT_DIR, str(project_name or ''))
+        if os.path.isdir(d):
+            for fn in os.listdir(d):
+                m = re.match(r'^第(\d+)集\.json$', fn)
+                if m:
+                    out.add(int(m.group(1)))
+    except Exception as e:  # noqa: BLE001 —— 影响范围探测失败只少报，不改写行为
+        logger.warning('跨集覆盖影响探测失败（剧本扫描，忽略）：%s', e)
+    if not out:
+        # 剧本还没产出时退到 bible（episodes_seen 由 continuity 维护）
+        try:
+            from continuity_store import load_bible as _load_bible
+            _b = _load_bible(CONTINUITY_DIR, project_name) or {}
+            out = {int(x) for x in (_b.get('episodes_seen') or [])
+                   if str(x).strip().isdigit()}
+        except Exception as e:  # noqa: BLE001
+            logger.debug('跨集覆盖影响探测：bible 回退失败（忽略）：%s', e)
+    return sorted(out)
+
+
+def _overwrite_scope(project_name: str, asset_type: str, names: list) -> dict:
+    """算出「这次 overwrite 会改写哪些集、哪些资产」—— **只读探针**。
+
+    判据（按可信度从高到低，命中即采用，避免把陈旧元数据当成事实）：
+      1. **磁盘实证**：项目所有集剧本的 characters/items/scenes 里出现过该名字；
+      2. **bible / state 元数据**：outfit_by_episode 的键 + first/last_seen_episode
+         （剧本已清理、只剩设定库时仍能兜住）。
+
+    ## 为什么选「二次确认」而不是「写入新 asset_library 指纹」
+
+    · **版本化解决不了用户的真实意图**：用户点「重新生成」就是想要**这一张新图**，
+      不是想要「新开一个版本、旧版本留着」。若把新图写进新指纹目录，
+      _build_asset_index（按 <项目>/<角色>/base.png 取图）**根本不会读它**，
+      用户会看到「点了没反应」—— 又是一次静默失败，与本任务要消灭的问题同类。
+    · **asset_library 是跨项目去重库、不是版本库**：指纹口径是
+      sha256(版本号 + 模板 + 提示词 + 风格 + 画幅 + 类型)，lookup 命中即**零渲染复用**；
+      把「重生成」写成新指纹，下次同提示词反而会命中最旧的那一版
+      （种子刻意不进指纹），语义与用户预期相反。
+    · **成本**：二次确认只需一个 flag，不必改动取图链路（取图被 5 个模块共用）。
+    因此本实现取「二次确认 + 明确告知影响范围」，并在响应体与日志里给出全量影响清单。
+
+    返回::
+
+        {'episodes_seen': [1, 2, 3], 'episodes_hit': [1, 2, 3],
+         'cross_episode': True, 'source': 'scripts+storyboards',
+         'assets': [{'kind': 'character', 'name': '羡进', 'episodes': [1, 2, 3]}]}
+    """
+    eps = _episodes_of_project(project_name)
+    want = [str(n).strip() for n in (names or []) if str(n or '').strip()]
+    _script_key = ('characters' if asset_type == 'character'
+                   else 'items' if asset_type == 'item' else 'scenes')
+    appear = {w: set() for w in want}
+    _found_any = False
+    try:
+        for ep in eps:
+            sp = os.path.join(SCRIPT_DIR, str(project_name), '第%d集.json' % int(ep))
+            try:
+                with open(sp, 'r', encoding='utf-8') as _f:
+                    _sd = json.load(_f)
+            except Exception as e:  # noqa: BLE001 —— 单集剧本读不到不影响其余集
+                logger.debug('跨集覆盖影响探测：第%s集剧本读取失败（跳过）：%s', ep, e)
+                continue
+            _found_any = True
+            for row in (_sd.get(_script_key) or []):
+                if not isinstance(row, dict):
+                    continue
+                nm = str(row.get('name') or '').strip()
+                if nm in appear:
+                    appear[nm].add(int(ep))
+    except Exception as e:  # noqa: BLE001
+        logger.warning('跨集覆盖影响探测：剧本扫描异常（忽略）：%s', e)
+        appear = {}
+    _src = 'scripts'
+    if not appear:
+        # bible 回退：outfit_by_episode 的键 + first/last_seen_episode
+        try:
+            from continuity_store import load_bible as _load_bible
+            _b = _load_bible(CONTINUITY_DIR, project_name) or {}
+            appear = {}
+            for row in (_b.get(_script_key) or []):
+                if not isinstance(row, dict):
+                    continue
+                nm = str(row.get('name') or '').strip()
+                if nm not in want:
+                    continue
+                _s = set()
+                for k in ((row.get('outfit_by_episode') or {}) or {}):
+                    if str(k).strip().isdigit():
+                        _s.add(int(k))
+                try:
+                    _ls = int(row.get('last_seen_episode') or 0)
+                except (TypeError, ValueError):
+                    _ls = 0
+                try:
+                    _fe = int(row.get('first_episode') or 0)
+                except (TypeError, ValueError):
+                    _fe = 0
+                if _ls > 0:
+                    _s.add(_ls)
+                if _fe > 0 and _ls >= _fe:
+                    _s.update(range(_fe, _ls + 1))
+                appear[nm] = _s
+            _src = 'bible'
+        except Exception as e:  # noqa: BLE001
+            logger.debug('跨集覆盖影响探测：bible 回退失败（忽略）：%s', e)
+            appear = {}
+    assets = [{'kind': asset_type, 'name': nm, 'episodes': sorted(appear.get(nm) or [])}
+              for nm in (want or sorted(appear.keys()))]
+    _eps_hit = sorted({e for a in assets for e in a['episodes']})
+    return {'episodes_seen': eps, 'episodes_hit': _eps_hit,
+            'cross_episode': len(_eps_hit) > 1,
+            'assets': assets,
+            'source': _src if not _found_any else 'scripts'}
+
+
+def _scope_rows(scope: dict) -> str:
+    """影响清单 → 一行可读文本（给日志与拒绝响应体共用）。"""
+    _rows = []
+    for a in (scope or {}).get('assets') or []:
+        _eps = ','.join(str(x) for x in (a.get('episodes') or [])) or '?'
+        _rows.append('%s[集%s]' % (a.get('name'), _eps))
+    return ', '.join(_rows) or '(未匹配到具体资产名)'
+
+
+def _log_asset_overwrite_impact(project_name: str, asset_type: str,
+                                scope: dict, via: str) -> None:
+    """把「这次覆盖改写了哪些集」写进日志 —— 每次覆盖都留痕，不依赖响应体被看见。"""
+    if not scope:
+        return
+    _lvl = logger.warning if scope.get('cross_episode') else logger.info
+    _lvl('[资产覆盖·影响] 入口=%s 项目=%s 类型=%s：本次 overwrite 将改写 %d 个资产 → %s',
+         via, project_name, asset_type,
+         len(scope.get('assets') or []), _scope_rows(scope))
+
 @assets_api_bp.route('/api/assets/generate', methods=['POST'])
 def api_generate_assets():
     """生成资产（角色/物品/场景，含多视角）"""
@@ -118,6 +285,41 @@ def api_generate_assets():
     if _g is not None:
         return _g
 
+    # ============ 跨集覆盖防护（2026-10-13 t16 P0-①）============
+    # 只保护**角色主设定图**：它是项目级共用基准（assets/characters/<项目>/<角色>/base.png），
+    # 改写它等于改写全项目从第 1 集起的形象；而物品/场景的重生成影响面与角色不同口径
+    # （不改动即不引入新行为），本任务只堵角色这条已实测的风险路径。
+    overwrite_scope = None
+    if overwrite and asset_type == "character":
+        overwrite_scope = _overwrite_scope(
+            project_name, asset_type,
+            [str((a or {}).get('name') or '').strip() for a in assets
+             if isinstance(a, dict) and str((a or {}).get('name') or '').strip()])
+        if overwrite_scope.get('cross_episode') and not (
+                _as_bool_flag(data.get('confirm_overwrite'))
+                or _as_bool_flag(data.get('confirm_overwrite_scope'))):
+            _eps = ','.join(str(x) for x in (overwrite_scope.get('episodes_hit') or []))
+            _hint = \
+                ("这些角色是全项目共用的设定图，重生成会**同时改写第 %s 集的人物形象"
+                 "（含第 1 集）。确认请重发同一请求并加 confirm_overwrite=true。") % _eps
+            logger.warning(
+                "[资产覆盖·已拦截] 入口=/api/assets/generate 项目=%s 类型=%s："
+                "overwrite=true 且影响 %d 个集 —— %s（未带 confirm_overwrite，已拒绝）",
+                project_name, asset_type, len(overwrite_scope.get('episodes_hit') or []),
+                _scope_rows(overwrite_scope))
+            return jsonify({
+                "error": "跨集覆盖未确认：" + _hint,
+                "code": "cross_episode_overwrite_needs_confirm",
+                "needs_confirm": True,
+                "confirm_field": "confirm_overwrite",
+                "project_name": project_name,
+                "asset_type": asset_type,
+                "overwrite_scope": overwrite_scope,
+                "assets_affected": [a.get('name') for a in overwrite_scope.get('assets') or []],
+            }), 409
+        _log_asset_overwrite_impact(project_name, asset_type, overwrite_scope,
+                                    via='/api/assets/generate')
+
     # B-12 P1-15：资产任务 ID 改用 uuid（G5 只改了分镜/视频/配音/混音，资产漏改），
     # 同秒并发请求不再互撞。
     task_id = f"{asset_type}_{project_name}_{uuid.uuid4().hex[:12]}"
@@ -137,7 +339,15 @@ def api_generate_assets():
     thread.daemon = True
     thread.start()
 
-    return jsonify({"task_id": task_id, "status": "started"})
+    _resp = {"task_id": task_id, "status": "started"}
+    if overwrite_scope is not None:
+        # 如实回显本次覆盖的影响范围（前端可直接展示；日志里已另有一份）
+        _resp["overwrite_scope"] = overwrite_scope
+        if overwrite_scope.get('cross_episode'):
+            _resp["overwrite_warning"] = (
+                "本次重生成会改写第 %s 集的人物形象（角色设定图为全项目共用基准）"
+                % ','.join(str(x) for x in (overwrite_scope.get('episodes_hit') or [])))
+    return jsonify(_resp)
 
 
 @assets_api_bp.route('/api/assets/character/upload-sheet', methods=['POST'])
@@ -193,6 +403,39 @@ def api_character_upload_sheet():
                         "outfit_key": outfit_key, "base": base_dst,
                         "message": "该角色已有设定图（base.png 已就绪）；"
                                    "如需替换请带 overwrite=true"})
+
+    # ============ 跨集覆盖防护（2026-10-13 t16 P0-①）============
+    # 与 /api/assets/generate 同口径：上传新形象图并 overwrite 主设定图 = 改写全项目基准。
+    # ⚠️ 只护**主设定图**（outfit_key 为空时）；服装变体有自己的目录，影响面局限在该变体，
+    #    不在此处拦截（避免把合法换装操作挡住）。
+    overwrite_scope = None
+    if overwrite and not outfit_key:
+        overwrite_scope = _overwrite_scope(project_name, "character", [character])
+        if overwrite_scope.get('cross_episode') and not (
+                _as_bool_flag(request.form.get('confirm_overwrite'))
+                or _as_bool_flag(request.args.get('confirm_overwrite'))
+                or _as_bool_flag(request.form.get('confirm_overwrite_scope'))
+                or _as_bool_flag(request.args.get('confirm_overwrite_scope'))):
+            _eps = ','.join(str(x) for x in (overwrite_scope.get('episodes_hit') or []))
+            logger.warning(
+                "[资产覆盖·已拦截] 入口=/api/assets/character/upload-sheet 项目=%s "
+                "角色=%s：overwrite 且影响 %d 个集 —— %s（未带 confirm_overwrite，已拒绝）",
+                project_name, character, len(overwrite_scope.get('episodes_hit') or []),
+                _scope_rows(overwrite_scope))
+            return jsonify({
+                "success": False,
+                "error": ("跨集覆盖未确认：角色「%s」的设定图是全项目共用基准，"
+                          "替换会**同时改写第 %s 集的人物形象**（含第 1 集）。"
+                          "确认请重发同一请求并加 confirm_overwrite=true。")
+                         % (character, _eps),
+                "code": "cross_episode_overwrite_needs_confirm",
+                "needs_confirm": True,
+                "confirm_field": "confirm_overwrite",
+                "character": character,
+                "overwrite_scope": overwrite_scope,
+            }), 409
+        _log_asset_overwrite_impact(project_name, "character", overwrite_scope,
+                                    via='/api/assets/character/upload-sheet')
 
     # 暂存上传件 → 校验可解码 → 统一转 PNG 落 base.png
     os.makedirs(UPLOAD_TMP_DIR, exist_ok=True)
@@ -265,13 +508,20 @@ def api_character_upload_sheet():
     except Exception as _me:  # noqa: BLE001
         logger.warning("上传形象图：元数据写入失败（忽略）：%s", _me)
 
-    return jsonify({"success": True, "derive_ok": True, "skipped": False,
-                    "character": character, "outfit_key": outfit_key,
-                    "base": base_dst,
-                    "views": {},
-                    "view_files": {},
-                    "layout_hint": "不裁剪：保留整图（character sheet 四区）",
-                    "message": "已上传（不裁剪：直接使用整张 character sheet 设定图）"})
+    _resp = {"success": True, "derive_ok": True, "skipped": False,
+             "character": character, "outfit_key": outfit_key,
+             "base": base_dst,
+             "views": {},
+             "view_files": {},
+             "layout_hint": "不裁剪：保留整图（character sheet 四区）",
+             "message": "已上传（不裁剪：直接使用整张 character sheet 设定图）"}
+    if overwrite_scope is not None:
+        _resp["overwrite_scope"] = overwrite_scope
+        if overwrite_scope.get('cross_episode'):
+            _resp["overwrite_warning"] = (
+                "本次替换会改写第 %s 集的人物形象（角色设定图为全项目共用基准）"
+                % ','.join(str(x) for x in (overwrite_scope.get('episodes_hit') or [])))
+    return jsonify(_resp)
 
 
 @assets_api_bp.route('/api/assets/character/outfit', methods=['POST'])

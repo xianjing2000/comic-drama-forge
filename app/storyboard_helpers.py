@@ -1737,9 +1737,55 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     需要强制全部重画时（如换风格）显式传 overwrite=True。
     注意：质检不达标的镜头只写质检暂存区、不写正式目录，所以「正式目录里已有该图」
     ⟺ 「该镜上一轮已通过质检」——跳过它不会漏掉任何不达标镜。
+
+    episode_no：本集集号。除决定落盘目录（第 1 集平铺 / 第 2 集起 epNN/）外，
+    **还决定本集角色的服装变体覆盖**（2026-10-13 t16 P0-②，见下方「集级服装覆盖」段）。
     """
     out_dir = _ep_dir(os.path.join(STORYBOARDS_DIR, project_name), episode_no)
     os.makedirs(out_dir, exist_ok=True)
+    # ===================== 集级服装覆盖（2026-10-13 t16 P0-②）=====================
+    # 用户实测缺陷：「同一集里分镜图的服装和视频的服装不一样」。
+    #
+    # 根因：服装变体（衣柜）的**消费端只接了视频一侧** ——
+    #   · 视频：video_helpers 调 episode_helpers._episode_outfit_overrides(项目, 集号)，
+    #     把 {角色名: outfit_key} 写进 shot["character_outfits"]，
+    #     再由 qc_helpers._shot_outfit_dir 解析成 outfits/<key>/ 取变体图；
+    #   · 分镜：**没有任何调用点**，而剧本里 shot["outfit"] / shot["character_outfits"]
+    #     实测全为空（第1/2/3集 0/46、0/39、0/39）→ _shot_outfit_dir 恒返回 '' →
+    #     分镜恒取主设定图 base.png，视频取 outfits/<key>/base.png ⇒ 两段产物服装不一致。
+    #
+    # 修法（与 video_helpers:1455-1462 **逐字同口径**，setdefault 不覆盖剧本显式声明）：
+    #   在 worker 入口**一次性**把本集覆盖写进每镜（对所有下游路径等效：主循环内联、
+    #   提示词预取线程、单镜重跑入口都各自调用本 worker 或走同一分配器）。
+    # fail-open：state 缺失 / 变体解析不出 → 空 dict → 行为与改造前完全一致（零回归）。
+    # 集号解析与 `_ep_dir` 同口径（<=1 → 第 1 集），不依赖 worker 入参一定是 int。
+    try:
+        _ovr_ep = int(episode_no)
+    except (TypeError, ValueError):
+        _ovr_ep = 1
+    if _ovr_ep <= 0:
+        _ovr_ep = 1
+    try:
+        from episode_helpers import _episode_outfit_overrides as _ep_outfit_ovr
+        _ep_outfit_override = _ep_outfit_ovr(project_name, _ovr_ep) or {}
+    except Exception as _oo_e:  # noqa: BLE001 —— 覆盖解析失败绝不阻断分镜生成
+        logger.warning("[服装变体] 本集服装覆盖解析失败（分镜按主设定图出图）：%s", _oo_e)
+        _ep_outfit_override = {}
+    if _ep_outfit_override:
+        _applied_ovr = 0
+        for _s in (shots or []):
+            if not isinstance(_s, dict):
+                continue
+            _co = dict(_s.get("character_outfits") or {})
+            for _cn, _ok in _ep_outfit_override.items():
+                _co.setdefault(_cn, _ok)
+            _s["character_outfits"] = _co
+            _applied_ovr += 1
+        logger.info("[服装变体] 分镜侧已应用本集服装覆盖（t16 P0-②）：%s → %d 镜",
+                    _ep_outfit_override, _applied_ovr)
+    else:
+        logger.info("[服装变体] 本集无可应用的服装覆盖（分镜按主设定图出图，与改造前一致）")
+    # ===================== 集级服装覆盖 结束 =====================
     # ---- 分镜图 URL 的集前缀（P1 修复，2026-09-25）----
     # ⚠️ 旧 bug：本 worker 落盘在 `_ep_dir(...)`（第 2 集起是 <项目>/epNN/），
     #    但 manifest 里的 url 却**硬编码**成 `/api/storyboards/file/<项目>/shot_NN.png`

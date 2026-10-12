@@ -399,12 +399,19 @@ def _match_shot_chars(shot: dict, char_idx: dict) -> list:
     resolved, missing, fuzzy = asset_name_match.resolve_names(
         chars_in, char_idx, "character")
     for _q, _k, _lv in fuzzy:
+        _note_ref_warning(
+            shot, f"角色名模糊命中：镜头 {shot.get('shot_id')} 的 {_q!r} → {_k!r}（{_lv}）")
         logger.info("[角色参考图] 角色名模糊命中：%r → %r（%s）", _q, _k, _lv)
     if missing:
         _msg = (f"角色名未匹配：镜头 {shot.get('shot_id')} 的 {missing} "
                 f"在角色资产 {sorted(char_idx.keys())[:8]} 中无对应项，将不带其参考图")
         _note_ref_warning(shot, _msg)
-        logger.warning("[角色参考图] %s", _msg)
+        # ⭐ t16 P0-③（2026-10-13）：原先只有这一行汇总 warning —— 日志里看不出**缺的是谁、
+        #    影响哪一镜、现有资产有哪些**（三样都在 _msg 里，却没打出来）。
+        #    这是「静默降级」最典型的形态：信息存在但没有出口。
+        logger.warning("[角色参考图] shot=%s 角色 %s 未匹配到资产（现有资产：%s）"
+                       "→ 本镜不带这些角色的参考图",
+                       shot.get("shot_id"), missing, sorted(char_idx.keys())[:8])
     return resolved
 
 
@@ -455,8 +462,16 @@ def _pick_char_view(char_payload: dict, want_half: bool, outfit_dir: str = "") -
                 _hit = _first_existing(*[os.path.join(_od, f"{k}.png") for k in order])
                 if _hit:
                     return _hit
+                # ⭐ t16 P0-③（2026-10-13）：变体目录存在但**里面没有可用图** → 静默回落主
+                #    设定图。这是「换装没生效」的**最常见成因**（outfit.json 已登记、出图
+                #    还没跑完，见 continuity._register_outfit_variants 的 pending 语义），
+                #    此前连一条日志都没有，排障只能靠人翻目录。这里至少留下可检索的记录。
+                logger.warning("[服装变体] 变体目录存在但无可用图（base/front 均缺）→ 本镜回落"
+                               "主设定图（换装未生效）：%s", _od)
+            else:
+                logger.debug("[服装变体] 变体目录不存在（回落主设定图）：%s", _od)
         except Exception as _oe:  # noqa: BLE001  变体取图失败绝不拖垮参考图链
-            logger.debug("服装变体取图失败（回落主设定图）：%s", _oe)
+            logger.warning("[服装变体] 变体取图异常（回落主设定图）：%s", _oe)
     cands = [comfyui_client.resolve_local_path(payload.get(k) or "") for k in order]
     # 资产目录约定路径兜底（前端未上报时）
     d = payload.get("_dir")

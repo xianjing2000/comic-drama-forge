@@ -50,6 +50,9 @@ from config import (
 )
 from shared_qc import _qc_load_cfg  # noqa: F401  再导出
 from shared_project import _AUDIO_QC_AUDIO_EXT, _AUDIO_QC_MEDIA_EXT, _AUDIO_QC_NON_PROJECT_DIRS, _audio_qc_project_key, _ep_dir, _ep_read_dir  # noqa: F401  再导出
+# t16 P0-③：缺档探测用（原先本文件**没有**导入它 —— 缺档探测会 NameError 被吞成 debug 日志，
+# 于是告警只能退化成笼统的「取不到可用图」）。此处显式导入，让告警能精确到缺哪一档。
+from shared_project import _first_existing  # noqa: F401
 from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
 from shared_base import _trash_move  # noqa: F401  再导出
 from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
@@ -334,7 +337,15 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
     # 否则最常见的失败就是 A 的脸跑到 B、B 的衣服跑到 C。
     for i, name in enumerate(chars_in):
         if i >= 3:
-            break                       # 3 个角色身份槽位；第 4 人起并入构图说明
+            # 3 个角色身份槽位；第 4 人起并入构图说明。
+            # ⭐ t16 P0-③ 该降级**刻意不升级为告警**（否则三人群像镜会天天刷屏）：
+            #    官方 9 槽协议里角色身份槽位就是 3 个，这是**容量契约**而非故障；
+            #    真要报也应由 _cap_storyboard_refs 的「参考图超上限」告警一并体现。
+            #    这里留 debug 便于排障时确认「第 4 人确实被容量挤掉」。
+            logger.debug("[分镜参考图] shot=%s 角色「%s」超出 3 个身份槽位，"
+                         "并入构图文字说明（非故障，协议容量所限）",
+                         shot.get("shot_id"), name)
+            break
         payload = char_idx.get(name, {}) or {}
         # 2026-09-25 景别对档：近景/特写/中景优先取 half.png（半身胸像），
         # 全景/远景优先取 front.png（全身）；档位缺失时逐级回退（见 _pick_char_view）。
@@ -344,6 +355,40 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
         img = _pick_char_view(payload, _want_half,
                               _shot_outfit_dir(shot, name, payload.get("_dir") or ""))
         if not img or img in used_paths:
+            # ⭐ 2026-10-13（t16 P0-③，用户口径「静默降级容忍度极低」）：这里原先直接
+            #    continue —— 角色**整条身份链**（身份锚点 / 服装锚点 / 身份基准网格）
+            #    就这样无声消失，任务结果里只看到「已注入 N 张参考图」，看不出少了谁。
+            #    实测触发面很大：任何「剧本声明了角色、但该角色目录里还没有 base.png」
+            #    的集都会命中（例：第3集新登场的 王虎/李天风/王二牛/莫问天，资产尚未产出）。
+            #    现在把两种原因分开报，并把「缺哪一档 / 影响哪一镜」写进 shot
+            #    （_ref_warnings 累加式 + _ref_warning 首条），随任务结果一起可查。
+            if not img:
+                _cd = str(payload.get("_dir") or "")
+                _missing_view = []
+                if _cd:
+                    try:
+                        _missing_view = [k for k in ("base", "front")
+                                         if not _first_existing(os.path.join(_cd, f"{k}.png"))]
+                    except Exception as _mv_e:  # noqa: BLE001 —— 探测失败不改变降级行为
+                        logger.debug("[分镜参考图] 缺档探测失败（忽略）：%s", _mv_e)
+                        _missing_view = []
+                _note_ref_warning(
+                    shot,
+                    f"角色参考图缺失：角色「{name}」命中资产索引，但"
+                    f"{_cd or '资产目录（无 _dir）'} 下"
+                    + (f"缺 {'/'.join(_missing_view)}.png" if _missing_view else
+                       "取不到可用图（base.png / front.png 均不存在或为空）")
+                    + "；本镜将**不带该角色的身份参考图**（身份锚点 / 服装锚点 / 身份基准"
+                      "网格一并失效，只能靠文字描述锁人）")
+                logger.warning(
+                    "[分镜参考图] shot=%s 角色「%s」命中资产索引但取不到参考图"
+                    "（目录=%s，缺档=%s）→ 本镜无该角色身份锚点",
+                    shot.get("shot_id"), name, _cd or "(无)", "/".join(_missing_view) or "base/front")
+                continue
+            # img 非空但被**本镜另一个角色**占用（同一张设定图不重复占槽）：不是降级，
+            # 槽位纪律使然，按 debug 记录即可（正常不会发生 —— 同角色不会在名单里出现两次）。
+            logger.debug("[分镜参考图] shot=%s 角色「%s」的参考图与前面角色重复（%s），跳过该槽位",
+                         shot.get("shot_id"), name, img)
             continue
         used_paths.add(img)
         _zoom = "半身近景" if _want_half else "全身"
@@ -365,9 +410,24 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
     # 2026-09-29：取**与本镜机位同向**的那一档场景图（俯拍→俯视档 / 斜侧→斜侧档），
     # 而不是恒取基准图 —— 机位反向的参考图会把构图先验拽反。档位缺失时逐级回落。
     _sc_view = _scene_view_for_shot(shot)
-    scene_img = _pick_scene_view(_sc_entry, shot) if _sc_entry else None
+    # ⭐ t16 P0-③：`if _sc_entry else None` 会漏掉「场景命中资产索引但资产目录为空」——
+    #    那种情况下 entry 是 `{}`（**假值**），原先直接走 else 分支静默不给图、
+    #    连 `_resolve_scene_entry` 的未匹配告警都不会触发（它只在「名字匹配不上」时报）。
+    #    改成按「解析出的场景名」判定，与角色侧同口径。
+    scene_img = _pick_scene_view(_sc_entry, shot) if scene_name else None
     if scene_img and scene_img in used_paths:
+        # ⭐ t16 P0-③：场景锚点被「角色参考图占位」挤掉时原先静默置 None
+        #    （实测从未发生 —— 场景图与角色图不会是同一文件，但一旦发生就是无声降级）。
+        logger.debug("[分镜参考图] shot=%s 场景参考图与已用图重复（%s），本镜不占场景槽",
+                     shot.get("shot_id"), scene_img)
         scene_img = None
+    elif not scene_img and scene_name:
+        _note_ref_warning(
+            shot, "场景参考图缺失：场景「%s」命中资产索引但取不到可用图"
+                  "（场景资产 base/front 缺失或为空）→ 本镜不带场景空间/光照锚点" % scene_name)
+        logger.warning("[分镜参考图] shot=%s 场景「%s」命中资产索引但取不到参考图"
+                       "（场景资产 base/front 缺失）→ 本镜无场景锚点",
+                       shot.get("shot_id"), scene_name)
 
     # ---- <imageN>：道具（镜头内物品，可多个但最多 2 张，避免挤占角色槽位）----
     item_refs = []
@@ -378,6 +438,19 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
             break
         img = item_idx.get(cand, {}).get("image")
         if not img or img in used_paths or img == scene_img:
+            # ⭐ t16 P0-③（2026-10-13）：道具参考图静默丢弃的三种成因必须可区分 ——
+            #    「物品资产无图」（资产没出/被回收）、「与已用图重复」、「与场景图重复」。
+            #    此前一律 continue，任务结果里只看到参考图张数少了一张。
+            if not img:
+                _note_ref_warning(
+                    shot, "物品参考图缺失：物品「%s」命中资产索引但无可用图"
+                          "（物品资产 base/front 缺失或为空）→ 本镜不带该道具参考图" % cand)
+                logger.warning("[分镜参考图] shot=%s 物品「%s」命中资产索引但无参考图"
+                               "（物品资产 base/front 缺失）→ 本镜无该道具锚点",
+                               shot.get("shot_id"), cand)
+            else:
+                logger.debug("[分镜参考图] shot=%s 物品「%s」参考图与已用图重复（%s），跳过",
+                             shot.get("shot_id"), cand, img)
             continue
         used_paths.add(img)
         item_refs.append((cand, img))
