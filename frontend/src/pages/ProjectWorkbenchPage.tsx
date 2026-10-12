@@ -27,7 +27,9 @@ import { describeError, sanitizeErrorMessage } from '@/utils/errorText';
 
 // t12（2026-10-12）：分镜质量三类口径（真通过 / 软放行 / 阻断）—— 与后端
 // storyboard_helpers._sb_quality_tally 同源。软放行必须与成功分开显示，不能再全绿。
-import { summarizeStoryboardQuality, shotQuality, criticalIssuesOf, softReasonOf } from '@/utils/storyboardQuality';
+// t25（2026-10-12）：canvas 现在自带三类质量计数 summary（与 manifest 同源同值），
+// 优先用它、缺失时回落前端自算 —— 保证「canvas soft 计数 == manifest soft_accepted_count」。
+import { summarizeStoryboardQuality, mergeBackendQuality, shotQuality, criticalIssuesOf, softReasonOf } from '@/utils/storyboardQuality';
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
@@ -416,16 +418,19 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
   // ComfyUI 采样级实时进度：有生产任务时才轮询 comfyui 日志源（tqdm N/M）
   const comfy = useComfyProgress(!!cur);
 
-  if (!cur) return null;
+  // ⚠️ 修复 t39 N2：失败挂起时后端 current 会被 _clear_current() 清空（cur=null），
+  // 但 failure_pause 非空 —— 若仍「!cur 就 return null」，失败挂起横幅（含「处理并继续」）
+  // 永远渲染不出来。改为：无进度且无失败挂起才整体隐藏；有失败挂起则保留横幅 + 恢复入口。
+  if (!cur && !failurePause) return null;
 
-  const percent = Math.max(0, Math.min(100, Number(cur.percent) || 0));
-  const stepsDone = Array.isArray(cur.steps_done) ? cur.steps_done : [];
-  const stalled = Number(cur.step_stalled_sec) || 0;
+  const percent = cur ? Math.max(0, Math.min(100, Number(cur.percent) || 0)) : 0;
+  const stepsDone = cur ? (Array.isArray(cur.steps_done) ? cur.steps_done : []) : [];
+  const stalled = cur ? (Number(cur.step_stalled_sec) || 0) : 0;
   const stalledMin = Math.floor(stalled / 60);
   const stalledSec = stalled % 60;
   // step 可能是环节内子阶段（如 outline 提炼大纲属 script 步骤）——子阶段
   // 不在步骤表里，此时不点亮任何环节（百分比与描述行仍准确），避免步骤链错位
-  const _rawStep = (cur.step || '').split(':')[0];
+  const _rawStep = (cur?.step || '').split(':')[0];
   const currentStepId = PRODUCTION_STEPS.some(s => s.id === _rawStep) ? _rawStep : null;
   const currentStep = PRODUCTION_STEPS.find(s => s.id === currentStepId);
 
@@ -442,7 +447,7 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
           {t('wb.productionProgress')}
         </span>
         <div className="flex items-center gap-2">
-          {cur.episode != null && (
+          {cur && cur.episode != null && (
             <span className="text-sm text-ink-2">{t('wb.producingEpisode', { n: cur.episode })}</span>
           )}
           {/* 托管 启动/暂停 控制（2026-10-08：API 早已具备，此前无 UI 入口） */}
@@ -482,10 +487,15 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
           <button
             type="button"
             onClick={togglePause}
-            className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-danger text-white hover:opacity-90 transition-opacity"
+            disabled={ctrlBusy}
+            className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium bg-danger text-white hover:opacity-90 transition-opacity disabled:cursor-wait disabled:opacity-50"
           >
-            <Play className="h-3 w-3" />
-            {t('wb.resumeAutopilot')}
+            {ctrlBusy ? (
+              <span className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />
+            ) : (
+              <Play className="h-3 w-3" />
+            )}
+            {t('wb.failureResume')}
           </button>
         </div>
       )}
@@ -500,10 +510,10 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
 
 
       {/* 当前步骤消息 + 超时告警 */}
-      {cur.message && <p className="text-xs text-ink-2 mb-1">{cur.message}</p>}
+      {cur && cur.message && <p className="text-xs text-ink-2 mb-1">{cur.message}</p>}
 
       {/* ComfyUI 采样进度（如「比例分镜 10/19」）：解析 comfyui 日志的 tqdm 行 */}
-      {comfy.active && comfy.total > 0 && (
+      {cur && comfy.active && comfy.total > 0 && (
         <div className="mt-2 flex items-center gap-2 rounded-md border border-line bg-surface-2 px-2.5 py-1.5 text-xs">
           <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" />
           <span className="shrink-0 text-ink-2">{t('live.comfySampling')}</span>
@@ -516,7 +526,7 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
           <span className="shrink-0 tabular-nums text-ink-2">{comfy.percent}%</span>
         </div>
       )}
-      {stalled >= 900 && (
+      {cur && stalled >= 900 && (
         <div className="flex items-start gap-2 mt-2 p-2.5 rounded bg-warning-subtle text-warning-strong text-xs">
           <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
           <div>
@@ -3981,7 +3991,9 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput,
   /** t12：软放行镜清单是否展开（质检不达标但已入库的镜，默认收起、徽标常显） */
   const [softOpen, setSoftOpen] = useState(false);
   /** t12：本集三类质量计数（真通过 / 软放行 / 阻断）—— 软放行绝不并入成功 */
-  const sbQuality = summarizeStoryboardQuality(cards as any[]);
+  // t25：后端 summary 给出 success_count/soft_accepted_count/... 时**以后端为准**
+  // （同源同值，避免前后端两套算法规格漂移）；旧后端没给则回落前端自算。
+  const sbQuality = mergeBackendQuality(summarizeStoryboardQuality(cards as any[]), summary);
   useEffect(() => {
     if (!focusShot) return;
     // 目标镜不在本集（跨集跳转刚切集、卡片还没刷新）→ 先不滚，等卡片到位

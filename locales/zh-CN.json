@@ -999,7 +999,8 @@
     "screenplayRewriteTimeout": "改写分镜剧本超时，请稍后在工作台查看进度",
     "screenplayHumanTag": "此为人审稿；下方为改写后的分镜剧本",
     "pauseAutopilot": "暂停托管",
-    "resumeAutopilot": "恢复托管"
+    "resumeAutopilot": "恢复托管",
+    "failureResume": "处理并继续"
   },
   "settings": {
     "title": "设置",

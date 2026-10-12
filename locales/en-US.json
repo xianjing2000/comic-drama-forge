@@ -999,7 +999,8 @@
     "screenplayRewriteTimeout": "Storyboard screenplay rewrite timed out; check the workbench later",
     "screenplayHumanTag": "Human review draft; the storyboard script below is the rewritten version",
     "pauseAutopilot": "Pause autopilot",
-    "resumeAutopilot": "Resume autopilot"
+    "resumeAutopilot": "Resume autopilot",
+    "failureResume": "Fix and continue"
   },
   "settings": {
     "title": "Settings",
