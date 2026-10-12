@@ -22,6 +22,12 @@
   集合不变、H3 结构完整、长度上限、不骤缩），不过就丢弃并用原提示词；
 - **同一提示词只打一次模型**：进程内缓存（生成重试/质检重试会重复预检同一条提示词）；
   失败结果缓存 10 分钟，避免上游故障时每镜都空等一次超时。
+- **失败要安静且快速**（2026-10-12 P0）：单次调用有超时（PROMPT_ENHANCE_TIMEOUT_SEC，默认
+  240s —— 思考模式模型长输出实测 118.5s+），外层还有本层总预算（PROMPT_ENHANCE_BUDGET_SEC，
+  默认 300s，用于截断 llm_client 对本地网关的最多 3 次读超时重试）；失败按类型
+  （限流/超时/连不上/其它）登记**全局冷却**（PROMPT_ENHANCE_COOLDOWN_SEC，默认 600s），
+  冷却期内所有提示词直接跳过模型调用 —— 零网络、零等待。
+  事故背景：timeout 曾被误调成 25s，思考模式模型必然超时 → 每镜 3×25s ≈ 75s 白等。
 """
 from __future__ import annotations
 
@@ -42,7 +48,8 @@ from prompt_protocol import (  # 协议标记下沉（2026-10-08 解耦）：不
     SB_MARK_REF_USAGE_LEGACY, SB_MARK_STYLE, SB_MARK_STYLE_LEGACY, SB_MARK_TASK)
 from config import (AI_CONFIG_PATH, LLM_CONFIG_PATH,
                     PROMPT_ENHANCE_ENABLED, PROMPT_MODEL_REVIEW_ENABLED,
-                    PROMPT_ENHANCE_TIMEOUT_SEC, PROMPT_ENHANCE_CACHE_SIZE)
+                    PROMPT_ENHANCE_TIMEOUT_SEC, PROMPT_ENHANCE_CACHE_SIZE,
+                    PROMPT_ENHANCE_BUDGET_SEC, PROMPT_ENHANCE_COOLDOWN_SEC)
 from llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -99,6 +106,139 @@ def review_enabled() -> bool:
     if flag is None:
         flag = _file_flag("review_enabled")
     return PROMPT_MODEL_REVIEW_ENABLED if flag is None else flag
+
+
+# --------------------------------------------------------------------------- #
+# 失败分类 / 单次调用总预算 / 全局冷却（2026-10-12 P0）
+# --------------------------------------------------------------------------- #
+# 为什么要有这三件东西（实测回归）：增强层原先只有「单次调用超时」一个旋钮，失败记忆又是
+# **按提示词**记的 —— 每镜提示词都不同，于是上游一坏就变成「每镜各付一次重试」。
+# 实测代价：timeout 被误调成 25s 后，思考模式模型（长输出实测 118.5s）必然超时，
+# 每镜 3 次 × 25s ≈ 75s 白等，46 镜 ≈ 57 分钟，且增强 100% 降级。
+#
+# 三道闸各管一件事，互不替代：
+#   · 失败分类 —— 限流/无算力不该按「网络抖动」处理（重试只是重复挨打 → 立即放弃 + 长冷却）；
+#   · 总预算   —— timeout 管「单次尝试」，预算管「这一层总共最多等多久」
+#                 （llm_client 对本地网关的读超时最多重试 3 次 → 单旋钮必然失衡）；
+#   · 全局冷却 —— 把「每镜各付一次」变成「一次失败、整段安静」，这是安静降级的核心。
+_RATE_LIMIT_MARKERS: Tuple[str, ...] = (
+    "model_unavailable", "cooling down", "rate limit", "rate_limit", "too many requests",
+    "no available channel", "no available workers", "all circuits open",
+    "无可用算力", "限流",
+)
+#: 「连不上」类失败的特征（requests/urllib3 的文案 + 中文系统提示）
+_UNREACHABLE_MARKERS: Tuple[str, ...] = (
+    "failed to establish a new connection", "max retries exceeded", "connection refused",
+    "拒绝连接", "nodename nor servname", "name or service not known",
+)
+#: 「其它」类失败的冷却（秒）：多是单条提示词/单次输出的问题，不该把整层关太久
+_OTHER_FAIL_COOLDOWN_SEC = 60
+#: 整层共用的冷却键：限流/无算力/超时是**上游级**症状，一次失败就让整层安静下来。
+#: （review 与 enhance 共用这一把键 —— 增强已经等满预算后，复审不该再花第二个预算。）
+_COOLDOWN_LAYER_KEY = "prompt_enhance"
+
+
+class EnhanceBudgetExceeded(RuntimeError):
+    """单次增强/复审超出**总预算**（墙钟）—— 按超时类处理，安静降级。"""
+
+
+def _is_timeout_error(exc) -> bool:
+    if isinstance(exc, (TimeoutError, EnhanceBudgetExceeded)):
+        return True
+    return ("timeout" in type(exc).__name__.lower()
+            or "timed out" in str(exc).lower() or "超时" in str(exc))
+
+
+def _classify_failure(exc) -> str:
+    """把 LLM 失败分类（决定冷却时长与日志措辞；每一类都**不再叠加我们自己的等待**）。
+
+    · `ratelimit`   —— 限流 / 无算力（HTTP 400 model_unavailable、429、账号冷却、
+      "no available channel"…）：上游明确说「现在没配额」，重试只是重复挨打。
+    · `timeout`     —— 读超时或超出本层总预算：模型可能只是慢（思考模式），但本次已经等够。
+    · `unreachable` —— 连不上（ConnectionError / 拒绝连接 / DNS 失败）。远端会 fail-fast，
+      但**本地/内网**网关按 llm_client 现有逻辑仍会重试 3 次并退避（实测 11s/次），
+      故同样归入长冷却：上游根本不在，没必要每镜都试一遍。
+    · `other`       —— 其它（未配置 / 输出非 JSON / 未知异常）：立即放弃，短冷却。
+    """
+    _low = str(exc or "").lower()
+    if any(_m in _low for _m in _RATE_LIMIT_MARKERS):
+        return "ratelimit"
+    if _is_timeout_error(exc):
+        return "timeout"
+    if any(_m in _low for _m in _UNREACHABLE_MARKERS):
+        return "unreachable"
+    if "connectionerror" in type(exc).__name__.lower():
+        return "unreachable"
+    return "other"
+
+
+_COOLDOWN: Dict[str, float] = {}
+_COOLDOWN_LOCK = threading.Lock()
+
+
+def _cooldown_remaining(module: str) -> float:
+    """本层（或本模块）冷却剩余秒数；0 = 可正常调用模型。"""
+    _now = time.time()
+    with _COOLDOWN_LOCK:
+        _layer = float(_COOLDOWN.get(_COOLDOWN_LAYER_KEY) or 0.0)
+        _own = float(_COOLDOWN.get(module) or 0.0)
+    return max(0.0, max(_layer, _own) - _now)
+
+
+def _note_failure(module: str, category: str) -> int:
+    """登记一次失败：按类型设置冷却，返回冷却秒数（0 = 不冷却）。"""
+    _sec = (int(PROMPT_ENHANCE_COOLDOWN_SEC)
+            if category in ("ratelimit", "timeout", "unreachable")
+            else int(_OTHER_FAIL_COOLDOWN_SEC))
+    if _sec <= 0:
+        return 0
+    _key = (_COOLDOWN_LAYER_KEY
+            if category in ("ratelimit", "timeout", "unreachable") else module)
+    with _COOLDOWN_LOCK:
+        _base = max(float(_COOLDOWN.get(_key) or 0.0), time.time())
+        _COOLDOWN[_key] = _base + _sec
+    return _sec
+
+
+def reset_cooldown() -> None:
+    """清掉全局冷却（人工重试 / 诊断 / 单测用）。"""
+    with _COOLDOWN_LOCK:
+        _COOLDOWN.clear()
+
+
+def _call_with_budget(fn, what: str, budget_sec: float = None):
+    """在**墙钟总预算**内跑一次模型调用；返回 `(ok, value, error)`。
+
+    为什么需要它：llm_client 对**本地/内网**网关的读超时最多重试 3 次
+    （本地冷启动 503 会自愈，故不走 fail-fast 分支）→ 单次调用最坏 3×timeout。
+    只有 timeout 一个旋钮无法同时满足「思考模式要 240s」与「失败不得 75s/镜」
+    （取 240s → 最坏 720s；取小 → 正常增强必然超时，这正是本次 P0 的根因）。
+    超预算即放弃：被放弃的调用留在**守护线程**里自行结束（其超时由 requests 负责），
+    结果丢弃 —— 主链路立刻继续，这是「安静降级」的关键部分。
+    """
+    _budget = float(PROMPT_ENHANCE_BUDGET_SEC if budget_sec is None else budget_sec)
+    _box: Dict[str, object] = {}
+
+    def _worker() -> None:
+        try:
+            _box["value"] = fn()
+        except BaseException as _e:  # noqa: BLE001 —— 原样带回主线程做分类
+            _box["error"] = _e
+
+    _th = threading.Thread(target=_worker, name="prompt-enhance-llm", daemon=True)
+    _t0 = time.time()
+    _th.start()
+    _th.join(timeout=max(1.0, _budget))
+    _elapsed = time.time() - _t0
+    if _th.is_alive():
+        return False, None, EnhanceBudgetExceeded(
+            f"{what} 超出本层总预算 {_budget:.0f}s（已放弃等待，后台调用自行结束；"
+            f"实际等待 {_elapsed:.1f}s）")
+    if "error" in _box:
+        return False, None, _box["error"]
+    if _elapsed >= 1.0:
+        logger.info("%s 用时 %.1fs（预算 %.0fs）", what, _elapsed, _budget)
+    return True, _box.get("value"), None
 
 
 # --------------------------------------------------------------------------- #
@@ -339,6 +479,12 @@ def enhance_prompt(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
     if _fail_recent(key):
         out["note"] = "近期增强失败（冷却中），按原文继续"
         return out
+    _cd = _cooldown_remaining("text")
+    if _cd > 0:
+        # 安静降级：整层冷却期不写 warning（每镜一行会刷屏），只留 debug + note
+        out["note"] = f"增强整层冷却中（剩余 {int(_cd)}s），按原文继续"
+        logger.debug("提示词增强[%s] 跳过：整层冷却剩余 %.0fs", kind, _cd)
+        return out
 
     try:
         client = _client_for("text")
@@ -360,11 +506,15 @@ def enhance_prompt(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
         # max_tokens 只是物理兜底（中文约 1.5 字符/token，取 1.2 保守系数并留思考余量）；
         # 真正的长度控制由 system 里的硬约束表达。
         _mt = max(1500, min(8192, int(h3_prompt_kit.MAX_PROMPT_CHARS / 1.2)))
-        resp = client.chat(
-            [{"role": "system", "content": _system},
-             {"role": "user", "content": user}],
-            temperature=0.4, max_tokens=_mt, timeout=PROMPT_ENHANCE_TIMEOUT_SEC)
-        cand = _strip_fence(resp)
+        _ok, _resp, _err = _call_with_budget(
+            lambda: client.chat(
+                [{"role": "system", "content": _system},
+                 {"role": "user", "content": user}],
+                temperature=0.4, max_tokens=_mt, timeout=PROMPT_ENHANCE_TIMEOUT_SEC),
+            what=f"提示词增强[{kind}]")
+        if not _ok:
+            raise _err
+        cand = _strip_fence(str(_resp))
         ok, why = _skeleton_ok(kind, prompt, cand)
         if not ok:
             logger.info("提示词增强[%s] 结果未通过骨架校验（%s），保持原文", kind, why)
@@ -376,9 +526,12 @@ def enhance_prompt(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
         logger.info("提示词增强[%s] 已采纳（%d -> %d 字符）", kind, len(prompt), len(cand))
         return out
     except Exception as e:  # noqa: BLE001  fail-open：增强失败绝不阻断生成
-        logger.warning("提示词增强[%s] 失败（按原文继续）：%s: %s",
-                       kind, type(e).__name__, e)
-        out["note"] = f"增强调用失败（{type(e).__name__}），按原文继续"
+        _cat = _classify_failure(e)
+        _sec = _note_failure("text", _cat)
+        logger.warning("提示词增强[%s] 失败（按原文继续）：[%s] %s: %s%s",
+                       kind, _cat, type(e).__name__, e,
+                       f"；整层冷却 {_sec}s（期间所有提示词跳过增强/复审）" if _sec else "")
+        out["note"] = f"增强调用失败（{_cat}），按原文继续"
         _cache_put_fail(key)
         return out
 
@@ -456,6 +609,12 @@ def model_review(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
     if _fail_recent(key):
         out["note"] = "近期复审失败（冷却中），默认通过"
         return out
+    _cd = _cooldown_remaining("qc")
+    if _cd > 0:
+        # 整层冷却（含「增强刚失败」这一情形）：复审不再花第二个预算，安静默认通过
+        out["note"] = f"复审整层冷却中（剩余 {int(_cd)}s），默认通过"
+        logger.debug("提示词复审[%s] 跳过：整层冷却剩余 %.0fs", kind, _cd)
+        return out
 
     try:
         client = _client_for("qc")
@@ -467,11 +626,15 @@ def model_review(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
                 f"【目标风格】{str(style or '').strip() or '（未指定）'}\n"
                 f"【镜头上下文】\n{_ctx_brief(ctx)}\n"
                 f"【待审提示词】\n{prompt}")
-        resp = client.chat(
-            [{"role": "system", "content": _REVIEW_INSTRUCTION},
-             {"role": "user", "content": user}],
-            temperature=0.1, max_tokens=8192, timeout=PROMPT_ENHANCE_TIMEOUT_SEC)
-        data = _extract_json(resp)
+        _ok, _resp, _err = _call_with_budget(
+            lambda: client.chat(
+                [{"role": "system", "content": _REVIEW_INSTRUCTION},
+                 {"role": "user", "content": user}],
+                temperature=0.1, max_tokens=8192, timeout=PROMPT_ENHANCE_TIMEOUT_SEC),
+            what=f"提示词复审[{kind}]")
+        if not _ok:
+            raise _err
+        data = _extract_json(str(_resp))
         if not data:
             out["note"] = "复审输出不是合法 JSON，默认通过"
             _cache_put_fail(key)
@@ -492,8 +655,11 @@ def model_review(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
         _cache_put_ok(key, json.dumps(result, ensure_ascii=False))
         return result
     except Exception as e:  # noqa: BLE001  fail-open：复审失败不影响本次生成
-        logger.warning("提示词复审[%s] 失败（默认通过）：%s: %s",
-                       kind, type(e).__name__, e)
-        out["note"] = f"复审调用失败（{type(e).__name__}），默认通过"
+        _cat = _classify_failure(e)
+        _sec = _note_failure("qc", _cat)
+        logger.warning("提示词复审[%s] 失败（默认通过）：[%s] %s: %s%s",
+                       kind, _cat, type(e).__name__, e,
+                       f"；整层冷却 {_sec}s（期间所有提示词跳过增强/复审）" if _sec else "")
+        out["note"] = f"复审调用失败（{_cat}），默认通过"
         _cache_put_fail(key)
         return out
