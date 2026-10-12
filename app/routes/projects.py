@@ -757,11 +757,17 @@ def _collect_project_cast_images(rec: dict, kind_pref: str = "") -> tuple:
     outline = None
     try:
         import book_outline as bo
-        text, _ch = novel_parser.read_novel_text(NOVELS_DIR, rec.get("novel_id") or "")
+        # 修复（2026-10-12 t36）：read_novel_text 返回 **str**（非元组）。原 `text, _ch = ...`
+        # 会把字符串拆成两个字符 —— 长度非 2 时抛 ValueError，被下方 except 吞掉 → 大纲优先的
+        # 主角/反派识别**永远静默降级**（t23 补的 split_novel 也因此从未被走到）。
+        # 改为单变量赋值，split_novel 才真正执行。
+        novel_id = rec.get("novel_id") or ""
+        text = novel_parser.read_novel_text(NOVELS_DIR, novel_id)
         chunks = novel_parser.split_novel(text)
         outline = bo.load_outline(dir_key, text, len(chunks) or 0, CONTINUITY_DIR) or bo.load_outline(dir_key, text, 0, CONTINUITY_DIR)
     except Exception as e:  # noqa: BLE001
-        _app_logger().debug("读取 book_outline 失败，使用默认主角/反派映射：%s", e)
+        # 失败可见：debug → warning（不再被裸 except 静默吞）
+        _app_logger().warning("读取 book_outline 失败，使用默认主角/反派映射：%s", e)
         outline = None
 
     hero_names, villain_names = [], []
