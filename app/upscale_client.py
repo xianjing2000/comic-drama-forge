@@ -315,6 +315,244 @@ def save_calibration(entry: Dict) -> str:
 
 
 
+
+# ============================ 场内切片（分段超分） ============================
+
+#: 字符码常量（本机写盘工具会吞掉源码里的反斜杠字面量，故一律用 chr() 表达）。
+_BSCH = chr(92)      # 反斜杠: 转义单引号 / 清单换行
+_NLCH = chr(10)      # 换行: ffmpeg concat 清单的分隔符
+#: 单个切片的目标时长上限（秒）——片段时长 <= 该值时「不切片」，走原来的单次超分路径。
+DEFAULT_CHUNK_SECONDS = 10
+#: 切片时长下限：小于 1s 的切片没有意义（额外一次模型装载/提交，收益为负）。
+MIN_CHUNK_SECONDS = 1
+#: 切片时长上限：超过 60s 就回到了「整场一次超分」的老问题（显存/超时）。
+MAX_CHUNK_SECONDS = 60
+
+
+def normalize_chunk_seconds(value, default: int = DEFAULT_CHUNK_SECONDS) -> int:
+    """把外部传入的切片时长收敛为 [1, 60] 的整数；非法/缺省 → default。
+
+    <= 0 是**显式关闭切片**（回到「整场一次超分」的旧行为），不回落 default ——
+    否则用户没法关掉切片。
+    """
+    try:
+        v = int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
+    if v <= 0:
+        return 0
+    return max(MIN_CHUNK_SECONDS, min(MAX_CHUNK_SECONDS, v))
+
+
+def _segment_one(src: str, out_path: str, start: float, dur: float,
+                 ffmpeg: str, timeout: int) -> str:
+    """切出 [start, start+dur) 一段（-c copy，**不重编码**）；成功返回 out_path，失败返回空串。
+
+    为什么 -ss 放在 -i **之前**：输入侧定位会跳到目标时间点前最近的关键帧再解码，
+    既准确又快（输出侧 -ss 需要解码丢弃前面全部帧，多片时会线性变慢）。
+
+    为什么不用 -f segment：实测那套会把音频 DTS 按绝对时间切（视频从 0 重新开始），
+    结果片段被切成 10~17s 的乱长、最大超目标 65%。-ss/-t 的边界是确定的：
+    每片从关键帧起、不短于 dur（-c copy 只能在关键帧切，故单片可能略长）。
+    """
+    cmd = [ffmpeg, "-hide_banner", "-y", "-v", "error",
+           "-ss", "%.3f" % max(0.0, float(start)),
+           "-i", src,
+           "-t", "%.3f" % max(0.01, float(dur)),
+           "-map", "0:v:0", "-map", "0:a?",
+           "-c", "copy",
+           "-avoid_negative_ts", "make_zero",
+           "-movflags", "+faststart",
+           out_path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("切片超分：切第 %.2fs 段异常：%s", start, e)
+        return ""
+    if r.returncode != 0:
+        logger.warning("切片超分：切第 %.2fs 段失败（rc=%s）：%s",
+                       start, r.returncode, (r.stderr or "").strip()[-300:])
+        return ""
+    if not os.path.isfile(out_path) or os.path.getsize(out_path) <= 0:
+        return ""
+    return out_path
+
+
+def segment_video_nocopy(input_video: str, out_dir: str,
+                         seconds: int = DEFAULT_CHUNK_SECONDS,
+                         timeout: int = 300) -> List[str]:
+    """把视频按 **不超过 seconds 秒** 切成片段（ffmpeg -ss/-t + -c copy，**不重编码**）。
+
+    为什么必须不重编码：切片只是「换一种提交粒度」，画面不能被二次压缩（FlashVSR 之后
+    再压一次会掉细节），且重编码一整场（164s）本身也要几十秒~几分钟。
+
+    关键帧边界（重要）：-c copy 只能在关键帧处切，因此**单片可能略长于 seconds**
+    （实测本机 H3 成片：目标 10s → 最长 16.5s，即 +65%）。这是可接受的取舍 —— 目标是
+    「控制单次提交规模」，不是精确等分；这里会用 ffprobe 复核并把实际范围写进日志。
+
+    返回按序号排列的切片绝对路径（>=1 个）；切不出（ffmpeg 缺失/失败/源不可读/源无时长）
+    返回 []，调用方据此回落「整段一次超分」——绝不因为切片失败而让超分整体失败。
+    """
+    sec = normalize_chunk_seconds(seconds, DEFAULT_CHUNK_SECONDS)
+    if sec <= 0:
+        return []
+    ffmpeg = _which("ffmpeg") or "ffmpeg"
+    src = os.path.abspath(input_video or "")
+    if not src or not os.path.exists(src):
+        logger.warning("切片超分：源视频不存在，无法切片：%s", input_video)
+        return []
+    info = probe_video(src)
+    total = float(info.get("duration") or 0) if info.get("ok") else 0.0
+    if total <= 0:
+        logger.warning("切片超分：读不到源时长（%s），回落整段超分", info.get("error"))
+        return []
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        logger.warning("切片超分：切片目录不可用（%s）：%s", out_dir, e)
+        return []
+
+    n = int((total + sec - 1e-6) // sec) + 1     # 片数上限（向上取整 + 1 防边界）
+    chunks: List[str] = []
+    want = 0.0              # 下一片的目标起点
+    covered = 0.0           # 已被已切片段覆盖到的源时间（避免重叠：实测重叠会让成片变长）
+    for i in range(n):
+        if want >= total - 1e-3:
+            break
+        dur = min(float(sec), max(0.05, total - want))
+        out = os.path.join(out_dir, "chunk_%03d.mp4" % i)
+        got = _segment_one(src, out, want, dur, ffmpeg,
+                           int(timeout) if timeout else 300)
+        if not got:
+            # 任一段切不出 → 整体回落整段超分（绝不交半套切片给下游）
+            return []
+        chunks.append(got)
+        # -ss 落在**关键帧**上，实际起点可能早于 want → 下一片从「已被覆盖的位置」续切，
+        # 避免与前一片重叠（实测 i*sec 的朴素步进会让每片重放一段前缀，成片被拉长 37%）。
+        ci = probe_video(got)
+        cd = float(ci.get("duration") or 0) if ci.get("ok") else 0.0
+        covered = max(covered, want + (cd if cd > 0 else dur))
+        want = covered - 1e-3
+    if not chunks:
+        logger.warning("切片超分：未产出任何切片，回落整段超分：%s", src)
+        return []
+
+    # 复核（fail-open）：探不到时长（或时长为 0）的切片剔除，避免把空壳提交给 ComfyUI
+    kept: List[str] = []
+    durs: List[float] = []
+    for c in chunks:
+        ci = probe_video(c)
+        cd = float(ci.get("duration") or 0) if ci.get("ok") else 0.0
+        if cd <= 0:
+            logger.warning("切片超分：切片不可用（%s），剔除：%s", ci.get("error"), c)
+            continue
+        kept.append(c)
+        durs.append(cd)
+    if not kept:
+        logger.warning("切片超分：全部切片不可用，回落整段超分：%s", src)
+        return []
+    _mx = max(durs)
+    if _mx > sec * 3:
+        logger.error("切片超分：实际最长片 %.2fs 超过目标 %ds 的 3 倍 —— 源片关键帧过稀，"
+                     "单次提交规模未真正受控（该片仍会超分，但超时/显存风险回归）", _mx, sec)
+    logger.info("切片超分：%s（%.2fs）→ %d 片（目标 <=%ds，实际 %.2f~%.2fs）",
+                os.path.basename(src), total, len(kept), sec, min(durs), _mx)
+    return kept
+
+
+def concat_segments_nocopy(parts: List[str], out_path: str,
+                           timeout: int = 1800) -> str:
+    """把切片超分产物拼回**整段**（先试 -c copy 流拼接，不重编码）。
+
+    为什么优先 -c copy：所有切片来自同一母版的同一次超分任务 → 编码参数天然一致，
+    流拼接是逐字节搬运，既快又无损。
+
+    失败/无音轨混合时回落 concat filter 重编码 —— 这里**必须**重编码，因为
+    -c copy 对「部分片段无音轨」会静默丢轨（见 video_postprocess.concat_videos 的
+    t11 P0 记录）。回落路径复用 video_postprocess 的成熟实现（它会逐段补静音轨）。
+
+    返回 out_path 表示成功；失败返回 ""（契约与 video_postprocess.concat_videos 一致，
+    不抛异常）。
+    """
+    parts = [os.path.abspath(p) for p in (parts or []) if p and os.path.exists(p)]
+    if not parts:
+        logger.error("切片超分：拼回整段失败 —— 无可用片段")
+        return ""
+    if len(parts) == 1:
+        try:
+            os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+            shutil.copy2(parts[0], out_path)
+            return out_path
+        except Exception as e:  # noqa: BLE001
+            logger.error("切片超分：单片直接归档失败：%s", e)
+            return ""
+
+    try:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    except OSError as e:
+        logger.error("切片超分：拼回目录不可用（%s）：%s", os.path.dirname(out_path), e)
+        return ""
+
+    ffmpeg = _which("ffmpeg") or "ffmpeg"
+    list_file = out_path + ".list"
+    try:
+        with open(list_file, "w", encoding="utf-8") as f:
+            for v in parts:
+                # 单引号转义与 video_postprocess.concat_videos 同一约定（路径含 ' 时截断）
+                f.write(_concat_file_line(v))
+        cmd = [ffmpeg, "-hide_banner", "-y", "-v", "error",
+               "-f", "concat", "-safe", "0", "-i", list_file,
+               "-c", "copy", "-movflags", "+faststart", out_path]
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+        ok = (r.returncode == 0 and os.path.isfile(out_path)
+              and os.path.getsize(out_path) > 0
+              and float(probe_video(out_path).get("duration") or 0) > 0)
+        if ok:
+            logger.info("切片超分：拼回整段成功（-c copy，%d 片）：%s", len(parts), out_path)
+            return out_path
+        logger.warning("切片超分：-c copy 拼接失败（rc=%s，%s），回落重编码拼接",
+                       r.returncode, (r.stderr or "").strip()[-300:])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("切片超分：-c copy 拼接异常，回落重编码拼接：%s", e)
+    finally:
+        try:
+            if os.path.exists(list_file):
+                os.remove(list_file)
+        except OSError as _ce:
+            logger.debug("清理切片拼接清单失败（忽略）：%s", _ce)
+
+    # 回落：复用 video_postprocess 的重编码拼接（统一参数 + 逐段补静音轨）
+    try:
+        from video_postprocess import VideoPostProcessor
+        proc = VideoPostProcessor()
+        got = proc.concat_videos(parts, out_path,
+                                 caller="upscale_client.concat_segments_nocopy")
+        if got and float(probe_video(got).get("duration") or 0) > 0:
+            logger.info("切片超分：拼回整段成功（重编码，%d 片）：%s", len(parts), got)
+            return got
+    except Exception as e:  # noqa: BLE001
+        logger.error("切片超分：重编码拼接也失败：%s", e, exc_info=True)
+    return ""
+
+
+# ============================ 切片拼接清单 ============================
+
+
+def _concat_file_line(path: str) -> str:
+    """ffmpeg concat demuxer 清单的一行（file + 单引号路径 + 行尾换行）。
+
+    为什么单独抽成函数：清单语法用单引号包裹路径，路径里的单引号必须写成
+    「关引号 + 反斜杠转义单引号 + 重开引号」；且**每行必须以换行结束**——
+    实测漏掉换行时 ffmpeg 会把两行粘成 "chunk_000.mp4nfile ..." 直接报错。
+    这两处都极易写错，抽出来一次覆盖即可守住。
+    """
+    p = os.path.abspath(path)
+    esc = p.replace(chr(39), chr(39) + _BSCH + chr(39))
+    return "file " + chr(39) + esc + chr(39) + _NLCH
+
+
 # ============================ 工作流构造 ============================
 
 def build_te_workflow(input_video: str, filename_prefix: str, scale: int = 2,
@@ -533,8 +771,204 @@ class VideoUpscaler:
     def upscale(self, input_video: str, project_name: str = "project", scale: int = 2,
                 mode: Optional[str] = None, timeout: Optional[int] = None,
                 engine: Optional[str] = None,
-                progress_cb=None, **overrides) -> Dict:
+                progress_cb=None,
+                segment_seconds: Optional[int] = None,
+                chunk_seconds: Optional[int] = None,
+                **overrides) -> Dict:
         """对 input_video 执行 FlashVSR 超分，返回结构化结果；失败抛 UpscaleError
+
+        engine: "te-speed-flashvsr"（默认，加速链路）/ "legacy-flashvsr"（旧链路回退）
+
+        ⭐ 2026-10-13（t9）**场内切片超分**（本函数的默认行为）：
+          长片段（如一场 164s）整段提交会同时击穿两条硬限制 ——
+            ① 显存：VHS_LoadVideoPath(frame_load_cap=0) 把**全部帧**读进内存，
+               164s@24fps/960x544 ≈ 3949 帧 ≈ 23GiB → 8G 卡必然 OOM；
+            ② 超时：实测约 1.96 s/帧 → 一场 ≈ 2.15 小时 > 单次等待上限。
+          做法：把片段按不超过 segment_seconds 秒（默认 10）切成若干片（ffmpeg -ss/-t +
+          **-c copy，不重编码**）→ 逐片超分 → 拼回整段。下游「逐场超分→流拼接整集」不变。
+
+          参数：
+            segment_seconds / chunk_seconds：切片时长（秒），二者同义，segment_seconds 优先。
+              缺省（None）= 用 DEFAULT_CHUNK_SECONDS(10)；**显式传 0/负数 = 关闭切片**
+              （回到整段一次超分的旧行为，供兼容/回退）。
+              只有「片段时长 > 切片时长」时才真的切片；否则仍走单次提交（短片段无收益）。
+          失败语义（保持 fail-open）：**任一切片超分失败 → 自动整体回落整段超分**；
+            切片/拼回失败同样回落；回落再失败才抛 UpscaleError。
+        """
+        # 切片时长解析：segment_seconds 优先，其次 chunk_seconds（两条入口名同义）
+        _raw_seg = segment_seconds if segment_seconds is not None else chunk_seconds
+        _seg = normalize_chunk_seconds(_raw_seg if _raw_seg is not None else DEFAULT_CHUNK_SECONDS,
+                                       DEFAULT_CHUNK_SECONDS)
+        return self._upscale_with_chunks(
+            input_video, project_name=project_name, scale=scale, mode=mode,
+            timeout=timeout, engine=engine, progress_cb=progress_cb,
+            segment_seconds=_seg, **overrides)
+
+    def _upscale_with_chunks(self, input_video: str, project_name: str = "project",
+                             scale: int = 2, mode: Optional[str] = None,
+                             timeout: Optional[int] = None, engine: Optional[str] = None,
+                             progress_cb=None, segment_seconds: int = DEFAULT_CHUNK_SECONDS,
+                             **overrides) -> Dict:
+        """切片编排：切 → 逐片超分 → 拼回整段。任何一步不行都**整体回落整段超分**。"""
+        t0 = time.time()
+
+        def step(msg, pct=None):
+            if progress_cb:
+                try:
+                    progress_cb(msg, pct)
+                except Exception as e:
+                    logger.debug("进度回调异常（忽略，不阻断超分）：%s", e)
+            logger.info(f"[超分] {msg}")
+
+        def _whole(why: str) -> Dict:
+            """回落：整段一次超分（segment_seconds=0 防重入，绝不递归回切片）"""
+            logger.warning("超分回落整段路径（%s）：%s", why, os.path.basename(input_video or ""))
+            return self._upscale_once(
+                input_video, project_name=project_name, scale=scale, mode=mode,
+                timeout=timeout, engine=engine, progress_cb=progress_cb,
+                segment_seconds=0, **overrides)
+
+        if int(segment_seconds or 0) <= 0:
+            return _whole("切片已关闭")
+        if not input_video or not os.path.exists(input_video):
+            # 交给 _upscale_once 报出原始错误（这里不抢先改写错误语义）
+            return _whole("输入不存在/不可读")
+
+        src = probe_video(input_video)
+        if not src.get("ok"):
+            return _whole("源视频不可解析")
+        dur = float(src.get("duration") or 0)
+        if dur <= 0 or dur <= float(segment_seconds):
+            logger.info("切片超分：源片 %.2fs <= 切片时长 %ss，无需切片，直接整段超分",
+                        dur, segment_seconds)
+            return _whole("片段不长于切片时长")
+
+        # 切片目录：与正式产物同盘的 _chunks/，**整场跑完无条件清理**（含异常路径）
+        try:
+            base = os.path.abspath(os.path.join(UPSCALE_DIR, project_name or "project"))
+        except Exception:  # noqa: BLE001
+            base = os.path.abspath(".")
+        tag = time.strftime("%Y%m%d_%H%M%S")
+        work_dir = os.path.join(base, "_chunks",
+                                f"{os.path.splitext(os.path.basename(input_video))[0][:60]}_{tag}")
+
+        tot_in = 0.0        # 各片超分耗时之和（标定用；含排队与模型装载）
+        try:
+            step(f"场内切片：{dur:.1f}s → 目标每片 <= {segment_seconds}s（不重编码）", 5)
+            chunks = segment_video_nocopy(input_video, work_dir, segment_seconds)
+            if not chunks:
+                return _whole("切片失败")
+
+            up_chunks: List[str] = []
+            for i, c in enumerate(chunks):
+                c_info = probe_video(c)
+                c_dur = float(c_info.get("duration") or 0)
+                pct = 5 + int(round(70.0 * (i / max(1, len(chunks)))))
+                step(f"切片 {i + 1}/{len(chunks)}（{c_dur:.1f}s，FlashVSR {int(scale)}x）…", pct)
+
+                def _chunk_prog(m, _p=None, _tag=f"{i + 1}/{len(chunks)}"):
+                    _head = f"切片 {_tag}"
+                    if _p is not None:
+                        try:
+                            _head += f"（{int(float(_p))}%）"
+                        except (TypeError, ValueError):
+                            pass
+                    step(f"{_head}：{m}", pct)
+
+                r = self._upscale_once(
+                    c, project_name=project_name, scale=scale, mode=mode,
+                    timeout=timeout, engine=engine, progress_cb=_chunk_prog,
+                    segment_seconds=0, **overrides)
+                up = (r or {}).get("output_path") or ""
+                if not up or not os.path.isfile(up):
+                    raise UpscaleError(f"第 {i + 1}/{len(chunks)} 片超分未产出文件")
+                up_chunks.append(up)
+                tot_in += float((r or {}).get("elapsed_sec") or 0)
+
+            # 拼回「整段」：与整段超分同一落盘命名口径（<stem>_upscaled_<n>x_<ts>.mp4）
+            stem = os.path.splitext(os.path.basename(input_video))[0].strip("_")
+            out_dir = os.path.abspath(os.path.join(UPSCALE_DIR, project_name or "project"))
+            os.makedirs(out_dir, exist_ok=True)
+            joined = os.path.join(out_dir, f"{stem}_upscaled_{int(scale)}x_{tag}.mp4")
+            step(f"切片超分完成，拼回整段（{len(up_chunks)} 片）…", 92)
+            merged = concat_segments_nocopy(up_chunks, joined)
+            if not merged or not os.path.isfile(merged):
+                raise UpscaleError("切片产物拼回整段失败")
+
+            dst = probe_video(merged)
+            if not dst.get("ok") or float(dst.get("duration") or 0) <= 0:
+                raise UpscaleError(f"拼回产物不可播放：{dst.get('error')}")
+            elapsed = round(time.time() - t0, 1)
+            step(f"完成（切片 {len(up_chunks)} 片）：{dst['width']}x{dst['height']}，"
+                 f"耗时 {elapsed}s", 100)
+            result = {
+                "success": True,
+                "engine": "te-speed-flashvsr",
+                "engine_chain": f"segment(-c copy) x{len(up_chunks)} → FlashVSR → concat",
+                "accelerated": True,
+                "params": {},
+                "prompt_id": "",
+                "input_path": os.path.abspath(input_video),
+                "output_path": merged,
+                "output_filename": os.path.basename(merged),
+                "comfyui_output": "",
+                "scale": int(scale),
+                "mode": str(mode or ""),
+                "before": src,
+                "after": dst,
+                "size_delta_mb": round(dst["size_mb"] - src["size_mb"], 2),
+                "elapsed_sec": elapsed,
+                # ---- 切片专属审计字段（哪个路径、几片、单片/合计耗时）----
+                "chunked": True,
+                "chunk_seconds": int(segment_seconds),
+                "chunk_count": len(up_chunks),
+                "chunk_paths": list(up_chunks),
+                "chunk_elapsed_sum_sec": round(tot_in, 1),
+                "elapsed_sec_per_chunk": round(tot_in / max(1, len(up_chunks)), 1),
+            }
+            try:
+                result["calibration_file"] = save_calibration({
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "engine": "te-speed-flashvsr",
+                    "input": os.path.abspath(input_video),
+                    "before": f"{src.get('width')}x{src.get('height')}",
+                    "after": f"{dst.get('width')}x{dst.get('height')}",
+                    "frames": src.get("frames") or 0,
+                    "mode": str(mode or ""),
+                    "scale": int(scale),
+                    "elapsed_sec": elapsed,
+                    # 切片标定：离线预估按「每片耗时」外推，比按整段更准
+                    "chunked": True,
+                    "chunk_seconds": int(segment_seconds),
+                    "chunk_count": len(up_chunks),
+                    "chunk_elapsed_sum_sec": round(tot_in, 1),
+                    "input_duration_sec": round(dur, 3),
+                    "per_chunk_sec": round(tot_in / max(1, len(up_chunks)), 1),
+                })
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"写耗时标定失败（不影响结果）: {e}")
+            return result
+        except Exception as e:  # noqa: BLE001
+            logger.warning("切片超分未走通（%s: %s），回落整段超分", type(e).__name__, e)
+            return _whole(f"切片路径异常：{type(e).__name__}: {e}")
+        finally:
+            # G8：切片件是**临时件**，成功/失败/异常都清掉（正式产物已归档到 out_dir）
+            try:
+                if os.path.isdir(work_dir):
+                    shutil.rmtree(work_dir, ignore_errors=True)
+                # 顺手收掉空的 _chunks/ 容器目录：空目录留着会让「临时目录是否清理干净」
+                # 这条断言永远为假（本次实测踩到），也容易被误读成「还有残留」。
+                _parent = os.path.dirname(work_dir)
+                if os.path.isdir(_parent) and not os.listdir(_parent):
+                    os.rmdir(_parent)
+            except Exception as _ce:  # noqa: BLE001
+                logger.debug("清理切片临时目录失败（忽略）：%s", _ce)
+
+    def _upscale_once(self, input_video: str, project_name: str = "project", scale: int = 2,
+                      mode: Optional[str] = None, timeout: Optional[int] = None,
+                      engine: Optional[str] = None,
+                      progress_cb=None, **overrides) -> Dict:
+        """**单次**超分（不做切片编排）。切片路径逐片调用它；回落路径也调它。
 
         engine: "te-speed-flashvsr"（默认，加速链路）/ "legacy-flashvsr"（旧链路回退）
         """
@@ -589,7 +1023,10 @@ class VideoUpscaler:
                 frame_rate=src["fps"] or 24.0,
                 has_audio=src["has_audio"],
                 attach_audio=bool(overrides.get("attach_audio", True)),
-                **{k: v for k, v in overrides.items() if k != "attach_audio"},
+                # ⚠️ 编排参数绝不透传给工作流构建器（它们是**编排**参数，不是节点输入；
+                #    误传会让 TEFlashVSRTuning 收到未知字段 → 提交前自检直接失败）。
+                **{k: v for k, v in overrides.items()
+                   if k not in ("attach_audio", "segment_seconds", "chunk_seconds")},
             )
         else:
             wf = build_upscale_workflow(
@@ -599,8 +1036,23 @@ class VideoUpscaler:
                 mode=mode,
                 frame_rate=src["fps"] or 24.0,
                 has_audio=src["has_audio"],
-                **overrides,
+                **{k: v for k, v in overrides.items()
+                   if k not in ("segment_seconds", "chunk_seconds")},
             )
+        # G9：同一进程内重复提交**完全相同的源片 + 倍率**是 bug（会白烧一次超分），显式告警。
+        #   （只告警、不阻断：正常业务里同一源片换 mode/参数重跑是合法的，判重只看
+        #   源片路径 + 尺寸/帧率/时长 + 倍率这一组"本应命中幂等"的键。）
+        _src_key = f"{os.path.abspath(input_video)}|{int(scale)}|{src['width']}x{src['height']}" \
+                   f"@{src['fps']}:{src['duration']}"
+        _seen = getattr(self, "_seen_src_keys", None)
+        if _seen is None:
+            _seen = set()
+            self._seen_src_keys = _seen
+        if _src_key in _seen:
+            logger.error("超分重复提交：同一源片 + 同一倍率本次进程内已提交过（%s，scale=%s）"
+                         "—— 白烧一次超分，请检查调用方是否绕过了幂等/断点续跑判断",
+                         os.path.basename(input_video), scale)
+        _seen.add(_src_key)
         report = self.client.validate_api_prompt(wf)
         if (report["unknown_types"] or report["missing_required"]
                 or report["dangling_links"] or report.get("unexpected_inputs")):

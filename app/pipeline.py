@@ -484,8 +484,17 @@ DEFAULT_CONFIG = {
     # 绝不把已经跑通的成片拖成失败。
     "enable_upscale": False,
     "upscale_scale": 2,            # 超分倍率，FlashVSR 支持 2 / 3 / 4
-        # 逐场次先超分再拼接（2026-10-08）：True = 各场次独立超分→流拼接成整集；False = 直接超分整集原片
-        "upscale_per_scene": True,
+    # 逐场次先超分再拼接（2026-10-08）：True = 各场次独立超分→流拼接成整集；False = 直接超分整集原片
+    "upscale_per_scene": True,
+    # ⭐ 2026-10-13（t9）**场内切片超分**：逐场超分时，先把该场按不超过 N 秒切成小片
+    #   （ffmpeg -ss/-t + -c copy，不重编码）→ 逐片超分 → 拼回场级。
+    #   为什么必须切：实测一场 = 960x544/24fps/164.5s/3949 帧 ——
+    #     · VHS_LoadVideoPath(frame_load_cap=0) 全帧载入 ≈ 23GiB → 8G 卡必 OOM；
+    #     · 超分标定 ≈ 1.96 s/帧 → 一场 ≈ 2.15 小时，击穿单次等待上限。
+    #   默认 10；显式传 0 = 关闭切片（回到整段一次超分，兼容旧行为）。
+    #   ⚠️ 四处同改（少一处就会出现「界面上设了不生效」）：DEFAULT_CONFIG / normalize_config /
+    #     autopilot.PLAN_DEFAULTS / 前端 ProjectWorkbenchPage 的 UpscaleTab。
+    "upscale_chunk_seconds": 10,
     # ⭐「配音先行」（2026-10-04 新语义）：默认开启。True = 剧本后为**每个角色**生成
     # 一段参考音色音频，供 H3 以 `audioMode=generate` 锁定角色音色并自生成对白。
     # （不再逐句合成整集配音、不再回填 shot.duration。）仅在调试或无需参考音色时关闭。
@@ -542,6 +551,18 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
         cfg["upscale_scale"] = DEFAULT_CONFIG["upscale_scale"]
     if cfg["upscale_scale"] not in (2, 3, 4):
         cfg["upscale_scale"] = DEFAULT_CONFIG["upscale_scale"]
+    # ⭐ t9：场内切片时长（秒）。收敛为 [0, 60] 的整数：
+    #   · 非法/缺省 → DEFAULT_CONFIG 的 10（前端 JSON 类型不可信）；
+    #   · 0 或负数 → **0 = 显式关闭切片**（回到整段一次超分，兼容旧行为）；
+    #   · > 60 → 上限 60（再大就回到「整场一次超分」的老问题：显存/超时）。
+    try:
+        cfg["upscale_chunk_seconds"] = int(float(cfg.get("upscale_chunk_seconds")))
+    except (TypeError, ValueError):
+        cfg["upscale_chunk_seconds"] = DEFAULT_CONFIG["upscale_chunk_seconds"]
+    if cfg["upscale_chunk_seconds"] <= 0:
+        cfg["upscale_chunk_seconds"] = 0
+    elif cfg["upscale_chunk_seconds"] > 60:
+        cfg["upscale_chunk_seconds"] = 60
     try:
         cfg["coverage_min_percent"] = float(cfg.get("coverage_min_percent"))
     except (TypeError, ValueError):
@@ -982,17 +1003,119 @@ def _scene_segments(ctx) -> list:
     return [p for _, p in sorted(out)]
 
 
-def _upscale_scene_once(upscaler, src_path, dst_path, project_name, scale, progress_cb) -> dict:
+# ===================== 场级超分产物的 stale 校验（t9 修复 t6 缺陷①） =====================
+#
+# 缺陷：旧实现只判 _playable(epNN_sceneNN_upscaled.mp4) 就复用 → 场素材（scene_NN.mp4）
+#   返工重画后，拼出来的成片仍是**返工前的旧画面**，而且没有任何提示。
+# 做法：每产出一份场级超分产物，就在旁边写一份 <产物>.src.json 指纹（源片 size + mtime_ns）。
+#   复用前比对指纹：不一致（或没有指纹）→ 判定陈旧，重新超分。
+# 为什么不用产物 mtime 比大小：copy2 会把 mtime 一起搬过来，时间戳不可靠；
+#   而 (size, mtime_ns) 是同一批视频文件里「重画必然变化」的最小充分集（体量差 1 字节都算变）。
+# 兼容性：没有指纹的老产物一律视为陈旧（重跑一次而已，不会误用旧画面）。
+_SCENE_UPSCALE_META_SUFFIX = ".src.json"
+
+
+def _scene_upscale_meta_path(dst_path: str) -> str:
+    """场级超分产物的源片指纹旁路文件路径。
+
+    ⚠️ 后缀刻意**不以 .mp4 结尾**：G8 约定「临时件/旁路件不得被 *.mp4 扫描命中」。
+    """
+    return (dst_path or "") + _SCENE_UPSCALE_META_SUFFIX
+
+
+def _fs_fingerprint(path: str) -> dict:
+    """文件指纹 {size, mtime_ns}；文件不可读返回 {}。"""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return {}
+    return {"size": int(st.st_size), "mtime_ns": int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9)))}
+
+
+def _scene_upscale_reusable(src_path: str, dst_path: str) -> tuple:
+    """该场旧超分产物能否复用 → (bool, 原因字符串)。
+
+    三条判据（任一不满足即「不复用」，重新超分）：
+      ① 产物存在且可播放（沿用 G7 的 _playable：ffprobe 能读到视频流且时长 > 0）；
+      ② 有源片指纹旁路文件（老产物没有 → 无从证明是新的，一律重超）；
+      ③ 指纹与**当前**源片一致（size + mtime_ns 都相同）。
+
+    fail-safe 取向：任何读取异常都判「不可复用」。代价只是多跑一次超分，
+    而误用的代价是「用户看到返工前的旧画面」——两者不对称，故绝不 fail-open。
+    """
+    if not _playable(dst_path):
+        return False, "产物不存在或不可播放"
+    meta_p = _scene_upscale_meta_path(dst_path)
+    if not _nonempty(meta_p):
+        return False, "无源片指纹记录（老产物）"
+    try:
+        with open(meta_p, "r", encoding="utf-8") as f:
+            meta = json.load(f) or {}
+    except (OSError, ValueError) as e:
+        return False, f"指纹文件不可读：{e}"
+    cur = _fs_fingerprint(src_path)
+    if not cur:
+        return False, f"源片不可读：{src_path}"
+    old = meta.get("source_fingerprint") or {}
+    if (int(old.get("size") or -1) != cur["size"]
+            or int(old.get("mtime_ns") or -1) != cur["mtime_ns"]):
+        return False, (f"源片已变更（{old.get('size')}/{old.get('mtime_ns')} → "
+                       f"{cur['size']}/{cur['mtime_ns']}）")
+    return True, ""
+
+
+def _write_scene_upscale_meta(src_path: str, dst_path: str, scale: int,
+                             chunk_seconds: int = 0) -> dict:
+    """记下「这次超分吃的是哪一版源片」（失败不抛，只告警）。"""
+    info = {
+        "source_path": os.path.abspath(src_path or ""),
+        "source_fingerprint": _fs_fingerprint(src_path),
+        "output_path": os.path.abspath(dst_path or ""),
+        "output_fingerprint": _fs_fingerprint(dst_path),
+        "scale": int(scale or 2),
+        "chunk_seconds": int(chunk_seconds or 0),
+        "written_at": _now(),
+    }
+    try:
+        atomic_write_json(_scene_upscale_meta_path(dst_path), info)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("写场级超分指纹失败（不影响出片）：%s", e)
+    return info
+
+
+def _drop_upscale_temp(path: str) -> bool:
+    """清掉超分临时件（G8：临时件不能留在产物目录里被当成正式产物）。
+
+    只删传入路径本身；不存在/删除失败都不抛（临时件清理失败不该让超分失败）。
+    """
+    if not path:
+        return False
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+            logger.info("逐场超分：已清理临时件 %s", os.path.basename(path))
+            return True
+    except OSError as e:
+        logger.warning("逐场超分：清理临时件失败（%s）：%s", path, e)
+    return False
+
+
+def _upscale_scene_once(upscaler, src_path, dst_path, project_name, scale, progress_cb,
+                        segment_seconds: int = 0) -> dict:
     """把单场超分产物（带时间戳原文件名）归档到确定性路径 dst_path，返回 {output_path}。
 
     与整集路径同样的归档契约：源文件（UPSCALE_DIR/<project>/ 下带时间戳）拷贝到确定性
     路径；dst 已存在且非空时直接复用（断点续跑，幂等）；拷贝失败返回 {}。
+
+    ⭐ t9：segment_seconds > 0 时走「场内切片超分」（≤N 秒/片，不重编码切片 → 逐片超分
+    → 拼回场级）。不传 = 0 = 关闭切片（回到整段一次超分，兼容旧行为）。
     """
     res = upscaler.upscale(
         src_path, project_name=project_name, scale=scale,
         # 与整集路径一致：源片自带 H3 原生音轨，显式挂音轨，避免超分产物无声
         attach_audio=True,
         progress_cb=progress_cb,
+        segment_seconds=int(segment_seconds or 0),
     )
     produced = (res or {}).get("output_path") or ""
     if not _nonempty(produced):
@@ -1028,16 +1151,36 @@ def _try_per_scene_upscale(ctx, scene_srcs, out_path) -> bool:
     _up_tid = f"pipe_up_ps_{int(time.time() * 1000)}"
     _upscaler.current_task_id = _up_tid
     up_scene_files = []
+    # ⭐ t9：场内切片时长（秒）—— 一场 164s 整段提交会击穿显存与超时，故默认切成 10s 片
+    chunk_sec = 0
+    try:
+        chunk_sec = int(ctx["config"].get("upscale_chunk_seconds", 10) or 10)
+    except (TypeError, ValueError):
+        chunk_sec = 10
+    if chunk_sec < 0:
+        chunk_sec = 10
+    # 清理**历史遗留**的场级拼接临时件（t6 缺陷②：旧实现留下的 .mp4 临时件从未清理，
+    # 会被 /api/upscale/list 当正式产物列出来）。只删我们自己的临时件，不碰正式产物。
+    _legacy_tmp = os.path.join(os.path.dirname(out_path), f"_per_scene_concat_ep{ep_no:02d}.mp4")
+    _drop_upscale_temp(_legacy_tmp)
+
     try:
         with gpu_task_gate.run_gpu_task(_up_tid, "托管·逐场超分"):
             for i, src_s in enumerate(scene_srcs):
                 sn = int(re.match(_SCENE_FILE_RE, os.path.basename(src_s)).group(1))
                 dst_s = os.path.join(os.path.dirname(out_path),
                                      f"ep{ep_no:02d}_scene{sn:02d}_upscaled.mp4")
-                if _playable(dst_s):
-                    logger.info("逐场超分：第 %d/%d 场（scene_%02d）已有产物，复用",
+                # ⭐ t9 修复（t6 缺陷①）：原来只判 _playable 就复用 —— 场素材返工重画后
+                #    epNN_sceneNN_upscaled.mp4 仍是**旧画面**，拼出来的成片是旧的。
+                #    现在要求「可播放 **且** 源片指纹与上次超分时一致」才复用。
+                _use_prev, _why = _scene_upscale_reusable(src_s, dst_s)
+                if _use_prev:
+                    logger.info("逐场超分：第 %d/%d 场（scene_%02d）产物有效，复用",
                                 i + 1, total, sn)
                 else:
+                    if _why:
+                        logger.warning("逐场超分：第 %d/%d 场（scene_%02d）不复用旧产物（%s），重新超分",
+                                       i + 1, total, sn, _why)
                     ctx["progress"](f"超分 场次 {i + 1}/{total}（FlashVSR {scale}x）…",
                                     84, phase="upscale")
                     # ⚠️ 2026-10-10 修复（日志显示「超分 45：…」的根因）：
@@ -1056,36 +1199,48 @@ def _try_per_scene_upscale(ctx, scene_srcs, out_path) -> bool:
                         ctx["progress"](f"{_head}：{m}", 84, phase="upscale")
 
                     _r = _upscale_scene_once(
-                        _upscaler, src_s, dst_s, project, scale, _scene_up_prog)
+                        _upscaler, src_s, dst_s, project, scale, _scene_up_prog,
+                        segment_seconds=chunk_sec)
                     if not _r:
                         logger.warning("逐场超分：第 %d 场（%s）失败，回落整集超分",
                                        sn, os.path.basename(src_s))
                         return False
+                    # 记录「这次超分吃的是哪一版源片」→ 下次据此判 stale
+                    _write_scene_upscale_meta(src_s, dst_s, scale, chunk_sec)
                 up_scene_files.append(dst_s)
     except Exception as e:  # noqa: BLE001
         logger.warning("逐场超分：异常，回落整集超分：%s", e, exc_info=True)
         return False
 
     # 全部场次超分完成 → 流拼接成整集超分
+    # ⭐ t9 修复（t6 缺陷② · G8）：临时件原来是 .mp4 后缀且从不清理 → 被 /api/upscale/list
+    #    当成正式产物列出（用户会看到一条根本不存在的「超分产物」）。现在用非 .mp4 后缀
+    #    （.list/.work 都不会被 *.mp4 扫描命中），并且**无论成败都在 finally 里清掉**。
     tmp_concat = os.path.join(os.path.dirname(out_path),
-                              f"_per_scene_concat_ep{ep_no:02d}.mp4")
-    cv = A.video_processor.concat_videos(up_scene_files, tmp_concat,
-                                         caller="pipeline.step_upscale.per_scene")
-    if not cv or not _playable(cv):
-        logger.warning("逐场超分：拼接失败或拼接产物不可播放，回落整集超分")
-        return False
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    if os.path.abspath(cv) != os.path.abspath(out_path):
-        try:
-            shutil.copy2(cv, out_path)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("逐场超分：归档失败：%s", e)
+                              f"_per_scene_concat_ep{ep_no:02d}.work")
+    try:
+        cv = A.video_processor.concat_videos(up_scene_files, tmp_concat,
+                                             caller="pipeline.step_upscale.per_scene")
+        if not cv or not _playable(cv):
+            logger.warning("逐场超分：拼接失败或拼接产物不可播放，回落整集超分")
             return False
-    if not _playable(out_path):
-        logger.warning("逐场超分：归档后不可播放，回落整集超分")
-        return False
-    logger.info("逐场超分→拼接完成：%s（%d 场，%d KB）",
-                out_path, len(up_scene_files), os.path.getsize(out_path) // 1024)
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        if os.path.abspath(cv) != os.path.abspath(out_path):
+            try:
+                shutil.copy2(cv, out_path)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("逐场超分：归档失败：%s", e)
+                return False
+        if not _playable(out_path):
+            logger.warning("逐场超分：归档后不可播放，回落整集超分")
+            return False
+    finally:
+        # G8：临时件必须清（成功/失败/异常三条路径都清）
+        _drop_upscale_temp(tmp_concat)
+        _drop_upscale_temp(tmp_concat + ".list")
+    logger.info("逐场超分→拼接完成：%s（%d 场，%d KB，切片 %ss）",
+                out_path, len(up_scene_files), os.path.getsize(out_path) // 1024,
+                chunk_sec if chunk_sec > 0 else "off")
     return True
 
     try:

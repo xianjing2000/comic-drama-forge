@@ -5055,6 +5055,27 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput,
 /** 超分来源 kind 标签（后端 app/routes/upscale.py 的 dirs 标签即中文 label：成片/视频片段/超分产物，
  *  无英文 key）。收敛成常量避免散落字面量；后端 label 变更时只需改这一处。 */
 const UPSCALE_KIND_FINAL = '成片';
+
+/**
+ * 场内切片时长的可选档位（秒）；0 = 不切片（整场一次超分，旧行为）。
+ *
+ * ⚠️ 后端 normalize_config 会把超分切片时长上限收敛到 60s，前端不提供更大档位，
+ * 避免「界面能设、后端悄悄改小」这种假通道。
+ */
+const UPSCALE_CHUNK_PRESETS = [0, 5, 10, 20] as const;
+
+/**
+ * 把计划里的 upscale_chunk_seconds 收敛到合法档位（非法/缺省 → 10）。
+ *
+ * 说明：这里的文案刻意内联中文而不进 locales —— 本次任务的 scope 明确排除了 locales 目录，
+ * 新增 i18n key 会牵动三份语言包与校验脚本，属于另一个改动面。
+ */
+function normalizePlanChunk(v: unknown): number {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return 10;
+  if (n === 0) return 0;
+  return Math.min(60, Math.max(1, Math.round(n)));
+}
 function UpscaleTab({ projectKey }: { projectKey: string }) {
   const { t } = useApp();
   const [env, setEnv] = useState<UpscaleEnv | null>(null);
@@ -5078,6 +5099,14 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
   /** 自动生产是否带超分（项目级计划，存于 autopilot plan） */
   const [planOn, setPlanOn] = useState<boolean | null>(null);
   const [planScale, setPlanScale] = useState<2 | 3 | 4>(2);
+  /**
+   * 场内切片时长（秒，0 = 关闭切片）。
+   *
+   * 逐场超分时把一场（实测 164s）切成不超过 N 秒的小片再逐片超分：
+   * 8G 显存下「一场整段」必然 OOM（全帧载入 ≈23GiB）且耗时 ≥2 小时。
+   * 与 upscale_scale 同属项目计划字段（存 autopilot plan，后端按 PLAN_DEFAULTS 白名单过滤）。
+   */
+  const [planChunk, setPlanChunk] = useState(10);
   const [savingPlan, setSavingPlan] = useState(false);
   /** 轮询定时器句柄（卸载/切任务时必须清掉，否则会一直打后端） */
   const pollRef = React.useRef<number | null>(null);
@@ -5116,6 +5145,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
         setPlanOn(pl.enable_upscale !== false);
         const s = Number(pl.upscale_scale);
         setPlanScale(s === 3 || s === 4 ? (s as 3 | 4) : 2);
+        setPlanChunk(normalizePlanChunk(pl.upscale_chunk_seconds));
       } else {
         setPlanOn(null);
       }
@@ -5179,8 +5209,13 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
     }
   };
 
-  /** 保存「自动生产时是否带超分」到项目计划（后端只认 PLAN_DEFAULTS 里的字段） */
-  const savePlan = async (patch: { enable_upscale?: boolean; upscale_scale?: 2 | 3 | 4 }) => {
+  /**
+   * 保存超分相关计划字段到项目计划（后端只认 PLAN_DEFAULTS 里的字段，其余会被 400/忽略）。
+   *
+   * patch 用宽松类型而不是逐字段字面量联合：每加一个计划字段都要改签名，
+   * 已经因为「改签名漏改调用点」踩过一次（参数被静默丢弃）。
+   */
+  const savePlan = async (patch: Record<string, unknown>) => {
     setSavingPlan(true);
     setError('');
     try {
@@ -5189,6 +5224,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
       setPlanOn(pl.enable_upscale !== false);
       const s = Number(pl.upscale_scale);
       setPlanScale(s === 3 || s === 4 ? (s as 3 | 4) : 2);
+      setPlanChunk(normalizePlanChunk(pl.upscale_chunk_seconds));
     } catch (e) {
       setError(e instanceof Error ? e.message : t('upscale.planSaveFailed'));
     } finally {
@@ -5343,6 +5379,32 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
               ))}
             </div>
             <span className="text-xs text-ink-3">{t('upscale.planScaleHint')}</span>
+          </div>
+
+          {/* 场内切片时长（t9）：逐场超分时按 ≤N 秒切片。
+              8G 显存下「一场整段」（实测 164s/3949 帧）必然 OOM 且耗时 ≥2h ——
+              这里给出的就是用户要的那个旋钮，默认 10s。 */}
+          <div className="mt-3 pt-3 border-t border-line flex flex-wrap items-center gap-3">
+            <span className="text-xs text-ink-2">场内切片时长</span>
+            <div className="flex gap-2">
+              {UPSCALE_CHUNK_PRESETS.map((n) => (
+                <button
+                  key={n}
+                  disabled={savingPlan || !planOn}
+                  onClick={() => savePlan({ upscale_chunk_seconds: n })}
+                  className={`px-3 py-1 rounded-md text-xs font-medium transition-all disabled:opacity-50 ${FOCUS_RING} ${
+                    planChunk === n
+                      ? 'bg-brand text-white'
+                      : 'bg-surface-2 text-ink-2 hover:bg-line hover:text-ink-1'
+                  }`}
+                >
+                  {n === 0 ? '不切片（整场）' : n + ' 秒/片'}
+                </button>
+              ))}
+            </div>
+            <span className="text-xs text-ink-3">
+              每片单独超分后拼回该场；切片不重编码（画面无损）。
+            </span>
           </div>
         </div>
       )}
