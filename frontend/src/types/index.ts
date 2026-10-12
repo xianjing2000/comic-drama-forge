@@ -938,6 +938,36 @@ export interface AITestResult {
   retries_used?: number;
 }
 
+/**
+ * 提供商模型清单检测（POST /api/ai/models）响应（t3）。
+ *
+ * 成功（HTTP 200）：{success:true, models: 模型名清单, count, api_key_masked(脱敏),
+ *                    cached, elapsed_ms}
+ * 失败（HTTP 400）：{success:false, error, code, api_key_masked, hint}
+ * code ∈ invalid_url | unauthorized | models_not_supported | http_error | empty | unreachable。
+ * ⚠️ api_key 绝不明文回传 —— 一律走 api_key_masked，前端任何展示都用它。
+ */
+export interface AIProviderModelsResponse {
+  success: boolean;
+  /** 成功时为模型名清单（可为空数组）；失败时该字段缺省 */
+  models?: string[];
+  count?: number;
+  /** 脱敏后的 api_key（形如 sk-1****abcd），绝不明文 */
+  api_key_masked: string;
+  base_url: string;
+  /** 实际请求的 OpenAI 兼容清单地址（如 https://.../v1/models） */
+  models_url: string;
+  /** 命中 TTL 缓存时为 true */
+  cached?: boolean;
+  elapsed_ms?: number;
+  /** 失败原因（人类可读，已脱敏，可直接展示） */
+  error?: string;
+  /** 失败码 */
+  code?: 'invalid_url' | 'unauthorized' | 'models_not_supported' | 'http_error' | 'empty' | 'unreachable';
+  /** 失败时的处置建议 */
+  hint?: string;
+}
+
 // ========== 超分（FlashVSR） ==========
 // 后端能力早已完整实现（app/upscale_client.py + 8 个 /api/upscale/* 端点），
 // 但此前没有任何界面入口。以下类型对齐 app.py `api_upscale_*` 的真实返回。

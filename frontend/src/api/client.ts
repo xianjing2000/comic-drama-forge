@@ -19,7 +19,7 @@ import type {
   AutopilotStatus, AutopilotProgress,
   Deliverable, DeliverablesResponse,
   Provider, ProvidersResponse,
-  AIConfigResponse, AITestResult,
+  AIConfigResponse, AITestResult, AIProviderModelsResponse,
   UpscaleEnv, UpscaleSource, UpscaleSubmitResponse, UpscaleTask, UpscaleArtifact,
   AgentJob, AgentTool, AgentGuards, AgentKillState,
   CharacterOutfitsResponse, CharacterOutfitGenerateResponse,
@@ -1273,6 +1273,30 @@ export const exportApi = {
 // 之前写成 '/api/ai/config' 实际会请求 /api/api/ai/config → 404，AI 配置页整体不可用。
 export const aiConfigApi = {
   get: () => request<AIConfigResponse>('/ai/config'),
+  /**
+   * 提供商模型清单检测（POST /api/ai/models，t3）。
+   *
+   * 填 base_url + api_key → 后端自动探测 OpenAI 兼容网关的 /v1/models，返回可用
+   * 模型名清单，前端据此把「Model」从手填改成下拉选择；拉取失败仍可手填兜底。
+   *
+   * ⚠️ 若用户有已保存密钥且未回显明文，只传 module（text/qc）即可，后端会复用
+   * 该模块已保存的 base_url + 解密后的 key —— 明文绝不下发前端。
+   */
+  detectModels: async (payload: { base_url?: string; api_key?: string; module?: string; refresh?: boolean; timeout?: number }): Promise<AIProviderModelsResponse> => {
+    // 后端把「检测失败」表达为 HTTP 400 + 结构化 JSON（{success:false, code, hint, ...}），
+    // 不是真正的 HTTP 错误。这里不套用 request()（它会 throw 并丢掉 code/hint/api_key_masked），
+    // 而是对 400 也原样解析返回，让调用方按 success 分流、拿全字段。
+    const response = await fetch(API_BASE + '/ai/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok && response.status !== 400) {
+      const { message } = await readErrorDetail(response);
+      throw new ApiError(message, { status: response.status });
+    }
+    return response.json() as Promise<AIProviderModelsResponse>;
+  },
   /**
    * 按需回显某模块已保存的 api_key 明文（眼睛按钮点开时调用）。
    * 默认 get() 仍一律脱敏 —— 已保存密钥的前端 value 为空，圆点是 placeholder。

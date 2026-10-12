@@ -1625,16 +1625,12 @@
     "notConfigured": "Not configured",
     "module": {
       "text": {
-        "title": "Text analysis model (= LLM engine)",
-        "desc": "This is the LLM engine: used for all text-only tasks such as novel-to-script, chapter-to-script, and prompt analysis"
+        "title": "Text model (= LLM engine + creative orchestrator)",
+        "desc": "Text analysis + AI creative orchestrator unified: novel-to-script, chapter-to-script, prompt analysis, style settling, and all other text-only tasks"
       },
       "qc": {
         "title": "QC model",
         "desc": "Handles visual quality checks for storyboard images and videos (must support image input)"
-      },
-      "chat": {
-        "title": "Chat orchestrator model",
-        "desc": "AI creative orchestrator: settles the comic-drama style, genre, and art style through multi-turn dialogue"
       }
     },
     "reasoning": {
@@ -1650,6 +1646,13 @@
     "reasoningHintTail": ", and low is recommended for long JSON tasks.",
     "testConnection": "Test connection",
     "saveConfig": "Save configuration",
+    "detectModels": "Detect models",
+    "detectingModels": "Detecting provider model list…",
+    "modelsLoaded": "Loaded {n} models — pick from the dropdown",
+    "modelsEmpty": "No model list parsed; you can type a model name manually",
+    "modelsError": "Detection failed: {err}; you can type a model name manually",
+    "modelManualHint": "If model detection fails or returns empty, type the model name manually",
+    "detectNeedKey": "Fill in Base URL and API Key before detecting",
     "verdictReachableNoContent": "Reachable (no content returned)",
     "testSuccess": "Test succeeded",
     "testFailed": "Test failed",
@@ -1675,8 +1678,8 @@
     "clearConfig": "Clear configuration",
     "clearMessage": "Clear the API configuration for \"{module}\"? Its base_url, model, and API Key will be removed and must be filled in again.",
     "infoTitle": "Configuration notes",
-    "infoIndependent": "The three AI modules are fully independent: text analysis, QC, and the chat orchestrator each have their own endpoint configuration",
-    "infoTextModel": "The \"text analysis model\" is the LLM engine itself (used for all text-only tasks such as novel-to-script and prompt analysis), so no separate configuration is needed",
+    "infoIndependent": "The two AI modules are fully independent: the text model (text + creative orchestrator unified) and the QC model each have their own endpoint configuration",
+    "infoTextModel": "The \"text model\" is the LLM engine + creative orchestrator (novel-to-script, prompt analysis, style settling, and other text-only tasks); both are unified and need no separate configuration",
     "infoQcModel": "The QC model must support image input (e.g. GPT-4o, Qwen-VL, GLM-4V)",
     "infoComfyui": "The ComfyUI address is determined by the COMFYUI_URL environment variable and is shown here read-only",
     "infoApiKey": "API Keys are stored encrypted and are never shown in plain text",
@@ -1685,6 +1688,9 @@
     "fallbackDesc": "Auto-switch to next fallback after 3 consecutive API errors; task continues without interruption",
     "fallbackAdd": "+ Add fallback",
     "fallbackRemove": "Remove",
+    "fallbackMoveUp": "Move up",
+    "fallbackMoveDown": "Move down",
+    "fallbackReordered": "Fallback order updated and saved",
     "fallbackSave": "Add",
     "fallbackNoKey": "No key",
     "fallbackLabelPh": "Label (optional)",

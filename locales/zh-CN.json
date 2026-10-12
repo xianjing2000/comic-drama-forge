@@ -1625,16 +1625,12 @@
     "notConfigured": "未配置",
     "module": {
       "text": {
-        "title": "文本分析模型（= LLM 引擎）",
-        "desc": "就是 LLM 引擎：小说转剧本、章节转剧本、提示词分析等纯文本任务都用它"
+        "title": "纯文本模型（= LLM 引擎 + 创作总控）",
+        "desc": "文本分析 + AI 对话总控合一：小说转剧本、章节转剧本、提示词分析、创作风格设定等纯文本任务都用它"
       },
       "qc": {
         "title": "质检模型",
         "desc": "负责分镜图片和视频的视觉质量检查（需支持图像输入）"
-      },
-      "chat": {
-        "title": "对话总控模型",
-        "desc": "AI 创作总控：通过多轮对话确定漫剧风格、题材、画风等设定"
       }
     },
     "reasoning": {
@@ -1650,10 +1646,20 @@
     "reasoningHintTail": "，长 JSON 任务建议 low。",
     "testConnection": "测试连接",
     "saveConfig": "保存配置",
+    "detectModels": "检测模型清单",
+    "detectingModels": "正在检测提供商模型清单…",
+    "modelsLoaded": "已加载 {n} 个模型，点击下拉选择",
+    "modelsEmpty": "未解析到模型清单，可手动填写模型名",
+    "modelsError": "检测失败：{err}，可手动填写模型名",
+    "modelManualHint": "模型清单拉取失败或为空时，可直接手动输入模型名兜底",
+    "detectNeedKey": "请先填写 Base URL 与 API Key 再检测",
     "fallbackTitle": "备用模型（故障转移）",
     "fallbackDesc": "主模型连续 3 次 API 报错时自动切到下一个备用模型，任务不中断",
     "fallbackAdd": "+ 添加备用",
     "fallbackRemove": "删除",
+    "fallbackMoveUp": "上移",
+    "fallbackMoveDown": "下移",
+    "fallbackReordered": "备用模型顺序已更新并保存",
     "fallbackSave": "添加",
     "fallbackNoKey": "未填密钥",
     "fallbackLabelPh": "名称（可选，如 备用-DeepSeek）",
@@ -1700,8 +1706,8 @@
     "clearConfig": "清空配置",
     "clearMessage": "确定要清空「{module}」的接口配置吗？该模块的 base_url、模型与 API Key 都会被移除，需要重新填写。",
     "infoTitle": "配置说明",
-    "infoIndependent": "三个 AI 模块完全独立：文本分析、质检、对话总控各有自己的接口配置",
-    "infoTextModel": "「文本分析模型」就是 LLM 引擎（小说转剧本、提示词分析等纯文本任务都用它），无需另行配置",
+    "infoIndependent": "两个 AI 模块完全独立：纯文本模型（文本 + 对话总控合一）、质检模型各有自己的接口配置",
+    "infoTextModel": "「纯文本模型」= LLM 引擎 + 创作总控（小说转剧本、提示词分析、风格设定等纯文本任务），已合一，无需分开配置",
     "infoQcModel": "质检模型需要支持图像输入（如 GPT-4o、Qwen-VL、GLM-4V）",
     "infoComfyui": "ComfyUI 地址由环境变量 COMFYUI_URL 决定，页面上只做只读展示",
     "infoApiKey": "API Key 加密存储，不会在界面明文显示",

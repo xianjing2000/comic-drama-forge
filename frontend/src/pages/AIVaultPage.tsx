@@ -1,14 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '@/context/AppContext';
 import { aiConfigApi, watermarkApi, promptEnhanceApi } from '@/api/client';
 import { Badge, Button, Card, ConfirmDialog, Input, Select, Skeleton } from '@/components/ui';
-import { AlertTriangle, Brain, CheckCircle2, Eye, EyeOff, Network, Pencil, RefreshCw, Search, X } from '@/components/ui/icons';
+import { AlertTriangle, Brain, CheckCircle2, ChevronDown, Eye, EyeOff, Pencil, RefreshCw, Search, X } from '@/components/ui/icons';
 import type { IconProps } from '@/components/ui/icons';
-import type { AIConfigModule, AIConfigResponse, AITestResult, AIFallbackModel } from '@/types';
+import type { AIConfigModule, AIConfigResponse, AITestResult, AIFallbackModel, AIProviderModelsResponse } from '@/types';
 import { PromptManagerTab } from '@/components/PromptManagerTab';
 import { sanitizeErrorMessage } from '@/utils/errorText';
 
-type ModuleKey = 'text' | 'qc' | 'chat';
+type ModuleKey = 'text' | 'qc';
 
 interface ModuleState {
   base_url: string;
@@ -18,6 +18,20 @@ interface ModuleState {
   /** 思考档位：'' = 不注入（服务端默认），其余为 low / high / max */
   reasoning_effort: string;
 }
+
+/** 提供商模型清单检测的三态状态（t3）。error 已经过 sanitizeErrorMessage 脱敏。 */
+interface ProviderModelsState {
+  loading: boolean;
+  loaded: boolean;
+  models: string[];
+  error: string;
+  models_url: string;
+  api_key_masked: string;
+}
+
+const EMPTY_MODELS: ProviderModelsState = {
+  loading: false, loaded: false, models: [], error: '', models_url: '', api_key_masked: '',
+};
 
 const EMPTY_MODULE: ModuleState = {
   base_url: '', model: '', api_key: '', has_api_key: false, reasoning_effort: '',
@@ -43,8 +57,8 @@ interface SystemSettings {
 
 /**
 * 模块卡片头部的图标底色 / 字色。
-* 原先是 `from-*-500 to-*-500` 渐变 —— 那是另一套设计语言，且与「卡片白底 +
-* 细描边」的观感冲突；这里统一走语义 token。
+* 统一走语义 token，与「卡片白底 + 细描边」的观感一致。
+* 合并后只保留「纯文本模型(text)」与「质检模型(qc)」两个模块（chat 已并入 text）。
 */
 const MODULE_CONFIG: Record<ModuleKey, {
   icon: React.ComponentType<IconProps>;
@@ -72,15 +86,82 @@ const MODULE_CONFIG: Record<ModuleKey, {
     probe: 'vision',
     tone: 'bg-accent-subtle text-accent',
   },
-  chat: {
-    icon: Network,
-    titleKey: 'vault.module.chat.title',
-    descKey: 'vault.module.chat.desc',
-    placeholderUrl: 'https://api.deepseek.com/v1',
-    placeholderModel: 'deepseek-chat',
-    tone: 'bg-success-subtle text-success-strong',
-  },
 };
+
+/**
+ * 模型选择器：手填兜底 + 模型清单下拉二合一（t3）。
+ *
+ * 输入框始终可自由输入（模型清单拉取失败 / 为空时手填兜底）；检测到模型清单后，
+ * 聚焦 / 点击右侧箭头展开下拉，选中即回填。三态（loading / empty / error）由父组件
+ * 在下方用 renderModelsStatus 渲染。
+ */
+function ModelPicker({ value, onChange, placeholder, models, disabled, label }: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  models: string[];
+  disabled?: boolean;
+  label?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const hasOptions = models.length > 0;
+  const showList = open && hasOptions;
+
+  return (
+    <div>
+      {label && <span className="mb-1 block text-sm font-medium text-ink-2">{label}</span>}
+      <div ref={boxRef} className="relative">
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onFocus={() => { if (hasOptions) setOpen(true); }}
+          placeholder={placeholder}
+          disabled={disabled}
+          className="w-full rounded-md border bg-surface px-3 text-base text-ink-1 transition-colors placeholder:text-ink-3 h-9 font-mono text-sm border-line hover:border-line-strong focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/25 disabled:cursor-not-allowed disabled:opacity-50 pr-8"
+        />
+        {hasOptions && (
+          <button
+            type="button"
+            onClick={() => setOpen(o => !o)}
+            disabled={disabled}
+            tabIndex={-1}
+            className="absolute inset-y-0 right-0 flex items-center pr-2 text-ink-3 hover:text-ink-1"
+            aria-label="toggle model list"
+          >
+            <ChevronDown className={'h-4 w-4 transition-transform ' + (open ? 'rotate-180' : '')} />
+          </button>
+        )}
+        {showList && (
+          <ul className="absolute z-20 mt-1 max-h-56 w-full overflow-auto rounded-md border border-line bg-surface py-1 shadow-lg">
+            {models.map(m => (
+              <li key={m}>
+                <button
+                  type="button"
+                  onClick={() => { onChange(m); setOpen(false); }}
+                  className="block w-full px-3 py-1.5 text-left font-mono text-sm text-ink-1 hover:bg-surface-2"
+                >
+                  {m}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
 
 export function AIVaultPage() {
   const { t } = useApp();
@@ -88,38 +169,38 @@ export function AIVaultPage() {
   const [config, setConfig] = useState<Record<ModuleKey, ModuleState>>({
     text: { ...EMPTY_MODULE },
     qc: { ...EMPTY_MODULE },
-    chat: { ...EMPTY_MODULE },
   });
   const [reOptions, setReOptions] = useState<string[]>(FALLBACK_REASONING_OPTIONS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<Record<ModuleKey, AITestResult | null>>({
-    text: null, qc: null, chat: null,
+    text: null, qc: null,
   });
   // 备用模型（故障转移链）：按模块维护，主模型挂 3 次自动切下一个，任务不中断
-  const [fallbacks, setFallbacks] = useState<Record<ModuleKey, AIFallbackModel[]>>({ text: [], qc: [], chat: [] });
+  const [fallbacks, setFallbacks] = useState<Record<ModuleKey, AIFallbackModel[]>>({ text: [], qc: [] });
   const [showAddFb, setShowAddFb] = useState<ModuleKey | null>(null);
   const [fbDraft, setFbDraft] = useState<AIFallbackModel>({ base_url: '', model: '', api_key: '', label: '' });
   /** 正在编辑哪一条备用（null = 新增）；编辑时密钥回填脱敏值，提交即「不改动原密钥」 */
   const [editingFb, setEditingFb] = useState<{ module: ModuleKey; index: number } | null>(null);
-  /** 每条备用各自的连通性测试结果，key = `${module}#${index}` */
+  /** 每条备用各自的连通性测试结果，key = module + '#' + index */
   const [fbResults, setFbResults] = useState<Record<string, AITestResult | null>>({});
   const [fbTesting, setFbTesting] = useState<string | null>(null);
-  /**
-   * 备用列表「已改但未保存」标记。
-   * ⚠️ 实测踩坑（用户报「我配了 2 个备用，怎么只剩 1 个」）：备用卡片里的「添加」
-   * 只改组件 state，必须再点卡片**下方**的主「保存配置」才会落盘。用户加完就刷新，
-   * 未保存的条目自然消失。所以这里显式提示，别再让人白配一遍。
-   */
-  const [fbDirty, setFbDirty] = useState<Record<ModuleKey, boolean>>({ text: false, qc: false, chat: false });
-  /** 备用列表正在落盘（添加/编辑/删除后自动提交，不需要用户再点一次「保存配置」） */
+  /** 备用列表「已改但未保存」标记 */
+  const [fbDirty, setFbDirty] = useState<Record<ModuleKey, boolean>>({ text: false, qc: false });
+  /** 备用列表正在落盘（添加/编辑/删除/排序后自动提交，不需要用户再点一次「保存配置」） */
   const [fbSaving, setFbSaving] = useState<ModuleKey | null>(null);
+  /** 主模型各模块的「提供商模型清单检测」状态（t3） */
+  const [modelsState, setModelsState] = useState<Record<ModuleKey, ProviderModelsState>>({
+    text: { ...EMPTY_MODELS }, qc: { ...EMPTY_MODELS },
+  });
+  /** 备用草稿表单的「提供商模型清单检测」状态（t3） */
+  const [fbModelsState, setFbModelsState] = useState<ProviderModelsState>({ ...EMPTY_MODELS });
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [clearTarget, setClearTarget] = useState<ModuleKey | null>(null);
   const [clearing, setClearing] = useState(false);
   /** API Key 明文可见性（按模块记忆，眼睛按钮切换） */
-  const [visibleKeys, setVisibleKeys] = useState<Record<ModuleKey, boolean>>({ text: false, qc: false, chat: false });
+  const [visibleKeys, setVisibleKeys] = useState<Record<ModuleKey, boolean>>({ text: false, qc: false });
   /** 正在拉取已保存密钥明文的模块（回填期间按钮禁用） */
   const [revealing, setRevealing] = useState<ModuleKey | null>(null);
 
@@ -141,53 +222,44 @@ export function AIVaultPage() {
       // 加载 AI 模块配置
       aiConfigApi.get()
         .then(d => {
-          // 后端实际结构：config = { modules: {text,qc,chat}, modules_meta, ... }
-          // 早期前端误以为模块直接平铺在 config 上，导致读不到任何值、所有卡片都显示「未配置」。
+          // 后端实际结构：config = { modules: {text,qc}, modules_meta, ... }
           const raw = (d.config || {}) as any;
-          const c = (raw.modules || raw) as Record<ModuleKey, AIConfigModule>;
-          // ComfyUI 地址来自这份响应的 config.comfyui（后端如实标注了来源是环境变量），
-          // 不再从 /ai/settings 取——那个接口返回的是「创作设定」，压根没有这个字段。
+          // t2 合并后 modules 只剩 text/qc；此处用 Record<string,...> 兼容老数据里可能残留的 chat
+          const c = (raw.modules || raw) as Record<string, AIConfigModule>;
           if (raw.comfyui?.url) {
             setSysSettings(prev => ({ ...prev, comfyui_url: String(raw.comfyui.url) }));
           }
           if (Array.isArray(raw.reasoning_effort_options) && raw.reasoning_effort_options.length) {
             setReOptions(raw.reasoning_effort_options.map((x: unknown) => String(x)));
           }
+          // text 优先：老数据 text 空而 chat 有值时取 chat（与后端合并策略一致，纯兜底）
+          const textCfg = (c.text && (c.text.base_url || c.text.model)) ? c.text : c.chat;
+          const qcCfg = c.qc;
           // 回填备用模型（故障转移链）
           setFallbacks({
-            text: Array.isArray(c.text?.fallbacks) ? c.text!.fallbacks!.map(f => ({ ...f })) : [],
-            qc: Array.isArray(c.qc?.fallbacks) ? c.qc!.fallbacks!.map(f => ({ ...f })) : [],
-            chat: Array.isArray(c.chat?.fallbacks) ? c.chat!.fallbacks!.map(f => ({ ...f })) : [],
+            text: Array.isArray(textCfg?.fallbacks) ? textCfg!.fallbacks!.map(f => ({ ...f })) : [],
+            qc: Array.isArray(qcCfg?.fallbacks) ? qcCfg!.fallbacks!.map(f => ({ ...f })) : [],
           });
-          setFbDirty({ text: false, qc: false, chat: false });
+          setFbDirty({ text: false, qc: false });
           setConfig({
             text: {
-              base_url: c.text?.base_url || '',
-              model: c.text?.model || '',
-              api_key: c.text?.api_key || '',
-              has_api_key: c.text?.has_api_key || false,
-              reasoning_effort: c.text?.reasoning_effort || '',
+              base_url: textCfg?.base_url || '',
+              model: textCfg?.model || '',
+              api_key: textCfg?.api_key || '',
+              has_api_key: textCfg?.has_api_key || false,
+              reasoning_effort: textCfg?.reasoning_effort || '',
             },
             qc: {
-              base_url: c.qc?.base_url || '',
-              model: c.qc?.model || '',
-              api_key: c.qc?.api_key || '',
-              has_api_key: c.qc?.has_api_key || false,
-              reasoning_effort: c.qc?.reasoning_effort || '',
-            },
-            chat: {
-              base_url: c.chat?.base_url || '',
-              model: c.chat?.model || '',
-              api_key: c.chat?.api_key || '',
-              has_api_key: c.chat?.has_api_key || false,
-              reasoning_effort: c.chat?.reasoning_effort || '',
+              base_url: qcCfg?.base_url || '',
+              model: qcCfg?.model || '',
+              api_key: qcCfg?.api_key || '',
+              has_api_key: qcCfg?.has_api_key || false,
+              reasoning_effort: qcCfg?.reasoning_effort || '',
             },
           });
         })
         .catch(err => console.error('Failed to load AI config:', err)),
       // 加载水印设置：走专用的 /watermark/config。
-      // 原先读 /ai/settings 的 watermark_enabled，但那个接口返回的是「创作设定」，
-      // 永远不含该字段 → 开关恒为关、保存也写不进真实配置。
       watermarkApi.get()
         .then(d => {
           const w = d.config || {};
@@ -217,12 +289,99 @@ export function AIVaultPage() {
     setTimeout(() => setMessage(null), 4000);
   };
 
+  /** 模型清单三态提示（主模型与备用表单共用） */
+  const renderModelsStatus = (ms: ProviderModelsState) => {
+    if (ms.loading) {
+      return (
+        <p className="mt-1 flex items-center gap-1.5 text-xs text-ink-3">
+          <RefreshCw className="h-3 w-3 animate-spin" />
+          {t('vault.detectingModels')}
+        </p>
+      );
+    }
+    if (ms.error) {
+      return <p className="mt-1 text-xs text-danger-strong">{t('vault.modelsError', { err: ms.error })}</p>;
+    }
+    if (ms.loaded && ms.models.length === 0) {
+      return <p className="mt-1 text-xs text-warning-strong">{t('vault.modelsEmpty')}</p>;
+    }
+    if (ms.loaded && ms.models.length > 0) {
+      return <p className="mt-1 text-xs text-success-strong">{t('vault.modelsLoaded', { n: ms.models.length })}</p>;
+    }
+    return null;
+  };
+
+  /** 检测主模型的提供商模型清单（base_url + api_key → POST /api/ai/models） */
+  const handleDetectModels = async (module: ModuleKey) => {
+    const state = config[module];
+    const baseUrl = state.base_url.trim();
+    const apiKey = state.api_key.trim();
+    // 已保存密钥且未回显明文 → 只传 module，后端复用保存的 base_url + 解密 key（明文不下发前端）
+    const reuseSaved = state.has_api_key && !apiKey;
+    if (!reuseSaved && (!baseUrl || !apiKey)) {
+      showMessage('error', t('vault.detectNeedKey'));
+      return;
+    }
+    setModelsState(prev => ({ ...prev, [module]: { ...EMPTY_MODELS, loading: true } }));
+    try {
+      const res = await aiConfigApi.detectModels(
+        reuseSaved ? { module } : { base_url: baseUrl, api_key: apiKey }
+      );
+      if (res.success && Array.isArray(res.models)) {
+        setModelsState(prev => ({ ...prev, [module]: {
+          loading: false, loaded: true, models: res.models || [],
+          error: '', models_url: res.models_url || '', api_key_masked: res.api_key_masked || '',
+        }}));
+        showMessage('success', t('vault.modelsLoaded', { n: (res.models || []).length }));
+      } else {
+        const err = sanitizeErrorMessage(String(res.error || res.hint || t('error.unknown')));
+        setModelsState(prev => ({ ...prev, [module]: {
+          loading: false, loaded: false, models: [],
+          error: err, models_url: res.models_url || '', api_key_masked: res.api_key_masked || '',
+        }}));
+        showMessage('error', t('vault.modelsError', { err }));
+      }
+    } catch (err) {
+      const msg = sanitizeErrorMessage(err instanceof Error ? err.message : t('error.unknown'));
+      setModelsState(prev => ({ ...prev, [module]: {
+        loading: false, loaded: false, models: [], error: msg, models_url: '', api_key_masked: '',
+      }}));
+      showMessage('error', t('vault.modelsError', { err: msg }));
+    }
+  };
+
+  /** 检测备用草稿的提供商模型清单（显式 base_url + api_key） */
+  const handleDetectFbModels = async () => {
+    const baseUrl = (fbDraft.base_url || '').trim();
+    const apiKey = (fbDraft.api_key || '').trim();
+    if (!baseUrl || !apiKey) {
+      showMessage('error', t('vault.detectNeedKey'));
+      return;
+    }
+    setFbModelsState({ ...EMPTY_MODELS, loading: true });
+    try {
+      const res = await aiConfigApi.detectModels({ base_url: baseUrl, api_key: apiKey });
+      if (res.success && Array.isArray(res.models)) {
+        setFbModelsState({ loading: false, loaded: true, models: res.models || [], error: '', models_url: res.models_url || '', api_key_masked: res.api_key_masked || '' });
+        showMessage('success', t('vault.modelsLoaded', { n: (res.models || []).length }));
+      } else {
+        const err = sanitizeErrorMessage(String(res.error || res.hint || t('error.unknown')));
+        setFbModelsState({ loading: false, loaded: false, models: [], error: err, models_url: res.models_url || '', api_key_masked: res.api_key_masked || '' });
+        showMessage('error', t('vault.modelsError', { err }));
+      }
+    } catch (err) {
+      const msg = sanitizeErrorMessage(err instanceof Error ? err.message : t('error.unknown'));
+      setFbModelsState({ loading: false, loaded: false, models: [], error: msg, models_url: '', api_key_masked: '' });
+      showMessage('error', t('vault.modelsError', { err: msg }));
+    }
+  };
+
   /** 保存后回读：把服务端归一化后的 index / has_api_key / api_key_masked 拉回来 */
   const refreshFallbacks = async (module: ModuleKey) => {
     try {
       const d = await aiConfigApi.get();
       const raw2 = (d.config || {}) as any;
-      const c2 = (raw2.modules || raw2) as Record<ModuleKey, AIConfigModule>;
+      const c2 = (raw2.modules || raw2) as Record<string, AIConfigModule>;
       setFallbacks(prev => ({
         ...prev,
         [module]: Array.isArray(c2[module]?.fallbacks) ? c2[module]!.fallbacks!.map(f => ({ ...f })) : [],
@@ -230,14 +389,7 @@ export function AIVaultPage() {
     } catch { /* 回读失败不影响已保存的结果 */ }
   };
 
-  /**
-   * 把备用列表**立刻落盘**。
-   *
-   * 为什么需要它（用户实测提问：「为什么点了保存修改还要点下方的保存配置」）：
-   * 备用列表原先只在点主「保存配置」时随 module 配置一起提交，于是加/改/删之后
-   * 必须再点一次下面那个按钮才生效 —— 少点一次就静默丢失（用户配了 2 条只剩 1 条）。
-   * 现在添加/保存修改/删除都会走这里自动提交，两段式变成一步。
-   */
+  /** 把备用列表立刻落盘（添加/编辑/删除/排序后自动提交，两段式变一步） */
   const persistFallbacks = async (module: ModuleKey, list: AIFallbackModel[], okText?: string) => {
     const state = config[module];
     if (!state.base_url.trim() || !state.model.trim()) {
@@ -255,8 +407,6 @@ export function AIVaultPage() {
     })).filter(f => f.base_url && f.model);
     setFbSaving(module);
     try {
-      // 注意：这里**总是**把数组传下去（哪怕是空的）——
-      // 传 undefined 等于「不改动」，删光备用就永远删不掉。
       const result = await aiConfigApi.save(
         module, state.base_url.trim(), state.model.trim(),
         state.api_key.trim() || undefined, state.reasoning_effort, _fbs);
@@ -290,7 +440,6 @@ export function AIVaultPage() {
 
     setSaving(module);
     try {
-      // 备用模型：只提交填了 base_url + model 的条目（缺密钥的也允许提交，由后端标记 has_api_key）
       const _fbs = (fallbacks[module] || []).map(f => ({
         base_url: f.base_url?.trim(),
         model: f.model?.trim(),
@@ -304,7 +453,6 @@ export function AIVaultPage() {
         state.model.trim(),
         state.api_key.trim() || undefined,
         state.reasoning_effort,
-        // 总是提交数组（含空数组）：传 undefined = 不改动，会让「删光备用」静默失效
         _fbs
       );
       if (result.success) {
@@ -316,7 +464,6 @@ export function AIVaultPage() {
           [module]: {
             ...prev[module],
             has_api_key: result.module_config?.has_api_key ?? prev[module].has_api_key,
-            // 回显后端归一化后的档位：非法值会被后端清成 ''，前端要跟着收敛
             reasoning_effort: result.module_config?.reasoning_effort ?? prev[module].reasoning_effort,
           },
         }));
@@ -353,7 +500,6 @@ export function AIVaultPage() {
       setTestResult(prev => ({ ...prev, [module]: result }));
       if (result.success) {
         const ms = result.latency_ms ?? result.response_time_ms;
-        // success 但没拿到正文时不要报「测试成功」——那会让人以为模型已就绪
         const partial = result.verdict !== 'ok';
         showMessage(
           partial ? 'error' : 'success',
@@ -361,7 +507,7 @@ export function AIVaultPage() {
             ? t('vault.msg.partialReachable', { module: t(MODULE_CONFIG[module].titleKey) })
             : t('vault.msg.testOk', {
                 module: t(MODULE_CONFIG[module].titleKey),
-                ms: typeof ms === 'number' ? ` (${ms}ms)` : '',
+                ms: typeof ms === 'number' ? ' (' + ms + 'ms)' : '',
               })
         );
       } else {
@@ -391,6 +537,7 @@ export function AIVaultPage() {
     });
     setEditingFb({ module, index });
     setShowAddFb(module);
+    setFbModelsState({ ...EMPTY_MODELS });
   };
 
   /** 关闭新增/编辑表单 */
@@ -398,16 +545,12 @@ export function AIVaultPage() {
     setShowAddFb(null);
     setEditingFb(null);
     setFbDraft({ base_url: '', model: '', api_key: '', label: '', reasoning_effort: '' });
+    setFbModelsState({ ...EMPTY_MODELS });
   };
 
-  /**
-   * 测试某条备用。两条路径：
-   * - 已保存且用户没改密钥（无明文）→ 只传索引，由后端取解密后的 key（密钥不下发前端）；
-   * - 草稿 / 用户刚填了明文 → 用显式 base_url/model/api_key 直接探，
-   *   否则会拿「旧的第 i 条」当被测对象，结论张冠李戴。
-   */
+  /** 测试某条备用（已保存无明文 → 按索引由后端取解密 key；草稿 → 显式 base_url/model/key） */
   const handleTestFallback = async (module: ModuleKey, index: number) => {
-    const key = `${module}#${index}`;
+    const key = module + '#' + index;
     const fb = (fallbacks[module] || [])[index];
     const label = fb?.label || t('vault.fallbackN', { n: index + 1 });
     const typedKey = (fb?.api_key || '').trim();
@@ -425,7 +568,7 @@ export function AIVaultPage() {
         result.success && !partial ? 'success' : 'error',
         result.success
           ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label }))
-          : `${t('vault.fallbackTestFail')}：${result.error || result.guide || ''}`.slice(0, 200)
+          : (t('vault.fallbackTestFail') + '：' + (result.error || result.guide || '')).slice(0, 200)
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : t('error.unknown');
@@ -433,19 +576,31 @@ export function AIVaultPage() {
         ...prev,
         [key]: { success: false, module, probe: 'text', error: msg } as AITestResult,
       }));
-      showMessage('error', `${t('vault.fallbackTestFail')}：${msg}`);
+      showMessage('error', t('vault.fallbackTestFail') + '：' + msg);
     } finally {
       setFbTesting(null);
     }
   };
 
-  // 清空配置：改为统一确认弹窗（原生 confirm 阻塞主线程、样式与深色主题脱节，
-  // 也无法显示「处理中」状态，误点后没有可撤销的余地）
+  /** 备用故障转移链排序：上移（-1）/下移（+1），改完立刻落盘 */
+  const moveFallback = async (module: ModuleKey, index: number, dir: -1 | 1) => {
+    const list = [...(fallbacks[module] || [])];
+    const j = index + dir;
+    if (j < 0 || j >= list.length) return;
+    [list[index], list[j]] = [list[j], list[index]];
+    setFallbacks(prev => ({ ...prev, [module]: list }));
+    setFbResults(prev => {
+      const next = { ...prev };
+      Object.keys(next).forEach(k => { if (k.startsWith(module + '#')) delete next[k]; });
+      return next;
+    });
+    persistFallbacks(module, list, t('vault.fallbackReordered'));
+  };
+
+  // 清空配置：统一确认弹窗
   const handleClear = (module: ModuleKey) => setClearTarget(module);
 
-  // 眼睛按钮：切换明文/圆点。已保存的密钥后端默认不下发明文（前端 value 为空，
-  // 圆点只是 placeholder），首次点开时按需拉一次明文回填输入框，否则切了 type
-  // 也什么都显不出来。
+  // 眼睛按钮：切换明文/圆点。已保存的密钥后端默认不下发明文，首次点开时按需拉一次明文。
   const handleToggleVisible = async (moduleKey: ModuleKey) => {
     const turningOn = !visibleKeys[moduleKey];
     setVisibleKeys(prev => ({ ...prev, [moduleKey]: !prev[moduleKey] }));
@@ -475,6 +630,7 @@ export function AIVaultPage() {
           ...prev,
           [module]: { ...EMPTY_MODULE },
         }));
+        setModelsState(prev => ({ ...prev, [module]: { ...EMPTY_MODELS } }));
         showMessage('success', result.message);
       }
     } catch (err) {
@@ -493,7 +649,6 @@ export function AIVaultPage() {
   };
 
   // ========== 水印设置操作 ==========
-  // 只保存水印：ComfyUI 地址是只读（来自环境变量），LLM 引擎已并入「文本分析模型」。
   const handleSysSave = async () => {
     setSysSaving(true);
     try {
@@ -536,8 +691,6 @@ export function AIVaultPage() {
   };
 
   if (loading) {
-    // 骨架沿用真实内容的外层（max-w-5xl 居中 + space-y-6）：
-    // 标题行 → 系统设置卡 → 三张 AI 模块配置卡，避免「转圈 → 长页面」的跳变
     return (
       <div className="space-y-6 max-w-5xl mx-auto" role="status" aria-live="polite" aria-label={t('vault.loadingConfig')}>
         <div className="space-y-2">
@@ -546,7 +699,7 @@ export function AIVaultPage() {
         </div>
         <Skeleton className="h-44 rounded-lg" />
         <div className="grid grid-cols-1 gap-6">
-          {[0, 1, 2].map((i) => (
+          {[0, 1].map((i) => (
             <Skeleton key={i} className="h-72 rounded-lg" />
           ))}
         </div>
@@ -565,11 +718,11 @@ export function AIVaultPage() {
           </p>
         </div>
         {message && (
-          <div className={`px-4 py-2 rounded-lg text-sm ${
+          <div className={'px-4 py-2 rounded-lg text-sm ' + (
             message.type === 'success'
               ? 'bg-success-subtle text-success-strong'
               : 'bg-danger-subtle text-danger-strong'
-          }`}>
+          )}>
             {message.text}
           </div>
         )}
@@ -582,10 +735,6 @@ export function AIVaultPage() {
         </h3>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* ComfyUI 地址：只读展示。
-              它由环境变量 COMFYUI_URL 决定，写进配置文件后没有任何代码读取
-              （各 ComfyUI 客户端都直接取模块级常量）。此前是个可编辑输入框，
-              但保存后不生效——典型的「改了也没用」控件，故改为如实展示。 */}
           <div className="md:col-span-2">
             <Input
               label={t('settings.comfyui.url')}
@@ -624,7 +773,7 @@ export function AIVaultPage() {
           )}
         </div>
 
-        {/* 提示词增强（2026-09-30）：出图/出片前 LLM 增强 + 质检模型复审，保存后立即生效 */}
+        {/* 提示词增强（2026-09-30） */}
         <div className="border-t border-line pt-4 mt-4">
           <div className="mb-2">
             <span className="text-ink-1 font-medium">{t('vault.promptEnhanceTitle')}</span>
@@ -675,7 +824,7 @@ export function AIVaultPage() {
         </div>
       </Card>
 
-      {/* ===== AI 模块配置区 ===== */}
+      {/* ===== AI 模块配置区（合并后只有 text / qc 两个模块） ===== */}
       <div className="grid grid-cols-1 gap-6">
         {(Object.keys(MODULE_CONFIG) as ModuleKey[]).map(moduleKey => {
           const meta = MODULE_CONFIG[moduleKey];
@@ -688,7 +837,7 @@ export function AIVaultPage() {
               {/* Card Header */}
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${meta.tone}`}>
+                  <div className={'w-10 h-10 rounded-xl flex items-center justify-center ' + meta.tone}>
                     <meta.icon className="h-5 w-5" />
                   </div>
                   <div>
@@ -727,15 +876,6 @@ export function AIVaultPage() {
                 </div>
                 <div>
                   <Input
-                    label="Model"
-                    value={state.model}
-                    onChange={v => updateField(moduleKey, 'model', v)}
-                    placeholder={meta.placeholderModel}
-                    className="font-mono text-sm"
-                  />
-                </div>
-                <div>
-                  <Input
                     type={visibleKeys[moduleKey] ? 'text' : 'password'}
                     label="API Key"
                     value={state.api_key}
@@ -760,8 +900,30 @@ export function AIVaultPage() {
                     <p className="text-xs text-ink-3 mt-1">{t('vault.keySavedHint')}</p>
                   )}
                 </div>
-                {/* 思考档位：只对「思考不可关闭」的模型（如 GLM-5.3-Flash）有意义。
-                    可关思考的模型（Qwen/vLLM 系）用 enable_thinking=false，不在这里调。 */}
+                <div className="flex items-end">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => handleDetectModels(moduleKey)}
+                    loading={modelsState[moduleKey].loading}
+                    title={t('vault.detectModels')}
+                  >
+                    {t('vault.detectModels')}
+                  </Button>
+                </div>
+                {/* 模型：手填兜底 + 模型清单下拉（t3） */}
+                <div className="md:col-span-2">
+                  <ModelPicker
+                    label="Model"
+                    value={state.model}
+                    onChange={v => updateField(moduleKey, 'model', v)}
+                    placeholder={meta.placeholderModel}
+                    models={modelsState[moduleKey].models}
+                  />
+                  {renderModelsStatus(modelsState[moduleKey])}
+                  <p className="mt-1 text-xs text-ink-3">{t('vault.modelManualHint')}</p>
+                </div>
+                {/* 思考档位：只对「思考不可关闭」的模型（如 GLM-5.3-Flash）有意义。 */}
                 <div className="md:col-span-2">
                   <Select
                     label={t('vault.reasoningLabel')}
@@ -782,7 +944,7 @@ export function AIVaultPage() {
                 </div>
               </div>
 
-              {/* ===== 备用模型（故障转移链）===== */}
+              {/* ===== 备用模型（故障转移链） ===== */}
               <div className="border-t border-line pt-4 mt-2">
                 <div className="flex items-center justify-between mb-2">
                   <div>
@@ -795,6 +957,7 @@ export function AIVaultPage() {
                     onClick={() => {
                       setEditingFb(null);
                       setFbDraft({ base_url: '', model: '', api_key: '', label: '', reasoning_effort: '' });
+                      setFbModelsState({ ...EMPTY_MODELS });
                       setShowAddFb(moduleKey);
                     }}
                   >
@@ -806,6 +969,29 @@ export function AIVaultPage() {
                     {fallbacks[moduleKey].map((fb, i) => (
                       <li key={i} className="p-2 rounded-lg bg-surface-2 text-sm">
                         <div className="flex items-center gap-2">
+                          {/* 排序：上移 / 下移（故障转移顺序） */}
+                          <div className="flex items-center gap-0.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => moveFallback(moduleKey, i, -1)}
+                              disabled={i === 0 || fbSaving === moduleKey}
+                              className="p-1 rounded text-ink-3 hover:text-brand transition-colors disabled:cursor-not-allowed disabled:opacity-30"
+                              title={t('vault.fallbackMoveUp')}
+                              aria-label={t('vault.fallbackMoveUp')}
+                            >
+                              <ChevronDown className="h-3.5 w-3.5 rotate-180" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => moveFallback(moduleKey, i, 1)}
+                              disabled={i === fallbacks[moduleKey].length - 1 || fbSaving === moduleKey}
+                              className="p-1 rounded text-ink-3 hover:text-brand transition-colors disabled:cursor-not-allowed disabled:opacity-30"
+                              title={t('vault.fallbackMoveDown')}
+                              aria-label={t('vault.fallbackMoveDown')}
+                            >
+                              <ChevronDown className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
                           <div className="flex-1 min-w-0">
                             <div className="font-mono text-xs text-ink-1 truncate">
                               {fb.label || t('vault.fallbackN', { n: i + 1 })}
@@ -813,25 +999,17 @@ export function AIVaultPage() {
                             </div>
                             <div className="font-mono text-xs text-ink-3 truncate">{fb.base_url}</div>
                           </div>
-                          {/*
-                           * 「未填密钥」只在**确实没有任何密钥**时显示。
-                           * ⚠️ 实测踩坑：原先只看 `has_api_key`，而刚在表单里新填的条目是本地
-                           * draft（没有 has_api_key 字段，密钥在 `api_key` 里），于是用户明明
-                           * 填了 key，行上却挂着红字「未填密钥」—— 他截图来问「我不是填了密钥吗」。
-                           * 现在三种来源任一存在即视为已填：已保存标记 / 已保存脱敏值 / 草稿明文。
-                           */}
                           {!(fb.has_api_key || fb.api_key_masked || (fb.api_key && fb.api_key.trim())) && (
                             <span className="text-xs text-warning-strong shrink-0">{t('vault.fallbackNoKey')}</span>
                           )}
-                          {/* 测试连接：与主模型同款能力。密钥不回前端，只传索引由后端取。 */}
                           <button
                             type="button"
                             onClick={() => handleTestFallback(moduleKey, i)}
-                            disabled={fbTesting === `${moduleKey}#${i}`}
+                            disabled={fbTesting === moduleKey + '#' + i}
                             className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-xs text-ink-2 hover:text-brand hover:border-brand transition-colors disabled:opacity-40"
                             title={t('vault.fallbackTest')}
                           >
-                            <RefreshCw className={`h-3 w-3 ${fbTesting === `${moduleKey}#${i}` ? 'animate-spin' : ''}`} />
+                            <RefreshCw className={'h-3 w-3 ' + (fbTesting === moduleKey + '#' + i ? 'animate-spin' : '')} />
                             {t('vault.fallbackTest')}
                           </button>
                           <button
@@ -851,10 +1029,9 @@ export function AIVaultPage() {
                               setFallbacks(prev => ({ ...prev, [moduleKey]: next }));
                               setFbResults(prev => {
                                 const n = { ...prev };
-                                Object.keys(n).forEach(k => { if (k.startsWith(`${moduleKey}#`)) delete n[k]; });
+                                Object.keys(n).forEach(k => { if (k.startsWith(moduleKey + '#')) delete n[k]; });
                                 return n;
                               });
-                              // 删完立刻落盘，不用再点下面的「保存配置」
                               persistFallbacks(moduleKey, next, t('vault.fallbackDeleted'));
                             }}
                             className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-xs text-ink-2 hover:text-danger hover:border-danger transition-colors"
@@ -864,19 +1041,19 @@ export function AIVaultPage() {
                             {t('vault.fallbackRemove')}
                           </button>
                         </div>
-                        {fbTesting === `${moduleKey}#${i}` && (
+                        {fbTesting === moduleKey + '#' + i && (
                           <div className="mt-1 text-xs text-ink-3">
                             {t('vault.fallbackTesting')}
                           </div>
                         )}
-                        {fbResults[`${moduleKey}#${i}`] && (() => {
-                          const r = fbResults[`${moduleKey}#${i}`]!;
+                        {fbResults[moduleKey + '#' + i] && (() => {
+                          const r = fbResults[moduleKey + '#' + i]!;
                           const partial = r.success && r.verdict !== 'ok';
                           return (
-                            <div className={`mt-1 text-xs ${r.success ? (partial ? 'text-warning-strong' : 'text-success-strong') : 'text-danger-strong'}`}>
+                            <div className={'mt-1 text-xs ' + (r.success ? (partial ? 'text-warning-strong' : 'text-success-strong') : 'text-danger-strong')}>
                               {r.success
                                 ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: fb.label || t('vault.fallbackN', { n: i + 1 }) }))
-                                : `${t('vault.fallbackTestFail')}：${sanitizeErrorMessage(String(r.error || '')).slice(0, 180)}`}
+                                : t('vault.fallbackTestFail') + '：' + sanitizeErrorMessage(String(r.error || '')).slice(0, 180)}
                             </div>
                           );
                         })()}
@@ -900,12 +1077,25 @@ export function AIVaultPage() {
                     <Input label="Base URL" placeholder={t('vault.fallbackUrlPh')} value={fbDraft.base_url || ''}
                       onChange={v => setFbDraft(d => ({ ...d, base_url: v }))} className="font-mono text-sm" />
                     <div className="grid grid-cols-2 gap-2">
-                      <Input label="Model" placeholder={t('vault.fallbackModelPh')} value={fbDraft.model || ''}
-                        onChange={v => setFbDraft(d => ({ ...d, model: v }))} className="font-mono text-sm" />
+                      <div>
+                        <ModelPicker
+                          label="Model"
+                          placeholder={t('vault.fallbackModelPh')}
+                          value={fbDraft.model || ''}
+                          onChange={v => setFbDraft(d => ({ ...d, model: v }))}
+                          models={fbModelsState.models}
+                        />
+                      </div>
                       <Input label="API Key" type="password" placeholder={t('vault.fallbackKeyPh')}
                         value={fbDraft.api_key || ''}
                         onChange={v => setFbDraft(d => ({ ...d, api_key: v }))} className="font-mono text-sm" />
                     </div>
+                    <div className="flex items-center gap-2">
+                      <Button variant="secondary" size="sm" onClick={handleDetectFbModels} loading={fbModelsState.loading}>
+                        {t('vault.detectModels')}
+                      </Button>
+                    </div>
+                    {renderModelsStatus(fbModelsState)}
                     <div className="flex justify-end gap-2">
                       <Button variant="ghost" size="sm" onClick={closeFbForm}>
                         {t('vault.cancel')}
@@ -918,14 +1108,12 @@ export function AIVaultPage() {
                           if (isEdit && editingFb) list[editingFb.index] = { ...fbDraft };
                           else list.push({ ...fbDraft });
                           setFallbacks(prev => ({ ...prev, [moduleKey]: list }));
-                          // 列表变了 → 旧的测试结论作废，避免张冠李戴
                           setFbResults(prev => {
                             const next = { ...prev };
-                            Object.keys(next).forEach(k => { if (k.startsWith(`${moduleKey}#`)) delete next[k]; });
+                            Object.keys(next).forEach(k => { if (k.startsWith(moduleKey + '#')) delete next[k]; });
                             return next;
                           });
                           closeFbForm();
-                          // 加/改完立刻落盘 —— 不再要求用户再点一次下面的「保存配置」
                           persistFallbacks(moduleKey, list,
                             isEdit ? t('vault.fallbackUpdated') : t('vault.fallbackAdded'));
                         }}
@@ -959,8 +1147,6 @@ export function AIVaultPage() {
 
               {/* Test Result */}
               {result && (() => {
-                // success=true 但没拿到正文（额度被思考占用）既不是「配置错」也不是「就绪」，
-                // 用琥珀色单独区分，避免用户看到红叉/绿勾后被误导。
                 const partial = result.success && result.verdict !== 'ok';
                 const ms = result.latency_ms ?? result.response_time_ms;
                 const box = partial
@@ -968,9 +1154,9 @@ export function AIVaultPage() {
                   : result.success
                     ? 'bg-success-subtle text-success-strong'
                     : 'bg-danger-subtle text-danger-strong';
-                    const ResultIcon = partial ? AlertTriangle : result.success ? CheckCircle2 : X;
+                const ResultIcon = partial ? AlertTriangle : result.success ? CheckCircle2 : X;
                 return (
-                  <div className={`p-3 rounded-lg text-sm ${box}`}>
+                  <div className={'p-3 rounded-lg text-sm ' + box}>
                     <div className="flex items-center gap-2 flex-wrap">
                       <ResultIcon className="h-4 w-4 shrink-0" />
                       <span className="font-medium">
@@ -1008,9 +1194,7 @@ export function AIVaultPage() {
         })}
       </div>
 
-      {/* ===== 提示词模板管理（借鉴 Moha 的提示词管理布局）=====
-          出厂默认 + 用户覆盖两级（见 app/prompt_templates.py）；保存/恢复立即对后续生成生效。
-          AI 配置页是单页卡片流（非分 Tab），这里按「卡片区块」内嵌，改动最小且入口直觉。 */}
+      {/* ===== 提示词模板管理 ===== */}
       <PromptManagerTab />
 
       {/* Info Card */}
