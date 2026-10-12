@@ -753,6 +753,112 @@ def probe_refmod_nodes(timeout: int = 5) -> dict:
     return result
 
 
+# ===================================================================== #
+# t18：H3 总超时可配置 + 实测标定（直接修「成片永远跑不出」的根因）
+# ===================================================================== #
+# 背景（2026-10-12 生产实测）：单段 H3 ≈ 17 分钟（1020s+），而旧公式
+#     timeout = 1200 + timeout_per_segment(900) × 段数
+# 对 10 段给出 10200s —— 与「10 段 × 17 分钟 ≈ 10200s」**恰好重合**：
+# 每次都在最后一刻判超时 → interrupt + 重投（段缓存虽复用，但最后一段白跑、
+# 还要重新排队），用户看到的现象就是「永远出不来 mp4」。
+#
+# 现口径：timeout = base + 单段实测耗时 × 段数 × 安全系数，全部可 env 覆盖：
+#   MJSCXT_H3_SEGMENT_SECONDS   单段实测耗时（秒；默认读标定文件，兜底 1020 = 实测 17min）
+#   MJSCXT_H3_TIMEOUT_BASE      固定基数（秒，默认 1800：排队/加载模型/导出开销）
+#   MJSCXT_H3_TIMEOUT_MULT      安全系数（默认 1.5）
+#   MJSCXT_H3_TIMEOUT_MIN       下限（秒，默认 3600）
+#   MJSCXT_H3_TIMEOUT_CAP       上限（秒，默认 0 = 不设上限）
+#   MJSCXT_WAIT_EXTENSIONS      软超时续等次数（默认 3；见 wait_for_completion）
+#   MJSCXT_WAIT_EXTEND_SECONDS  每次续等时长（秒，默认 1800）
+# 例：10 段 → 1800 + 1020×10×1.5 = 17100s（≈4.75h），相对旧值 10200s 富余 ≈ 68%。
+_H3_SEG_COST_DEFAULT_SEC = 1020.0
+_H3_TIMING_FILE = os.path.join(PROJECT_OUTPUT_DIR, "_h3_timing.json")
+
+
+def _env_int(name: str, default: int) -> int:
+    """整数环境变量（非法/空 → default，绝不抛）。"""
+    try:
+        raw = str(os.environ.get(name) or "").strip()
+        return int(float(raw)) if raw else int(default)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    """浮点环境变量（非法/空 → default，绝不抛）。"""
+    try:
+        raw = str(os.environ.get(name) or "").strip()
+        return float(raw) if raw else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _h3_seg_cost_seconds(fallback: float = 0.0) -> float:
+    """单段 H3 实测耗时（秒）：env > 标定文件 > 兜底（默认 1020s = 实测 17 分钟）。
+
+    标定文件由每次成功生成后自动写入（见 _h3_record_seg_cost），跨进程有效。
+    """
+    env = _env_float("MJSCXT_H3_SEGMENT_SECONDS", 0.0)
+    if env > 0:
+        return env
+    try:
+        with open(_H3_TIMING_FILE, "r", encoding="utf-8") as f:
+            _d = json.load(f) or {}
+        _v = float(_d.get("seg_seconds") or 0)
+        if _v > 0:
+            return _v
+    except (OSError, ValueError, TypeError) as _e:
+        logger.debug("H3 耗时标定读取失败（用兜底值）：%s", _e)
+    return float(fallback or _H3_SEG_COST_DEFAULT_SEC)
+
+
+def _h3_record_seg_cost(n_segments: int, elapsed_sec: float) -> None:
+    """把本轮「整体耗时 / 段数」写进标定文件（EMA 平滑，抗单次抖动）；失败只 debug。"""
+    try:
+        n = max(1, int(n_segments))
+        per = float(elapsed_sec) / n
+        if per <= 0:
+            return
+        old = 0.0
+        try:
+            with open(_H3_TIMING_FILE, "r", encoding="utf-8") as f:
+                old = float((json.load(f) or {}).get("seg_seconds") or 0)
+        except (OSError, ValueError, TypeError):
+            old = 0.0
+        new = per if old <= 0 else (old * 0.6 + per * 0.4)
+        os.makedirs(os.path.dirname(_H3_TIMING_FILE), exist_ok=True)
+        with open(_H3_TIMING_FILE, "w", encoding="utf-8") as f:
+            json.dump({"seg_seconds": round(new, 1), "last_per": round(per, 1),
+                       "segments": n,
+                       "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")},
+                      f, ensure_ascii=False)
+        logger.info("[H3 标定] 单段实测 %.1fs（本轮 %d 段 / %.0fs）→ 下次总超时按此估算",
+                    new, n, elapsed_sec)
+    except Exception as _e:  # noqa: BLE001
+        logger.debug("H3 耗时标定写入失败（忽略）：%s", _e)
+
+
+def _h3_timeout_seconds(n_segments: int, timeout_per_segment: int = None) -> int:
+    """H3 单次提交的总超时（秒）：base + 实测单段耗时 × 段数 × 安全系数。"""
+    base = _env_int("MJSCXT_H3_TIMEOUT_BASE", 1800)
+    mult = _env_float("MJSCXT_H3_TIMEOUT_MULT", 1.5)
+    floor = _env_int("MJSCXT_H3_TIMEOUT_MIN", 3600)
+    cap = _env_int("MJSCXT_H3_TIMEOUT_CAP", 0)
+    seg = _h3_seg_cost_seconds()
+    try:
+        tps = float(timeout_per_segment or 0)
+    except (TypeError, ValueError):
+        tps = 0.0
+    if tps > seg:          # 调用方显式给了更大的单段预估 → 尊重它（宁大不小）
+        seg = tps
+    total = int(base + seg * max(1, int(n_segments)) * mult)
+    if cap > 0:
+        # ⭐ 上限（运维显式设的）优先于下限：否则 CAP=3000 会被 MIN=3600 顶掉。
+        floor = min(floor, cap)
+        total = min(total, cap)
+    return max(floor, total)
+
+
 class ComfyUIClient:
     """ComfyUI API 客户端"""
 
@@ -1858,6 +1964,38 @@ class ComfyUIClient:
                 "pending": len(d.get("queue_pending") or []),
                 "ok": True}
 
+    def _recheck_after_timeout(self, prompt_id: str) -> Tuple[str, dict]:
+        """t18：到点复查远端，返回 ("done"|"error"|"running"|"gone", entry)。
+
+        为什么需要：旧实现到点后**无条件** interrupt 并判失败 —— 而实测
+        「单段 ≈ 17 分钟 × 10 段」的总耗时与旧公式给出的总超时**恰好重合**，
+        于是每次都在最后一刻把「马上就好」的任务取消掉、重投：最后一段白跑、
+        还要重新排队（段缓存虽被复用，但用户看到的现象就是「永远出不来 mp4」）。
+        现在先复查：已完成 → 取回结果；仍在跑 → 交给调用点续等；都不在 → 真超时。
+        """
+        try:
+            _h = self.get_history(prompt_id) or {}
+            _e = _h.get(prompt_id) if isinstance(_h, dict) else None
+        except Exception as _e1:  # noqa: BLE001
+            logger.debug("到点复查 history 失败（按仍在跑处理）：%s", _e1)
+            return "running", {}
+        if isinstance(_e, dict):
+            _st = _e.get("status") or {}
+            if _st.get("completed") or _st.get("status_str") == "success":
+                return "done", _e
+            if _st.get("status_str") == "error":
+                return "error", _e
+        try:
+            _q = self._get("/queue") or {}
+            _qids = [x[1] for x in (_q.get("queue_running") or [])
+                     if isinstance(x, (list, tuple)) and len(x) > 1]
+            _qids += [x[1] for x in (_q.get("queue_pending") or [])
+                      if isinstance(x, (list, tuple)) and len(x) > 1]
+        except Exception as _e2:  # noqa: BLE001
+            logger.debug("到点复查 /queue 失败（按仍在跑处理）：%s", _e2)
+            return "running", {}
+        return ("running" if prompt_id in _qids else "gone"), {}
+
     def wait_for_completion(self, prompt_id: str, timeout: int = 3600) -> dict:
         """轮询远端任务直到完成。
 
@@ -1874,6 +2012,10 @@ class ComfyUIClient:
         超时和 error 的 interrupt 都传 prompt_id（不再打断队列中正在执行的其他任务）。
         """
         start = time.time()
+        # ⭐ t18：软超时 —— deadline 可在循环体内被「续等」推后（见循环体末尾的到点复查）。
+        deadline = start + max(1, int(timeout))
+        _ext_left = _env_int("MJSCXT_WAIT_EXTENSIONS", 3)
+        _ext_sec = max(1, _env_int("MJSCXT_WAIT_EXTEND_SECONDS", 1800))
         # ⭐ 2026-10-08：存活检测计数器。旧实现只轮询 history —— 一旦 ComfyUI 重启、
         #    历史被清、或提交被丢，这个 prompt_id 就**永远不会出现在 history 里**，
         #    于是死等满 timeout（默认 3600s = 1 小时！实测整集卡死 6~25 分钟无日志、
@@ -1881,7 +2023,7 @@ class ComfyUIClient:
         #    队列 → 判定远端已丢失，立即返回 {}（调用方按「没拿到结果」重试）。
         _miss = 0
         _MISS_LIMIT = 5
-        while time.time() - start < timeout:
+        while time.time() < deadline:
             # ⓪ 轮询顺手确保 temp 目录存在（exist_ok 幂等、零开销）——ComfyUI 侧节点
             # 仍可能在 temp 下建工作目录，此为通用防御。
             try:
@@ -1947,6 +2089,25 @@ class ComfyUIClient:
                 logger.warning(f"退避期间收到中止信号，主动打断远端任务 {prompt_id}")
                 self.interrupt(prompt_id)
                 raise
+            # ---- ⭐ t18：到点复查（软超时续等）----
+            #  旧实现到点后**无条件** interrupt + 判失败：而「17min/段 × 10 段」的实测
+            #  总耗时与旧公式给出的超时**恰好重合** → 每次都在最后一刻取消、重投，
+            #  最后一段白跑并重新排队。这里先复查：已完成 → 直接取回；仍在跑 → 续等。
+            if _ext_left > 0 and time.time() >= deadline:
+                _st18, _e18 = self._recheck_after_timeout(prompt_id)
+                if _st18 == "done" and isinstance(_e18, dict):
+                    _bump("completed", 1)
+                    _bump("waited_seconds", round(time.time() - start, 2))
+                    logger.info("[等待续等] %s 在到点时刻已完成 → 取回结果（远端未取消）",
+                                prompt_id)
+                    return _e18
+                if _st18 == "running":
+                    _ext_left -= 1
+                    deadline = time.time() + _ext_sec
+                    logger.warning(
+                        "[等待续等] %s 已等 %ds 仍未完成，但远端**仍在执行** → 续等 %ds"
+                        "（剩余 %d 次）—— 绝不取消「刚好差一点」的任务（那是白烧最后一段）",
+                        prompt_id, int(time.time() - start), _ext_sec, _ext_left)
         # ③ 超时（非中止）：仍清理远端，避免本地判超时而远端白跑
         # B-21 P1-13：超时 interrupt 定向到指定 prompt_id（不再误伤队列中其他任务）
         logger.warning(f"等待超时: {prompt_id}（清理远端队列）")
@@ -5021,8 +5182,12 @@ class ComfyUIClient:
             if dlss_bypassed:
                 logger.info(f"H3 DLSS 补帧已旁路（temp 不稳定）: {dlss_bypassed}")
 
-        timeout = timeout or int(1200 + timeout_per_segment * n)
-        logger.info(f"H3 提交：{n} 段，总超时 {timeout}s（单段预估 {timeout_per_segment}s）")
+        timeout = timeout or _h3_timeout_seconds(n, timeout_per_segment)
+        logger.info(f"H3 提交：{n} 段，总超时 {timeout}s"
+                    f"（单段估算 {_h3_seg_cost_seconds():.0f}s × {n} 段 × 系数"
+                    f" {_env_float('MJSCXT_H3_TIMEOUT_MULT', 1.5)} + 基线"
+                    f" {_env_int('MJSCXT_H3_TIMEOUT_BASE', 1800)}s；"
+                    f"可用 MJSCXT_H3_TIMEOUT_* / MJSCXT_H3_SEGMENT_SECONDS 覆盖）")
         # 崩溃免重渲（2026-09-29）：同 Director 路径，见 submit_resumable 文档。
         history, prompt_id, resumed = self.submit_resumable(
             api_prompt, job_key=f"h3|{filename_prefix}",
@@ -5640,8 +5805,16 @@ class ComfyUIClient:
                 "audio_count_used": len(seg_audio_names[i]),
             })
 
-        timeout = timeout or int(1200 + timeout_per_segment * n)
-        logger.info(f"H3(Director) 提交：{n} 段，总超时 {timeout}s（单段预估 {timeout_per_segment}s），"
+        # ⭐ t18：总超时按「实测单段耗时 × 段数 × 安全系数 + 基线」估算（全部 env 可配）。
+        #  旧公式 1200 + timeout_per_segment(900) × 段数 对 10 段只有 10200s，而实测
+        #  单段 ≈ 1020s（17 分钟）→ 恰好卡在临界点，每次都在最后一刻超时。
+        _t18_t0 = time.time()
+        timeout = timeout or _h3_timeout_seconds(n, timeout_per_segment)
+        logger.info(f"H3(Director) 提交：{n} 段，总超时 {timeout}s"
+                    f"（单段估算 {_h3_seg_cost_seconds():.0f}s × {n} 段 × 系数"
+                    f" {_env_float('MJSCXT_H3_TIMEOUT_MULT', 1.5)} + 基线"
+                    f" {_env_int('MJSCXT_H3_TIMEOUT_BASE', 1800)}s；"
+                    f"到点后仍会先复查续等 {_env_int('MJSCXT_WAIT_EXTENSIONS', 3)} 次），"
                     f"段间引导 {'开' if layout.get('continuity') else '关'}"
                     f"（{layout.get('continuity_overlap_frames')} 帧）")
         # DLSS 补帧旁路（2026-10-01）：NvidiaDLSSFrameInterpolation 的 temp 工作目录
@@ -5659,6 +5832,10 @@ class ComfyUIClient:
         if resumed:
             logger.info("H3(Director) 本次为**免重渲复用**（未消耗 GPU）")
         files = self.get_output_files(history, ".mp4")
+        # ⭐ t18：本轮成功产出 → 把「实测单段耗时」写进标定文件，下次超时估算直接用实测值
+        #   （resumed=True 是台账复用、没真正渲染，不计入标定）。
+        if files and not resumed:
+            _h3_record_seg_cost(n, time.time() - _t18_t0)
 
         audio_check = []
         if files:

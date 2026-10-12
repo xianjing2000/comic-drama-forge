@@ -1985,23 +1985,98 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     if _force_scene and os.path.isfile(_sdst):
                         logger.info("[episode][per-scene] 第 %d 场被登记为「待重跑」"
                                     "（单镜返工的多镜场）→ 强制重画本场", _sn)
-                    _sres = comfyui_client.generate_h3_sequence_sequential(
-                        segments=_ssegs,
-                        filename_prefix=(f"comic_drama/{project_name}_"
-                                         f"{episode_tag or 'episode'}_s{_sn:02d}"),
-                        seed=comfyui_job_store.get_or_create_seed(
-                            f"video|{project_name}|{episode_tag or 'episode'}|scene{_sn}",
-                            lambda: _secrets.randbelow(2 ** 31 - 2) + 1,
-                            live_key=(f"h3|comic_drama/{project_name}_"
-                                      f"{episode_tag or 'episode'}|scene{_sn}")),
-                        timeout_per_segment=timeout_per_segment, size=_size,
-                        qc_fn=_seg_qc_fn if qc_on else None, qc_cfg=qc_cfg,
-                        qc_style=eff_style, max_retries=max_retries,
-                        qc_stop_cb=(_ep_qc_stop_cb if qc_on else None),
-                        common_refs=[c["path"] for c in _common if c.get("path")],
-                        common_ref_audios=_common_audio_paths,
-                        common_prompt=_common_prompt)
-                    _sf = (_sres or {}).get("files") or []
+                    # ⭐ t18/captain 实测（P0）：**必须传 cache_name** —— 插件分段缓存目录名
+                    #   由 resolve_segment_cache_key(cache_name, node_id) 决定（插件
+                    #   director/segment_cache.py）。不传 → 回落到 <node_id>（本工作流恒为 12），
+                    #   于是第 1 集 10 个场次的 seg_0000..seg_000N **互相覆盖**（插件注释原话：
+                    #   「第 2 场的 seg_0000 覆盖第 1 场的」）→ 「段都算完了却合成不出 mp4」
+                    #   的另一主因。命名口径 <项目>__ep<集号>__s<场次>：同场重跑名字不变 →
+                    #   复用同一目录（保住断点续跑收益），不同场次/集次彼此隔离。
+                    _cn_scene = f"{project_name}__ep{int(_epn):02d}__s{_sn:02d}"
+                    # ⭐ t18：长场次主动分批（MJSCXT_H3_BATCH_SEGMENTS，默认 0 = 不分批）。
+                    #   单次提交 N 段的总超时有限，极端长场次（28 段 × 17min ≈ 8h）一旦中途
+                    #   失败就要整批重来；分批把失败面压到一批。⚠️ 批边界是**硬切**（H3 段间
+                    #   隐变量只能在同一次提交内传递），故默认关闭、由运维显式开启。
+                    _batch_segs = 0
+                    try:
+                        _batch_segs = int(float(
+                            str(os.environ.get("MJSCXT_H3_BATCH_SEGMENTS") or "0").strip() or 0))
+                    except (TypeError, ValueError):
+                        _batch_segs = 0
+                    if _batch_segs > 0 and len(_ssegs) > _batch_segs:
+                        _batches = [_ssegs[_bi2:_bi2 + _batch_segs]
+                                    for _bi2 in range(0, len(_ssegs), _batch_segs)]
+                        logger.info("[episode][per-scene] 第 %d 场 %d 段 → 分 %d 批渲染"
+                                    "（MJSCXT_H3_BATCH_SEGMENTS=%d；批边界为硬切）",
+                                    _sn, len(_ssegs), len(_batches), _batch_segs)
+                        _bfiles, _berr = [], ""
+                        for _bi, _bseg in enumerate(_batches):
+                            _bres = comfyui_client.generate_h3_sequence_sequential(
+                                segments=_bseg,
+                                filename_prefix=(f"comic_drama/{project_name}_"
+                                                 f"{episode_tag or 'episode'}_s{_sn:02d}"
+                                                 f"_b{_bi:02d}"),
+                                # 每批独立缓存目录（批之间互不覆盖，也不与整场冲突）
+                                cache_name=f"{_cn_scene}__b{_bi:02d}",
+                                seed=comfyui_job_store.get_or_create_seed(
+                                    f"video|{project_name}|{episode_tag or 'episode'}"
+                                    f"|scene{_sn}|b{_bi}",
+                                    lambda: _secrets.randbelow(2 ** 31 - 2) + 1,
+                                    live_key=(f"h3|comic_drama/{project_name}_"
+                                              f"{episode_tag or 'episode'}|scene{_sn}|b{_bi}")),
+                                timeout_per_segment=timeout_per_segment, size=_size,
+                                qc_fn=_seg_qc_fn if qc_on else None, qc_cfg=qc_cfg,
+                                qc_style=eff_style, max_retries=max_retries,
+                                qc_stop_cb=(_ep_qc_stop_cb if qc_on else None),
+                                common_refs=[c["path"] for c in _common if c.get("path")],
+                                common_ref_audios=_common_audio_paths,
+                                common_prompt=_common_prompt)
+                            _bf = (_bres or {}).get("files") or []
+                            if not _bf or not os.path.isfile(_bf[0]):
+                                _berr = ((_bres or {}).get("error")
+                                         or f"第 {_bi + 1}/{len(_batches)} 批未返回视频")
+                                break
+                            _bfiles.append(_bf[0])
+                        _sf = []
+                        if _bfiles and not _berr:
+                            if len(_bfiles) == 1:
+                                _sf = [_bfiles[0]]
+                            else:
+                                _bmerged = os.path.join(
+                                    videos_dir, f"scene_{_sn:02d}.batched.mp4")
+                                try:
+                                    import video_postprocess as _vp_b
+                                    _bmr = _vp_b.VideoPostProcessor().concat_videos(
+                                        _bfiles, _bmerged,
+                                        caller="video_helpers.per_scene_batched")
+                                except Exception as _be:  # noqa: BLE001
+                                    _bmr = ""
+                                    logger.error("[episode][per-scene] 分批拼接异常：%s", _be)
+                                if _bmr and os.path.isfile(_bmr):
+                                    _sf = [_bmr]
+                                else:
+                                    _berr = "分批渲染完成但批间拼接失败（各批产物保留供排障）"
+                        _sres = {"files": _sf, "error": _berr, "qc_results": [],
+                                 "batched": len(_batches), "batch_files": list(_bfiles)}
+                    else:
+                        _sres = comfyui_client.generate_h3_sequence_sequential(
+                            segments=_ssegs,
+                            filename_prefix=(f"comic_drama/{project_name}_"
+                                             f"{episode_tag or 'episode'}_s{_sn:02d}"),
+                            cache_name=_cn_scene,
+                            seed=comfyui_job_store.get_or_create_seed(
+                                f"video|{project_name}|{episode_tag or 'episode'}|scene{_sn}",
+                                lambda: _secrets.randbelow(2 ** 31 - 2) + 1,
+                                live_key=(f"h3|comic_drama/{project_name}_"
+                                          f"{episode_tag or 'episode'}|scene{_sn}")),
+                            timeout_per_segment=timeout_per_segment, size=_size,
+                            qc_fn=_seg_qc_fn if qc_on else None, qc_cfg=qc_cfg,
+                            qc_style=eff_style, max_retries=max_retries,
+                            qc_stop_cb=(_ep_qc_stop_cb if qc_on else None),
+                            common_refs=[c["path"] for c in _common if c.get("path")],
+                            common_ref_audios=_common_audio_paths,
+                            common_prompt=_common_prompt)
+                        _sf = (_sres or {}).get("files") or []
                     if not _sf or not os.path.isfile(_sf[0]):
                         _scene_reports.append({
                             "scene_no": _sn, "success": False,
