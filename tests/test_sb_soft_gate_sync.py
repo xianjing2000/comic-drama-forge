@@ -50,11 +50,11 @@ class TestKeywordTableSync(unittest.TestCase):
             only_sb, [],
             "以下词条只在软放行表、不在 qc 硬阻断表里 —— 两处判据打架：%s" % only_sb)
 
-    #: 已知重复词条（**生产侧既有事实，不在本任务 inScope 内修**）：
-    #:   qc_client.CRITICAL_ISSUE_KEYWORDS 里「六指」出现两次（2026-10-10 手部畸变批
-    #:   与 T18 手指畸变批重叠）。功能上无影响（词表按 in 匹配，重复不改变判定），
-    #:   故登记为**已接受基线**而不是让测试长期发红；清理后把这里改回空集即可收紧。
-    KNOWN_DUPLICATES = {"qc_client.CRITICAL_ISSUE_KEYWORDS": {"六指"}}
+    #: 已无重复词条（2026-10-12 t34 下沉单一来源时，把原 qc_client 词表里重复的
+    #:   「六指」去重了——2026-10-10 手部畸变批与 T18 手指畸变批各写了一次）。
+    #:   功能上无影响（词表按 in 匹配，重复不改变判定）；去重后两侧引用同一常量，
+    #:   重复项基数为空集，任何新出现的重复词仍会立刻变红（收紧逻辑不变）。
+    KNOWN_DUPLICATES = {}
 
     def test_duplicate_entries_match_known_baseline(self):
         """重复词条只能等于「已接受基线」——新出现的重复立刻变红。"""
