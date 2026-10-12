@@ -222,8 +222,10 @@ class CrossChunkValidator:
                     episode_no, [sid],
                 ))
         # 3) 场景跳切（相邻两镜 location 不同且未声明转场）
+        #    idx 从 0 起：首镜只做「前镜」初始化、不比较；idx=1 起才真正比较
+        #    locations[0]→locations[1]，避免首对相邻镜头（镜0→镜1）的跳切被漏检。
         prev_loc = ""
-        for idx in range(1, contract.shot_count):
+        for idx in range(contract.shot_count):
             loc = contract.locations[idx]
             if prev_loc and loc and prev_loc != loc:
                 if not any(m in _shot_edit_reason(contract.all_shots[idx])

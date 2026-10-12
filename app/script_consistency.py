@@ -41,6 +41,8 @@ import re
 import time
 from datetime import datetime
 
+from fs_atomic import atomic_write_json, read_json_strict
+
 logger = logging.getLogger(__name__)
 
 # ===================== 常量 =====================
@@ -783,17 +785,19 @@ def consistency_report_path(continuity_dir: str, project_key: str, episode_no) -
 
 
 def load_consistency_report(continuity_dir: str, project_key: str, episode_no) -> dict:
-    """读取单集一致性报告（不存在或损坏时返回空 dict，不抛异常）"""
+    """读取单集一致性报告（A-4：缺失→空 dict；损坏→.bak 恢复；无 .bak→降级空 dict）。
+
+    用 read_json_strict 三态读取对齐项目契约：缺失返 default(None)、正常返内容、
+    损坏先 .bak 恢复；损坏且无 .bak 时 read_json_strict 抛错，这里捕获并降级为空 dict
+    （fail-open，不静默清空——read_json_strict 内部已 logger.error 留痕）。
+    """
     path = consistency_report_path(continuity_dir, project_key, episode_no)
-    if not os.path.isfile(path):
-        return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"剧本一致性报告读取失败（按无报告处理）{path}：{e}")
+        data = read_json_strict(path, None)
+    except (ValueError, OSError) as e:
+        logger.warning(f"剧本一致性报告读取失败（损坏且无可用 .bak，按无报告处理）{path}：{e}")
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def save_consistency_report(report: dict, continuity_dir: str = None, project_key: str = None,
@@ -804,12 +808,10 @@ def save_consistency_report(report: dict, continuity_dir: str = None, project_ke
     ep = _as_int(episode_no or payload.get("episode_no"), 1) or 1
     pkey = _safe_name(project_key or payload.get("project_key") or "novel_project")
     path = consistency_report_path(continuity_dir, pkey, ep)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
     payload["project_key"] = pkey
     payload["episode_no"] = ep
     payload["report_path"] = path
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    atomic_write_json(path, payload)
     logger.info(f"第{ep}集剧本一致性报告已落盘：{path}")
     return path
 

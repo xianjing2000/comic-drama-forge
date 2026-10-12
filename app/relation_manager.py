@@ -97,13 +97,20 @@ class RelationManager:
         self.save()
 
     def add_relation(self, char_id_a: str, char_id_b: str, relation_type: str, strength: str = "medium", note: str = "") -> str:
-        """添加角色关系"""
+        """添加角色关系（同一对角色允许多种关系，rel_id 同名时追加序号保证唯一）。"""
         if relation_type not in ALL_RELATION_TYPES:
             raise ValueError(f"无效的关系类型: {relation_type}")
 
-        # 关系ID格式: char_a_char_b (按字母序排序确保唯一)
+        # 关系ID格式: char_a_char_b（按字母序排序）；同一对角色可有多种关系
+        # （如 亲属+师徒），故同名时追加序号保证唯一、不覆盖既有关系 —— 这样
+        # detect_conflicts 的「同一对角色有多个关系」才能真正被检测到（t15 P2）。
         pair = tuple(sorted([char_id_a, char_id_b]))
-        rel_id = f"{pair[0]}_{pair[1]}"
+        base = f"{pair[0]}_{pair[1]}"
+        rel_id = base
+        _seq = 2
+        while rel_id in self.data["relations"]:
+            rel_id = f"{base}_{_seq}"
+            _seq += 1
 
         self.data["relations"][rel_id] = {
             "id": rel_id,

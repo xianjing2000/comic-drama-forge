@@ -152,12 +152,17 @@ def apply_scene_relations(bible: dict, relations: dict, overwrite: bool = False)
             val = rel.get(src)
             if k == "refs":
                 val = list(val or [])
-            if not val and val != []:
+            is_bool = isinstance(val, bool)
+            # 字符串/列表字段：空值（""/[]/None）不写，避免给每个场景塞空值；
+            # 布尔字段（anchor）：False 是合法值，必须能写回以清除锚点（t15 P2）。
+            if not is_bool and not val:
                 continue
             if k == "refs" and not val:
-                continue                  # 空 refs 不写，避免给每个场景塞空数组
+                continue                  # 空 refs 不写
             cur = s.get(k)
-            if cur and not overwrite:
+            # 幂等：已有值默认不覆盖；唯一例外是布尔锚点 true→false 的「清除」必须生效，
+            # 否则锚点只能设不能清。
+            if cur and not overwrite and not (is_bool and val is False and cur is True):
                 stat["skipped"] += 1
                 continue
             s[k] = val

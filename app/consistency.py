@@ -257,32 +257,30 @@ def _verdict(score: int, semantic: bool) -> str:
 # ===================== ③ 设定比对层 =====================
 
 def load_character_costumes(project: str) -> dict:
-    """从 continuity bible 读取角色当前服装状态 → {角色名: 服装描述}"""
-    path = os.path.join(CONTINUITY_DIR, project, "bible.json")
+    """从 continuity bible 读取角色当前服装状态 → {角色名: 服装描述}。
+
+    单一来源：复用 continuity_store.bible_path（含 project_key 归一化 _safe）与
+    load_bible（含 characters 规范化为 list 的口径），不再自算路径 / 自解析 dict|list
+    两态，避免与设定库读写口径漂移（t15 P2）。bible 损坏且无 .bak 时 load_bible
+    fail-loud，这里捕获并降级为空 dict（fail-open，与旧行为一致）。
+    """
+    from continuity_store import bible_path, load_bible
+    path = bible_path(CONTINUITY_DIR, project)
     if not os.path.isfile(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            bible = json.load(f) or {}
-    except Exception as e:  # noqa: BLE001
+        bible = load_bible(CONTINUITY_DIR, project)
+    except (ValueError, OSError) as e:
         logger.warning(f"bible.json 读取失败（跳过服装比对）：{e}")
         return {}
-    chars = bible.get("characters")
     out = {}
-    if isinstance(chars, dict):
-        for name, info in chars.items():
-            if isinstance(info, dict):
-                c = (info.get("current_costume") or info.get("costume")
-                     or info.get("outfit") or "")
-                if c:
-                    out[name] = str(c)
-    elif isinstance(chars, list):
-        for info in chars:
-            if isinstance(info, dict) and info.get("name"):
-                c = (info.get("current_costume") or info.get("costume")
-                     or info.get("outfit") or "")
-                if c:
-                    out[str(info["name"])] = str(c)
+    for info in (bible.get("characters") or []):
+        if not isinstance(info, dict) or not info.get("name"):
+            continue
+        c = (info.get("current_costume") or info.get("costume")
+             or info.get("outfit") or "")
+        if c:
+            out[str(info["name"])] = str(c)
     return out
 
 
