@@ -40,8 +40,12 @@ issue 就拦），``warn`` 为诊断模式（只记录、连自愈都不做）�
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import logging
+import os
 import re
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import h3_prompt_kit
@@ -1355,7 +1359,134 @@ def _crit_kind(msg) -> str:
     return s.strip()
 
 
+# =======================================================================
+# 预检结果缓存（2026-10-12 用户需求：「分镜和视频提示词也要预热」）
+# -----------------------------------------------------------------------
+# 背景与动机（实测数据）：
+#   分镜每镜「前置段」84~93 秒，其中**提示词预检独占 83.9~92.7 秒（约 99%）**：
+#     shot=39 前置段 93.0s（提示词预检 92.7s）
+#     shot=40 前置段 84.3s（提示词预检 83.9s）
+#   而 preflight 此前**没有任何缓存** —— 同一份提示词（含同镜重试、续跑、预热）
+#   每次都要重新走一遍 LLM。
+#
+# 设计：
+#   · key 覆盖全部影响判决的输入：kind / style / ref_count / expect_refs /
+#     **ctx 的 8 个语义字段（与 prompt_enhance 同口径）** / prompt 全文。
+#     任一变化 -> 不同 key -> 重新预检（不会拿旧结论套新输入）。
+#   · 进程内 FIFO 淘汰（上限 _PF_CACHE_SIZE），线程安全（预取线程与主线程并发读写）。
+#   · **只缓存、不改任何判定逻辑**：命中即原样返回上次结论。
+#   · fail-open：缓存自身异常时退化为「不缓存」，绝不影响预检语义。
+#   · 开关 MJSCXT_PROMPT_QC_CACHE=0 可强制关闭。
+# =======================================================================
+_PF_CACHE: Dict[str, dict] = {}
+_PF_LOCK = threading.Lock()
+_PF_CACHE_SIZE = 256
+_PF_HIT = {"n": 0}
+_PF_MISS = {"n": 0}
+
+
+def _pf_cache_enabled() -> bool:
+    v = str(os.environ.get("MJSCXT_PROMPT_QC_CACHE") or "1").strip().lower()
+    return v not in ("0", "false", "off", "no")
+
+
+def prompt_qc_cache_stats() -> dict:
+    # 预检缓存的命中统计（供日志与诊断使用）
+    with _PF_LOCK:
+        return {"size": len(_PF_CACHE), "hit": _PF_HIT["n"], "miss": _PF_MISS["n"],
+                "capacity": _PF_CACHE_SIZE}
+
+
+def _ctx_brief_for_cache(ctx) -> str:
+    # 抽取 ctx 的语义字段（与 prompt_enhance._CTX_KEYS 同口径）。
+    # 刻意复用同一组键：预检内部会调用 prompt_enhance.enhance_prompt(ctx=...)，
+    # 两者若口径不同，会出现「预检缓存命中但增强用了不同上下文」的错配。
+    keys = ("description", "visual_detail", "storyboard_prompt_zh",
+            "camera", "location", "emotion", "name", "outfit")
+    if not isinstance(ctx, dict):
+        return ""
+    parts = []
+    for k in keys:
+        v = str(ctx.get(k) or "").strip()
+        if v:
+            parts.append("%s:%s" % (k, v[:400]))
+    return "\n".join(parts)
+
+
+def _pf_cache_key(kind: str, prompt: str, ctx, style: str,
+                  ref_count, expect_refs) -> str:
+    # 构造预检缓存键：把影响判决的输入全量纳入，避免串味。
+    try:
+        brief = _ctx_brief_for_cache(ctx)
+    except Exception:
+        brief = ""
+    basis = "|".join((
+        str(kind or ""), str(style or ""),
+        str(ref_count), str(expect_refs),
+        brief, str(prompt or ""),
+    ))
+    return hashlib.sha1(basis.encode("utf-8", "ignore")).hexdigest()
+
+
+def _pf_cache_get(key: str):
+    if not _pf_cache_enabled():
+        return None
+    with _PF_LOCK:
+        v = _PF_CACHE.get(key)
+        if v is not None:
+            _PF_HIT["n"] = _PF_HIT["n"] + 1
+            return copy.deepcopy(v)
+        _PF_MISS["n"] = _PF_MISS["n"] + 1
+    return None
+
+
+def _pf_cache_put(key: str, val) -> None:
+    if not _pf_cache_enabled() or not isinstance(val, dict):
+        return
+    try:
+        with _PF_LOCK:
+            if len(_PF_CACHE) >= _PF_CACHE_SIZE:
+                _PF_CACHE.pop(next(iter(_PF_CACHE)), None)   # FIFO 淘汰（够用且无额外依赖）
+            _PF_CACHE[key] = copy.deepcopy(val)
+    except Exception:
+        pass
+
+
 def preflight(kind: str, prompt: str, ctx: dict = None, style: str = "",
+              cfg: dict = None, ref_count=None, expect_refs=None) -> dict:
+    # 生成前预检的**带缓存入口**（2026-10-12）。
+    #
+    # 与 _preflight_uncached 的关系：本函数是它的透明包装，只做「查缓存 -> 算 -> 回填」，
+    # **不参与任何判定**。命中时原样返回上次结论（含自愈后的 prompt / repairs / accept）。
+    #
+    # 为什么要这层（实测）：分镜前置段 84~93 秒里预检占 99%，而同一份提示词会被
+    # 反复预检（同镜重试、续跑、预热并行）。加缓存后重复预检归零，
+    # 这是「资产完成即预热分镜提示词 / 分镜完成即预热视频提示词」能真正省时的前提。
+    #
+    # 落地口径：只缓存、不改判定；任何异常都退化为直接调用原实现（fail-open）。
+    try:
+        if not _pf_cache_enabled():
+            return _preflight_uncached(kind, prompt, ctx=ctx, style=style, cfg=cfg,
+                                       ref_count=ref_count, expect_refs=expect_refs)
+        _ck = _pf_cache_key(kind, prompt, ctx, style, ref_count, expect_refs)
+        _hit = _pf_cache_get(_ck)
+        if _hit is not None:
+            _hit["cache_hit"] = True
+            return _hit
+        _out = _preflight_uncached(kind, prompt, ctx=ctx, style=style, cfg=cfg,
+                                   ref_count=ref_count, expect_refs=expect_refs)
+        if isinstance(_out, dict):
+            _pf_cache_put(_ck, _out)
+            _out = dict(_out)
+            _out["cache_hit"] = False
+        return _out
+    except Exception:
+        # fail-open：缓存自身出问题绝不阻断预检
+        return _preflight_uncached(kind, prompt, ctx=ctx, style=style, cfg=cfg,
+                                   ref_count=ref_count, expect_refs=expect_refs)
+
+
+def _preflight_uncached(kind: str, prompt: str, ctx: dict = None, style: str = "",
               cfg: dict = None, ref_count: Optional[int] = None,
               expect_refs: Optional[bool] = None) -> dict:
     """生成前预检 + 自愈（**生成链路的推荐入口**）。
