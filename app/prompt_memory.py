@@ -1168,7 +1168,8 @@ class PromptMemory:
 
     def mark_used(self, lesson_ids: List[str]) -> int:
         """命中回写：对每个命中的 ``lesson_id`` 做 ``use_count += 1``、
-        ``last_used = now``，全部命中后**原子落盘**。返回实际命中条数（去重后）。
+        ``last_used = now``，只改内存并置 ``_dirty_usage``，**不立即落盘**（顺延到下次
+        写操作或显式 ``flush()``）。返回实际命中条数（去重后）。
         """
         ids = {str(x).strip() for x in (lesson_ids or []) if str(x).strip()}
         if not ids:

@@ -159,6 +159,22 @@ def _migrate_units_fk(conn: sqlite3.Connection) -> str:
     cols = [x[1] for x in conn.execute('PRAGMA table_info(units)').fetchall()]
     if not cols:
         return 'units 表不存在'
+    # t103：迁移前预检 —— 新表 NOT NULL 列若在旧表存在 NULL 值，INSERT 必失败，
+    # 而 SQLite 的 ALTER/CREATE 隐式提交、不回滚（实测验证），会留下半完成状态。
+    # 故在 ALTER 之前先把会令 INSERT 失败的原因挡在门外。
+    not_null_cols = ('task_id', 'unit_key', 'status', 'result_path', 'error', 'updated_at')
+    null_hits = []
+    for col in not_null_cols:
+        if col not in cols:
+            return 'units 表缺少列 %s，拒绝自动迁移（请人工处理后再试）' % col
+        try:
+            n = conn.execute('SELECT COUNT(*) FROM units WHERE %s IS NULL' % col).fetchone()[0]
+        except Exception:  # noqa: BLE001
+            n = 0
+        if n:
+            null_hits.append('%s(%d)' % (col, n))
+    if null_hits:
+        return 'units 表存在 NULL 值列 %s，拒绝自动迁移（请人工处理后再试）' % ', '.join(null_hits)
     col_list = ', '.join(cols)
     try:
         with conn:
@@ -169,8 +185,23 @@ def _migrate_units_fk(conn: sqlite3.Connection) -> str:
             conn.execute('DROP TABLE _units_pre_fk')
         return '迁移完成（拷贝 %d 行）' % rows
     except Exception as e:  # noqa: BLE001
-        logger.warning('units 外键迁移失败（保留原表）：%s', e)
-        return '迁移失败：%s' % e
+        logger.warning('units 外键迁移失败：%s', e)
+        # t103：SQLite 的 ALTER/CREATE 隐式提交、不回滚，失败会留下「units 空新表 +
+        # _units_pre_fk 残留旧数据」的半完成状态。这里手动回滚恢复原状。
+        try:
+            tables = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if '_units_pre_fk' in tables:
+                if 'units' in tables:
+                    conn.execute('DROP TABLE units')          # 半成品空表
+                conn.execute('ALTER TABLE _units_pre_fk RENAME TO units')  # 旧数据回原位
+                conn.commit()
+                logger.warning('迁移失败，已回滚恢复原 units 表')
+            else:
+                conn.rollback()
+        except Exception as re:  # noqa: BLE001
+            logger.error('迁移失败且自动回滚也失败，需人工处理：%s', re)
+        return '迁移失败（已回滚）：%s' % e
 
 
 def ensure_schema(db_path: str) -> Dict[str, Any]:

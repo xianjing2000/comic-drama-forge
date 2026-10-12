@@ -666,9 +666,12 @@ def _match_project_entries(root: str, names: list) -> list:
     return hit
 
 
-@_locked
 def delete_project(ref: str, confirm: bool = False) -> dict:
     """删除项目 = 移入回收站（output/projects/_trash/…），非物理删除，可手工还原。
+
+    t103：**不再整函数持 _INDEX_LOCK** —— 文件移动与关联清理（耗时）在锁外执行，
+    只在「读 index → 删记录 → 写 index」的读改写临界区持锁，避免删除大项目长时间
+    阻塞其它项目的 create / update / load_index。
 
     需要显式 confirm=True（前端会弹出二次确认框），未确认一律拒绝。
 
@@ -726,9 +729,10 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
                 "index_removed": False, "aborted": True,
                 "abort_reason": "部分产物移动失败，已保留注册表与关联数据"}
 
-    index = load_index()
-    index["projects"] = [x for x in index.get("projects", []) if x.get("id") != rec["id"]]
-    save_index(index)
+    with _INDEX_LOCK:   # t103：读改写临界区持锁（load_index/save_index 为 RLock 可重入）
+        index = load_index()
+        index["projects"] = [x for x in index.get("projects", []) if x.get("id") != rec["id"]]
+        save_index(index)
 
     # 关联清理：ai_chat 的「按项目键分桶/分子目录」数据不在 22 类产物目录覆盖内
     # （全局单文件 chat_history.json / project_settings.json + archive/<键>/ 子目录），
@@ -1391,7 +1395,8 @@ def migrate_legacy(force: bool = False) -> dict:
         for nm, nid in novels.items():
             if not nid:
                 continue
-            if nm and (nm in rec["dir_key"] or rec["dir_key"] in nm):
+            # t103：子串匹配会把「剑心」误绑到「剑心_外传」，改为精确匹配 dir_key/显示名
+            if nm and (nm == rec.get("dir_key") or nm == rec.get("name")):
                 update_project(rec["id"], novel_id=nid, novel_name=nm)
                 break
 
