@@ -422,6 +422,11 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'desc': '这类「只有标题行、正文近空」的壳章必须并入其后的真实章节，不能单独成章。',
         'owner': 'novel_parser.SHELL_CHAPTER_BODY_CHARS',
     },
+    'script_body_min_ratio': {
+        'default': 0.25, 'type': 'float', 'range': (0.0, 1.0), 'group': '剧本',
+        'desc': '剧本正文（description+visual_detail+dialogue_text）相对原文的最短压缩比；低于此值判「超短剧本」落盘打 warning（防 LLM 截断/内容丢失，2026-10-12 t81）',
+        'owner': 'novel_to_script.SCRIPT_BODY_MIN_RATIO',
+    },
     'chunk_chars': {
         'default': 2400, 'type': 'int', 'range': (0, 10000000), 'group': '剧本',
         'desc': '单块送模型的字符数（2400 字 ≈ 13 镜/块）',
@@ -584,6 +589,11 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': 900, 'type': 'int', 'range': (0, 100000), 'group': '任务台账',
         'desc': '默认租约存活时长（秒）。心跳停超过它就判 stale。',
         'owner': 'task_lease.DEFAULT_TTL_SEC',
+    },
+    'archive_max_count': {
+        'default': 200, 'type': 'int', 'range': (0, 100000), 'group': '任务台账',
+        'desc': '回收归档最多保留条数（超上限按时间淘汰最旧；0 表示不限制数量，默认 200）',
+        'owner': 'task_lease.ARCHIVE_MAX_COUNT',
     },
     'voice_bank_min_sec': {
         'default': 1.0, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
@@ -997,7 +1007,8 @@ def orphan_candidates() -> Dict[str, Any]:
     impl = ('_RE', '_PATTERN', 'REGEX', '_REGEX', 'URL', 'PATH', '_DIR', 'DIR_', 'EXT',
             'EXTENSION', '_SUFFIX', '_PREFIX', 'PROMPT', 'TEMPLATE', '_TXT', 'MARKER',
             'SENTINEL', 'KEY', 'HEADER', 'MIME', '_VERSION_', 'SCHEMA', 'TABLE', 'COLUMN',
-            'ENUM', '_NAMES', 'ALIASES', 'MAP', '_TYPES', '_VALUES', '_LIST', '_SET')
+            'ENUM', '_NAMES', 'ALIASES', 'MAP', '_TYPES', '_VALUES', '_LIST', '_SET',
+            'CACHE_NAME')
     owners = set()
     for _k, _v in REGISTRY.items():
         owners.add(str(_v.get('owner') or ''))
