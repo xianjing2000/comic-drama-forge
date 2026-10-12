@@ -62,6 +62,8 @@ from shared_project import (_apply_project_settings, _audio_qc_project_key,  # n
                             _AUDIO_QC_NON_PROJECT_DIRS, _ep_dir, _ep_read_dir,
                             _novel_key, _project_style, _resolve_novel_project)
 
+# t105 评估「待迁」：属 HTTP 边界工具，应迁至 shared_web（与 _friendly_error/_body 同族），
+# 但目标模块 app/shared_web.py 超出本任务 inScope，留待后续任务。
 def _autopilot_guard(fn):
     """统一异常兜底：托管接口不应把 500 抛给前端，而是返回可读错误
 
@@ -85,6 +87,8 @@ def _autopilot_guard(fn):
             return jsonify({"success": False, "error": _friendly_error(e)}), 500
     _wrap.__name__ = fn.__name__
     return _wrap
+# t105 评估「待迁」：教训库统计视图（_prompt_memory_* 三函数），应迁至 prompt_memory，
+# 但目标模块 app/prompt_memory.py 超出本任务 inScope，留待后续任务。
 def _prompt_memory_dead_count() -> int:
     """死教训数（use_count==0 的条数）；读取失败返回 0。"""
     try:
@@ -111,6 +115,8 @@ def _prompt_memory_view(kind: str = "", limit: int = 50) -> dict:
     except Exception as e:  # noqa: BLE001
         _app_logger().warning("读取质检教训库失败：%s", e)
         return {"total": 0, "by_kind": {}, "path": "", "lessons": [], "error": str(e)}
+# t105 评估「不迁」：用 request.args（Flask 请求上下文）解析 project_id/project_name，
+# 属路由层粘合逻辑；下沉需改成显式传参、破坏现有调用方，故保留在路由层。
 def _resolve_continuity_key(novel_id):
     """小说 → (meta, 项目记录, 项目键)，供连贯性查询接口复用"""
     meta = get_novel(NOVELS_DIR, novel_id)
@@ -133,15 +139,8 @@ def _resolve_continuity_key(novel_id):
 
 
 
-def _dub_audio_url(project_name: str, rel_path: str) -> str:
-    rel = os.path.relpath(rel_path, _dub_project_dir(project_name)).replace(os.sep, "/")
-    return f"/api/tts/file/{project_name}/{rel}" if not rel.startswith("..") else ""
-
-
-def _dub_project_dir(project_name: str) -> str:
-    d = os.path.join(DUB_DIR, project_name)
-    os.makedirs(d, exist_ok=True)
-    return d
+# t105：_dub_audio_url/_dub_project_dir 已下沉到 dub_helpers（audio-dev 完成），此处改为再导出。
+from dub_helpers import _dub_audio_url, _dub_project_dir  # noqa: F401  再导出
 
 
 
@@ -179,6 +178,8 @@ def _dub_project_dir(project_name: str) -> str:
 
 
 
+# t105 评估「待迁」：水印配置统一入口，应迁至 video_watermark，
+# 但目标模块 app/video_watermark.py 超出本任务 inScope，留待后续任务。
 def _wm_load_cfg() -> dict:
     return video_watermark.load_config(WATERMARK_CONFIG_PATH)
 
@@ -203,6 +204,9 @@ def _wm_load_cfg() -> dict:
 
 
 
+# t105 评估「不迁」：以下 _quality_* 五函数是「质检状态视图」粘合层，聚合 quality_stage（状态机）
+# + preview_gate（预演判定）+ shared_project._ep_read_dir（目录）+ VIDEOS_DIR/PROJECT_OUTPUT_DIR，
+# 下沉到 quality_stage 会让其反向依赖 preview_gate/shared_project 引入耦合，故保留在路由层。
 def _quality_asset_url(kind: str, project: str, name: str) -> str:
     """资产名 → 第一张可用图的 URL（front/base 优先，与生成链路取图同口径）。"""
     d = os.path.join(PROJECT_OUTPUT_DIR, "assets", kind, project, str(name))

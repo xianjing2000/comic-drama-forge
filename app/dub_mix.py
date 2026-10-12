@@ -417,10 +417,9 @@ def mix_video_with_entries(video_path: str, entries: List[Dict], out_path: str,
 
 
 def write_mix_report(report: Dict, path: str) -> str:
-    """落盘合成报告（JSON）"""
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+    """落盘合成报告（JSON，原子写：唯一临时名 + fsync + .bak 快照 + os.replace）"""
+    from fs_atomic import atomic_write_json
+    atomic_write_json(path, report)
     return os.path.abspath(path)
 
 

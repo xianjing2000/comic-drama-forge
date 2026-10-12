@@ -199,6 +199,24 @@ def _locked_character_keys() -> tuple:
     return ("name", "gender", "identity", "appearance", "personality", "titles")
 
 
+# ---- bible「读→改→写」并发保护（t104 P2：预热线程 + 主线程并发 merge 丢更新）----
+_BIBLE_LOCKS: dict = {}
+_BIBLE_LOCKS_GUARD = threading.Lock()
+
+
+def _bible_lock(project_key: str):
+    """per-project 锁：bible「读→改→写」临界区保护。
+
+    预热线程（pipeline 的 daemon prefetch）与主线程可能同时生成同一项目不同集，
+    各自 merge_bible_from_episode 会并发「读 bible→改→写」，后写覆盖先写导致
+    丢失更新（角色/场景/服装状态丢失）。按 project_key 分片加锁串行化同一项目，
+    不同项目互不阻塞。
+    """
+    key = str(project_key or "")
+    with _BIBLE_LOCKS_GUARD:
+        return _BIBLE_LOCKS.setdefault(key, threading.Lock())
+
+
 def merge_bible_from_episode(continuity_dir: str, project_key: str, script: dict,
                              episode_no: int, episode_bible: dict = None) -> dict:
     """把本集角色/物品/场景并入项目级设定库（A① 持久化复用）。
@@ -207,7 +225,18 @@ def merge_bible_from_episode(continuity_dir: str, project_key: str, script: dict
       本集外观与锁定值冲突时记入 conflicts（供 D 校验）；
     - 道具：首次定义后外观锁定，owner 可随剧情变化；
     - 场景：描述首次定义后固定。
+
+    并发：按 project_key 加锁串行化同一项目的「读→改→写」，避免预热线程与主线程
+    并发 merge 同一项目时丢失更新（t104 P2）。
     """
+    with _bible_lock(project_key):
+        return _merge_bible_from_episode(
+            continuity_dir, project_key, script, episode_no, episode_bible)
+
+
+def _merge_bible_from_episode(continuity_dir: str, project_key: str, script: dict,
+                              episode_no: int, episode_bible: dict = None) -> dict:
+    """（无锁实现，见外层 merge_bible_from_episode 的锁包装）"""
     bible = load_bible(continuity_dir, project_key)
     src_chars = (episode_bible or {}).get("characters") or script.get("characters") or []
     src_items = (episode_bible or {}).get("items") or script.get("items") or []
@@ -408,13 +437,13 @@ def _register_outfit_variants(bible: dict, project_key: str, episode_no: int) ->
             key = "ep%02d_%s" % (int(episode_no), _h)
             vdir = os.path.join(odir, key)
             os.makedirs(vdir, exist_ok=True)
-            with open(os.path.join(vdir, "outfit.json"), "w", encoding="utf-8") as f:
-                json.dump({
-                    "outfit_key": key, "desc": ep_outfit, "character": nm,
-                    "project": project_key, "episode": int(episode_no),
-                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "pending": True,
-                }, f, ensure_ascii=False, indent=2)
+            # t104 P3：改 fs_atomic 原子写（原裸 open+json.dump 写一半崩溃会损坏登记文件）
+            atomic_write_json(os.path.join(vdir, "outfit.json"), {
+                "outfit_key": key, "desc": ep_outfit, "character": nm,
+                "project": project_key, "episode": int(episode_no),
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "pending": True,
+            })
             added.append((nm, key))
         if added:
             logger.info("[服装变体] 剧本阶段已登记 %d 个换装：%s",

@@ -369,6 +369,16 @@ class VideoPostProcessor:
         except OSError as e:
             logger.debug("清理 0 字节残件失败（忽略）：%s", e)
 
+    @staticmethod
+    def _mp4_output_fmt(output_path: str) -> List[str]:
+        """output_path 用非视频扩展名时显式 ``-f mp4``（G8：临时文件用非 .mp4 后缀，
+        ffmpeg 无法从扩展名推断容器格式，必须显式指定）。正常 .mp4/.mov/.mkv 等
+        扩展名返回空列表（ffmpeg 自行推断，行为不变）。"""
+        _ext = os.path.splitext(output_path or "")[1].lower()
+        if _ext in (".mp4", ".mov", ".mkv", ".webm", ".m4v"):
+            return []
+        return ["-f", "mp4"]
+
     def _concat_fail(self, caller: str, reason: str, output_path: str = "") -> str:
         """拼接失败的**唯一出口**：按契约返回 ``""``，但必须先把原因留痕。
 
@@ -481,8 +491,7 @@ class VideoPostProcessor:
                 "-safe", "0",
                 "-i", list_file,
                 "-c", "copy",
-                output_path
-            ]
+            ] + self._mp4_output_fmt(output_path) + [output_path]
 
             result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
             # 2026-10-12（t11 审计 P0）：原实现只判 returncode —— 返回码 0 但输出被吞
@@ -667,8 +676,7 @@ class VideoPostProcessor:
             cmd += [
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                 "-movflags", "+faststart",
-                output_path,
-            ]
+            ] + self._mp4_output_fmt(output_path) + [output_path]
             logger.info("concat filter 重编码拼接 %d 个片段（has_any_audio=%s，补音轨 %d 段）→ %s",
                         n, has_any_audio, len(pad_temps), output_path)
             try:
@@ -896,8 +904,14 @@ class VideoPostProcessor:
             logger.info(f"字幕全部关闭（subtitle_enabled=caption_burn_enabled=false），跳过烧制：{output_path}")
 
         if subtitles:
-            self.add_subtitles(output_path, subtitles,
-                             os.path.join(final_dir, f"ep{ep:02d}_final_subtitles.mp4"))
+            _subbed = self.add_subtitles(
+                output_path, subtitles,
+                os.path.join(final_dir, f"ep{ep:02d}_final_subtitles.mp4"))
+            # P2（t100）：字幕烧制成功则交付字幕版 —— caption 是剧情装置（默认开），
+            # 不返回字幕版会让观众拿到无 caption 的成片（时空跳变无交代）。失败回落
+            # 无字幕版（fail-open：字幕是加值，不因烧字幕失败丢失整集成片）。
+            if _subbed:
+                output_path = _subbed
 
         logger.info(f"第 {ep} 集最终视频: {output_path}")
         return output_path

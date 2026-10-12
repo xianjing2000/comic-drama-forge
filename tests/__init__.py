@@ -23,6 +23,39 @@ import sys
 import tempfile
 
 # --------------------------------------------------------------------------- #
+# t84：统一钉死测试临时目录落点（任何 mkdtemp 都不再散落工作区根）
+# --------------------------------------------------------------------------- #
+# 机制（t84 查实，非猜测）：electron-app 便携版 python（3.13）在「系统 TEMP」
+# （%TEMP%=C:\Users\LIUJIA~1\AppData\Local\Temp）下**实际创建文件**返回
+# Permission denied（os.access(W_OK) 却误报 True），于是 tempfile.gettempdir()
+# 逐级回退到候选列表最后一个 = cwd（工作区根）→ 42 处 mkdtemp 全部落在工作区根。
+# 这里显式把 tempfile.tempdir 钉到一个「单一目录」：系统 TEMP 可写则落系统 TEMP，
+# 否则落项目根的 .mjscxt-tests（单一 dot 目录，集中可清理，不再产生 *_xxxxxxxx 根级目录）。
+def _writable_dir(d):
+    try:
+        probe = os.path.join(d, ".__wprobe__")
+        fd = os.open(probe, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(fd)
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
+
+
+_sys_tmp = os.environ.get("TEMP") or os.environ.get("TMP") or tempfile.gettempdir()
+if _sys_tmp and _writable_dir(_sys_tmp):
+    _TEST_TMP_ROOT = os.path.join(_sys_tmp, "mjscxt-tests")
+else:
+    _HERE = os.path.dirname(os.path.abspath(__file__))
+    _ROOT = os.path.dirname(_HERE)
+    _TEST_TMP_ROOT = os.path.join(_ROOT, ".mjscxt-tests")
+try:
+    os.makedirs(_TEST_TMP_ROOT, exist_ok=True)
+    tempfile.tempdir = _TEST_TMP_ROOT
+except OSError:
+    pass
+
+# --------------------------------------------------------------------------- #
 # 1) 数据根强制重定向到进程级临时目录（必须在任何 app 模块 import 之前）
 # --------------------------------------------------------------------------- #
 _ENV_OVERRIDE = "MJSCXT_T20_FORCE_DATA_DIR"

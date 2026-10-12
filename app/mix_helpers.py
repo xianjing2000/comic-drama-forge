@@ -98,6 +98,9 @@ def _mix_segments_dir(project_name: str, episode: int = 0) -> str:
         vids = [f for f in os.listdir(ep_dir) if f.lower().endswith(".mp4")]
         if vids:
             return ep_dir
+    if episode:
+        # t101：指定集专属目录缺失/为空 → 回退项目级目录，显式告警（可能取到其它集素材）
+        logger.warning("mix 分段目录回退：指定集 ep%02d 专属目录缺失/为空，回退项目级目录（可能取到其它集素材）", int(episode))
     # 回退：项目级目录（第 1 集或整集模式）
     for d in project_store.project_dirs(VIDEOS_DIR, project_name):
         if not os.path.isdir(d):
@@ -112,7 +115,7 @@ def _mix_segments_dir(project_name: str, episode: int = 0) -> str:
 
 
 def _mix_manifest(project_name: str, episode: int = 0) -> dict:
-    """读取配音清单（优先指定集数，其次最新）"""
+    """读取配音清单（优先指定集数，其次最新；指定集缺失回退时会带 fallback 告警）"""
     out_dir = os.path.join(DUB_DIR, project_name)
     if not os.path.isdir(out_dir):
         raise DubMixError(f"尚未生成配音（目录不存在）：{out_dir}")
@@ -128,7 +131,15 @@ def _mix_manifest(project_name: str, episode: int = 0) -> dict:
     cands.sort(key=os.path.getmtime, reverse=True)
     p = cands[0]
     with open(p, "r", encoding="utf-8") as f:
-        return {"manifest": json.load(f), "path": p}
+        manifest = json.load(f)
+    fallback = ""
+    if episode:
+        # t101：指定集清单缺失 → 回退最新，显式告警（不再静默跨集，可能时间轴/台词错配）
+        got_ep = int(manifest.get("episode") or 0)
+        fallback = (f"指定集 ep{int(episode):02d} 配音清单缺失，回退到最新清单"
+                    f"（ep{got_ep:02d}），可能时间轴/台词错配")
+        logger.warning("mix 清单跨集回退：%s（%s）", fallback, out_dir)
+    return {"manifest": manifest, "path": p, "fallback": fallback}
 
 
 def _mix_prepare(data: dict) -> dict:
@@ -148,6 +159,7 @@ def _mix_prepare(data: dict) -> dict:
 
     mf = _mix_manifest(project_name, episode)
     manifest = mf["manifest"]
+    manifest_fallback = mf.get("fallback") or ""
     episode = episode or int(manifest.get("episode") or 1)
 
     seg_dir = _mix_segments_dir(project_name, episode)
@@ -172,6 +184,8 @@ def _mix_prepare(data: dict) -> dict:
         entries, warnings = built["entries"], list(built["warnings"])
     if not entries:
         raise DubMixError("没有可用的配音音频：请先完成配音合成，或检查配音文件是否存在")
+    if manifest_fallback:
+        warnings.append(manifest_fallback)
 
     # ---- 音效轨：H3 原生音效经人声分离后垫底（2026-09-17 新增）----
     # 为什么需要：H3 是音视频联合模型，原音轨里既有打斗/雨声等音效，也有它自己生成的

@@ -89,19 +89,25 @@ def build_relate_prompt(scenes: list) -> str:
     )
 
 
-def relate_scenes(client, scenes: list, temperature: float = 0.3) -> dict:
-    """分析场景空间关联，返回 {场景名: {space_group, refs, anchor, fixed_structure}}。
+#: 单批关联分析的场景数上限（超过分批，避免长 prompt / 长输出被截断）
+_MAX_RELATE_SCENES_PER_BATCH = 30
+#: 单批关联分析的输出 token 上限
+_MAX_RELATE_TOKENS = 4000
 
-    client：LLMClient（需有 chat_json）。scenes 为空 / 调用失败 / 解析失败
-    → 返回 {}（fail-open，调用方按「无关联」处理，零回归）。
-    """
-    items = [s for s in (scenes or []) if isinstance(s, dict) and str(s.get("name") or "").strip()]
-    if not items or client is None:
-        return {}
-    known = {str(s.get("name") or "").strip() for s in items}
+
+def _relate_batch(client, items: list, temperature: float) -> dict:
+    """单批场景关联（items 为场景名非空的一组 dict）。失败返回 {}（fail-open）。"""
+    prompt = build_relate_prompt(items)
     try:
-        raw = client.chat_json(build_relate_prompt(items), system=_SYSTEM,
-                               temperature=temperature)
+        raw = client.chat_json(prompt, system=_SYSTEM, temperature=temperature,
+                               max_tokens=_MAX_RELATE_TOKENS)
+    except TypeError:
+        # 旧 client / 测试替身的 chat_json 不接受 max_tokens → 回退不带该参数
+        try:
+            raw = client.chat_json(prompt, system=_SYSTEM, temperature=temperature)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[场景关联] 分析失败（按无关联处理）：%s: %s", type(e).__name__, e)
+            return {}
     except Exception as e:  # noqa: BLE001  关联分析失败绝不阻断生产
         logger.warning("[场景关联] 分析失败（按无关联处理）：%s: %s", type(e).__name__, e)
         return {}
@@ -112,6 +118,7 @@ def relate_scenes(client, scenes: list, temperature: float = 0.3) -> dict:
         rows = raw
     if not isinstance(rows, list):
         return {}
+    known = {str(s.get("name") or "").strip() for s in items}
     out = {}
     for r in rows:
         if not isinstance(r, dict):
@@ -127,6 +134,24 @@ def relate_scenes(client, scenes: list, temperature: float = 0.3) -> dict:
             "anchor": bool(r.get("anchor")),
             "fixed_structure": str(r.get("fixed_structure") or "").strip()[:_FIXED_STRUCTURE_MAX],
         }
+    return out
+
+
+def relate_scenes(client, scenes: list, temperature: float = 0.3) -> dict:
+    """分析场景空间关联，返回 {场景名: {space_group, refs, anchor, fixed_structure}}。
+
+    client：LLMClient（需有 chat_json）。scenes 为空 / 调用失败 / 解析失败
+    → 返回 {}（fail-open，调用方按「无关联」处理，零回归）。
+    场景多时按 _MAX_RELATE_SCENES_PER_BATCH 分批，每批显式 max_tokens，避免长输出被截。
+    """
+    items = [s for s in (scenes or []) if isinstance(s, dict) and str(s.get("name") or "").strip()]
+    if not items or client is None:
+        return {}
+    batches = [items[i:i + _MAX_RELATE_SCENES_PER_BATCH]
+               for i in range(0, len(items), _MAX_RELATE_SCENES_PER_BATCH)]
+    out = {}
+    for b in batches:
+        out.update(_relate_batch(client, b, temperature))
     if out:
         logger.info("[场景关联] 已解析 %d 个场景的关联（组数 %d）",
                     len(out), len({v["space_group"] for v in out.values() if v["space_group"]}))

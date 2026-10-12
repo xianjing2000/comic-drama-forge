@@ -663,7 +663,11 @@ def _video_retry_shot_impl():
     #   行为与改动前完全一致（向后兼容）。
     _rs_files = sorted([f for f in files if f], key=_seg_sort_key)
     if len(_rs_files) > 1:
-        _rs_cat = os.path.join(vid_dir, f"shot_{seq:02d}.tmp.mp4")
+        # P2（t100）：临时名改非 .mp4 后缀（G8 纪律）—— 原 shot_NN.tmp.mp4 若 concat
+        # 失败残留，会被 _ordered_shot_files 的 ^shot_数字 glob 捡走混入成片。点开头
+        # 隐藏文件 + 非 .mp4 后缀，双重避免被 *.mp4 glob 命中；concat_videos 内部按
+        # 非视频扩展名自动补 -f mp4（见 video_postprocess._mp4_output_fmt）。
+        _rs_cat = os.path.join(vid_dir, f".shot_{seq:02d}.concat.clean")
         try:
             import video_postprocess as _vp_mod2
             _rs_merged = _vp_mod2.VideoPostProcessor().concat_videos(
@@ -677,6 +681,12 @@ def _video_retry_shot_impl():
         else:
             logger.error("[单镜重跑] shot=%s 子段 concat 失败，回退首个子段", seq)
             _move_with_retry(_rs_files[0], dst)
+        # 无论成功（已 move 走）还是失败（残留），都把临时文件清干净
+        try:
+            if os.path.isfile(_rs_cat):
+                os.remove(_rs_cat)
+        except OSError as _rce2:
+            logger.debug("清理子段 concat 临时文件失败（忽略）：%s", _rce2)
     else:
         _move_with_retry(_rs_files[0] if _rs_files else files[0], dst)
     # 该镜已更新 → 同集的旧成片失效，打上「已过期」标记，避免用户对着旧成片点验收

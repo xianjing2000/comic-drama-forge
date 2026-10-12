@@ -55,6 +55,42 @@ def _dub_audio_url(project_name: str, rel_path: str) -> str:
     return f"/api/tts/file/{project_name}/{rel}" if not rel.startswith("..") else ""
 
 
+_script_scan_cache = {"stamp": 0.0, "cands": []}
+
+
+def _scan_scripts() -> list:
+    """扫描 output/scripts 下所有含 shots 的剧本（带缓存：目录 mtime 不变则复用）。
+
+    t101 P3：_dub_resolve_script 的自动匹配原本每次全量 os.walk + 逐文件 json.load，
+    而 _dub_line_speaker_from_script / _dub_character_desc 逐句触发它 → 同一计划构建周期内
+    重复 IO。这里按 SCRIPT_DIR 目录 mtime 缓存扫描结果（周期内剧本目录不变，安全）。
+    """
+    try:
+        stamp = os.path.getmtime(SCRIPT_DIR)
+    except OSError:
+        return []
+    if _script_scan_cache["stamp"] == stamp:
+        return _script_scan_cache["cands"]
+    cands = []
+    for dp, _dn, fn in os.walk(SCRIPT_DIR):
+        for name in fn:
+            if not name.lower().endswith(".json"):
+                continue
+            p = os.path.join(dp, name)
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    s = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(s, dict) or not s.get("shots"):
+                continue
+            cands.append({"path": p, "mtime": os.path.getmtime(p), "script": s,
+                          "episode_no": s.get("episode_no") or (s.get("metadata") or {}).get("episode_no")})
+    _script_scan_cache["stamp"] = stamp
+    _script_scan_cache["cands"] = cands
+    return cands
+
+
 def _dub_resolve_script(data: dict) -> dict:
     """解析配音所用剧本：优先 body.script，其次 script_path（限项目输出目录内），最后自动匹配"""
     script = data.get("script")
@@ -76,21 +112,7 @@ def _dub_resolve_script(data: dict) -> dict:
     # 自动匹配 output/scripts 下的剧本（优先路径含项目名，其次 episode_no 命中，最后取最新）
     project_name = data.get("project_name") or ""
     episode = data.get("episode")
-    cands = []
-    for dp, _dn, fn in os.walk(SCRIPT_DIR):
-        for name in fn:
-            if not name.lower().endswith(".json"):
-                continue
-            p = os.path.join(dp, name)
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    s = json.load(f)
-            except Exception:
-                continue
-            if not isinstance(s, dict) or not s.get("shots"):
-                continue
-            cands.append({"path": p, "mtime": os.path.getmtime(p), "script": s,
-                          "episode_no": s.get("episode_no") or (s.get("metadata") or {}).get("episode_no")})
+    cands = _scan_scripts()
     if not cands:
         raise TTSError("未找到可用剧本（output/scripts 下无含 shots 的 JSON），请先生成剧本")
 

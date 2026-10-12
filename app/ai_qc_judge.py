@@ -31,11 +31,6 @@ HIGH_KEYWORDS = [
     "景别不符", "构图严重问题",
 ]
 
-MEDIUM_KEYWORDS = [
-    "描述过短", "描述不详细", "时长偏差", "镜头数量不足",
-    "轻微构图问题", "颜色偏差",
-]
-
 
 def assess_severity(verdict: dict) -> str:
     """评估质检结果的严重程度。

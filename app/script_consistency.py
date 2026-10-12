@@ -321,6 +321,34 @@ def scan_meta_leak(script, novel_meta: dict = None) -> dict:
 _HAN_ONLY_RE = re.compile(r"^[\u4e00-\u9fa5]+$")
 
 
+def _is_han(ch: str) -> bool:
+    """单字符是否汉字（用于中文词边界判断）。"""
+    return bool(ch) and '\u4e00' <= ch <= '\u9fff'
+
+
+def _contains_word(corpus: str, name: str) -> bool:
+    """判断 name 是否作为「独立词」出现在 corpus 中（中文词边界语义，t104 P2）。
+
+    原实现 `name in corpus` 是子串匹配：候选「青云宗」会误命中「青云宗派」导致
+    覆盖假阴性（该补生成的不补）。这里按中文词边界重判：候选名前后若是「停用字
+    （助词/动词/虚词，见 _ELEMENT_STOP_CHARS）/ 非汉字 / 文本边界」，视为独立词命中；
+    若是「实词汉字」，视为更长词的一部分（子串）不命中。
+    例：『青云宗』命中「的青云宗的」「青云宗」，不命中「青云宗派」。
+    """
+    name = str(name or "")
+    if not name:
+        return False
+    for m in re.finditer(re.escape(name), corpus):
+        s, e = m.start(), m.end()
+        prev = corpus[s - 1] if s > 0 else ""
+        nxt = corpus[e] if e < len(corpus) else ""
+        prev_ok = (not prev) or (not _is_han(prev)) or (prev in _ELEMENT_STOP_CHARS)
+        nxt_ok = (not nxt) or (not _is_han(nxt)) or (nxt in _ELEMENT_STOP_CHARS)
+        if prev_ok and nxt_ok:
+            return True
+    return False
+
+
 def _valid_element(word: str, exclude_names: set = None, name_pool: set = None) -> bool:
     """要素候选合法性：纯中文、长度 3~5、无停用字、不是角色/设定名的片段"""
     if not word or not (3 <= len(word) <= 5):
@@ -394,7 +422,7 @@ def check_element_coverage(chapter_text: str, script, novel_meta: dict = None) -
     for kind, rows in candidates.items():
         for row in rows:
             item = {"name": row["name"], "kind": kind, "freq": row["freq"]}
-            if row["name"] in corpus:
+            if _contains_word(corpus, row["name"]):
                 covered.append(item)
             else:
                 missing.append(item)
