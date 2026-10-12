@@ -533,6 +533,15 @@ def default_voice_map(characters: List[dict], project: str = "", episode: int = 
     }
 
 
+def _repr_param(value) -> str:
+    """把非法参数值格式化成可读、截断、脱敏的展示串（防超长字符串注入日志/响应）。"""
+    if value is None:
+        return "<空>"
+    s = str(value)
+    shown = s if len(s) <= 32 else s[:32] + "…"
+    return repr(shown)
+
+
 def normalize_voice(raw: Optional[dict], fallback: Optional[dict] = None) -> Dict:
     """校验并归一化单个音色配置（非法 speaker 直接报错，不静默回退）
 
@@ -549,14 +558,28 @@ def normalize_voice(raw: Optional[dict], fallback: Optional[dict] = None) -> Dic
     # 归一为 preset —— 合成端拿到的永远是具体模式，不必认识 auto。
     if _mode == "auto":
         _mode = "preset"
+    # seed / temperature 是数值字段：非法值（非数字字符串等）必须在入口转成可读的
+    # TTSError（路由层据此回 400），而不是让 int/float 裸抛 ValueError 变成 500
+    # （P1：/api/tts/voice-map 与 /api/tts/preview 只 catch TTSError）。
+    try:
+        _seed = int(raw.get("seed") if raw.get("seed") is not None
+                    else (base.get("seed") or 0))
+    except (TypeError, ValueError):
+        raise TTSError(f"seed 必须是整数，收到非法值：{_repr_param(raw.get('seed'))}")
+    try:
+        _temperature = float(raw.get("temperature") or base.get("temperature")
+                             or TTS_DEFAULT_PARAMS["temperature"])
+    except (TypeError, ValueError):
+        raise TTSError(f"temperature 必须是数字，收到非法值：{_repr_param(raw.get('temperature'))}")
+
     voice = {
         "mode": _mode,
         "speaker": raw.get("speaker") or base.get("speaker") or SPEAKER_KEYS[0],
         "instruct": raw.get("instruct", base.get("instruct", "")) or "",
-        "seed": int(raw.get("seed") if raw.get("seed") is not None else (base.get("seed") or 0)),
+        "seed": _seed,
         "model_choice": raw.get("model_choice") or base.get("model_choice") or TTS_DEFAULT_PARAMS["model_choice"],
         "language": raw.get("language") or base.get("language") or TTS_DEFAULT_PARAMS["language"],
-        "temperature": float(raw.get("temperature") or base.get("temperature") or TTS_DEFAULT_PARAMS["temperature"]),
+        "temperature": _temperature,
     }
     # clone 两个字段：即使当前不是 clone 模式也原样带着（切模式时不丢配置）
     _ref_audio = raw.get("ref_audio", base.get("ref_audio", "")) or ""

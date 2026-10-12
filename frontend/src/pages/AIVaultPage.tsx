@@ -316,7 +316,10 @@ export function AIVaultPage() {
     const state = config[module];
     const baseUrl = state.base_url.trim();
     const apiKey = state.api_key.trim();
-    // 已保存密钥且未回显明文 → 只传 module，后端复用保存的 base_url + 解密 key（明文不下发前端）
+    // 已保存密钥且未回显明文 → 复用保存的解密 key（明文不下发前端）。
+    // ⚠️ 修复 t8 P1：只有 base_url 也为空时才纯传 {module}（后端取保存的 base_url + key）；
+    //    用户手填/改了 base_url 时必须把当前 base_url 显式传下去（{module, base_url}，
+    //    后端对 module 只补缺 api_key）——否则会拿到「旧 base_url」的模型清单。
     const reuseSaved = state.has_api_key && !apiKey;
     if (!reuseSaved && (!baseUrl || !apiKey)) {
       showMessage('error', t('vault.detectNeedKey'));
@@ -325,7 +328,9 @@ export function AIVaultPage() {
     setModelsState(prev => ({ ...prev, [module]: { ...EMPTY_MODELS, loading: true } }));
     try {
       const res = await aiConfigApi.detectModels(
-        reuseSaved ? { module } : { base_url: baseUrl, api_key: apiKey }
+        reuseSaved
+          ? (baseUrl ? { module, base_url: baseUrl } : { module })
+          : { base_url: baseUrl, api_key: apiKey }
       );
       if (res.success && Array.isArray(res.models)) {
         setModelsState(prev => ({ ...prev, [module]: {
@@ -354,7 +359,9 @@ export function AIVaultPage() {
   const handleDetectFbModels = async () => {
     const baseUrl = (fbDraft.base_url || '').trim();
     const apiKey = (fbDraft.api_key || '').trim();
-    if (!baseUrl || !apiKey) {
+    // ⚠️ 编辑已保存备用时 api_key 回填的是脱敏值（形如 sk-1****abcd），
+    //    不能拿去请求（否则必然 401）；脱敏值统一拦下，提示重新填写。
+    if (!baseUrl || !apiKey || apiKey.includes('*')) {
       showMessage('error', t('vault.detectNeedKey'));
       return;
     }

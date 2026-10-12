@@ -877,6 +877,38 @@ def chapters_and_text(novel_meta: dict) -> tuple:
     return items, text
 
 
+def split_novel(text: str, chunk_chars: int = None) -> list:
+    """把小说全文按章节边界聚合分块（与 novel_to_script.build_chunks 同口径）。
+
+    供**只读**消费方（如 book_outline 的内容指纹 / 分块预估）复用，避免各消费方
+    各写一套分块逻辑（单一来源）。
+
+    返回分块列表 ``[{'index','text','char_count','from_chapter','to_chapter',...}]``；
+    正文为空 / 分块失败时返回 ``[]`` 并落 warning（**绝不抛异常**、不阻断调用方），
+    但失败必须可见。
+
+    背景（2026-10-12 t7 审查修复）：routes/projects.py 曾调用
+    ``novel_parser.split_novel``，而本模块当时并无该函数 → 必然 AttributeError 被上层
+    ``except Exception`` 吞掉 → 大纲优先的主角/反派识别与封面参考**永远静默降级**。
+    补上本函数后调用方不再炸，且本函数内部的任何失败都会写 warning 而非静默返回。
+    """
+    if not text or not text.strip():
+        logger.warning("split_novel：正文为空，返回空分块列表")
+        return []
+    try:
+        # 延迟导入：novel_to_script 是下游重模块（本模块为叶子），函数内导入避免
+        # 模块级循环；分块口径的唯一来源是 build_chunks，不在这里另写一套。
+        from novel_to_script import build_chunks
+        chapters = split_chapters(text)
+        kw = {}
+        if chunk_chars:
+            kw["chunk_chars"] = int(chunk_chars)
+        return build_chunks(text, chapters, **kw)
+    except Exception as e:  # noqa: BLE001 只读分块失败不阻断，但必须可见
+        logger.warning("split_novel：全文分块失败（降级为空列表）：%s", e)
+        return []
+
+
 def read_novel_text(novels_dir: str, novel_id: str, max_chars: int = None) -> str:
     meta = get_novel(novels_dir, novel_id)
     text_path = os.path.join(novels_dir, meta.get("text_file") or f"{novel_id}.txt")

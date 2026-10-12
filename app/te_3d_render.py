@@ -469,7 +469,7 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
            f"?p={payload_name}&post={CAPTURE_PATH}")
     env = dict(os.environ)
     env.setdefault("MJSCXT_TE3D_RENDER", "1")
-    cmd = [
+    _cmd_base = [
         _browser_path,                      # type: ignore[list-item]
         "--headless=new",
         "--disable-gpu",
@@ -504,19 +504,22 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
         #   于是每镜白等 90s×2 后降级（整条 3D 构图基准链路长期失效）。
         #   改为**每次渲染一个独立临时 profile**：实测 1.2 秒完成、回传 390KB，
         #   比复用还稳（临时目录不保存任何状态，不存在锁残留）。
-        "--user-data-dir=" + _profile_dir,
-        url,
     ]
+    # ⚠️ --user-data-dir 与 url 不在此拼接（2026-10-12 t25 修复）：--user-data-dir 必须
+    #    指向 _attempt 内每次新建的临时 profile（mkdtemp 之后）。若在此拼接，_profile_dir
+    #    此刻仍是空串 / 上一轮已删路径 → 临时 profile 隔离失效、单实例锁残留回归。
 
     def _attempt(tag: str) -> Optional[bytes]:
         """跑一次浏览器渲染，返回 PNG 字节；失败返回 None（原因写日志）。"""
         global _browser_disabled, _profile_dir
         box = _CaptureInbox()
         srv.inbox = box
-        # 每次独立临时 profile（见 cmd 里的说明：复用固定 profile 会因单实例锁残留而静默失败）
+        # 每次独立临时 profile（复用固定 profile 会因单实例锁残留而静默失败，见上方 _cmd_base 注释）
         _profile_dir = tempfile.mkdtemp(prefix="te3d_prof_")
+        # --user-data-dir 必须在 mkdtemp 之后拼接，指向本次临时目录（否则隔离失效）
+        _cmd = list(_cmd_base) + ["--user-data-dir=" + _profile_dir, url]
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+            proc = subprocess.Popen(_cmd, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL, env=env)
         except OSError as e:
             logger.warning("[3D站位图] 浏览器启动失败（%s）：%s", tag, e)

@@ -1473,8 +1473,15 @@ def _fallback_shots_for_chunk(chunk: dict, shots_target: int = 1, bible: dict = 
 # ===================== 组装 =====================
 
 def _norm_list(items, limit, keys):
+    """把模型返回的资产数组清洗成白名单字段的 dict 列表。
+
+    limit 为 None 时全量保留（不截断）——「资产不设数量上限」（2026-09-29 决策）。
+    """
+    rows = items or []
+    if limit is not None:
+        rows = rows[:limit]
     out = []
-    for it in (items or [])[:limit]:
+    for it in rows:
         if not isinstance(it, dict):
             continue
         row = {}
@@ -3937,15 +3944,19 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
                                  target_shots, events=trunc_events,
                                  continuity_ctx=continuity_ctx, cache_dir=cache_dir))
 
-    characters = _norm_list(bible.get("characters"), 8,
+    # 2026-10-12 t7 修复：去掉 8/3/8 硬截断 —— 「资产不设数量上限」在 build_bible /
+    # _fallback_bible 已贯彻（digest 与兜底聚合都不截断），唯独这里落盘前又把
+    # characters/items/scenes 分别砍到 8/3/8，超限条目静默丢弃（下游 _match_known_names
+    # 连带滤掉引用）。改为 limit=None 全量保留。
+    characters = _norm_list(bible.get("characters"), None,
                             ["name", "age", "gender", "identity", "appearance", "outfit", "personality",
                              "voice_style", "reference_prompt_zh", "reference_prompt_en"])
-    items = _norm_list(bible.get("items"), 3,
+    items = _norm_list(bible.get("items"), None,
                        ["name", "category", "appearance", "owner", "owner_photo",
                         "surface_text", "importance",
                         "reference_prompt_zh", "reference_prompt_en"])
     scenes = normalize_scenes_meta(_norm_list(
-        bible.get("scenes"), 8,
+        bible.get("scenes"), None,
         ["name", "location", "appearance", "scene_lighting", "int_ext", "time_of_day",
          # ⭐ 2026-10-07：场景「确切文字」字段（治场景告示/招牌乱码）。
          #    必须与其他字段同批登记 —— _norm_list 只保留白名单字段，漏登记会静默丢弃。
