@@ -30,6 +30,8 @@ import { describeError, sanitizeErrorMessage } from '@/utils/errorText';
 import AutonomousPanel from '@/components/AutonomousPanel';
 import QualityPanel from '@/components/QualityPanel';
 import TriagePanel from '@/components/TriagePanel';
+// t9：音频体检面板（扫描分类计数 + 无声镜号定位 + 频谱/波形弹窗 + 门禁处置）
+import AudioHealthPanel from '@/components/AudioHealthPanel';
 import ExportPanel from '@/components/ExportPanel';
 
 type WorkbenchTab = 'overview' | 'storyboard' | 'qc' | 'upscale' | 'audio' | 'output';
@@ -68,6 +70,17 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
   const [activeTab, setActiveTab] = useState<WorkbenchTab>('overview');
   // AI 总控默认展开为右侧常驻面板（不占标签页）；用户可收起，收起后右侧只剩一个竖条按钮
   const [chatOpen, setChatOpen] = useState(true);
+  /**
+   * t9：音频体检面板点「定位分镜」时带过来的镜号（含所属集）。
+   * 为什么提升到工作台：体检面板在 audio 标签内，而分镜卡片在 storyboard 标签内
+   * —— 跨标签定位必须由父层切标签 + 把镜号透传给分镜页，面板自己滚不到另一个标签的 DOM。
+   * 消费后（分镜页滚动+高亮完成）回调清空，避免每次 re-render 重复滚动。
+   */
+  const [shotFocus, setShotFocus] = useState<{ shotId: string; episodeNo: number | null } | null>(null);
+  const gotoShotInStoryboard = React.useCallback((shotId: string | number, episodeNo?: number) => {
+    setShotFocus({ shotId: String(shotId), episodeNo: episodeNo ?? null });
+    setActiveTab('storyboard');
+  }, []);
 
   // 资产单独抽成函数：生产启动后可在不整页刷新的情况下重新拉取（缺陷 D3）
   const reloadAssets = React.useCallback(async () => {
@@ -239,7 +252,10 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
             )}
             {activeTab === 'storyboard' && (
               <StoryboardHubTab projectKey={projectKey} novelId={project.novel_id}
-                                onGotoOutput={() => setActiveTab('output')} />
+                                onGotoOutput={() => setActiveTab('output')}
+                                focusShot={shotFocus?.shotId ?? null}
+                                focusEpisodeNo={shotFocus?.episodeNo ?? null}
+                                onFocusConsumed={() => setShotFocus(null)} />
             )}
             {activeTab === 'qc' && (
               <>
@@ -254,6 +270,13 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
             )}
             {activeTab === 'audio' && (
               <>
+                {/* 音频体检（t9）：扫描分类计数 + 无声镜号（可定位分镜）+ 频谱/波形 + 门禁处置 */}
+                <AudioHealthPanel
+                  project={projectKey}
+                  novelId={project.novel_id}
+                  onLocateShot={gotoShotInStoryboard}
+                />
+
                 <AudioTab projectKey={projectKey} />
               </>
             )}
@@ -3773,10 +3796,16 @@ function ShotPromptEditor({ shot, novelId, episodeNo, onSaved }: {
   );
 }
 
-function StoryboardHubTab({ projectKey, novelId, onGotoOutput }: {
+function StoryboardHubTab({ projectKey, novelId, onGotoOutput,
+  focusShot, focusEpisodeNo, onFocusConsumed }: {
   projectKey: string;
   novelId?: string;
   onGotoOutput?: () => void;
+  /** t9：音频体检面板带过来的镜号（要滚动+高亮的那一镜），消费后由 onFocusConsumed 清空 */
+  focusShot?: string | null;
+  /** t9：该镜所属集（跨集跳转时先切集再滚动，避免落到同号不同集的卡上） */
+  focusEpisodeNo?: number | null;
+  onFocusConsumed?: () => void;
 }) {
   const { t } = useApp();
   // 2026-10-06：子标签收敛——九宫格草案（后端已删）与「关键帧」尾帧入口都下线。
@@ -3799,6 +3828,13 @@ function StoryboardHubTab({ projectKey, novelId, onGotoOutput }: {
     }
   }, [episodes, selectedEpisode]);
 
+  // t9：体检面板点「定位分镜」时，若目标镜在别的集，先切到那一集再交给 StoryboardTab 滚动
+  useEffect(() => {
+    if (focusEpisodeNo == null) return;
+    if (!episodes.some((e) => e.episode_no === focusEpisodeNo)) return;
+    setSelectedEpisode((prev) => (prev === focusEpisodeNo ? prev : focusEpisodeNo));
+  }, [focusEpisodeNo, episodes]);
+
   return (
     <div className="space-y-5">
       {/* 集切换器：分镜产物按集隔离，必须先在集之间分流 */}
@@ -3808,7 +3844,14 @@ function StoryboardHubTab({ projectKey, novelId, onGotoOutput }: {
         onChange={setSelectedEpisode}
       />
 
-      <StoryboardTab projectKey={projectKey} episodeNo={selectedEpisode} onGotoOutput={onGotoOutput} />
+      <StoryboardTab
+        projectKey={projectKey}
+        episodeNo={selectedEpisode}
+        onGotoOutput={onGotoOutput}
+        focusShot={focusShot}
+        focusEpisodeNo={focusEpisodeNo}
+        onFocusConsumed={onFocusConsumed}
+      />
     </div>
   );
 }
@@ -3831,11 +3874,18 @@ const PROJECT_VIDEO_MODE_OPTIONS: { value: VideoMode; labelKey: string }[] = [
 // 批量重生成单次上限：与后端 /api/video/retry-shots-batch 的硬上限（≤12）一致
 const BATCH_RETRY_LIMIT = 12;
 
-function StoryboardTab({ projectKey, episodeNo, onGotoOutput }: {
+function StoryboardTab({ projectKey, episodeNo, onGotoOutput,
+  focusShot, focusEpisodeNo, onFocusConsumed }: {
   projectKey: string;
   episodeNo?: number | null;
   /** t27（F5）：返工使成片/超分失效时，「去成品验收重新合成」的一键跳转出口 */
   onGotoOutput?: () => void;
+  /** t9：要定位（滚动+高亮）的镜号；来自音频体检面板的「定位分镜」 */
+  focusShot?: string | null;
+  /** t9：该镜所属集：与当前集号不一致时先不滚（等集切换完成，避免落到同号不同集的卡上） */
+  focusEpisodeNo?: number | null;
+  /** t9：定位完成后回调（父层清空焦点，避免每次 re-render 重复滚动） */
+  onFocusConsumed?: () => void;
 }) {
   const { t } = useApp();
   const toast = useToast();
@@ -3895,6 +3945,25 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput }: {
   /** 正在放大的分镜图：正式图或生成中 scratch 图；null = 弹窗关闭。
    *  分镜缩略图原先没有任何点击交互（点了没反应），这里补上全屏放大查看。 */
   const [zoomImg, setZoomImg] = useState<{ src: string; seq: number; grid?: boolean } | null>(null);
+
+  // ---- t9：音频体检「定位分镜」的落地（滚动 + 高亮）----
+  /** 卡片列表容器：用 data-shot-id 在本容器内查找目标卡（不跨组件、不摸全局 DOM） */
+  const cardsRef = useRef<HTMLDivElement | null>(null);
+  /** 当前高亮的镜号（2.6s 后自动褪去）；null = 无高亮 */
+  const [focusHighlight, setFocusHighlight] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focusShot) return;
+    // 目标镜不在本集（跨集跳转刚切集、卡片还没刷新）→ 先不滚，等卡片到位
+    if (focusEpisodeNo != null && episodeNo != null && Number(focusEpisodeNo) !== Number(episodeNo)) return;
+    const sid = String(focusShot);
+    if (!cards.some((c: any) => String(c.shot_id) === sid)) return;   // 卡片未加载 → cards 更新后会再跑
+    const el = cardsRef.current?.querySelector('[data-shot-id="' + sid + '"]') as HTMLElement | null;
+    if (!el) return;
+    try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch { /* 老浏览器无此 API：仍高亮 */ }
+    setFocusHighlight(sid);
+    const timer = setTimeout(() => { setFocusHighlight(null); onFocusConsumed?.(); }, 2600);
+    return () => clearTimeout(timer);
+  }, [focusShot, focusEpisodeNo, episodeNo, cards, onFocusConsumed]);
 
   // ---- 分镜画布自动刷新（轮询）----
   /**
@@ -4471,7 +4540,7 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput }: {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      <div ref={cardsRef} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {cards.map((card: any, cardIndex: number) => {
           const sid = String(card.shot_id);
           const imgBusy = busy === `${card.shot_id}:image`;
@@ -4481,6 +4550,8 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput }: {
           return (
             <div
               key={card.seq}
+              // t9：音频体检「定位分镜」按此属性在本容器内查找目标卡（不依赖 DOM 顺序）
+              data-shot-id={sid}
               // 拖拽落点：只有「有拖拽在途」时才接管，避免把其它点击/选择行为搅乱
               onDragOver={(e) => {
                 if (dragSid && dragSid !== sid && !reorderBusy) {
@@ -4496,7 +4567,9 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput }: {
               onDragLeave={() => setDragOverSid((prev) => (prev === sid ? null : prev))}
               className={`bg-surface rounded-lg border p-4 flex flex-col transition-colors ${
                 dragOverSid === sid && dragSid && dragSid !== sid ? 'border-brand bg-surface-2' : 'border-line'
-              } ${dragSid === sid ? 'opacity-60' : ''}`}
+              } ${dragSid === sid ? 'opacity-60' : ''} ${
+                focusHighlight === sid ? 'ring-2 ring-brand ring-offset-2 ring-offset-canvas' : ''
+              }`}
             >
               <div className="flex items-center justify-between mb-2">
                 <label className="flex items-center gap-1.5 cursor-pointer">
