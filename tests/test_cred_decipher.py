@@ -46,7 +46,7 @@ class TestDecipherContract(unittest.TestCase):
 
     def test_public_view_mask_is_not_cipher(self):
         """脱敏回显不得出现 Fernet 前缀（泄露密文/界面乱码）。"""
-        for m in ('text', 'qc', 'chat'):
+        for m in ('text', 'qc'):  # t2 合并 text/chat 后 chat 模块已不存在（2026-10-12）
             v = ACD.public_view(m)
             masked = v.get('api_key_masked') or ''
             self.assertFalse(masked.startswith('gAAAAA'),
