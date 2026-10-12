@@ -769,11 +769,20 @@ def _video_retry_shot_impl():
                     "outputs_invalidated": list((_invalidated or {}).get("marked") or [])})
 
 
-def _ensure_voice_bank_refs(common: list, project_name: str, all_characters=None) -> None:
-    """确保每个公共角色在 voice_bank 里有参考音频（2026-10-03）：
-    遍历公共池的角色，若 voice_bank 里没有参考音频，用 TTS 自动生成一段短文本
-    并保存到 voice_bank，供后续 _h3_common_ref_audios 捡取。
-    任何异常只记日志、绝不阻断主流程。
+def _ensure_voice_bank_refs(common: list, project_name: str, all_characters=None,
+                            force: bool = False) -> None:
+    """确保每个角色的 voice_bank 参考音色存在，且**由人设派生**（2026-10-03 / t8 2026-10-13）。
+
+    遍历公共池 + 角色资产全集，若某角色没有参考音频，就用 TTS 合成一段并存进 voice_bank，
+    供后续 _h3_common_ref_audios 捡取（H3 主线的音色来源）。任何异常只记日志、绝不阻断主流程。
+
+    force：True = 已有参考音频也**重新合成**（人设修好后的「重做音色」入口）。
+           ⚠️ 来源=用户上传的参考音频**永不覆盖**（见 voice_bank.ref_origin）——
+              人设只在「没有参考音频」时负责造一个，不覆盖用户的选择。
+
+    人设来源与取值优先序见模块 voice_bank（全项目所有集；voice_map 显式 > 首次出场集 >
+    台词最多集 > 兜底拼装）。旧实现只读第 1 集剧本，导致 9 个角色里 5 个退化成同一个
+    预置嗓子（Ryan），即用户实测的「每个角色的声音音色都一样」。
     """
     # ⚠️ 放宽守卫（原为 `if not common:`）：存量调用方要么传非空 common、要么传非空 all_characters（恒传 char_idx），故零行为变更；放宽只为让 `tts_pre`
     #    能以 common=[] + all_characters=<char_idx> 调用（「每角色参考音色」口径）。
@@ -808,82 +817,76 @@ def _ensure_voice_bank_refs(common: list, project_name: str, all_characters=None
     #    personality/voice_style），让音色底稿真正由人设派生。
     #    ⚠️ 注意与 H3 的英文约束无关：那是「六段正文」的约束；TTS 的 instruct 是
     #       QwenTTS 的中文参数，中文人设（如「清亮少年音」）正是它要的输入。
-    _chars_profile = []
+    # ⭐⭐ 2026-10-13 根修（t8 · 用户实测「每个角色的声音音色都一样」）：
+    #    旧实现**只从第 1 集剧本**读人设（这里原先把集号硬编码成 1），而「要生成哪些角色」
+    #    来自角色资产全集：两者不重合时，多出来的角色拿不到 voice_style → mode=preset +
+    #    speaker=SPEAKER_KEYS[0]（Ryan）+ seed=0 + instruct 空 → **这些角色是同一个嗓子**。
+    #    实测：第 1 集剧本只列 4 个角色，9 个角色里 5 个退化成 Ryan（张铁柱/李天风/王二牛/
+    #    王虎/莫问天）；LTAS 长时谱余弦 preset 组内 0.9584 vs design 组 0.8152。
+    #    现在人设来源 = **全项目所有集**（voice_bank.persona_index），取值优先序：
+    #      voice_map 显式 > 首次出场集 > 台词最多集 > 由 gender/age/identity/personality 兜底拼装。
+    import tts_client
+    import voice_bank
     try:
-        _script_p = os.path.join(_ep_dir(os.path.join(SCRIPT_DIR, project_name), 1),
-                                 "第1集.json")
-        if not os.path.isfile(_script_p):
-            _script_p = os.path.join(SCRIPT_DIR, project_name, "第1集.json")
-        _sd = read_json_strict(_script_p, {}) or {}
-        for _c in (_sd.get("characters") or []):
-            if isinstance(_c, dict) and str(_c.get("name") or "").strip():
-                _chars_profile.append(_c)
+        _persona = voice_bank.persona_index(project_name)
     except Exception as _e:  # noqa: BLE001
-        _chars_profile = []
-    if _chars_profile:
-        logger.info("[VoiceBank] 从剧本读到 %d 个角色人设，将用于音色派生",
-                        len(_chars_profile))
+        logger.warning("[VoiceBank] 人设索引构建失败（按无人设处理）：%s", _e)
+        _persona = {}
+    _voice_map = None
     try:
-        import tts_client
-        _vm_input = _chars_profile or [{"name": n} for n in _char_names]
-        _voice_map = tts_client.default_voice_map(
-            _vm_input,
-            project=project_name,
-            episode=1)
-        _chars_vmap = _voice_map.get("characters", {})
+        _voice_map = tts_client.load_voice_map(
+            os.path.join(_dub_dir, "voice_map.json")) or None
     except Exception as _e:  # noqa: BLE001
-        logger.warning("[VoiceBank] 无法生成默认 voice_map，跳过：%s", _e)
-        return
+        logger.debug("[VoiceBank] voice_map 读取失败（按无显式配置处理）：%s", _e)
+    logger.info("[VoiceBank] 人设来源＝全项目剧本（%d 个角色，覆盖全部集）%s",
+                len(_persona), "；已读到 voice_map 显式配置" if _voice_map else "")
     # 逐角色合成
     import tempfile
     for _cn in _char_names:
+        # ⭐ 用户上传的参考音频**永不覆盖**：人设只在「没有参考音频」时负责造一个，
+        #    绝不顶掉用户自己选的声线（voice_bank.ref_origin 判定 auto / uploaded / none）。
+        _origin = "none"
         try:
-            _ref, _ = find_voice_bank_ref(_dub_dir, _cn)
-            if _ref and os.path.isfile(_ref):
-                continue  # 已有参考音频
-        except Exception:
-            pass
-        # 需要生成：参考文本与音色指令都尽量带**角色人设**（2026-10-10 修复）。
-        # ⚠️ 原实现的两个问题（用户反馈「人物音色要根据人物人设生成」）：
-        #   ① instruct 被**硬编码为空** —— 而 tts_client.default_voice_map 已经按
-        #      角色算好了音色底稿（voice_style → instruct，见 tts_client.py:522），
-        #      算完就被这里丢掉，于是参考音色只由 speaker 预设决定、与人设无关；
-        #   ② 参考文本是通用句「我是X，这是我的声音样本。」，不含任何人物信息，
-        #      TTS 拿不到「这人多大、什么身份、什么气质」的语境。
-        #   现在：有音色底稿就用 design 模式（instruct 生效），并在参考文本里带上
-        #   角色的身份/年龄/性格要点；都没有时保持原行为（preset + 通用句）。
-        _voice = _chars_vmap.get(_cn) or {}
-        _speaker = str(_voice.get("speaker") or tts_client.SPEAKER_KEYS[0])
-        _seed = int(_voice.get("seed") or 0)
-        _instruct = str(_voice.get("instruct") or "").strip()
-        # 人设要点：优先取角色索引里的 appearance/identity/age，取不到就跳过
-        _ci = {}
-        try:
-            if isinstance(all_characters, dict):
-                _ci = all_characters.get(_cn) or {}
-            if not _ci:
-                _ci = _chars_vmap.get(_cn) or {}
+            _origin = voice_bank.ref_origin(_dub_dir, _cn)
         except Exception:  # noqa: BLE001
-            _ci = {}
-        _bits = []
-        for _k, _prefix in (("identity", ""), ("age", ""), ("personality", ""),
-                            ("gender", "")):
-            _v = str((_ci or {}).get(_k) or "").strip()
-            if _v:
-                _bits.append(f"{_prefix}{_v}")
-        _desc = "，".join(_bits)
-        _ref_text = (f"我是{_cn}，{_desc}。这是我的声音样本。" if _desc
-                     else f"我是{_cn}，这是我的声音样本。")
-        # 组装 TTS voice dict：有音色底稿走 design（instruct 生效），否则维持 preset
+            _origin = "none"
+        if _origin == voice_bank.REF_SOURCE_UPLOADED:
+            logger.info("[VoiceBank] %s 的参考音色是用户上传的 → 保留不动"
+                        "（人设不覆盖用户选择）", _cn)
+            continue
+        if not force:
+            try:
+                _ref, _ = find_voice_bank_ref(_dub_dir, _cn)
+            except Exception:  # noqa: BLE001
+                _ref = ""
+            if _ref and os.path.isfile(_ref):
+                continue  # 已有（自动生成的）参考音频：幂等，不重复烧 GPU
+        # 人设条目：项目剧本优先；剧本里没有该角色（例如脚本缺失/测试替身）时，
+        # 回落角色资产索引里的字段，保证「有人设字段就一定用上」。
+        _p_entry = _persona.get(_cn)
+        if not _p_entry and isinstance(all_characters, dict):
+            _ci = all_characters.get(_cn) or {}
+            _fields = {_k: str((_ci or {}).get(_k) or "").strip()
+                       for _k in ("gender", "age", "identity", "personality",
+                                  "appearance")}
+            if any(_fields.values()):
+                _p_entry = dict({"name": _cn, "episodes": []}, **_fields)
+        _spec = voice_bank.build_voice_spec(project_name, _cn, voice_map=_voice_map,
+                                            entry=_p_entry)
+        # ⭐ 取值可追溯（captain 要求）：日志必须写明「取第 N 集说明 + 理由」
+        logger.info("[VoiceBank] %s", _spec["reason"])
+        _ref_text = _spec["ref_text"]
+        # 组装 TTS voice dict：有音色描述走 design（instruct 生效），否则回落 preset
         _tts_voice = {
-            "mode": "design" if _instruct else "preset",
-            "speaker": _speaker,
-            "seed": _seed,
-            "instruct": _instruct,
+            "mode": _spec["mode"],
+            "speaker": _spec["speaker"],
+            "seed": _spec["seed"],
+            "instruct": _spec["instruct"],
             "model_choice": "1.7B",
         }
         logger.info("[VoiceBank] %s 参考音色生成：mode=%s instruct=%s 文本=%s",
-                        _cn, _tts_voice["mode"], (_instruct[:40] or "(空)"), _ref_text[:50])
+                        _cn, _tts_voice["mode"], (_spec["instruct"][:40] or "(空)"),
+                        _ref_text[:70])
         # 输出路径：voice_bank 目录下的临时文件
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _tf:
             _tmp_path = _tf.name
@@ -896,6 +899,16 @@ def _ensure_voice_bank_refs(common: list, project_name: str, all_characters=None
                 continue
             # 存入 voice_bank（按 ref.wav 落盘，save_voice_bank_ref 会覆盖旧文件）
             _saved = save_voice_bank_ref(_dub_dir2, _cn, _tmp_path, ref_text=_ref_text)
+            # ⭐ t8：给自动生成的参考音频打标（source=auto + 用的是哪条人设/集号/seed）。
+            #    旧 ref.json 分不出「用户上传」与「本项目自动生成」，本次排查就被卡住；
+            #    打标后 voice_bank.ref_origin 一眼可判，用户上传的音频永不被覆盖。
+            try:
+                voice_bank.mark_auto_ref(
+                    _dub_dir2, _cn, mode=_spec["mode"], instruct=_spec["instruct"],
+                    seed=_spec["seed"], source_episode=_spec["source_episode"],
+                    voice_style_source=_spec["voice_style_source"], ref_text=_ref_text)
+            except Exception as _e2:  # noqa: BLE001
+                logger.warning("[VoiceBank] %s ref.json 打标失败（忽略）：%s", _cn, _e2)
             logger.info("[VoiceBank] %s 自动生成参考音色：%s", _cn, _saved)
         except Exception as _e:  # noqa: BLE001
             logger.warning("[VoiceBank] %s 自动生成参考音色异常（忽略）：%s", _cn, _e)

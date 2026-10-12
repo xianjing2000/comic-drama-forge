@@ -15,6 +15,7 @@ tts_bp = Blueprint('tts', __name__)
 import audio_qc
 import prompt_qc
 import tts_client
+import voice_bank          # t8：人设→音色 单一事实源（试听走人设）
 from config import TTS_DEFAULT_PARAMS
 from flask import abort
 from tts_client import QwenTTSClient, TTSError, VOICE_BANK_EXTS, check_environment as tts_env_check, clean_line_text, clone_available as tts_clone_available, default_voice_map, find_voice_bank_ref, list_voice_bank, list_voices as tts_list_voices, load_voice_map, normalize_voice, probe_audio as probe_audio_info, save_voice_bank_ref, save_voice_map, voice_bank_dir
@@ -153,10 +154,18 @@ def api_tts_voice_bank_delete():
                     "message": "已解绑参考音频" if removed else "该角色未绑定参考音频"})
 @tts_bp.route('/api/tts/voice-bank/preview', methods=['POST'])
 def api_tts_voice_bank_preview():
-    """用已绑定的参考音频试听克隆效果（合成一句样例文本）。
+    """试听某角色的音色（t8 2026-10-13：**走人设**，不再一律克隆旧样本）。
 
-    body = {project_name, character, text?}
-    刻意**不读** voice_map：直接以 clone 模式合成，让用户在决定保存前先听效果。
+    body = {project_name, character, text?, mode?}
+
+    ⚠️ 为什么改（用户实测「每个角色的声音音色都一样」）：旧实现无条件 clone 该角色的
+    ref.wav，而那些 ref.wav 本身就是「拿不到人设 → preset Ryan」生成的 —— 试听把
+    「没有音色」这件事原样放大给用户看。现在按 voice_bank.preview_spec 判定：
+      · 用户**上传**过参考音频 → clone 它（那就是用户要听的声线，不被人设顶掉）；
+      · 其余 → **design + 人设 instruct**（VoiceDesign），即 H3 将来会听到的声线
+        （ref.wav 本身就是用同一条 instruct 合成的）；
+      · 连人设都取不到 → preset（speaker 按名字稳定散开，不再人人 Ryan）。
+    mode 可显式覆盖（design / preset / clone）。
     """
     data = _body()
     project_name, err = _project_or_400((data.get('project_name') or '').strip())
@@ -167,15 +176,33 @@ def api_tts_voice_bank_preview():
         return jsonify({"success": False, "error": "缺少 character"}), 400
     text = clean_line_text(data.get('text') or '', character) or \
         f"我是{character}，今日便让你见识见识。"
-    if not tts_clone_available():
-        return jsonify({"success": False,
-                        "error": "当前 ComfyUI 未提供参考音频克隆节点"
-                                 "（FB_Qwen3TTSVoiceClone / LoadAudio）"}), 503
     dub_dir = _dub_project_dir(project_name)
-    ref, ref_text = find_voice_bank_ref(dub_dir, character)
-    if not ref:
-        return jsonify({"success": False,
-                        "error": f"角色「{character}」未绑定参考音频，请先上传"}), 400
+    # ⭐ t8：试听音色方案 = 人设（VoiceDesign）/ 用户上传（clone）/ 兜底（preset）
+    try:
+        plan = voice_bank.preview_spec(dub_dir, project_name, character)
+    except Exception as e:  # noqa: BLE001 - 解析失败不该让试听变 500
+        _app_logger().warning("试听音色方案解析失败（回落预置）：%s", e)
+        plan = {"mode": "preset", "speaker": "Ryan", "seed": 0, "instruct": "",
+                "ref_audio": "", "ref_text": "", "voice_style_source": "无",
+                "source_episode": None, "ref_origin": "none", "reason": ""}
+    _req_mode = str(data.get('mode') or '').strip()
+    if _req_mode in ("preset", "design", "clone"):
+        plan = dict(plan, mode=_req_mode)
+    if plan.get("mode") == "clone":
+        if not tts_clone_available():
+            return jsonify({"success": False,
+                            "error": "当前 ComfyUI 未提供参考音频克隆节点"
+                                     "（FB_Qwen3TTSVoiceClone / LoadAudio）"}), 503
+        if not plan.get("ref_audio"):
+            ref, ref_text = find_voice_bank_ref(dub_dir, character)
+            if not ref:
+                return jsonify({"success": False,
+                                "error": f"角色「{character}」未绑定参考音频，请先上传"}), 400
+            plan = dict(plan, ref_audio=ref,
+                        ref_text=ref_text or plan.get("ref_text") or "")
+    _app_logger().info("[试听] %s/%s → mode=%s instruct=%s（%s）", project_name, character,
+                       plan.get("mode"), (plan.get("instruct") or "(空)")[:40],
+                       plan.get("reason") or "")
     # ⭐ 2026-10-05 修复「试听 500」：
     # ① voice 带上 character —— synthesize_one 的批项此前恒为 character=None，
     #    教训库 / 台词清洗全部丢了角色维度；
@@ -184,13 +211,21 @@ def api_tts_voice_bank_preview():
     #    用户完全不知道发生了什么）。现在统一返回可读的 502/500 JSON。
     try:
         voice = normalize_voice({
-            "mode": "clone", "ref_audio": ref, "ref_text": ref_text,
-            "speaker": "Ryan", "seed": 0, "character": character,
+            "mode": plan.get("mode") or "preset",
+            "speaker": plan.get("speaker") or "Ryan",
+            "seed": plan.get("seed") or 0,
+            "instruct": plan.get("instruct") or "",
+            "ref_audio": plan.get("ref_audio") or "",
+            "ref_text": plan.get("ref_text") or "",
         })
+        # ⭐ 2026-10-13：normalize_voice 会**重建** dict、丢掉未知键 → character 必须补回，
+        #    否则 synthesize_one 的批项又是 character=None（教训库/台词清洗丢角色维度）。
+        voice["character"] = character
         preview_dir = os.path.join(dub_dir, "preview")
         os.makedirs(preview_dir, exist_ok=True)
         out_path = os.path.join(preview_dir,
-                                f"clone_{int(time.time())}_{tts_client.safe_name(character, 12)}.wav")
+                                f"{plan.get('mode') or 'preset'}_{int(time.time())}_"
+                                f"{tts_client.safe_name(character, 12)}.wav")
         client = QwenTTSClient(out_root=DUB_DIR, params=TTS_DEFAULT_PARAMS)
         rec = client.synthesize_one(text, voice, out_path)
     except TTSError as e:
@@ -204,7 +239,15 @@ def api_tts_voice_bank_preview():
     info = probe_audio_info(rec["out_path"])
     return jsonify({"success": True, "result": rec, "audio": info, "voice": voice,
                     "url": _dub_audio_url(project_name, rec["out_path"]),
-                    "text_used": text})
+                    "text_used": text,
+                    # t8 新增（向后兼容：只是多几个字段）——让界面能显示「这句是按谁的
+                    # 人设、哪一集说明、用什么模式合成的」，从此试听所见即成片所听。
+                    "voice_mode": voice.get("mode"),
+                    "instruct": plan.get("instruct") or "",
+                    "voice_style_source": plan.get("voice_style_source") or "",
+                    "source_episode": plan.get("source_episode"),
+                    "ref_origin": plan.get("ref_origin") or "",
+                    "preview_note": plan.get("reason") or ""})
 @tts_bp.route('/api/tts/preview', methods=['POST'])
 def api_tts_preview():
     """单句试听合成：指定 text + 音色（或角色），返回可播放音频与时长"""
@@ -247,7 +290,19 @@ def api_tts_preview():
     try:
         base = (voice_map.get("characters") or {}).get(char_name) if char_name else None
         if base is None and char_name:
-            base = default_voice_map([{"name": char_name}], project_name, 1)["characters"].get(char_name)
+            # ⭐ t8（2026-10-13）：**必须带人设** —— 原实现只传 [{"name": 角色}]，
+            #    而 default_voice_map 在「单人成组」时池位恒取第 0 位 → 所有男性角色恒
+            #    Ryan、所有女性恒 Serena，这本身就是「试听每个角色都一样」的成因之一。
+            #    现在按 voice_bank 的优先序取人设（voice_map 显式 > 首次出场集 >
+            #    台词最多集 > 兜底拼装），与人设/参考音色生成完全同源。
+            try:
+                _spec = voice_bank.build_voice_spec(project_name, char_name,
+                                                    voice_map=voice_map)
+                base = {"mode": _spec["mode"], "speaker": _spec["speaker"],
+                        "seed": _spec["seed"], "instruct": _spec["instruct"]}
+            except Exception as _e:  # noqa: BLE001 - 无人设时退回旧口径，不让试听挂掉
+                _app_logger().debug("单句试听人设解析失败（回落旧口径）：%s", _e)
+                base = default_voice_map([{"name": char_name}], project_name, 1)["characters"].get(char_name)
         voice = normalize_voice(data.get('voice'), base)
     except TTSError as e:
         return jsonify({"success": False, "error": str(e)}), 400
