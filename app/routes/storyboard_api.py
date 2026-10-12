@@ -144,7 +144,9 @@ def api_storyboard_canvas(project_name):
                                                 if str(s.get("shot_id")) in order else 10 ** 6))
     kf_dir = _ep_dir(os.path.join(KEYFRAMES_DIR, project), _cv_ep)
     # 生成中快照（整步落盘之前也能预览）；纯展示增强，失败即空表
-    scratch_map = _storyboard_scratch_map(project)
+    # P0（2026-10-12）：必须把**本集号**传给 scratch_map，否则第 2 集会扫到
+    # 第 1 集平铺目录里的 `shot_NN_tryK.png`，把第 1 集的图当成本集的「生成中」预览。
+    scratch_map = _storyboard_scratch_map(project, _cv_ep)
     cards = []
     for i, s in enumerate(ordered):
         sid = s.get("shot_id", i + 1)

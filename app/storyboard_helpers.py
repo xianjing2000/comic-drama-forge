@@ -119,6 +119,11 @@ class _PromptQCBlocked(RuntimeError):
     """
 
 _REF_CANVAS_CACHE: dict = {}
+#: 画幅统一产物 → 源图 的反查表（T3，2026-10-12）。
+#: 为什么必须记：统一产物的文件名是 base_<sha1前8>_WxH.png（只带源路径哈希），
+#: 从产物**加不回来**源路径；而 manifest 里要记的是「哪个道具的哪张图」这种稳定身份。
+#: 只在进程内累积（生成期一次跑完就用完），不落盘 —— 落盘的证据是 manifest 的 refs 身份串。
+_REF_CANVAS_ORIGIN: dict = {}
 
 
 _TE3D_RENDER_LOCK = threading.Lock()
@@ -131,7 +136,44 @@ _OPT_REASONING_MARKERS = (
 )
 
 
-def _storyboard_scratch_map(project):
+def _storyboard_scratch_ep(episode_no=None) -> int:
+    """分镜「生成中」暂存路径的集号（兜底口径与 shared_project._ep_dir 一致）。"""
+    try:
+        ep = int(episode_no or 1)
+    except (TypeError, ValueError):
+        ep = 1
+    return ep if ep > 1 else 1
+
+
+def _storyboard_scratch_dir(project, episode_no=None) -> str:
+    """分镜「生成中」暂存目录（**按集隔离**：第 1 集平铺，第 2 集起 `epNN/`）。
+
+    ⚠️ 2026-10-12 P0 修复（用户实测报告）：原实现固定
+    `QC_DIR/<项目>/storyboard_scratch` —— **路径不带集号**，于是第 1 集生成过程中
+    写进去的 `shot_NN_tryK.png` 会被切到第 2 集的画布扫到，前端把第 1 集的图
+    当作「第 2 集第 N 镜 生成中」的预览（切集后图串集）。
+
+    口径与正式产物完全一致（见 `shared_project._ep_dir`）：第 1 集平铺以兼容旧数据，
+    第 2 集起 `epNN/`。
+
+    ⭐ 写入侧与读取侧**必须**共用本函数：只改一侧会让新路径永远为空
+    （写入仍在平铺、读取已指向 `epNN/`）。
+    """
+    return _ep_dir(os.path.join(QC_DIR, project, "storyboard_scratch"), episode_no)
+
+
+def _storyboard_scratch_sub(episode_no=None) -> str:
+    """暂存图 URL 的集前缀：第 1 集空串（兼容旧前端与旧数据），第 2 集起 `epNN/`。
+
+    拼进 `/api/storyboards/scratch/<项目>/<前缀><文件名>`。该路由（routes/storyboards_api.py）
+    的 filename 是 `<path:>` 转换器，天然接受 `epNN/shot_NN_tryK.png` 这类子路径，
+    与 base 目录（`.../storyboard_scratch`）拼接后正好命中集级子目录。
+    """
+    ep = _storyboard_scratch_ep(episode_no)
+    return f"ep{ep:02d}/" if ep > 1 else ""
+
+
+def _storyboard_scratch_map(project, episode_no=None):
     """扫「分镜生成中」的中间产物 → {shot_seq: {"url", "mtime"}}。
 
     ⭐ 为什么需要它（2026-10-02）：
@@ -140,17 +182,22 @@ def _storyboard_scratch_map(project):
         而生成过程本身要 2~3 分钟/镜，整步十几分钟，期间画布**一张图都取不到**，
         用户看到的是「跑着但什么都没有」，误判为卡死或前端不刷新。
 
-    `storyboard_scratch/` 是步骤进行中每镜的落盘位置（`shot_NN_tryK.png`，见
+    `storyboard_scratch/[epNN/]` 是步骤进行中每镜的落盘位置（`shot_NN_tryK.png`，见
     下方生成侧 `scratch_png`），这里把它作为**只读的进度快照**暴露给画布，
     仅用于「生成中」预览，**不改变** `storyboard.exists/url` 的既有语义
     （那仍严格代表「已落盘正式产物」）。取最新 try（文件名尾部序号最大）。
 
+    ⚠️ **集隔离（2026-10-12 P0）**：只扫**本集**的暂存目录（`episode_no` 决定；
+    第 1 集平铺、第 2 集起 `epNN/`）。本集目录不存在就返回空表，
+    **绝不回落**到第 1 集的平铺目录 —— 那正是「第 2 集显示第 1 集分镜图」的根因。
+
     失败一律返回空 dict：这是纯展示增强，绝不能让画布接口 500。
     """
     out = {}
-    scratch_dir = os.path.join(QC_DIR, project, "storyboard_scratch")
+    scratch_dir = _storyboard_scratch_dir(project, episode_no)
     if not os.path.isdir(scratch_dir):
         return out
+    _sub = _storyboard_scratch_sub(episode_no)
     try:
         for fn in os.listdir(scratch_dir):
             m = re.match(r"^shot_(\d+)_try(\d+)\.png$", fn)
@@ -166,7 +213,7 @@ def _storyboard_scratch_map(project):
             if cur is None or attempt > cur["_attempt"]:
                 out[seq] = {
                     "_attempt": attempt,
-                    "url": f"/api/storyboards/scratch/{project}/{fn}",
+                    "url": f"/api/storyboards/scratch/{project}/{_sub}{fn}",
                     "mtime": mtime,
                 }
     except OSError:
@@ -272,7 +319,9 @@ def _storyboard_retry_shot_impl():
     dst = os.path.join(dst_dir, f"shot_{seq:02d}.png")
     verdict = None
     gate = None
-    scratch_dir = os.path.join(QC_DIR, project, "storyboard_scratch")
+    # P0（2026-10-12）：暂存目录**按集隔离**，与画布读取侧共用同一口径，
+    # 否则单镜重跑的图会落到平铺目录、被别的集的画布扫到。
+    scratch_dir = _storyboard_scratch_dir(project, _ep)
     os.makedirs(scratch_dir, exist_ok=True)
     scratch = os.path.join(scratch_dir, f"shot_{seq:02d}_retry.png")
     # G8②：消费 ComfyUI output 源（与主 worker 的 move 语义对齐），不留 output 残留
@@ -365,11 +414,16 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
         manifest = read_json_strict(mpath, {})
     items = [s for s in (manifest.get("shots") or []) if isinstance(s, dict)]
     target = next((s for s in items if _shot_num_key(s.get("shot_id")) == _shot_num_key(shot_id)), None)
+    _ref_ids, _ref_paths = manifest_ref_maps(refs, project)
     entry = {
         "shot_id": shot_id, "success": True,
         "file": dst, "url": f"/api/storyboards/file/{_url_prefix}shot_{seq:02d}.png",
         "prompt": prompt, "ref_count": len(refs),
-        "refs": {r[0]: os.path.basename(os.path.dirname(r[2])) for r in refs},
+        # T3：与批量 worker 同口径 —— 记**资产身份串**（items/<项目>/<道具>/base.png）而不是
+        # 统一画幅目录名。单镜重跑与批量重跑写的是同一个 manifest，两处口径必须一致，
+        # 否则「这条镜头到底用了哪张道具图」会因为走哪条路径而不同。
+        "refs": _ref_ids,
+        "ref_paths": _ref_paths,
         "regenerated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "regenerated": "single_shot_retry",
     }
@@ -498,6 +552,7 @@ def _unify_ref_canvas(refs: list, size, project_name: str = "") -> list:
             cached = _REF_CANVAS_CACHE.get(key)
             if cached and os.path.isfile(cached):
                 newp = cached
+                _REF_CANVAS_ORIGIN[os.path.normcase(os.path.abspath(cached))] = os.path.abspath(local)
             else:
                 import hashlib
                 import tempfile
@@ -525,6 +580,8 @@ def _unify_ref_canvas(refs: list, size, project_name: str = "") -> list:
                         pass
                     raise
                 _REF_CANVAS_CACHE[key] = _dst
+                # T3：记下「产物 → 源图」，供 manifest 身份串与道具固定参考图核对使用
+                _REF_CANVAS_ORIGIN[os.path.normcase(os.path.abspath(_dst))] = os.path.abspath(local)
                 newp = _dst
             if newp != path:
                 changed += 1
@@ -537,6 +594,466 @@ def _unify_ref_canvas(refs: list, size, project_name: str = "") -> list:
                     tgt[0], tgt[1], changed, len(refs))
     return unified
 
+
+# ===================== 道具固定参考图（读侧） + 异常物件过渡镜（T3，2026-10-12） =====================
+#
+# 两件事都在「分镜出图之前」这一步收口：
+#   ① 道具固定参考图：把本镜道具槽位的图**重指到 asset_worker 钉住的那张固定参考图**
+#      （resolve_item_reference），并把「资产身份串」写进 manifest —— 于是「第 12 镜与
+#      第 26 镜用的是同一张员工卡」这件事可以被**直接核对**，不必再反查哈希。
+#      写侧（pin）在 asset_worker；这里只做读侧对齐，不改 H3 工作流槽位协议（非目标）。
+#   ② 异常物件过渡镜：用户反馈「渗血洞缺过渡镜头」——异常物件（血洞/渗血这类）
+#      在某镜里**凭空出现**。这里给出一套确定性判定：在异常首次出现的镜头序列里
+#      指明**由哪一个 shot_id 承担过渡作用**（前镜铺垫 / 本镜自身运镜 / 需要显式过渡），
+#      需要显式过渡时把「过渡」写进本镜提示词与 manifest 记录。
+#
+# ⚠️ 为什么**不**新增一个镜头：分镜序号 _shot_seq 是**位置下标**，落盘名 shot_NN.png
+#    也由它决定（本文件 _storyboard_worker）。在镜表中段插一镜会让其后所有截图号整体
+#    位移 —— 已入库的 shot_NN.png 会与新镜号错配，正在跑的集断点续跑会静默拿错图。
+#    所以这里只做「指明 + 写进提示词/manifest」，把结构性插入留给剧本层
+#    （plan_transition_shot 返回的 insert_shot 结构可直接交给剧本层使用）。
+
+#: 异常物件关键词（首现即需要过渡）。
+#:
+#: ⚠️ t3 的原表只有「渗血洞/血洞/渗血/血孔/血痕/渗血孔/血洞孔」—— 那是**用户口述的视觉
+#: 描述**，实测在两个真实项目剧本里命中 **0 处**，所以「渗血洞缺过渡」这个能力一直是空
+#: 操作。剧本里的真实用词是「小洞」（用户看到的画面＝渗血的洞，剧本写的是纸面上的小洞）。
+#: t16 按真实用词补表，并把「哪些词被拒绝、为什么」一并钉在这里（见 REJECTS）。
+TRANSITION_ANOMALY_KEYWORDS = (
+    # —— 视觉族（用户反馈口径；语义强、误伤面窄，保留）
+    "渗血洞", "血洞", "渗血", "血孔", "血痕", "渗血孔", "血洞孔",
+    # —— 剧本真实用词族（t16 补：实测命中数见 NOTES）
+    "小洞", "破洞", "孔洞",
+)
+
+#: 每个关键词的**来源与登记理由**（与道具别名表同构：显式登记，禁止自动收词）。
+#: hits = 在两项目真实剧本（进境_整本小说 第1集 / 逆天系统_全书 第1、2集）里的实测命中数。
+TRANSITION_ANOMALY_KEYWORD_NOTES = {
+    "渗血洞": {"hits": 0, "source": "用户 2026-10-12 成片质检报告原文用词",
+               "reason": "用户口述的视觉描述；剧本/小说原文 0 命中，保留以便日后续写命中。"},
+    "血洞": {"hits": 0, "source": "同上（视觉族）", "reason": "视觉族同义扩展。"},
+    "渗血": {"hits": 0, "source": "同上（视觉族）", "reason": "视觉族同义扩展。"},
+    "血孔": {"hits": 0, "source": "同上（视觉族）", "reason": "视觉族同义扩展（「孔」与「洞」同族）。"},
+    "血痕": {"hits": 0, "source": "同上（视觉族）", "reason": "视觉族同义扩展。"},
+    "渗血孔": {"hits": 0, "source": "同上（视觉族）", "reason": "视觉族同义扩展。"},
+    "血洞孔": {"hits": 0, "source": "同上（视觉族）", "reason": "视觉族同义扩展。"},
+    "小洞": {"hits": 7,
+             "source": "output/scripts/进境_整本小说/第1集.json 全文 7 处；原著 novels/20261010_184008_8d5152.txt「最后一笔把纸戳出了一个小洞」",
+             "reason": "剧本实际用词。命中镜 shot#25/26（守则纸面被红笔戳出的小洞）—— 即用户所说的「渗血洞」。"},
+    "破洞": {"hits": 0, "source": "同族补词",
+             "reason": "与「小洞」同族的明确开口用词；两项目现行剧本 0 命中，不产生误命中。"},
+    "孔洞": {"hits": 0, "source": "同族补词",
+             "reason": "与「小洞」同族的明确开口用词；两项目现行剧本 0 命中，不产生误命中。"},
+}
+
+#: **明确不收**的词（含实测误命中证据）—— 收了就会误伤，改词表前先看这里。
+TRANSITION_ANOMALY_KEYWORD_REJECTS = {
+    "洞": "单字太泛：真实剧本里会命中 shot#19「猫眼黑洞洞」、shot#53「门洞」，"
+          "以及逆天系统_全书的「洞穴」（修炼场所）/「洞察力」/「漏洞」（抽象词）。",
+    "黑洞": "会被 shot#19「猫眼黑洞洞」命中 —— 猫眼不是异常开口。",
+    "门洞": "shot#53「画面右侧原本漆黑的门洞已经不见」：门洞是建筑构件，且该异常属于「门消失」，"
+            "不是渗血洞类首现，混进来会让过渡要求挂错镜。",
+    "洞口": "会与「门洞」等正常开口相邻命中，语义不纯。",
+    "洞穴": "逆天系统_全书里「洞穴」＝修炼/传承场所（正常场景），命中即误判。",
+    "漏洞": "抽象词（守则漏洞 / 系统漏洞），与画面异常无关。",
+}
+
+
+def audit_transition_keywords(shots, keywords=None):
+    """关键词命中**反向检查**（给验收/排查用：列出哪些镜头会被哪些词命中）。
+
+    返回 {"keywords", "hits", "rejects", "reject_hits"}：
+      \u00b7 hits         —— 用当前（或给定）关键词表命中的镜号 + 命中词 + 上下文摘录；
+      \u00b7 reject_hits  —— 用**被拒绝的词**试跑，证明它们确实会误命中（所以不收）。
+    只读，不判定、不改镜头。
+    """
+    kws = tuple(keywords or TRANSITION_ANOMALY_KEYWORDS)
+    rej = tuple(TRANSITION_ANOMALY_KEYWORD_REJECTS)
+    hits, reject_hits = [], []
+    for shot in (shots or []):
+        if not isinstance(shot, dict):
+            continue
+        text = _shot_text(shot)
+        if not text:
+            continue
+        for kw in kws:
+            if kw in text:
+                pos = text.find(kw)
+                hits.append({"shot_id": shot.get("shot_id"), "keyword": kw,
+                             "excerpt": text[max(0, pos - 24):pos + len(kw) + 24]})
+                break
+        for kw in rej:
+            if kw in text:
+                pos = text.find(kw)
+                reject_hits.append({"shot_id": shot.get("shot_id"), "keyword": kw,
+                                    "excerpt": text[max(0, pos - 24):pos + len(kw) + 24]})
+                break
+    return {"keywords": list(kws), "hits": hits,
+            "rejects": dict((k, TRANSITION_ANOMALY_KEYWORD_REJECTS[k]) for k in rej),
+            "reject_hits": reject_hits}
+
+#: 过渡/铺垫措辞：命中即说明该镜**本身**承担了「把观众引到异常出现处」的作用
+TRANSITION_SETUP_MARKERS = (
+    "推", "推入", "推进", "推近", "拉", "拉远", "摇", "移", "跟随", "跟拍", "环绕",
+    "升降", "俯", "仰", "扫过", "环视", "转场", "切换", "淡入", "渐显", "渐入",
+    "定格", "特写", "逼近", "靠近", "由远及近", "拉近",
+)
+
+#: ⚠️【有意设计 · 不要「修」】role="predecessor_setup"（以及 self_setup）返回
+#: needed=False / 不补镜，是**刻意如此**，不是漏做。改前请先读完：
+#:   ① 判为 predecessor_setup 意味着该异常**已有过渡承担者**（真实样本：shot#25 纸面
+#:      「小洞」首现，由 shot#24 的「镜头下推」铺垫承担过渡）。用户反馈的「渗血洞无过渡」，
+#:      其机制是 t3 词表在剧本里 0 命中导致**从未触发**——t16 补词后已能识别且有承担者，
+#:      问题已解决，不是「还缺一镜」。
+#:   ② 把 predecessor_setup 改成需补镜属**策略变更**，且会牵动分镜序号：_shot_seq 是
+#:      **位置下标**、落盘名 shot_NN.png 由它决定，插镜会让其后所有截图号整体位移，
+#:      已入库的 shot_NN.png 与新镜号错配、断点续跑静默拿错图（与本节开头 t3 的取舍同源）。
+#:   ③ 将来真要显式补镜：**开剧本层任务在 shots 数组里插**，不要在分镜层动序号。
+#:      build_transition_shot() 返回的 insert_shot 结构就是给剧本层用的。
+
+#: 策略表（dict 而非散落的模块常量：阈值必须成套看，也不会被 config_doctor 当成
+#: 「未登记的可配置常量」—— 它们是算法标定值，不是用户可调项）
+TRANSITION_SHOT_POLICY = {
+    "enabled": True,
+    "min_shot_chars": 6,        # 镜头文本太短不作判定（避免误判）
+    "max_targets_per_episode": 4,  # 一集最多处理 4 处异常首现（防提示词膨胀）
+}
+
+
+#: 统一产物 → 源图 的反查结果缓存（同名产物重复出现时零磁盘扫描）
+_REF_CANVAS_REVERSE_CACHE: dict = {}
+
+#: 统一产物命名：<stem>_<sha1(源图绝对路径)前8>_<W>x<H>.png（见 _unify_ref_canvas）
+_REF_CANVAS_NAME_RE = re.compile(r"__(?P<h>[0-9a-f]{8})__")
+
+def _ref_canvas_origin_by_scan(path: str, project_name: str) -> str:
+    """进程内映射缺失时的兜底：按产物名里的 sha1(源图绝对路径)[:8] 在项目资产里反查源图。
+
+    为什么需要：_REF_CANVAS_ORIGIN 是**进程内**的。重跑分镜（新进程）时旧产物还在
+    output/qc/<项目>/ref_canvas/ 下，只凭文件名（没有源路径，只有 8 位哈希）原本无法
+    还原身份；有了这个反查，跨进程/跨批次也能把 manifest 的资产身份写对。
+    代价可控：只对**未被进程内映射覆盖**的路径调用一次，结果进缓存；扫描范围限于本项目
+    的 items/characters/scenes 三个目录。
+    """
+    base = os.path.basename(str(path or ""))
+    m = _REF_CANVAS_NAME_RE.search(base)
+    if not m:
+        # 兼容 _unify_ref_canvas 的真实命名：base_<8位hex>_1664x928.png
+        m = re.search(r"_(?P<h>[0-9a-f]{8})_[0-9]+x[0-9]+[.]png$", base)
+    if not m:
+        return ""
+    want = m.group("h")
+    ck = (str(project_name or ""), want)
+    if ck in _REF_CANVAS_REVERSE_CACHE:
+        return _REF_CANVAS_REVERSE_CACHE[ck]
+    import hashlib
+    found = ""
+    for root in (ITEMS_DIR, CHARACTERS_DIR, SCENES_DIR):
+        proj_dir = os.path.join(root, str(project_name or ""))
+        if not os.path.isdir(proj_dir):
+            continue
+        for dirpath, _dn, fns in os.walk(proj_dir):
+            for fn in fns:
+                if os.path.splitext(fn)[1].lower() not in _ASSET_IMG_EXTS:
+                    continue
+                cand = os.path.join(dirpath, fn)
+                try:
+                    h = hashlib.sha1(os.path.abspath(cand).encode("utf-8")).hexdigest()[:8]
+                except Exception:  # noqa: BLE001
+                    continue
+                if h == want:
+                    found = os.path.abspath(cand)
+                    break
+            if found:
+                break
+        if found:
+            break
+    _REF_CANVAS_REVERSE_CACHE[ck] = found
+    return found
+
+
+def ref_source_path(path: str, project_name: str = "") -> str:
+    """参考图路径 → **源图**路径（画幅统一产物会反查回它的源资产图；未知则原样返回）。
+
+    反查顺序：① 本进程 _unify_ref_canvas 记下的映射（首选，零成本）；
+              ② 按产物名里的哈希在项目资产目录反查（跨进程/历史批次，带缓存）。
+    """
+    p = os.path.abspath(str(path or ""))
+    if not p:
+        return ""
+    hit = _REF_CANVAS_ORIGIN.get(os.path.normcase(p))
+    if hit:
+        return hit
+    return _ref_canvas_origin_by_scan(p, project_name) or p
+
+
+def asset_ref_identity(path: str, project_name: str = "") -> str:
+    """参考图路径 → **稳定资产身份串**（items/<项目>/<道具>/base.png）。
+
+    统一产物先反查源图再算身份；不是资产路径（身份网格 / 上一镜衔接 / 3D 基准图等）
+    回落旧口径「所属目录名」—— 旧口径对那几类本来就有意义，且保持 manifest 兼容。
+    """
+    src = ref_source_path(path, project_name)
+    try:
+        from asset_worker import item_ref_identity   # 延迟导入：asset_worker 顶层 import 本模块
+        ident = item_ref_identity(src, project_name)
+        if ident:
+            return ident
+    except Exception:  # noqa: BLE001 —— 身份解析失败绝不阻断分镜
+        pass
+    return os.path.basename(os.path.dirname(src)) if src else ""
+
+
+def pin_item_refs_in_refs(refs: list, project_name: str) -> tuple:
+    """把本镜**道具槽位**的参考图对齐到道具的固定参考图（读侧，fail-open）。
+
+    返回 (新 refs, 记录列表)。记录形如
+    {"label", "from", "to", "identity", "changed", "error"}，供 manifest / 日志核对。
+    为什么只动道具：角色有衣柜（换装是合法变化）、场景有九宫格多机位（同一场景多张图
+    是设计），道具才是「同一物件反复出现必须一模一样」的那一类。
+    """
+    out, notes = [], []
+    proj = str(project_name or "").strip()
+    for entry in (refs or []):
+        try:
+            kind, label, path = entry[0], entry[1], entry[2]
+        except (TypeError, IndexError, KeyError):
+            out.append(entry)
+            continue
+        ident = asset_ref_identity(path, proj)
+        if not ident.startswith("items/"):
+            out.append(entry)
+            continue
+        item_name = ident.split("/")[2] if len(ident.split("/")) > 2 else ""
+        note = {"label": label, "item": item_name, "from": path, "to": path,
+                "identity": ident, "changed": False, "error": ""}
+        try:
+            from asset_worker import resolve_item_reference   # 延迟导入（见上）
+            got = resolve_item_reference(proj, item_name)
+            newp = got.get("path") or ""
+            if newp and os.path.isfile(newp):
+                note["identity"] = got.get("identity") or ident
+                note["pinned"] = bool(got.get("pinned"))
+                note["source"] = got.get("source") or ""
+                if os.path.normcase(os.path.abspath(newp)) != os.path.normcase(os.path.abspath(str(path))):
+                    note["changed"] = True
+                    note["to"] = newp
+                out.append((kind, label, note["to"]))
+                notes.append(note)
+                continue
+            note["error"] = got.get("error") or "固定参考图不可用"
+        except Exception as e:  # noqa: BLE001
+            note["error"] = "%s: %s" % (type(e).__name__, e)
+        out.append(entry)
+        notes.append(note)
+    return out, notes
+
+
+def manifest_ref_maps(refs: list, project_name: str) -> tuple:
+    """refs → (身份映射 {标签: 资产身份串}, 路径映射 {标签: 源图绝对路径})。
+
+    身份映射写进 manifest 的 refs（**可比对、与绝对路径无关**）；路径映射写进
+    ref_paths（本地排查用）。两者都由**源图**算出 —— 统一画幅产物不会污染身份。
+    """
+    ids, paths = {}, {}
+    for entry in (refs or []):
+        try:
+            label, path = entry[1], entry[2]
+        except (TypeError, IndexError, KeyError):
+            continue
+        key = str(label)
+        paths[key] = ref_source_path(path, project_name)
+        ids[key] = asset_ref_identity(path, project_name)
+    return ids, paths
+
+
+def _shot_text(shot: dict) -> str:
+    """镜头可判定文本（描述 + 细节 + 音效 + 画面文字 + 字幕 + 台词）。"""
+    if not isinstance(shot, dict):
+        return ""
+    parts = []
+    for k in ("description", "visual_detail", "audio_cues", "surface_text", "caption_text",
+              "dialogue_text", "dialogue", "prompt_h3"):
+        v = shot.get(k)
+        if isinstance(v, (list, tuple)):
+            parts.extend(str(x) for x in v)
+        elif v:
+            parts.append(str(v))
+    for k in ("items_in_shot", "characters_in_shot"):
+        v = shot.get(k)
+        if isinstance(v, (list, tuple)):
+            parts.extend(str(x) for x in v)
+    return " ".join(parts)
+
+
+def _shot_subjects(shot: dict) -> set:
+    """镜头主体集合（道具名 + 出场角色名），用于判断相邻镜是否同一物件序列。"""
+    if not isinstance(shot, dict):
+        return set()
+    subs = set()
+    for k in ("items_in_shot", "characters_in_shot"):
+        v = shot.get(k)
+        if isinstance(v, (list, tuple)):
+            subs.update(str(x).strip() for x in v if str(x).strip())
+    return subs
+
+
+def _has_setup_marker(text: str) -> bool:
+    t = str(text or "")
+    return any(mk in t for mk in TRANSITION_SETUP_MARKERS)
+
+
+def build_transition_shot(target: dict, all_shots: list, keyword: str = "") -> dict:
+    """按异常首现镜派生一个**过渡镜**（结构性插入用；只构造，不写盘、不改序号）。
+
+    交给剧本层使用（本文件不做结构性插入，理由见本节开头）。字段与剧本 shot 同构，
+    且 shot_id 取 max+1 保证不与既有镜号冲突；dialogue 留空（不引入新配音）。
+    """
+    shots = [s for s in (all_shots or []) if isinstance(s, dict)]
+    ids = [int(s.get("shot_id")) for s in shots
+           if str(s.get("shot_id")).strip().lstrip("-").isdigit()]
+    new_id = (max(ids) + 1) if ids else 1
+    loc = str(target.get("location") or "")
+    subj = "、".join(sorted(_shot_subjects(target))[:2]) or "异常物件"
+    return {
+        "shot_id": new_id,
+        "duration": 2.5,
+        "camera": str(target.get("shot_type") or "近景") + "缓推",
+        "shot_type": target.get("shot_type") or "近景",
+        "camera_motion": "轻推",
+        "location": loc,
+        "scene_no": target.get("scene_no"),
+        "scene_heading": target.get("scene_heading") or "",
+        "description": (
+            "过渡镜（程序按异常首次出现自动补）：镜头从%s的环境起幅→缓慢推近到%s即将出现的位置，"
+            "画面里此刻**还没有**该异常物件（%s），光位与陈设交代清楚"
+            % (loc or "本场环境", subj, keyword or "异常物件")),
+        "visual_detail": "起幅留出环境信息，推近过程平稳，禁止提前出现异常物件本体。",
+        "dialogue": [],
+        "emotion": "压抑/不安",
+        "audio_cues": "环境底噪渐入。",
+        "beat": "过渡",
+        "transition_for": target.get("shot_id"),
+        "transition_role": "inserted_transition",
+        "transition_reason": "异常物件（关键词「%s」/ 主体：%s）首现前没有任何铺垫镜"
+                             % (keyword or "未定", subj),
+        "episode": target.get("episode"),
+    }
+
+
+def plan_transition_shot(shots: list, *, keywords=None, policy: dict = None) -> dict:
+    """判定「异常物件首现」是否需要过渡镜，并**指明承担过渡作用的 shot_id**。
+
+    返回 {"needed", "shot_id", "for_shot_id", "role", "reason", "directive", "targets"}：
+      · role="predecessor_setup" → 前一个镜头的运镜/铺垫已承担过渡作用 → 指它；
+      · role="self_setup"        → 异常首现镜**自身**的运镜承担过渡作用 → 指它；
+      · role="needs_explicit_transition" → 序列里没有任何过渡承担者：
+            该镜提示词会被注入显式过渡要求，manifest 记录该 shot_id 承担过渡
+            （结构性补镜交给剧本层，见 build_transition_shot）。
+    targets：全部异常首现镜的判定明细（便于一次看全）。
+
+    ⚠️ predecessor_setup / self_setup 时 needed=False **不是漏做**：该异常已有过渡承担者，
+    无需补镜（真实样本：shot#25 纸面「小洞」首现 → 由 shot#24 下推铺垫承担）。
+    分镜序号是位置下标、落盘名由它决定，在分镜层插镜会让已入库产物错配；
+    将来要显式补镜请走**剧本层**在 shots 数组里插（详见 TRANSITION_SHOT_POLICY 上方注释）。
+    """
+    pol = dict(TRANSITION_SHOT_POLICY)
+    pol.update(policy or {})
+    kws = tuple(keywords or pol.get("keywords") or TRANSITION_ANOMALY_KEYWORDS)
+    shot_list = [s for s in (shots or []) if isinstance(s, dict)]
+    out = {"needed": False, "shot_id": None, "for_shot_id": None, "role": "",
+           "reason": "", "directive": "", "targets": [], "keywords": list(kws),
+           "insert_shot": None, "enabled": bool(pol.get("enabled", True))}
+    if not out["enabled"] or not kws or not shot_list:
+        return out
+    max_targets = int(pol.get("max_targets_per_episode") or 4)
+    min_chars = int(pol.get("min_shot_chars") or 6)
+    hits = []
+    for idx, shot in enumerate(shot_list):
+        text = _shot_text(shot)
+        if len(text) < min_chars:
+            continue
+        hit = next((kw for kw in kws if kw in text), "")
+        if not hit:
+            continue
+        if hits and idx - hits[-1]["index"] <= 1:
+            continue          # 与上一次命中相邻 → 同一段序列，只认首现
+        hits.append({"index": idx, "shot": shot, "keyword": hit})
+    for h in hits[:max_targets]:
+        idx, shot = h["index"], h["shot"]
+        sid = shot.get("shot_id")
+        prev = shot_list[idx - 1] if idx > 0 else None
+        detail = {"shot_id": sid, "keyword": h["keyword"], "role": "", "reason": "",
+                  "predecessor": prev.get("shot_id") if isinstance(prev, dict) else None,
+                  "directive": ""}
+        _prev_loc = str(prev.get("location") or "").strip() if isinstance(prev, dict) else ""
+        _cur_loc = str(shot.get("location") or "").strip()
+        _same_subject = bool(isinstance(prev, dict) and (_shot_subjects(prev) & _shot_subjects(shot)))
+        # 「同一序列」判据：主体（道具/角色）有交集，或**双方都写明**且地点相同。
+        # ⚠️ 两侧地点都为空**不算**同地点 —— 那是「没写」而不是「相同」，据此认定
+        #    前镜为过渡承担者会把不相干的镜头算进同一序列（本地旧版剧本常见）。
+        _same_place = bool(_prev_loc and _cur_loc and _prev_loc == _cur_loc)
+        if isinstance(prev, dict) and _has_setup_marker(_shot_text(prev)) \
+                and (_same_subject or _same_place):
+            detail.update({"role": "predecessor_setup",
+                           "reason": "前镜 #%s 的运镜/铺垫已把观众引到异常出现处" % prev.get("shot_id"),
+                           "transition_shot_id": prev.get("shot_id")})
+        elif _has_setup_marker(_shot_text(shot)):
+            detail.update({"role": "self_setup",
+                           "reason": "异常首现镜 #%s 自身运镜承担了过渡（%s）"
+                                     % (sid, h["keyword"]),
+                           "transition_shot_id": sid})
+        else:
+            detail.update({"role": "needs_explicit_transition",
+                           "reason": "异常物件（%s）首现镜 #%s 前后都没有铺垫/运镜过渡"
+                                     % (h["keyword"], sid),
+                           "transition_shot_id": sid,
+                           "directive": (
+                               "【过渡要求·程序按异常首现自动追加】本镜是「%s」在成片中首次出现："
+                               "首格必须是过渡态（该物件尚未成形/尚未入画），由环境或前一个动作引入，"
+                               "严禁在首格直接跳到异常本体；末格才呈现它。"
+                               % h["keyword"]),
+                           "insert_shot": build_transition_shot(shot, shot_list, h["keyword"])})
+            out["needed"] = True
+        out["targets"].append(detail)
+        if out["shot_id"] is None or detail["role"] == "needs_explicit_transition":
+            out.update({"shot_id": detail.get("transition_shot_id"), "for_shot_id": sid,
+                        "role": detail["role"], "reason": detail["reason"],
+                        "directive": detail.get("directive", ""),
+                        "insert_shot": detail.get("insert_shot")})
+    return out
+
+
+def apply_transition_directive(shots: list, plan: dict) -> dict:
+    """把过渡要求写进**异常首现镜**（内存态；本函数不写盘、不新增镜头）。
+
+    写入字段（都只在需要时出现，便于下游/质检识别）：
+      shot["transition_note"]   当前镜承担的角色（predecessor_setup/self_setup/needs_explicit_transition）
+      shot["transition_for"]    为哪一镜的异常首现服务
+      shot["transition_shot_id"]承担过渡作用的 shot_id
+      shot["transition_directive"] 需要显式过渡时的提示词追加段
+    返回 {"annotated": [shot_id...]}。
+    """
+    out = {"annotated": []}
+    if not isinstance(plan, dict) or not plan.get("targets"):
+        return out
+    by_id = {}
+    for s in (shots or []):
+        if isinstance(s, dict):
+            by_id[str(s.get("shot_id"))] = s
+    for t in plan["targets"]:
+        carrier = by_id.get(str(t.get("transition_shot_id")))
+        if carrier is None:
+            continue
+        carrier["transition_shot_id"] = t.get("transition_shot_id")
+        carrier["transition_for"] = t.get("shot_id")
+        carrier["transition_note"] = t.get("role")
+        if t.get("directive"):
+            target = by_id.get(str(t.get("shot_id")))
+            if target is not None:
+                target["transition_directive"] = t["directive"]
+        out["annotated"].append(t.get("transition_shot_id"))
+    return out
 
 def _grid_plan_template_fingerprint() -> str:
     """规划模板的内容指纹（并入九宫格规划的缓存键）。
@@ -735,6 +1252,28 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         _sb_style_res["label"] or "未指定（沿用模板）", _sb_grid_mode)
         shots = [dict(s, style=(s.get("style") or _sb_style)) for s in (shots or [])
                  if isinstance(s, dict)]
+    # ---- T3（2026-10-12）：异常物件（用户口径里的「渗血洞」）过渡判定 ----
+    # 用户反馈「渗血洞缺过渡镜头」：异常物件在某镜里凭空出现。这里逐个「异常首现镜」
+    # 判定承接过渡的 shot_id（前镜铺垫 / 本镜运镜 / 需要显式过渡），需要显式过渡的
+    # 在本镜提示词里追加过渡要求，并把结论写进 manifest（可核对、可追溯）。
+    # fail-open：判定异常一律跳过（分镜生成不受影响）。
+    transition_plan = {"enabled": False, "targets": [], "needed": False, "error": ""}
+    try:
+        transition_plan = plan_transition_shot(shots)
+        _tx_ann = apply_transition_directive(shots, transition_plan)
+        if transition_plan.get("targets"):
+            for _t in transition_plan["targets"]:
+                logger.info("[过渡镜] 异常首现 shot=%s（关键词「%s」）→ 承担过渡的 shot=%s（%s）：%s",
+                                _t.get("shot_id"), _t.get("keyword"),
+                                _t.get("transition_shot_id"), _t.get("role"), _t.get("reason"))
+            transition_plan["annotated"] = _tx_ann.get("annotated") or []
+        else:
+            logger.info("[过渡镜] 本批未命中异常物件关键词（%s）→ 不做过渡判定",
+                            "、".join(transition_plan.get("keywords") or []))
+    except Exception as _tx_e:  # noqa: BLE001
+        transition_plan = {"enabled": False, "targets": [], "needed": False,
+                           "error": "%s: %s" % (type(_tx_e).__name__, _tx_e)}
+        logger.warning("[过渡镜] 过渡判定失败（跳过，不影响分镜生成）：%s", _tx_e)
     manifest_shots = []
     # 旧 manifest：断点续跑时给「被跳过的镜头」回填上一轮的质检/提示词信息，避免信息丢失
     _prev_by_key = {}
@@ -853,7 +1392,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
            "identity_grid", "blocking_ref"}
         """
         pack = {"seq": seq_p, "refs": [], "labels": [], "prompt": "", "orig_prompt": "",
-                "pf_item": {}, "pgate_item": {}, "blocked": False, "refs_empty": False,
+                "pf_item": {}, "pgate_item": {}, "item_ref_notes": [],
+                "blocked": False, "refs_empty": False,
                 "no_reference": False, "ref_error": "", "error": "",
                 "identity_grid": "", "blocking_ref": ""}
         # ⭐ 2026-10-07 逐阶段计时（只加日志、不改行为）。
@@ -864,6 +1404,19 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         _tprev = _t0
         _ph = {}
         refs = _allocate_storyboard_refs(shot_p, char_idx, item_idx, scene_idx, project_name)
+        # T3（2026-10-12）：道具槽位对齐到**固定参考图**（同一道具在任何镜头同一张图）。
+        # 放在画幅统一之前：先定「用哪张图」，再统一它的画幅 —— 顺序反了会让身份串
+        # 落在统一产物上（路径带哈希，换机器就变），manifest 无法比对。
+        refs, _ir_notes = pin_item_refs_in_refs(refs, project_name)
+        for _irn in _ir_notes:
+            if _irn.get("changed"):
+                logger.info("[道具固定参考图] shot=%s 标签=%s 重指：%s → %s（身份 %s）",
+                                shot_p.get("shot_id"), _irn.get("label"),
+                                os.path.basename(str(_irn.get("from"))),
+                                os.path.basename(str(_irn.get("to"))), _irn.get("identity"))
+            elif _irn.get("error"):
+                logger.warning("[道具固定参考图] shot=%s 标签=%s 对齐失败（沿用本镜原图）：%s",
+                                   shot_p.get("shot_id"), _irn.get("label"), _irn.get("error"))
         # 统一参考图画幅：分镜工作流无尺寸节点，输出画幅继承第一张参考图，
         # 不统一会让同集画幅在 16:9 / 1:1 间跳变（详见 _unify_ref_canvas）。
         refs = _unify_ref_canvas(refs, _sb_size, project_name)
@@ -1049,6 +1602,24 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             "storyboard", prompt, ctx=shot_p,
             style=(shot_p.get("style") or _sb_style), ref_count=len(refs),
             project_name=project_name, cfg=qc_cfg)   # G13：复用 worker 级配置
+        # T3（2026-10-12）：异常物件首现镜的**过渡要求**注入（程序追加，不是模型自由文本）。
+        # 放在预检之后：预检判的是构建器产出的提示词（口径不变）；追加后再走一次
+        # 结构闸门 _storyboard_prompt_structurally_ok —— 缺协议段就撤回追加，
+        # 绝不为了加一句话而送出结构不合格的提示词。
+        _td = str(shot_p.get("transition_directive") or "").strip()
+        if _td:
+            _td_cand = prompt.rstrip() + "\n" + _td
+            try:
+                _td_ok, _td_miss = _storyboard_prompt_structurally_ok(_td_cand, _sb_grid_mode)
+            except Exception:  # noqa: BLE001 —— 闸门自身异常按放行处理（与预检 fail-open 同口径）
+                _td_ok, _td_miss = True, []
+            if _td_ok:
+                prompt = _td_cand
+                logger.info("[过渡镜] shot=%s 已注入过渡要求（承担过渡的 shot=%s，异常首现镜自身）",
+                                shot_p.get("shot_id"), shot_p.get("transition_shot_id"))
+            else:
+                logger.warning("[过渡镜] shot=%s 过渡要求注入后缺协议段（%s）：撤回追加，保持原提示词",
+                                   shot_p.get("shot_id"), "、".join(_td_miss))
         _ph["提示词预检"] = time.perf_counter() - _tprev
         _ph_total = time.perf_counter() - _t0
         # ⭐ 逐阶段计时（2026-10-07）：定位「分镜为什么慢」。
@@ -1062,6 +1633,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             " ".join(f"{k}={v:.1f}s" for k, v in _ph.items()))
         pack.update({"refs": refs, "labels": labels, "prompt": prompt,
                      "orig_prompt": orig_prompt, "pf_item": _pf_item,
+                     "item_ref_notes": _ir_notes,
                      "pgate_item": _pgate_item,
                      "blocked": not bool(_pgate_item.get("accept")),
                      "identity_grid": _identity_grid_path,
@@ -1221,7 +1793,19 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     item["phase_secs"] = pack.get("phase_secs")   # ⭐ 前置段逐阶段耗时（观测用）
                     item["phase_secs_total"] = pack.get("phase_secs_total")
                     orig_prompt = pack["orig_prompt"]   # 教训库的稳定键：改写后的提示词不参与指纹
-                    item["refs"] = {r[0]: os.path.basename(os.path.dirname(r[2])) for r in refs}
+                    # T3（2026-10-12）：manifest 的 refs 从「所属目录名」改成**资产身份串**
+                    # （items/进境_整本小说/楼层安全守则/base.png）——旧口径下道具统一画幅后
+                    # 一律记成 "ref_canvas"，23 个道具镜全一个值，看不出用的是哪张图；
+                    # 身份串与绝对路径无关，可直接比对「#12 与 #26 是否同一张员工卡」。
+                    # ref_paths 另存源图绝对路径（本地排查用；统一产物已反查回源图）。
+                    _ref_ids, _ref_paths = manifest_ref_maps(refs, project_name)
+                    item["refs"] = _ref_ids
+                    item["ref_paths"] = _ref_paths
+                    item["item_ref_notes"] = pack.get("item_ref_notes") or []
+                    for _lab, _ident in _ref_ids.items():
+                        if str(_ident).startswith("items/"):
+                            logger.info("[道具参考图] shot=%s 标签=%s 身份=%s 源图=%s",
+                                            shot_id, _lab, _ident, _ref_paths.get(_lab))
                     item["prompt_qc"] = pack["pf_item"].get("verdict")
                     item["prompt_qc_repairs"] = pack["pf_item"].get("repairs") or []
                     if pack["blocked"]:
@@ -1351,7 +1935,9 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                             item["error"] = "ComfyUI 未返回分镜图（可能节点缺失或超时）"
                             break
                         # P0：先落「质检暂存区」，质检达标后才写入正式交付目录（阻断 ⇒ 正式目录不产生该图）
-                        sb_scratch_dir = os.path.join(QC_DIR, project_name, "storyboard_scratch")
+                        # P0（2026-10-12）：暂存目录**按集隔离**（第 1 集平铺 / 第 2 集起 epNN/），
+                        # 与画布读取侧共用 _storyboard_scratch_dir，杜绝跨集串图。
+                        sb_scratch_dir = _storyboard_scratch_dir(project_name, _sb_ep)
                         os.makedirs(sb_scratch_dir, exist_ok=True)
                         _qc_prune_attempts(sb_scratch_dir)   # G8③：清本镜历史过期 try（共享目录按镜头前缀保留最近4）
                         scratch_png = os.path.join(sb_scratch_dir,
@@ -1689,6 +2275,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             "total": len(manifest_shots),
             "success_count": ok,
             "qc_blocked_count": blocked,
+            # T3：异常物件过渡判定结论（承担过渡的 shot_id + 每个异常首现镜的判定明细）
+            "transition_plan": transition_plan,
             "shots": manifest_shots,
         }
         # A-3 P1：manifest 原子写改走 fs_atomic（唯一临时名 + flush/fsync + .bak 快照 +
