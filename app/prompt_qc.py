@@ -80,14 +80,22 @@ DEFAULT_MODE = "repair"
 # ⚠️ 标记串已下沉到叶子模块 prompt_protocol（2026-10-08 解耦）：prompt_enhance 此前只为
 #    几个标记就模块级 import 本模块，与本模块内部的惰性 import 构成静态环。这里保留
 #    同名再导出，app.py 等历史调用点与守卫脚本零改动；「判据与生成端同源」这条铁律不变。
+# ⚠️ 2026-10-12（t7）：逐格版的**剩余**判据串（最后一格编号前缀 / 差异硬约束 /
+#    无台词防文字措辞，见 SB_MARK_GRID_ZH_PANEL_LAST / _DIFF / _SPEECH_OFF）也补下沉到
+#    同一处 —— 原先它们在本模块内联、并在 storyboard_helpers 各写一份；c4d3165 那次
+#    「改模板顺手删掉判据字样 → 预检误报缺判据」正是从这种多份定义里长出来的。
+#    现在本模块只引用常量，字面量只在 prompt_protocol 出现一次。
 from prompt_protocol import (  # noqa: F401
     SB_MARK_BLOCKING, SB_MARK_CANVAS, SB_MARK_CONTENT, SB_MARK_CONTENT_LEGACY,
     SB_MARK_FRAMING_LEGACY, SB_MARK_FRAMING_NEW, SB_MARK_FRAMING_UNSPEC, SB_MARK_IDENTITY,
     SB_MARK_IDENTITY_FROM_REF, SB_MARK_NO_REF, SB_MARK_NO_REF_LEGACY, SB_MARK_NO_TEXT,
-    SB_MARK_GRID_ZH_LAYOUT, SB_MARK_GRID_ZH_NO_TEXT, SB_MARK_GRID_ZH_PANEL,
+    SB_MARK_GRID_ZH_DIFF, SB_MARK_GRID_ZH_LAYOUT, SB_MARK_GRID_ZH_NO_TEXT,
+    SB_MARK_GRID_ZH_PANEL, SB_MARK_GRID_ZH_PANEL_LAST, SB_MARK_GRID_ZH_SPEECH_OFF,
     SB_MARK_NO_TEXT_LEGACY, SB_MARK_PRESERVE, SB_MARK_PRESERVE_LEGACY, SB_MARK_REF_USAGE,
     SB_MARK_REF_USAGE_LEGACY, SB_MARK_STYLE, SB_MARK_STYLE_LEGACY, SB_MARK_TASK,
-    SB_PRESERVE_BLANKET)
+    SB_PRESERVE_BLANKET,
+    GRID_ZH_TEMPLATE_NAME, assert_grid_zh_template_markers,
+    missing_grid_zh_template_markers)
 #: 参考图编号标记：官方协议的核心，提示词里**必须**用 <imageN> 而非自然语言指代
 SB_IMAGE_TAG_RE = re.compile(r"<image\s*(\d+)\s*>", re.IGNORECASE)
 #: 自然语言指代参考图（官方明确禁用，会产生歧义）
@@ -518,6 +526,39 @@ def _grid_zh_protocol(text: str) -> bool:
     return (SB_MARK_GRID_ZH_LAYOUT in t) and (SB_MARK_GRID_ZH_PANEL in t)
 
 
+#: 逐格版模板守卫的进程内一次性标记（一次通过后不再重复读盘；失败直接抛、不落标记）
+_GRID_TMPL_GUARD = {"checked": False}
+
+
+def verify_grid_zh_template(template_text: Optional[str] = None) -> None:
+    """守卫：中文逐格版模板必须含判据串，缺则 AssertionError（防 c4d3165 重演）。
+
+    ``template_text=None`` → 读**当前生效**模板（prompt_templates.load：用户覆盖 >
+    出厂默认 > 代码内兜底）；显式传文本便于守卫脚本 / 实测注入「被删字样的模板」。
+
+    ⚠️ 模板整体缺失（load 返回空串）**不算失败**：那会走英文版回落路径，不存在
+       「中文逐格判据被误报」的前提；只有「拿到了中文逐格版模板、但里面缺少判据串」
+       才是本守卫要拦的回归。
+
+    ⚠️ 失败语义：本函数**抛异常**。统一入口（keyframe_helpers._prompt_preflight）按
+       既有策略 fail-open，会把异常转成 warning 日志；直接调用 prompt_qc.preflight /
+       本函数的守卫脚本则原样抛出。生成端 render 前也应收口（见 t7 交接说明）。
+    """
+    if template_text is None:
+        try:
+            import prompt_templates  # 函数内导入：质检层不静态依赖模板中心
+            _text = prompt_templates.load(GRID_ZH_TEMPLATE_NAME)
+        except Exception as e:  # noqa: BLE001 —— 拿不到模板=没有中文逐格版可判
+            logger.warning("九宫格逐格版模板读取失败（跳过判据串守卫）：%s", e)
+            return
+        if not str(_text or "").strip():
+            return
+        assert_grid_zh_template_markers(
+            _text, source=f"prompt_templates:{GRID_ZH_TEMPLATE_NAME}")
+        return
+    assert_grid_zh_template_markers(template_text)
+
+
 def _ref_tag_indices(text: str) -> List[int]:
     """提示词里出现的 <imageN> 编号（去重升序）"""
     got = sorted({int(m.group(1)) for m in SB_IMAGE_TAG_RE.finditer(text or "")})
@@ -544,10 +585,11 @@ def _check_storyboard(prompt: str, ctx, style, ref_count: Optional[int] = None,
         # 2026-10-09：第三支骨架。只按它**真实存在**的结构判，不套英文段名、也不套 legacy 段名。
         if SB_MARK_GRID_ZH_PANEL not in prompt:
             issues.append("九宫格逐格版缺少「分镜N（景别，色调）：」逐格清单：9 格无从区分，易整片雷同")
-        if "分镜9（" not in prompt:
+        if SB_MARK_GRID_ZH_PANEL_LAST not in prompt:
             issues.append("九宫格逐格版不足 9 格：3×3 布局与左下角数字标注会断档")
-        if "格间差异" not in prompt:
-            issues.append("九宫格逐格版缺少「格间差异」硬约束：模型倾向复刻同一构图")
+        if SB_MARK_GRID_ZH_DIFF not in prompt:
+            issues.append(f"九宫格逐格版缺少「{SB_MARK_GRID_ZH_DIFF}」硬约束："
+                          "模型倾向复刻同一构图")
     elif new_proto:
         # ---------- Qwen-Image-2.1 官方 <imageN> 协议 ----------
         if not _has_section(prompt, SB_MARK_PRESERVE) \
@@ -624,12 +666,12 @@ def _check_storyboard(prompt: str, ctx, style, ref_count: Optional[int] = None,
             issues.append("未声明画面风格：画风会漂移到参考图或模型默认风格")
 
     # 2026-10-09：中文逐格版的防文字措辞有两种形态 ——
-    #   · 有台词 → 注入「严禁出现任何台词文字或字幕」；
-    #   · 无台词 → 注入「均不出现开口说话的口型」（此时本就不会画字，**不该**再要求防文字句）。
+    #   · 有台词 → 注入 SB_MARK_GRID_ZH_NO_TEXT；
+    #   · 无台词 → 注入 SB_MARK_GRID_ZH_SPEECH_OFF（此时本就不会画字，**不该**再要求防文字句）。
     # 逐格版按 grid_zh 单独判，避免对无台词镜假红。
     if grid_zh:
         if not _has_any(prompt, SB_MARK_NO_TEXT, SB_MARK_NO_TEXT_LEGACY,
-                        SB_MARK_GRID_ZH_NO_TEXT, "不出现开口说话的口型"):
+                        SB_MARK_GRID_ZH_NO_TEXT, SB_MARK_GRID_ZH_SPEECH_OFF):
             issues.append("缺少「不得出现文字/字幕/水印」约束：生成图易带字幕或水印")
     elif not _has_any(prompt, SB_MARK_NO_TEXT, SB_MARK_NO_TEXT_LEGACY):
         issues.append("缺少「不得出现文字/字幕/水印」约束：生成图易带字幕或水印")
@@ -1519,6 +1561,16 @@ def _preflight_uncached(kind: str, prompt: str, ctx: dict = None, style: str = "
                 "accept": True, "blocked": False, "skipped": True,
                 "label": "提示词预检未启用（跳过）",
                 "reason": "提示词预检未启用（跳过）"}
+
+    # ---- 判据源守卫（2026-10-12 t7）：中文逐格版模板必须含判据字样 ----
+    # 每进程只查一次（模板是进程级静态资源，改模板必重启）。放在「预检启用」之后、
+    # 增强层之前 —— 预检关掉时这条判据本来就不生效，没必要为此拦生成。
+    # 失败**不 fail-open**（抛 AssertionError）：宁可当场炸，也不要稳定地把模板缺陷
+    # 记成模型缺陷（c4d3165）。注意统一入口 _prompt_preflight 仍按既有策略 fail-open，
+    # 会把这里的异常转成 warning 日志 —— 那是调用方的策略，不是本守卫的语义。
+    if kind == "storyboard" and not _GRID_TMPL_GUARD["checked"]:
+        verify_grid_zh_template()
+        _GRID_TMPL_GUARD["checked"] = True
 
     # ---- 生成前 LLM 增强（2026-09-30 需求：所有图片/视频生成前先做提示词增强） ----
     # 放在确定性检查之前：增强结果同样要过整套确定性检查 + 自愈 + 钳制。
