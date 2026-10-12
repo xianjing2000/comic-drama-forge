@@ -680,9 +680,19 @@ def _h3_shot_ref_components(shot: dict, char_idx: dict, item_idx: dict, scene_id
             if not _p or _p in _seen_paths:
                 continue
             _seen_paths.add(_p)
-        _fb.append({"kind": "character", "name": _nm, "path": _p,
-                    "common_key": f"char:{_nm}",
-                    "appearance": _ap})
+            # ⚠️ 2026-10-12（R6 同族修复）：append **必须留在循环体内**。旧写法把
+            #    append 写在 for 之外、引用循环变量 _p —— 后果两条，且都不报错：
+            #      ① main_char_img 有多张时只追加**最后一张**（其余进 _seen_paths 却
+            #         不产出组件）→ 与注释承诺的「按实际张数逐个声明」不符，锚点丢失；
+            #      ② 若这些路径**早已在 _seen_paths 里**（同图已作物品/场景锚点用过），
+            #         循环被 continue 走空，_p 是上一次的残留值 → 追加一条**重复路径**
+            #         组件 → _h3_picture_defs 为同一张图产出两个 <Picture N>
+            #         （重复声明 + 后续编号整体错位 + 白占一个 9 槽位）。
+            #    实测（本轮 probe）：main_char_img 3 张 → 只出 1 条；同图复用 →
+            #    paths == [a.png, a.png]（同图被声明两次）。
+            _fb.append({"kind": "character", "name": _nm, "path": _p,
+                        "common_key": f"char:{_nm}",
+                        "appearance": _ap})
         out = _fb + out      # 角色在前（与 _h3_picture_defs 的段序一致，且保序）
     return out
 

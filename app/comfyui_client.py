@@ -438,8 +438,13 @@ SHOT_ACTION_SUFFIX = ("；上述动作必须完整、明确地表现出来（动
 # 确定性的句式转换（不调用模型）。转换失败时返回空串，由调用方跳过该条 —— 宁可少一条
 # 职责声明，也不要写一句模型读不懂的模糊指代。
 
-#: 标签里「参考图N（<imageN>）」前缀的匹配（兼容生成端两种写法）
-_REF_LABEL_PREFIX_RE = re.compile(r"^参考图\s*\d+\s*[（(]\s*<image\s*\d+>\s*[)）]\s*")
+#: 标签里「参考图N（<imageN>）」前缀的匹配（兼容生成端三种写法）
+#: ⚠️ 2026-10-12（R6 修复）：尖括号**可选** —— 文字道具特写标签是
+#:    「参考图1（image1）是本镜画面主体的道具「X」的设定图」（qc_helpers 的 _hero_item
+#:    分支，见 _allocate_storyboard_refs）。旧正则吃不到它，正文会残留
+#:    「（image1）是…」脏前缀，职责短语转写因此带上中文脏串。
+_REF_LABEL_PREFIX_RE = re.compile(
+    r"^参考图\s*\d+\s*[（(]\s*<?\s*image\s*\d+\s*>?\s*[)）]\s*")
 #: 「<imageN>」标记本身
 _REF_IMAGE_TAG_RE = re.compile(r"<image\s*(\d+)>", re.IGNORECASE)
 #: 标签里的中文职责词 → 官方英文职责短语
@@ -466,6 +471,16 @@ def _ref_label_body(raw, index: int) -> str:
     text = _REF_LABEL_PREFIX_RE.sub("", text).strip()
     # 兼容不带括号的历史写法：「参考图1是角色「X」的外貌…」
     text = re.sub(r"^参考图\s*\d+\s*是?", "", text).strip()
+    # ⭐⭐ 2026-10-12（R6 修复，核心）：连接词「是 / 为」必须一并剥掉。
+    #   生成端角色/场景槽位是「参考图N（<imageN>）**是**角色「X」的身份锚点（…视图）：…」
+    #   （qc_helpers._allocate_storyboard_refs 的主/次角色与场景两类写法），
+    #   前缀正则只吃到「）」，剩下的正文**以连接词开头**；而下游 _GRID_CHAR_LABEL_RE
+    #   是 "^角色「…" 的**锚定**匹配（当年按无连接词的旧标签写死）→ 正文
+    #   「是角色「X」的身份锚点（…）」一条都匹配不上 → 九宫格逐格版的「角色设定」段
+    #   **整段**回落到兜底句「…（本镜未注入角色身份参考图）…」= 有图无声明
+    #   （生产实测 45/46 镜，R6）。归一化后正文恒以职责主体（角色/场景/物品）开头，
+    #   中文逐格版与英文官方句式（build_storyboard_prompt）共用同一份干净正文。
+    text = re.sub(r"^[是为]\s*", "", text).strip()
     return text
 
 
@@ -3595,10 +3610,17 @@ class ComfyUIClient:
     # ===================== 九宫格中文逐格版内部件（2026-10-07，用户范本「逐格写死」范式） =====================
 
     #: 参考图标签「角色「X」的身份锚点（…视图）：<要点>」的匹配
-    #: （生成端 app._allocate_storyboard_refs 的两类角色槽位写法：主角色/次角色）。
+    #: （生成端 qc_helpers._allocate_storyboard_refs 的两类角色槽位写法：主角色/次角色）。
+    #: ⚠️ 前置的连接词「是」由 _ref_label_body 统一剥掉（R6 修复，2026-10-12），
+    #:    这里保持锚定匹配不变 —— 正文若仍带连接词，兜底由 _GRID_CHAR_LOOSE_RE 接住。
     _GRID_CHAR_LABEL_RE = re.compile(
         r"^角色「([^」]+)」的身份锚点（([^）]+?)视图）[:：]\s*(.+)$")
-    #: 特写镜头策略把角色标签改写为「已替换为该角色头部特写，…」（app._apply_closeup_ref_strategy），
+    #: ⭐ 2026-10-12（R6 修复）：身份锚点正文的**宽松兜底**（认词不认句式）。
+    #: 为什么需要：上面的锚定正则只认一种写法，上游句式一演进（连接词、预留槽位号、
+    #: 历史产物改写）就**整段**掉进「本镜未注入角色身份参考图」兜底 = 有图无声明。
+    #: 本正则只要求「角色「X」…身份锚点」同现，取角色名用于声明文本。
+    _GRID_CHAR_LOOSE_RE = re.compile(r"角色「([^」]+)」[^。；;「]{0,16}?身份锚点")
+    #: 特写镜头策略把角色标签改写为「已替换为该角色头部特写，…」（qc_helpers._apply_closeup_ref_strategy），
     #: 此时标签里已没有角色名，需从 shot 的角色名单按位回补。
     _GRID_CHAR_CLOSEUP_MARK = "已替换为该角色头部特写"
 
@@ -3614,8 +3636,11 @@ class ComfyUIClient:
           之后标签里的旧编号会整体错位，位置即真相 —— 与 :meth:`build_storyboard_prompt`
           的官方协议同口径）；
         - 无角色镜头（has_characters=False）→ 显式「无出场角色 + 禁人」声明；
-        - 有角色但标签解析不出（特写替换等）→ 用 shot 的角色名单（_char_ref_names →
-          characters_in_shot）回补角色名，仍取不到时给出保守兜底行。永不返回空串。
+        - **只要注入的参考图标签声明了「身份锚点」，本段必然产出对应的身份声明**
+          （R6，2026-10-12）：严格句式直取角色名 → 句式异常走宽松正则 → 仍取不到则按
+          shot 的角色名单（_char_ref_names → characters_in_shot）按位回补 → 再取不到
+          用「出场角色N」占位。**只有本镜确实没有角色身份参考图**才回落到保守兜底句
+          「本镜未注入角色身份参考图」。永不返回空串。
         """
         shot = shot if isinstance(shot, dict) else {}
         _declared = shot.get("_char_ref_names")
@@ -3646,6 +3671,24 @@ class ComfyUIClient:
                 lines.append((name or f"出场角色{closeup_no}",
                               f"身份与外观完全参考`<image{pos}>`；画面取景范围以该角色的"
                               "头部特写参考为准（仅肩部以上），服装发型与角色设定完全一致"))
+                continue
+            # ⭐⭐ 2026-10-12（R6 修复·第二道保险）：**认词不认句式** —— 只要标签正文里
+            #    出现「身份锚点」，它就是一张角色身份参考图，必须为本槽位产出身份声明。
+            #    为什么不能只靠上面的锚定正则：上游句式一旦演进（连接词 / 预留槽位号 /
+            #    历史产物 / 上游改写），锚定匹配就**静默失效**，整段能力退化成兜底句 ——
+            #    生产实测 45/46 镜「图已注入但提示词里没有任何身份声明」。
+            #    编号一律用**最终位置 pos**（= 实际连图槽位），与英文官方协议同口径。
+            if "身份锚点" in body:
+                m2 = ComfyUIClient._GRID_CHAR_LOOSE_RE.search(body)
+                name = m2.group(1).strip() if m2 else ""
+                if not name:
+                    # 句式异常时按 shot 的角色名单按位回补（与特写分支同一口径）
+                    name = next((n for n in queue if n not in used), "")
+                if name:
+                    used.add(name)
+                lines.append((name or f"出场角色{len(lines) + 1}",
+                              f"身份与外观完全参考`<image{pos}>`，"
+                              "保持其面部身份、发型与体型不变"))
         if not lines:
             if not has_characters:
                 return ("1. **本镜无出场角色：** 九个分镜画面只呈现场景与物品，"
