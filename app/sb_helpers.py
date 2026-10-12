@@ -114,7 +114,6 @@ def _panel_dup_hit(txt: str) -> bool:
       · 两者都不命中 → 真缺陷，返回 True。
     """
     for m in _PANEL_DUP_RE.finditer(txt or ""):
-        near3 = txt[max(0, m.start() - 3):m.start()]
         near6 = txt[max(0, m.start() - 6):m.start()]
         # 遇句子边界截断：只保留**本句内**的否定语境，绝不继承上一句
         _cut = -1
@@ -124,7 +123,7 @@ def _panel_dup_hit(txt: str) -> bool:
                 _cut = _pos
         if _cut >= 0:
             near6 = near6[_cut + 1:]
-        if any(n in near3 for n in _PANEL_DUP_NEG_WEAK):
+        if any(n in near6 for n in _PANEL_DUP_NEG_WEAK):
             continue
         if any(n in near6 for n in _PANEL_DUP_NEG_STRONG):
             continue
