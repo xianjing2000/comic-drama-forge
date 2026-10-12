@@ -14,6 +14,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -79,7 +80,23 @@ class CharacterManager:
         status: str = CHARACTER_STATUS_NEW
     ) -> str:
         """添加新角色"""
-        char_id = f"char_{len(self.data['characters']) + 1:03d}"
+        # P1（t26）：改用「最大已有序号 + 1 + 查重」，不再用 len()+1 —— 删除过角色 /
+        # 手动改 characters.json 导致 ID 不连续时，len()+1 会生成与已有条目相同的
+        # char_id 并静默覆盖（数据丢失）。
+        _chars = self.data.get('characters') or {}
+        _max_no = 0
+        for _cid in _chars:
+            _m = re.match(r"^char_(\d+)$", str(_cid))
+            if _m:
+                try:
+                    _max_no = max(_max_no, int(_m.group(1)))
+                except ValueError:
+                    pass
+        while True:
+            _max_no += 1
+            char_id = f"char_{_max_no:03d}"
+            if char_id not in _chars:
+                break
 
         self.data['characters'][char_id] = {
             "id": char_id,
@@ -139,7 +156,12 @@ class CharacterManager:
         src = Path(image_path)
         dst = self.reference_dir / f"{char_id}_{view_type}{src.suffix}"
         if src.exists():
-            shutil.copy2(src, dst)
+            # P1（t26）：调用方（routes/characters.py 上传参考图）已先把文件保存到同一
+            # reference_dir，此时 src 与 dst 是同一路径，shutil.copy2 会抛 SameFileError
+            # 导致接口恒 500。同路径时跳过复制、直接登记。
+            if os.path.normcase(os.path.abspath(str(src))) != \
+                    os.path.normcase(os.path.abspath(str(dst))):
+                shutil.copy2(src, dst)
             char['views'][view_type] = str(dst)
             char['references'].append({
                 "view": view_type,

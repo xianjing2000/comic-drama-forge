@@ -711,9 +711,12 @@ def apply_latent_size(api_prompt: dict, size: Optional[Tuple[int, int]]) -> List
             if not isinstance(inputs, dict):
                 inputs = {}
                 node["inputs"] = inputs
-            if "megapixels" in inputs or True:
+            # P1（t26）：去掉 or True 死条件 —— 只在节点已声明该输入时才写，否则给
+            # Upscale Image (Pixels) 这类无 megapixels/resolution_steps 输入的节点写
+            # 非法输入，ComfyUI 会报 invalid prompt 拒收。
+            if "megapixels" in inputs:
                 inputs["megapixels"] = megapixels
-            if "resolution_steps" in inputs or True:
+            if "resolution_steps" in inputs:
                 inputs["resolution_steps"] = 32
             changed.append(f"{node_id}(RefScale→mp={megapixels},x32)")
         # 显式「代码跟随画布」：不动 EmptyLatentImage，它的宽高由选择器输出线决定。
