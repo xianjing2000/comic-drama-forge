@@ -186,6 +186,23 @@ def picture_capacity(prompt: str) -> Optional[int]:
     return max(nums) if nums else None
 
 
+#: 提示词里 ``<Audio N>`` 标签的出现形式（大小写不敏感，与插件 ref_audio_N 键同源）
+_AUDIO_TAG_RE = re.compile(r"<\s*audio\s+(\d+)\s*>", re.IGNORECASE)
+
+
+def declared_audio_slots(prompt: str) -> List[int]:
+    """提示词里 ``<Audio N>`` 声明了哪些槽位（升序去重；无标签返回 ``[]``）。
+
+    与 :func:`picture_capacity` 对称：H3 的 ``<Audio N>`` 与 ``<Picture N>`` 一样是
+    **位置制**编号 —— N = 合并后 ``refAudios`` 按 index 升序的第几位
+    （插件 ``lib/ref_audios.py``：``ref_audio_{idx}`` + ``reference_audio_prompt_tag``）。
+    因此「声明的槽位集合」必须与「插件真正能装进去的槽位集合」**逐位相等**：
+      声明多 → 该 ``<Audio N>`` 指向空槽，H3 拿到「有指代、无音频」就自行编嗓子；
+      声明少 → 挂了音频但模型不知道用途（同样不可控）。
+    """
+    return sorted({int(m.group(1)) for m in _AUDIO_TAG_RE.finditer(str(prompt or ""))})
+
+
 #: 模板类型判定缓存：{绝对路径: 是否 Director 模板}。
 #: 判定要读 88KB JSON，`generate_h3_sequence` 每次调用都会问一次，缓存掉以免重复 IO。
 _TEMPLATE_KIND_CACHE: Dict[str, bool] = {}
@@ -531,13 +548,33 @@ class H3DirectorBuilder:
 
         与 ``_ref_items`` 对称，字段名是 ``audioFile``（不是 ``imageFile``），
         见插件 ``director/pack.py:724`` / ``director/plan.py:_reference_audio_file``。
-        ``index`` 从 0 起 = ``<Audio N+1>``（最多 ``MAX_REFERENCE_AUDIOS=3``）。
+        ``index`` 从 0 起 = ``<Audio N+1>``（上限 ``MAX_REFERENCE_AUDIOS=3`` = 插件
+        ``lib/ref_audios.py`` 的官方 autogrow ``ref_audio_0..2``）。
+
+        ⚠️ 2026-10-13 两处修正（用户实测「每个角色音色都一样」的根因所在的函数）：
+          1. **裁剪必须可见**：原先 ``[:MAX_REFERENCE_AUDIOS]`` 是**静默截断**，
+             超出部分直接消失且无任何日志 → 提示词声明的 ``<Audio 4>/<Audio 5>``
+             指向空槽，H3 自己编嗓子。现在超限写 ``logger.warning`` 并列出被丢弃文件名。
+          2. **先清洗再编号**（与 ``_ref_items`` 同口径）：原先先切片后过滤空串，
+             一旦列表里有空串，后续条目的 index 就出现**空洞**，而插件按「index 升序
+             的位置」给 ``<Audio N>`` 编号 —— 位置与 index+1 脱节即整体错位。
+        正常路径下调用方（``asset_refs._h3_common_ref_audios``）已裁到上限，
+        本函数不会触发告警；这里是**第二道闸门**，防任一侧将来单边改动。
         """
+        clean = [str(x).strip() for x in (names or []) if str(x or "").strip()]
+        if len(clean) > MAX_REFERENCE_AUDIOS:
+            logger.warning(
+                "参考音频 %d 支超过官方上限 %d 支（ref_audio_0..%d / <Audio 1..%d>）→ "
+                "截断到前 %d 支；被丢弃：%s（这些槽位无音频，提示词若声明了对应的 "
+                "<Audio N> 会指向空槽，H3 将自行编嗓子）",
+                len(clean), MAX_REFERENCE_AUDIOS, MAX_REFERENCE_AUDIOS - 1,
+                MAX_REFERENCE_AUDIOS, MAX_REFERENCE_AUDIOS,
+                "、".join(os.path.basename(str(x)) for x in clean[MAX_REFERENCE_AUDIOS:]))
+            clean = clean[:MAX_REFERENCE_AUDIOS]
         return [
-            {"index": i, "audioFile": str(name), "fileName": "",
+            {"index": i, "audioFile": name, "fileName": "",
              "type": "input", "subfolder": ""}
-            for i, name in enumerate(list(names or [])[:MAX_REFERENCE_AUDIOS])
-            if str(name or "").strip()
+            for i, name in enumerate(clean)
         ]
 
     @staticmethod
@@ -885,6 +922,17 @@ class H3DirectorBuilder:
                 + "）。公共项 index 必须 0..K-1 连续、段级项紧随其后，"
                   "且与提示词 <Picture N> 一一对应；请检查调用方传入的 prompt/seg_refs 是否同序。")
 
+        # ---- 守卫 C：参考音色槽位与提示词 ``<Audio N>`` 必须一一对应（2026-10-13）----
+        #    与守卫 B（参考图）同构。参考音色错位是**静音失效**：插件只装 ≤3 支，
+        #    提示词却声明到 <Audio 5> → 第 4/5 个角色没有音色，H3 自行编嗓子，
+        #    日志里只有一行 info，用户只能靠耳朵发现（本次实测就是这么暴露的）。
+        #    ⚠️ 只告警**不阻断**（与守卫 B 的硬失败不同）：参考音色不一致只影响音色，
+        #       而参考图错位会让整集画面指错素材；且生产跑批时不该因为某支音频
+        #       上传失败/缺失就把整集渲染打断（那会把「音色降级」升级成「整集不产」）。
+        audio_layout_issues = self.check_audio_layout(timeline)
+        for _iss in audio_layout_issues:
+            logger.warning("H3DirectorBuilder 参考音色槽位自检：%s", _iss)
+
         # ---- Director 节点注入 ----
         self._set_widget(director, _DIRECTOR_POS, "task_type", TASK_TYPE_R2V)
         # 与 timeline.global.prompt 一致置空（插件优先读 timeline，两处都空才不会被拼进段提示词）
@@ -982,6 +1030,12 @@ class H3DirectorBuilder:
             "seg_ref_start": ref_offset,
             "common_enabled": bool(common_enabled),
             "ref_layout_issues": ref_layout_issues,
+            # 公共参考音色（global.refAudios）实际挂载了什么 + 与 <Audio N> 的自检结果。
+            # 排查「音色一样/对不上人」时先看这两个字段（layout 会落进 build 报告）。
+            "common_audios": [a.get("audioFile")
+                              for a in (timeline["global"].get("refAudios") or [])
+                              if isinstance(a, dict)],
+            "audio_layout_issues": audio_layout_issues,
             "segment_refs": [self._ref_items(names, start=ref_offset)
                              for names in seg_ref_lists],
             "segment_audios": [self._ref_audio_items(names) for names in seg_audio_lists],
@@ -1010,8 +1064,12 @@ class H3DirectorBuilder:
         n_seg_refs = sum(len(names) for names in seg_ref_lists)
         logger.info(
             "H3 Director 工作流已就绪：%d 段 / %d 帧（%.2fs）/ 参考图 %d 张（段级）"
-            "+ %d 张（公共）/ 段间引导 %s(%s) / 节点 %d 连线 %d",
+            "+ %d 张（公共）/ 参考音色 %d 支（公共，槽位 index %s）/ 段间引导 %s(%s) / "
+            "节点 %d 连线 %d",
             len(seg_list), total, total / fps, n_seg_refs, len(layout["refs"]),
+            len(layout["common_audios"]),
+            [a.get("index") for a in (timeline["global"].get("refAudios") or [])
+             if isinstance(a, dict)],
             layout["continuity"], layout["continuity_overlap_frames"],
             len(wf["nodes"]), len(wf["links"]))
         return wf, layout
@@ -1077,6 +1135,97 @@ class H3DirectorBuilder:
                 issues.append(
                     f"{name}：提示词声明到 <Picture {declared}>，但实际槽位 {len(idxs)} 个"
                     f"（index {idxs[:12]}）")
+        return issues
+
+    @staticmethod
+    def check_audio_layout(timeline: dict) -> List[str]:
+        """自检：参考音色槽位与提示词 ``<Audio N>`` 是否一一对应 → 问题列表。
+
+        ⭐ 2026-10-13（用户实测「在 ComfyUI 里听每个角色的音色都是一样的」）：
+        本项目的缺陷形态是**声明数(5) > 挂载数(3)** —— 挂载侧静默截断，多出来的
+        ``<Audio 4>/<Audio 5>`` 指向空槽，H3 对这两个角色自行编嗓子，**全程零报错**。
+        这与参考图的 :func:`check_ref_layout` 是同一类静默失效，故配同构护栏：
+
+        1. ``global.refAudios`` 的 index 必须连续 ``0..M-1``（有空洞 → ``<Audio N>``
+           的位置编号整体错位；插件 ``_load_ref_audios`` 只丢弃 ≥ 上限的，不补洞）；
+        2. ``index >= MAX_REFERENCE_AUDIOS`` 的条目会被插件直接丢弃（``plan.py:469``）；
+        3. 公共提示词里**只要声明了** ``<Audio N>``（生产路径 = subject lock 逐行归属，
+           一行一支），它的槽位集合就必须与真正挂载的槽位集合**逐位相等** ——
+           这一条就是「声明数 != 挂载数」的直接判据；
+        4. 反向：**挂载的每一支都必须在某处被声明**（公共提示词或任一段），否则模型拿到
+           音频却不知道它属于谁（那种情况同样会自己编嗓子）；
+        5. 每段**生效提示词**（commonEnabled 时 = 公共提示词 + 段提示词）里出现的每一个
+           ``<Audio N>`` 都必须有对应挂载槽。段提示词六段里的 ``<Audio N>`` 只声明
+           **本镜出场的说话人**（``_subject_definitions`` / ``_retention_analysis`` 都要
+           该角色在 subjects 里），故允许是挂载集合的子集；但「有指代、无音频」必须报出来
+           —— 那正是本次缺陷的形态（``<Audio 4>`` 指向空槽 → H3 自行编嗓子）。
+
+        段级 ``refAudios`` 与全局共用同一套 index 空间（插件 ``merge_indexed_refs``
+        按 index 合并、段级优先），两者并存时语义是「段级覆盖全局」，此时不做判定
+        （存量 ``audioMode=source`` 路径；本项目公共音色路径下段级恒为空）。
+        """
+        issues: List[str] = []
+        gbl = timeline.get("global") or {}
+        segs = list(timeline.get("segments") or [])
+        _local = [a for _s in segs for a in (_s.get("refAudios") or [])
+                  if isinstance(a, dict)]
+        if _local and (gbl.get("refAudios") or []):
+            return issues
+        by_idx: Dict[int, dict] = {}
+        for _item in (gbl.get("refAudios") or []):
+            if not isinstance(_item, dict):
+                continue
+            try:
+                _idx = int(_item.get("index", 0))
+            except (TypeError, ValueError):
+                issues.append("global.refAudios 出现非数字 index：%r"
+                              % (_item.get("index"),))
+                continue
+            by_idx[_idx] = _item
+        _over = sorted(_k for _k in by_idx if _k < 0 or _k >= MAX_REFERENCE_AUDIOS)
+        if _over:
+            issues.append(
+                "global.refAudios index %s 会被插件直接丢弃（官方仅 ref_audio_0..%d）"
+                % (_over, MAX_REFERENCE_AUDIOS - 1))
+        mounted = sorted(_k for _k in by_idx if 0 <= _k < MAX_REFERENCE_AUDIOS)
+        if mounted and mounted != list(range(len(mounted))):
+            issues.append(
+                "global.refAudios 槽位 index 不连续 %s → <Audio N> 编号会整体错位"
+                % (mounted,))
+        want = {_k + 1 for _k in mounted}
+        _common_prompt = (str(gbl.get("prompt") or "")
+                          if gbl.get("commonEnabled") else "")
+        # (A) 公共提示词若声明了 <Audio N>，其槽位集合必须与挂载槽位**逐位相等**（同数同序）
+        _common_declared = set(declared_audio_slots(_common_prompt))
+        if _common_declared and _common_declared != want:
+            issues.append(
+                "公共提示词声明 <Audio %s>，但实际挂载 %d 支 refAudios（槽位 %s）→ "
+                "声明数与挂载数不一致；多出来的声明无音频可依，H3 会自行编嗓子"
+                % (",".join(str(_n) for _n in sorted(_common_declared)),
+                   len(mounted), mounted))
+        # (A2) 反向：挂载的每一支都必须在某处被声明（否则模型不知道音色归属）
+        _union = set(_common_declared)
+        for _seg in segs:
+            _union |= set(declared_audio_slots(_seg.get("prompt") or ""))
+        _undeclared = sorted(want - _union)
+        if _undeclared:
+            issues.append(
+                "挂载了 %d 支参考音色（槽位 %s），但 <Audio %s> 在提示词里从未声明 → "
+                "模型不知道这些音色的归属"
+                % (len(mounted), mounted,
+                   ",".join(str(_n) for _n in _undeclared)))
+        # (B) 任何一段的生效提示词里都不允许出现「没有挂载槽位」的 <Audio N>
+        for _i, _seg in enumerate(segs):
+            _name = _seg.get("id") or ("seg%d" % (_i + 1))
+            _text = ((_common_prompt + "\n") if _common_prompt else "") \
+                + str(_seg.get("prompt") or "")
+            _extra = set(declared_audio_slots(_text)) - want
+            if _extra:
+                issues.append(
+                    "%s：生效提示词声明了 <Audio %s> 却没有对应挂载槽位（共 %d 支，槽位 %s）"
+                    "→ 这些指代无音频可依，H3 会自行编嗓子"
+                    % (_name, ",".join(str(_n) for _n in sorted(_extra)),
+                       len(mounted), mounted))
         return issues
 
     # ------------------------------------------------------------------ 落盘

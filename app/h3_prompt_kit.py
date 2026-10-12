@@ -47,6 +47,7 @@
 from __future__ import annotations
 
 import canon                       # 设定一致性基线（2026-10-12）：只用标准库，无循环依赖
+import h3_director_builder         # 音色槽位上限单一来源（MAX_REFERENCE_AUDIOS）
 import logging
 import math
 import re
@@ -1527,6 +1528,21 @@ def build_ref2va(shot: dict, picture_defs: Sequence[Tuple[str, str]],
     #    audio_defs = [{"name": 角色名, "label": "<Audio 1>", "speaker": "S1",
     #                   "voice": "a low controlled male voice ..."}, ...]
     _audio_defs = [d for d in (audio_defs or []) if isinstance(d, dict)]
+    # ⭐ 2026-10-13 音色槽位守卫（用户实测「每个角色音色都一样」）：
+    #    参考音色槽位硬上限 = 官方 ReferenceToVideo autogrow ``ref_audio_0..2``
+    #    （插件 lib/ref_audios.py / director/plan.py:469 —— index >= 3 直接丢弃）。
+    #    声明多于上限时，多出来的 ``<Audio N>`` 在插件侧**没有音频槽**，H3 拿到
+    #    「有声明、无音频」的指代就自行编嗓子（且零报错）。
+    #    正常路径上游（asset_refs._h3_common_ref_audios -> _h3_audio_defs_for）已裁到上限，
+    #    这里不会触发；本闸门防的是**将来某条路径**单边改动又造出「声明数 != 挂载数」。
+    _audio_cap = max(1, int(getattr(h3_director_builder, "MAX_REFERENCE_AUDIOS", 3) or 3))
+    if len(_audio_defs) > _audio_cap:
+        logger.warning(
+            "H3 音色声明 %d 条 > 官方槽位上限 %d（<Audio 1..%d>）→ 截断到前 %d 条；"
+            "被截掉的 %s 本次不会出现在提示词里（其参考音频同样不会被挂载，属预期降级）",
+            len(_audio_defs), _audio_cap, _audio_cap, _audio_cap,
+            "、".join(str(_d.get("name") or "?") for _d in _audio_defs[_audio_cap:]))
+        _audio_defs = _audio_defs[:_audio_cap]
     _subj_labels, _audio_labels, _voice_descs = {}, {}, {}
     for _i, _s in enumerate(subjects or [], start=1):
         _n = str(_s.get("name") or "").strip()

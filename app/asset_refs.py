@@ -66,6 +66,7 @@ from video_postprocess import VideoPostProcessor, ensure_no_audio, ensure_audio_
 import asset_name_match
 import h3_common_refs
 import h3_director_builder
+import h3_prompt_kit
 import json
 import os
 import project_store
@@ -785,6 +786,147 @@ def _h3_is_common_comp(comp: dict, common_keys: set) -> bool:
     return h3_common_refs.asset_key(comp) in common_keys
 
 
+def _h3_audio_slot_cap() -> int:
+    """参考音色槽位上限（单一来源 = h3_director_builder.MAX_REFERENCE_AUDIOS）。
+
+    ⭐ 2026-10-13（音色截断修复）：该常量是**插件侧真实上限**，不是本项目拍的保守值 ——
+    插件 lib/ref_audios.py 里 "MAX_REFERENCE_AUDIOS = 3"（注释原文：
+    "Official MiniMaxH3ReferenceToVideo Autogrow max=3"）；插件 director/plan.py:469
+    的 _load_ref_audios 对 index >= 3 的条目**直接丢弃**，lib/ref_audios.py:26 的
+    ref_audios_dict 同样按 idx >= MAX_REFERENCE_AUDIOS 过滤。
+
+    所以「提升挂载上限」这条路走不通（修复方案 a 被排除）：官方节点只认
+    ref_audio_0..2、提示词只认 <Audio 1..3>，挂第 4 支也进不了 conditioning。
+    """
+    try:
+        return max(1, int(h3_director_builder.MAX_REFERENCE_AUDIOS))
+    except (AttributeError, TypeError, ValueError):  # pragma: no cover - 常量被误删时的兜底
+        return 3
+
+
+#: 角色重要性缓存：{项目名: ((剧本文件签名...), {角色名: (台词数, 出场镜数)})}。
+#: 逐段构建提示词时 _h3_common_ref_audios 会被调用上百次，不能每次都读盘解析剧本。
+_H3_IMPORTANCE_CACHE: dict = {}
+
+
+def _h3_character_importance(project_name: str) -> dict:
+    """统计每个角色的重要性（台词数 -> 出场镜数），数据源 = 项目剧本的 shots。
+
+    ⭐ 2026-10-13（音色截断修复）：参考音色槽位只有 3 个（见 _h3_audio_slot_cap），
+    而本项目 voice_bank 里已有 9 个角色。**必须裁**的时候要保留戏份最重的角色，
+    而不是「公共池 + 字典序」的前 3。实测（项目「逆天系统_全书」三集累计，
+    voice_bank 9 个角色）：故障那轮声明的顺序是「外门围观弟子 / 林清雪 / 羡进 /
+    赵天霸 / 张铁柱」，前 3 里林清雪只有 10 句台词，而台词更多的赵天霸(20 句)、
+    张铁柱(14 句)被挂载侧静默截掉 —— 戏份最重的角色反而没有音色。
+
+    口径：
+      · lines = 台词条数（shots[].dialogue 里 speaker 命中）；
+      · shots = 出场镜数（shots[].characters_in_shot 命中）；
+      · 范围 = 该项目**全部剧集**（参考音色集合本身是项目级的：调用方传的
+        all_names=char_idx 来自角色资产而非单集剧本，故这里同样按全项目统计）。
+    数据源缺失/不可解析 -> {}（调用方回落原顺序并告警，绝不因此报错）。
+    结果按剧本文件签名缓存。
+    """
+    _pdir = os.path.join(SCRIPT_DIR, str(project_name or ""))
+    if not project_name or not os.path.isdir(_pdir):
+        return {}
+    try:
+        _files = sorted(_fn for _fn in os.listdir(_pdir)
+                        if _fn.lower().endswith(".json")
+                        and not _fn.lower().endswith(".bak"))
+    except OSError:
+        return {}
+    _sig = []
+    for _fn in _files:
+        try:
+            _st = os.stat(os.path.join(_pdir, _fn))
+        except OSError:
+            continue
+        _sig.append((_fn, int(_st.st_mtime), int(_st.st_size)))
+    _key = str(project_name)
+    _cached = _H3_IMPORTANCE_CACHE.get(_key)
+    if _cached is not None and _cached[0] == tuple(_sig):
+        return _cached[1]
+    _agg: dict = {}
+    for _fn in _files:
+        try:
+            with open(os.path.join(_pdir, _fn), "r", encoding="utf-8") as _fh:
+                _data = json.load(_fh)
+        except Exception:  # noqa: BLE001 - 单集剧本坏了不该拖垮整集视频
+            continue
+        if not isinstance(_data, dict):
+            continue
+        for _sh in (_data.get("shots") or []):
+            if not isinstance(_sh, dict):
+                continue
+            _names = _sh.get("characters_in_shot") or []
+            if isinstance(_names, str):
+                _names = [_names]
+            for _n in _names:
+                _n = str(_n or "").strip()
+                if _n:
+                    _agg.setdefault(_n, [0, 0])[1] += 1
+            # 台词口径复用 h3_prompt_kit.dialogue_lines（单一事实源：dict/str/list 三形态）
+            for _ln in h3_prompt_kit.dialogue_lines(_sh.get("dialogue")):
+                _n = str(_ln.get("speaker") or "").strip()
+                if _n:
+                    _agg.setdefault(_n, [0, 0])[0] += 1
+    _out = {_n: (int(_v[0]), int(_v[1])) for _n, _v in _agg.items()}
+    _H3_IMPORTANCE_CACHE[_key] = (tuple(_sig), _out)
+    return _out
+
+
+def _h3_select_audio_pairs(pairs: list, project_name: str) -> list:
+    """把 [(角色名, 路径)] 裁到官方上限（重要性优先），并让裁剪**可见**。
+
+    ⭐ 2026-10-13 根修：声明侧（<Audio N>，见 _h3_audio_defs_for /
+    _h3_common_subject_lock）与挂载侧（global.refAudios，见
+    h3_director_builder._ref_audio_items）**消费的是同一个列表**，
+    因此**在这里统一裁剪一次**，两侧必然同数同序 —— 这是「恒等」的结构性保证，
+    而不是靠两处各写一个上限（那正是本缺陷的成因）。
+
+    · 不超上限 -> **原样返回**（零行为变更，连顺序都不动）；
+    · 超上限 -> 按「台词数 -> 出场镜数 -> 原顺序」排序后取前 N，并 logger.warning
+      写明「N 支裁到 M 支 + 保留/被裁角色名」；取不到剧本数据时回落原顺序裁剪
+      （同时告警「无法按重要性排序」）。
+    """
+    _cap = _h3_audio_slot_cap()
+    if len(pairs) <= _cap:
+        return pairs
+    _imp = _h3_character_importance(project_name)
+
+    def _score(_item) -> tuple:
+        _l, _s = _imp.get(str(_item[0]), (0, 0))
+        return (-_l, -_s)
+
+    if _imp:
+        _order = sorted(range(len(pairs)), key=lambda _i: (_score(pairs[_i]), _i))
+        _why = "按『台词数->出场镜数』重要性"
+    else:
+        logger.warning(
+            "[H3公共参考音色] 取不到项目 %s 的剧本统计，无法按重要性选角，"
+            "按原顺序裁剪（可能裁掉戏份更重的角色）", project_name)
+        _order = list(range(len(pairs)))
+        _why = "按原顺序（无剧本数据）"
+    _kept = [pairs[_i] for _i in _order[:_cap]]
+    _cut = [pairs[_i] for _i in _order[_cap:]]
+
+    def _lbl(_item) -> str:
+        _n = str(_item[0])
+        _l, _s = _imp.get(_n, (0, 0)) if _imp else (0, 0)
+        return f"{_n}({_l}句/{_s}镜)" if _imp else _n
+
+    logger.warning(
+        "[H3公共参考音色] 参考音色 %d 支 > 官方上限 %d 支（ref_audio_0..%d，"
+        "<Audio 1..%d>；插件 lib/ref_audios.py 硬上限）-> 已%s裁到 %d 支：保留 %s；"
+        "被裁掉 %s 本次没有参考音色（H3 会自行编嗓子，属预期降级；"
+        "如需音色请拆集或减少有音色角色）",
+        len(pairs), _cap, _cap - 1, _cap, _why, len(_kept),
+        "、".join(_lbl(_p) for _p in _kept),
+        "、".join(_lbl(_p) for _p in _cut))
+    return _kept
+
+
 def _h3_common_ref_audios(common: list, project_name: str, all_names=None) -> list:
     """从公共池角色收集 voice_bank 参考音色（2026-10-02 公共参考音色）。
 
@@ -799,6 +941,12 @@ def _h3_common_ref_audios(common: list, project_name: str, all_names=None) -> li
     **跳过无音色的角色**，下游靠公共池顺序反推「哪个 <Audio> 属于谁」会错位；
     携带角色名才能逐行准确归属。下游两处消费（build 侧取 [1]、subject_lock 侧取 [0]）
     需同步。
+
+    ⭐ 2026-10-13（音色截断根修）：返回值**已被 _h3_select_audio_pairs 裁到官方上限**
+    （默认 3，见 _h3_audio_slot_cap），且裁剪按「台词数→出场镜数」重要性选角并 logger.warning
+    公示。声明侧（_h3_audio_defs_for / _h3_common_subject_lock）与挂载侧
+    （global.refAudios）都从本函数的返回值派生，故「声明条数 == 挂载支数 == 被引用槽位数」
+    是结构性保证 —— 绝不允许任一侧另行裁剪出不同条数。
     """
     _char_names = [str(c.get("name") or "").strip()
                    for c in (common or [])
@@ -809,7 +957,8 @@ def _h3_common_ref_audios(common: list, project_name: str, all_names=None) -> li
     #    拿不到自己的参考音色 —— 实测 voice_bank 里有 3 个角色，只有林昭挂上了。
     #    音频槽上限 3（ref_audio_0..2），而参考图槽上限 9 本就紧张，
     #    故这里只把**音色**补到全角色，参考图仍维持「全段共用才进公共池」。
-    #    公共池里已有的角色优先，其余角色按传入顺序追加（超出 3 个由 _ref_audio_items 截断）。
+    #    公共池里已有的角色优先，其余角色按传入顺序追加 —— 超出官方上限的裁剪统一走
+    #    下方 _h3_select_audio_pairs（2026-10-13 根修：声明侧与挂载侧同源同裁，见该函数）。
     if all_names:
         _extra = (list(all_names.keys()) if isinstance(all_names, dict)
                   else list(all_names))
@@ -838,9 +987,19 @@ def _h3_common_ref_audios(common: list, project_name: str, all_names=None) -> li
             continue
         _seen.add(_key)
         _out.append((_cn, _ref))
+    # ⭐ 2026-10-13 根修（用户实测「每个角色音色都一样」）：
+    #    本函数是**声明侧与挂载侧唯一的共同来源**，故裁剪只在这里做一次 ——
+    #    调用方 _h3_audio_defs_for（六段 <Audio N> 声明）与 _h3_common_subject_lock
+    #    （公共提示词 <Audio N> = 角色名）、以及 build 侧 h3_director_builder
+    #    ._ref_audio_items（global.refAudios 实际挂载）都消费这里的返回值，
+    #    于是「声明条数 == 挂载支数」成为结构性事实（同数同序），而不是两处各写一个上限。
+    _before = len(_out)
+    _out = _h3_select_audio_pairs(_out, project_name)
     if _out:
-        logger.info("[H3公共参考音色] 公共角色音色 %d 支 → global.refAudios：%s",
-                        len(_out), "、".join(n for n, _p in _out))
+        logger.info("[H3公共参考音色] 公共角色音色 %d 支%s → global.refAudios：%s",
+                        len(_out),
+                        ("（%d 支已按上限裁剪）" % _before) if _before != len(_out) else "",
+                        "、".join(n for n, _p in _out))
     return _out
 
 
@@ -855,6 +1014,11 @@ def _h3_audio_defs_for(common: list, project_name: str, characters=None) -> list
       detailed_description:``... using the voice timbre referenced from <Audio 1> ...``
     此前我们只把音频文件写进 ``global.refAudios``，提示词里仅有一句非官方的
     ``<Audio 1> = 角色名``，H3 拿到音频却不知道用途 → 自己编嗓子（中英混杂 / 多说话人）。
+
+    ⚠️ 2026-10-13：本函数**不再自行裁剪**，声明的条数/顺序 == :func:`_h3_common_ref_audios`
+    返回的那一份（已裁到官方上限）。历史上这里不裁剪、而挂载侧 ``[:3]`` 静默截断，
+    造成「声明 5 条 / 只挂 3 支」→ 第 4、5 个角色的 ``<Audio N>`` 指向空槽，
+    H3 自行编嗓子（用户实测「每个角色音色都一样」）。
     """
     try:
         # 与写进 global.refAudios 的那一份**必须同源同序**（用户方案②）：_
