@@ -615,10 +615,14 @@ def _save_ai_module(data: dict):
     # 备用模型（故障转移链）：字段缺失 = 不改动；传 list = 整体覆盖
     has_fallbacks = "fallbacks" in data
     _fb = data.get("fallbacks") if has_fallbacks else None
+    # 同提供商备用模型（t74）：字段缺失 = 不改动；传 list = 整体覆盖。
+    # ⭐ t98 修复：此前漏读 model_fallbacks → 前端「本提供商备用模型」保存即丢（P1）。
+    has_model_fallbacks = "model_fallbacks" in data
+    _mf = data.get("model_fallbacks") if has_model_fallbacks else None
     cfg = ai_config.save_module(AI_CONFIG_PATH, module, base_url=base_url, model=model,
                                 api_key=None if keep else key, legacy_path=LLM_CONFIG_PATH,
                                 reasoning_effort=(reasoning_effort if has_reasoning_effort else None),
-                                fallbacks=_fb)
+                                fallbacks=_fb, model_fallbacks=_mf)
     # ⭐ 凭证单一事实源由 `ai_config.save_module` **内部**镜像闭合（json + 加密库 + tasks.db
     # 一次写完，见其 `_mirror_credentials_db` 长注释）—— 这里不再重复写库，只**读回核对**，
     # 避免同一份值有两个写点（将来谁改一处就会漂移）。核对能抓到「接口返回成功但写没落地」

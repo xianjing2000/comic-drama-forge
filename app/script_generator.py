@@ -5,8 +5,11 @@
 import json
 import os
 import logging
+import uuid
 from typing import List, Dict, Optional
 from datetime import datetime
+
+import fs_atomic
 
 from config import (ANTHROPIC_API_KEY, LLM_PROVIDER, QC_CONFIG_PATH, SCRIPT_DIR,
                     PROJECT_OUTPUT_DIR)
@@ -271,7 +274,8 @@ class ScriptGenerator:
         Web 端 OpenAI 兼容链路可显式传入「openai-compatible」以如实记录来源。"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         os.makedirs(SCRIPT_DIR, exist_ok=True)
-        filename = f"{project_name}_{timestamp}.json"
+        # t102：文件名加 uuid 后缀，避免同秒内并发生成同 project 覆盖同名文件。
+        filename = f"{project_name}_{timestamp}_{uuid.uuid4().hex[:6]}.json"
         filepath = os.path.join(SCRIPT_DIR, filename)
 
         # 2026-10-12 t40：合并而非覆盖 —— 兜底剧本等自带 metadata（如 fallback_reason）
@@ -283,8 +287,8 @@ class ScriptGenerator:
             "provider": provider if provider else self.provider,
         })
 
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(script, f, ensure_ascii=False, indent=2)
+        # t102：原子写（与 save_episode_script 同口径），崩溃/断电不留半截 JSON。
+        fs_atomic.atomic_write_json(filepath, script)
 
         logger.info(f"剧本已保存: {filepath}")
         return filepath

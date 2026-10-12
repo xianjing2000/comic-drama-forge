@@ -21,6 +21,8 @@ import re
 import shutil
 import time
 import uuid
+
+import fs_atomic
 from datetime import datetime
 from html import unescape as html_unescape
 from html.parser import HTMLParser
@@ -716,8 +718,8 @@ def _load_index(novels_dir: str) -> list:
 
 def _save_index(novels_dir: str, index: list):
     os.makedirs(novels_dir, exist_ok=True)
-    with open(_index_path(novels_dir), "w", encoding="utf-8") as f:
-        json.dump(index, f, ensure_ascii=False, indent=2)
+    # t102：原子写（与全库其它落盘口径一致），并发/崩溃不留半截 index.json。
+    fs_atomic.atomic_write_json(_index_path(novels_dir), index)
 
 
 def list_novels(novels_dir: str) -> list:
