@@ -1693,7 +1693,6 @@
     "modelFallbackCount": "{n}",
     "modelFallbackN": "Backup {n}",
     "modelFallbackAdd": "+ Add backup model",
-    "modelFallbackLabelPh": "Label (optional)",
     "modelFallbackReuseHint": "Reuses the main model's Base URL and API Key above — just pick a model",
     "modelFallbackSave": "Add",
     "modelFallbackSaved": "Backup models of this provider saved",

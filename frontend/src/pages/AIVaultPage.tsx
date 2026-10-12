@@ -198,7 +198,7 @@ export function AIVaultPage() {
   const [fbModelsState, setFbModelsState] = useState<ProviderModelsState>({ ...EMPTY_MODELS });
   /** 层级1：本提供商的备用模型（复用主模型 base_url + api_key，后端字段 model_fallbacks，t74 契约） */
   const [modelFallbacks, setModelFallbacks] = useState<Record<ModuleKey, { model: string; label: string; reasoning_effort: string }[]>>({ text: [], qc: [] });
-  const [mfDraft, setMfDraft] = useState<{ model: string; label: string }>({ model: '', label: '' });
+  const [mfDraft, setMfDraft] = useState<{ model: string }>({ model: '' });
   const [showAddMf, setShowAddMf] = useState<ModuleKey | null>(null);
   const [mfSaving, setMfSaving] = useState<ModuleKey | null>(null);
   const [mfTesting, setMfTesting] = useState<string | null>(null);
@@ -699,7 +699,7 @@ export function AIVaultPage() {
       showMessage(
         result.success && !partial ? 'success' : 'error',
         result.success
-          ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: mf.label || t('vault.modelFallbackN', { n: index + 1 }) }))
+          ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: t('vault.modelFallbackN', { n: index + 1 }) }))
           : t('vault.fallbackTestFail') + '：' + (result.error || result.guide || '')
       );
     } catch (err) {
@@ -714,16 +714,16 @@ export function AIVaultPage() {
   const addModelFallback = (module: ModuleKey) => {
     const m = mfDraft.model.trim();
     if (!m) return;
-    const list = [...(modelFallbacks[module] || []), { model: m, label: mfDraft.label.trim(), reasoning_effort: '' }];
+    const list = [...(modelFallbacks[module] || []), { model: m, label: '', reasoning_effort: '' }];
     setModelFallbacks(prev => ({ ...prev, [module]: list }));
     setShowAddMf(null);
-    setMfDraft({ model: '', label: '' });
+    setMfDraft({ model: '' });
     persistModelFallbacks(module, list, t('vault.modelFallbackAdded'));
   };
 
   const closeMfForm = () => {
     setShowAddMf(null);
-    setMfDraft({ model: '', label: '' });
+    setMfDraft({ model: '' });
   };
 
   // 清空配置：统一确认弹窗
@@ -1066,7 +1066,7 @@ export function AIVaultPage() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => { setShowAddMf(moduleKey); setMfDraft({ model: '', label: '' }); }}
+                    onClick={() => { setShowAddMf(moduleKey); setMfDraft({ model: '' }); }}
                   >
                     + {t('vault.modelFallbackAdd')}
                   </Button>
@@ -1101,7 +1101,7 @@ export function AIVaultPage() {
                           </div>
                           <div className="flex-1 min-w-0">
                             <div className="font-mono text-xs text-ink-1 truncate">
-                              {mf.label || t('vault.modelFallbackN', { n: i + 1 })}
+                              {t('vault.modelFallbackN', { n: i + 1 })}
                               <span className="ml-2 text-ink-3">{mf.model}</span>
                             </div>
                           </div>
@@ -1144,7 +1144,7 @@ export function AIVaultPage() {
                           return (
                             <div className={'mt-1 text-xs ' + (r.success ? (partial ? 'text-warning-strong' : 'text-success-strong') : 'text-danger-strong')}>
                               {r.success
-                                ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: mf.label || t('vault.modelFallbackN', { n: i + 1 }) }))
+                                ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: t('vault.modelFallbackN', { n: i + 1 }) }))
                                 : t('vault.fallbackTestFail') + '：' + sanitizeErrorMessage(String(r.error || '')).slice(0, 180)}
                             </div>
                           );
@@ -1155,8 +1155,6 @@ export function AIVaultPage() {
                 )}
                 {showAddMf === moduleKey && (
                   <div className="mt-2 p-3 rounded-lg border border-line space-y-2">
-                    <Input label={t('vault.modelFallbackLabelPh')} value={mfDraft.label || ''}
-                      onChange={v => setMfDraft(d => ({ ...d, label: v }))} className="text-sm" />
                     <ModelPicker
                       label={t('settings.modelLabel')}
                       placeholder={t('vault.fallbackModelPh')}

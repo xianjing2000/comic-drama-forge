@@ -1662,7 +1662,6 @@
     "modelFallbackCount": "{n} 个",
     "modelFallbackN": "备用 {n}",
     "modelFallbackAdd": "+ 添加备用模型",
-    "modelFallbackLabelPh": "名称（可选）",
     "modelFallbackReuseHint": "复用上方主模型的 Base URL 和 API Key，只需选模型",
     "modelFallbackSave": "添加",
     "modelFallbackSaved": "本提供商备用模型已保存",
