@@ -4,35 +4,16 @@
 # 由 tools/sink_routes.py 生成：URL 与响应体一字不改，只把 @app.route 换成蓝图路由；
 # 共享助手从 routes/_shared.py 取（沿用既有蓝图模式）。
 import logging
-from flask import Blueprint, jsonify, request, send_file, abort, current_app  # noqa: F401
-import os    # noqa: F401
-from PIL import Image  # noqa: F401
-import sys   # noqa: F401
-import re    # noqa: F401
-import time  # noqa: F401
-import uuid  # noqa: F401
-import threading   # noqa: F401
-import hashlib     # noqa: F401
-import shutil      # noqa: F401
-import random      # noqa: F401
-import base64      # noqa: F401
-import datetime    # noqa: F401
-import traceback   # noqa: F401
-import subprocess  # noqa: F401
-import json  # noqa: F401
-import time  # noqa: F401
-import uuid  # noqa: F401
-from agent_core import logger
+
+from flask import Blueprint, jsonify, request
+
 from llm_client import LLMError
-from routes._shared import _ai_gate_or_400
-from routes._shared import _ai_guide_response
-from routes._shared import _apply_project_settings
-from routes._shared import _body
-from routes._shared import _current_llm_client
-from routes._shared import _qc_load_cfg
-from routes._shared import _safe_project
+from routes._shared import (
+    _ai_gate_or_400, _ai_guide_response, _apply_project_settings, _body,
+    _current_llm_client, _qc_load_cfg, _safe_project,
+)
 import qc_client
-from script_generator import ScriptGenerator  # noqa: F401  script_gen 的构造依赖
+from script_generator import ScriptGenerator  # script_gen 的构造依赖
 
 # 注意：本对象必须在 import ScriptGenerator 之后、任何使用之前构造
 script_gen = ScriptGenerator()

@@ -196,6 +196,13 @@ export function AIVaultPage() {
   });
   /** 备用草稿表单的「提供商模型清单检测」状态（t3） */
   const [fbModelsState, setFbModelsState] = useState<ProviderModelsState>({ ...EMPTY_MODELS });
+  /** 层级1：本提供商的备用模型（复用主模型 base_url + api_key，后端字段 model_fallbacks，t74 契约） */
+  const [modelFallbacks, setModelFallbacks] = useState<Record<ModuleKey, { model: string; label: string; reasoning_effort: string }[]>>({ text: [], qc: [] });
+  const [mfDraft, setMfDraft] = useState<{ model: string; label: string }>({ model: '', label: '' });
+  const [showAddMf, setShowAddMf] = useState<ModuleKey | null>(null);
+  const [mfSaving, setMfSaving] = useState<ModuleKey | null>(null);
+  const [mfTesting, setMfTesting] = useState<string | null>(null);
+  const [mfResults, setMfResults] = useState<Record<string, AITestResult | null>>({});
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [clearTarget, setClearTarget] = useState<ModuleKey | null>(null);
   const [clearing, setClearing] = useState(false);
@@ -240,6 +247,11 @@ export function AIVaultPage() {
             text: Array.isArray(textCfg?.fallbacks) ? textCfg!.fallbacks!.map(f => ({ ...f })) : [],
             qc: Array.isArray(qcCfg?.fallbacks) ? qcCfg!.fallbacks!.map(f => ({ ...f })) : [],
           });
+          // 层级1：本提供商备用模型（model_fallbacks，t74）
+          const _mf = (m: any) => Array.isArray(m?.model_fallbacks)
+            ? m.model_fallbacks.map((f: any) => ({ model: f.model || '', label: f.label || '', reasoning_effort: f.reasoning_effort || '' }))
+            : [];
+          setModelFallbacks({ text: _mf(textCfg), qc: _mf(qcCfg) });
           setFbDirty({ text: false, qc: false });
           setConfig({
             text: {
@@ -604,6 +616,116 @@ export function AIVaultPage() {
     persistFallbacks(module, list, t('vault.fallbackReordered'));
   };
 
+  // ========== 层级1：本提供商备用模型（model_fallbacks，复用主模型 base_url + api_key，t74） ==========
+  const refreshModelFallbacks = async (module: ModuleKey) => {
+    try {
+      const d = await aiConfigApi.get();
+      const raw2 = (d.config || {}) as any;
+      const c2 = (raw2.modules || raw2) as Record<string, any>;
+      const mfs = c2[module]?.model_fallbacks;
+      setModelFallbacks(prev => ({
+        ...prev,
+        [module]: Array.isArray(mfs) ? mfs.map((f: any) => ({ model: f.model || '', label: f.label || '', reasoning_effort: f.reasoning_effort || '' })) : [],
+      }));
+    } catch { /* 回读失败不影响已保存结果 */ }
+  };
+
+  const persistModelFallbacks = async (module: ModuleKey, list: { model: string; label: string; reasoning_effort: string }[], okText?: string) => {
+    const state = config[module];
+    if (!state.base_url.trim() || !state.model.trim()) {
+      showMessage('error', t('vault.fallbackNeedMainFirst'));
+      return;
+    }
+    setMfSaving(module);
+    try {
+      // client.ts save 暂不支持 model_fallbacks（out-of-scope），此处按契约直接 POST /api/ai/config
+      const res = await fetch('/api/ai/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          module,
+          base_url: state.base_url.trim(),
+          model: state.model.trim(),
+          api_key: state.api_key.trim() || undefined,
+          reasoning_effort: state.reasoning_effort,
+          model_fallbacks: list,
+          fallbacks: (fallbacks[module] || []).map(f => ({
+            base_url: f.base_url?.trim(), model: f.model?.trim(),
+            api_key: f.api_key?.trim() || undefined, label: f.label?.trim() || undefined,
+            reasoning_effort: f.reasoning_effort,
+          })),
+        }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        await refreshModelFallbacks(module);
+        showMessage('success', okText || t('vault.modelFallbackSaved'));
+      } else {
+        showMessage('error', t('settings.saveFailed'));
+      }
+    } catch (err) {
+      showMessage('error', t('vault.saveFailedDetail', { err: err instanceof Error ? err.message : t('error.unknown') }));
+    } finally {
+      setMfSaving(null);
+    }
+  };
+
+  const moveModelFallback = async (module: ModuleKey, index: number, dir: -1 | 1) => {
+    const list = [...(modelFallbacks[module] || [])];
+    const j = index + dir;
+    if (j < 0 || j >= list.length) return;
+    [list[index], list[j]] = [list[j], list[index]];
+    setModelFallbacks(prev => ({ ...prev, [module]: list }));
+    setMfResults(prev => {
+      const n = { ...prev };
+      Object.keys(n).forEach(k => { if (k.startsWith(module + '#mf')) delete n[k]; });
+      return n;
+    });
+    persistModelFallbacks(module, list, t('vault.modelFallbackReordered'));
+  };
+
+  const handleTestModelFallback = async (module: ModuleKey, index: number) => {
+    const key = module + '#mf' + index;
+    const mf = (modelFallbacks[module] || [])[index];
+    if (!mf) return;
+    const state = config[module];
+    setMfTesting(key);
+    setMfResults(prev => ({ ...prev, [key]: null }));
+    try {
+      // api_key 留空 → 后端 /ai/test 用主模型保存的解密 key 补缺（复用同一提供商凭证）
+      const result = await aiConfigApi.test(module, state.base_url.trim(), mf.model.trim(), undefined, MODULE_CONFIG[module].probe || 'text', 30, mf.reasoning_effort);
+      setMfResults(prev => ({ ...prev, [key]: result }));
+      const partial = result.success && result.verdict !== 'ok';
+      showMessage(
+        result.success && !partial ? 'success' : 'error',
+        result.success
+          ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: mf.label || t('vault.modelFallbackN', { n: index + 1 }) }))
+          : t('vault.fallbackTestFail') + '：' + (result.error || result.guide || '')
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : t('error.unknown');
+      setMfResults(prev => ({ ...prev, [key]: { success: false, module, probe: 'text', error: msg } as AITestResult }));
+      showMessage('error', t('vault.fallbackTestFail') + '：' + msg);
+    } finally {
+      setMfTesting(null);
+    }
+  };
+
+  const addModelFallback = (module: ModuleKey) => {
+    const m = mfDraft.model.trim();
+    if (!m) return;
+    const list = [...(modelFallbacks[module] || []), { model: m, label: mfDraft.label.trim(), reasoning_effort: '' }];
+    setModelFallbacks(prev => ({ ...prev, [module]: list }));
+    setShowAddMf(null);
+    setMfDraft({ model: '', label: '' });
+    persistModelFallbacks(module, list, t('vault.modelFallbackAdded'));
+  };
+
+  const closeMfForm = () => {
+    setShowAddMf(null);
+    setMfDraft({ model: '', label: '' });
+  };
+
   // 清空配置：统一确认弹窗
   const handleClear = (module: ModuleKey) => setClearTarget(module);
 
@@ -870,7 +992,7 @@ export function AIVaultPage() {
                 </div>
               </div>
 
-              {/* Config Fields */}
+              {/* Config Fields（主模型 = 同一提供商） */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="md:col-span-2">
                   <Input
@@ -918,7 +1040,7 @@ export function AIVaultPage() {
                     {t('vault.detectModels')}
                   </Button>
                 </div>
-                {/* 模型：手填兜底 + 模型清单下拉（t3） */}
+                {/* 主模型：手填兜底 + 模型清单下拉（t3） */}
                 <div className="md:col-span-2">
                   <ModelPicker
                     label={t('settings.modelLabel')}
@@ -930,30 +1052,153 @@ export function AIVaultPage() {
                   {renderModelsStatus(modelsState[moduleKey])}
                   <p className="mt-1 text-xs text-ink-3">{t('vault.modelManualHint')}</p>
                 </div>
-                {/* 思考档位：只对「思考不可关闭」的模型（如 GLM-5.3-Flash）有意义。 */}
-                <div className="md:col-span-2">
-                  <Select
-                    label={t('vault.reasoningLabel')}
-                    value={state.reasoning_effort}
-                    onChange={v => updateField(moduleKey, 'reasoning_effort', v)}
-                    options={reOptions.map(opt => {
-                      const labelKey = REASONING_EFFORT_LABEL_KEYS[opt];
-                      return { value: opt, label: labelKey ? t(labelKey) : opt };
-                    })}
-                  />
-                  <p className="text-xs text-ink-3 mt-1">
-                    {t('vault.reasoningHintLead')}
-                    <span className="text-warning-strong">
-                      {t('vault.reasoningHintWarn')}
-                    </span>
-                    {t('vault.reasoningHintTail')}
-                  </p>
-                </div>
               </div>
 
-              {/* ===== 备用模型（故障转移链） ===== */}
+              {/* ===== 层级1：本提供商备用模型（复用同一 Base URL + API Key，t74 model_fallbacks） ===== */}
               <div className="border-t border-line pt-4 mt-2">
-                <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-ink-1">{t('vault.modelFallbackTitle')}</span>
+                    <Badge variant={(modelFallbacks[moduleKey] || []).length > 0 ? 'success' : 'default'}>
+                      {t('vault.modelFallbackCount', { n: (modelFallbacks[moduleKey] || []).length })}
+                    </Badge>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => { setShowAddMf(moduleKey); setMfDraft({ model: '', label: '' }); }}
+                  >
+                    + {t('vault.modelFallbackAdd')}
+                  </Button>
+                </div>
+                <p className="text-xs text-ink-3 mb-2">{t('vault.modelFallbackDesc')}</p>
+                {(modelFallbacks[moduleKey] || []).length > 0 && (
+                  <ul className="space-y-2">
+                    {(modelFallbacks[moduleKey] || []).map((mf, i) => (
+                      <li key={i} className="p-2 rounded-lg bg-surface-2 text-sm">
+                        <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-0.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => moveModelFallback(moduleKey, i, -1)}
+                              disabled={i === 0 || mfSaving === moduleKey}
+                              className="p-1 rounded text-ink-3 hover:text-brand transition-colors disabled:cursor-not-allowed disabled:opacity-30"
+                              title={t('vault.fallbackMoveUp')}
+                              aria-label={t('vault.fallbackMoveUp')}
+                            >
+                              <ChevronDown className="h-3.5 w-3.5 rotate-180" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => moveModelFallback(moduleKey, i, 1)}
+                              disabled={i === (modelFallbacks[moduleKey] || []).length - 1 || mfSaving === moduleKey}
+                              className="p-1 rounded text-ink-3 hover:text-brand transition-colors disabled:cursor-not-allowed disabled:opacity-30"
+                              title={t('vault.fallbackMoveDown')}
+                              aria-label={t('vault.fallbackMoveDown')}
+                            >
+                              <ChevronDown className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-mono text-xs text-ink-1 truncate">
+                              {mf.label || t('vault.modelFallbackN', { n: i + 1 })}
+                              <span className="ml-2 text-ink-3">{mf.model}</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleTestModelFallback(moduleKey, i)}
+                            disabled={mfTesting === moduleKey + '#mf' + i}
+                            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-xs text-ink-2 hover:text-brand hover:border-brand transition-colors disabled:opacity-40"
+                            title={t('vault.fallbackTest')}
+                          >
+                            <RefreshCw className={'h-3 w-3 ' + (mfTesting === moduleKey + '#mf' + i ? 'animate-spin' : '')} />
+                            {t('vault.fallbackTest')}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={mfSaving === moduleKey}
+                            onClick={() => {
+                              const next = (modelFallbacks[moduleKey] || []).filter((_, idx) => idx !== i);
+                              setModelFallbacks(prev => ({ ...prev, [moduleKey]: next }));
+                              setMfResults(prev => {
+                                const n = { ...prev };
+                                Object.keys(n).forEach(k => { if (k.startsWith(moduleKey + '#mf')) delete n[k]; });
+                                return n;
+                              });
+                              persistModelFallbacks(moduleKey, next, t('vault.modelFallbackDeleted'));
+                            }}
+                            className="shrink-0 flex items-center gap-1 px-2 py-1 rounded border border-line text-xs text-ink-2 hover:text-danger hover:border-danger transition-colors"
+                            title={t('vault.fallbackRemove')}
+                          >
+                            <X className="h-3 w-3" />
+                            {t('vault.fallbackRemove')}
+                          </button>
+                        </div>
+                        {mfTesting === moduleKey + '#mf' + i && (
+                          <div className="mt-1 text-xs text-ink-3">{t('vault.fallbackTesting')}</div>
+                        )}
+                        {mfResults[moduleKey + '#mf' + i] && (() => {
+                          const r = mfResults[moduleKey + '#mf' + i]!;
+                          const partial = r.success && r.verdict !== 'ok';
+                          return (
+                            <div className={'mt-1 text-xs ' + (r.success ? (partial ? 'text-warning-strong' : 'text-success-strong') : 'text-danger-strong')}>
+                              {r.success
+                                ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: mf.label || t('vault.modelFallbackN', { n: i + 1 }) }))
+                                : t('vault.fallbackTestFail') + '：' + sanitizeErrorMessage(String(r.error || '')).slice(0, 180)}
+                            </div>
+                          );
+                        })()}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {showAddMf === moduleKey && (
+                  <div className="mt-2 p-3 rounded-lg border border-line space-y-2">
+                    <Input label={t('vault.modelFallbackLabelPh')} value={mfDraft.label || ''}
+                      onChange={v => setMfDraft(d => ({ ...d, label: v }))} className="text-sm" />
+                    <ModelPicker
+                      label={t('settings.modelLabel')}
+                      placeholder={t('vault.fallbackModelPh')}
+                      value={mfDraft.model || ''}
+                      onChange={v => setMfDraft(d => ({ ...d, model: v }))}
+                      models={modelsState[moduleKey].models}
+                    />
+                    <p className="text-xs text-ink-3">{t('vault.modelFallbackReuseHint')}</p>
+                    <div className="flex justify-end gap-2">
+                      <Button variant="ghost" size="sm" onClick={closeMfForm}>{t('vault.cancel')}</Button>
+                      <Button variant="brand" size="sm" disabled={!mfDraft.model?.trim()}
+                        onClick={() => addModelFallback(moduleKey)}>
+                        {t('vault.modelFallbackSave')}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 思考档位：只对「思考不可关闭」的模型（如 GLM-5.3-Flash）有意义 */}
+              <div className="mt-4">
+                <Select
+                  label={t('vault.reasoningLabel')}
+                  value={state.reasoning_effort}
+                  onChange={v => updateField(moduleKey, 'reasoning_effort', v)}
+                  options={reOptions.map(opt => {
+                    const labelKey = REASONING_EFFORT_LABEL_KEYS[opt];
+                    return { value: opt, label: labelKey ? t(labelKey) : opt };
+                  })}
+                />
+                <p className="text-xs text-ink-3 mt-1">
+                  {t('vault.reasoningHintLead')}
+                  <span className="text-warning-strong">
+                    {t('vault.reasoningHintWarn')}
+                  </span>
+                  {t('vault.reasoningHintTail')}
+                </p>
+              </div>
+
+              {/* ===== 层级2：其它提供商（故障转移，各填 Base URL / API Key，t73 更名） ===== */}
+              <div className="border-t border-line pt-4 mt-2">
+                <div className="flex items-center justify-between mb-1">
                   <div>
                     <span className="text-sm font-medium text-ink-1">{t('vault.fallbackTitle')}</span>
                     <p className="text-xs text-ink-3 mt-0.5">{t('vault.fallbackDesc')}</p>
@@ -976,7 +1221,6 @@ export function AIVaultPage() {
                     {fallbacks[moduleKey].map((fb, i) => (
                       <li key={i} className="p-2 rounded-lg bg-surface-2 text-sm">
                         <div className="flex items-center gap-2">
-                          {/* 排序：上移 / 下移（故障转移顺序） */}
                           <div className="flex items-center gap-0.5 shrink-0">
                             <button
                               type="button"
@@ -1049,9 +1293,7 @@ export function AIVaultPage() {
                           </button>
                         </div>
                         {fbTesting === moduleKey + '#' + i && (
-                          <div className="mt-1 text-xs text-ink-3">
-                            {t('vault.fallbackTesting')}
-                          </div>
+                          <div className="mt-1 text-xs text-ink-3">{t('vault.fallbackTesting')}</div>
                         )}
                         {fbResults[moduleKey + '#' + i] && (() => {
                           const r = fbResults[moduleKey + '#' + i]!;
@@ -1104,9 +1346,7 @@ export function AIVaultPage() {
                     </div>
                     {renderModelsStatus(fbModelsState)}
                     <div className="flex justify-end gap-2">
-                      <Button variant="ghost" size="sm" onClick={closeFbForm}>
-                        {t('vault.cancel')}
-                      </Button>
+                      <Button variant="ghost" size="sm" onClick={closeFbForm}>{t('vault.cancel')}</Button>
                       <Button variant="brand" size="sm"
                         disabled={!fbDraft.base_url?.trim() || !fbDraft.model?.trim()}
                         onClick={() => {
