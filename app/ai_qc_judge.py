@@ -116,39 +116,26 @@ def determine_strategy(severity: str, context: dict = None) -> dict:
         # 低优先级，仅记录
         strategy = HANDLING_STRATEGIES["log_only"]
     
-    # 根据上下文调整策略
-    attempt = context.get("attempt", 1)
-    max_retries = strategy.get("max_retries", 3)
+    # 根据上下文调整策略（t17 P0：移除「重试耗尽即降级严重程度」的旧逻辑）
+    try:
+        attempt = int(context.get("attempt") or 1)
+    except (TypeError, ValueError):
+        attempt = 1
+    try:
+        outer_max = int(context.get("max_retries") or strategy.get("max_retries", 3))
+    except (TypeError, ValueError):
+        outer_max = strategy.get("max_retries", 3)
+    retries_exhausted = attempt >= outer_max
     
-    # 超过最大重试次数时，降低严重程度继续尝试，而不是转人工
-    if attempt >= max_retries:
-        # 降级策略：将严重程度降低一级
-        if severity == "critical":
-            severity = "high"
-        elif severity == "high":
-            severity = "medium"
-        elif severity == "medium":
-            severity = "low"
-        
-        # 重新确定策略
-        if severity == "high":
-            strategy = HANDLING_STRATEGIES["modify_and_retry"]
-        elif severity == "medium":
-            strategy = HANDLING_STRATEGIES["auto_retry"]
-        else:
-            strategy = HANDLING_STRATEGIES["log_only"]
-    
-    # 如果是关键业务（如最终成片），仍然需要严格质检，但不转人工
-    # 改为：记录警告但继续自动处理
-    if context.get("is_final", False) and severity in ["high", "critical"]:
-        # 记录警告，但不阻断
-        logger.warning(f"关键业务质检问题: 严重程度={severity}, 将继续自动处理")
+    if context.get("is_final", False) and severity in ("high", "critical"):
+        logger.warning(f"关键业务质检问题: 严重程度={severity}, 重试耗尽后需人工复核")
     
     return {
         "strategy": strategy,
         "severity": severity,
         "attempt": attempt,
-        "max_retries": strategy.get("max_retries", 3),
+        "max_retries": outer_max,
+        "retries_exhausted": retries_exhausted,
         "description": strategy.get("description", ""),
     }
 
@@ -211,7 +198,8 @@ def generate_fix_suggestions(verdict: dict, context: dict = None) -> List[str]:
 
 
 def create_execution_plan(verdict: dict, context: dict = None) -> dict:
-    """创建执行计划 - 支持24小时自动执行，无需人工干预"""
+    """创建执行计划：should_continue/requires_human 尊重质检结论，绝不静默放行"""
+    context = context or {}
     severity = assess_severity(verdict)
     strategy_info = determine_strategy(severity, context)
     suggestions = generate_fix_suggestions(verdict, context)
@@ -251,9 +239,27 @@ def create_execution_plan(verdict: dict, context: dict = None) -> dict:
             {"action": "continue_with_log", "description": "记录日志并继续流程"},
         ]
     
-    # 24小时自动执行模式：所有情况下都不需要人工干预
-    should_continue = True  # 始终继续流程
-    requires_human = False  # 从不需要人工处理
+    # ⚠️ 2026-10-12（t17 P0）：should_continue / requires_human 不得再硬编码。
+    # 判定规则（尊重质检结论，绝不静默放行）：
+    #   · 关键业务（is_final）且 high/critical → 不放行，需人工；
+    #   · 外层重试已耗尽 → 不放行，需人工；
+    #   · 低优先级（severity=low，无 critical/high/medium 缺陷信号）→ 可放行（仅记录）；
+    #   · 其余（medium/high/critical 且未耗尽）→ 不放行，触发重试循环。
+    is_final = bool(context.get("is_final", False))
+    is_low = severity == "low"
+    retries_exhausted = bool(strategy_info.get("retries_exhausted"))
+    if is_final and severity in ("high", "critical"):
+        should_continue = False
+        requires_human = True
+    elif retries_exhausted:
+        should_continue = False
+        requires_human = True
+    elif is_low:
+        should_continue = True
+        requires_human = False
+    else:
+        should_continue = False
+        requires_human = False
     
     return {
         "severity": severity,
