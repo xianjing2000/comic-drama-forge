@@ -962,11 +962,58 @@ class ComfyUIClient:
 
     # ===================== 工作流加载与转换 =====================
 
-    def load_workflow(self, workflow_file: str, return_meta: bool = False):
-        """加载工作流文件并转换为 API prompt 格式"""
+    # ⭐⭐ 2026-10-12：接入插件新增的 cache_name（MiniMaxH3Director 面板「性能」组）。
+    #
+    # ## 为什么需要
+    # 插件旧版的分段缓存目录是 minimax_seg_cache / <node_id> —— **按节点 id**。
+    # 我们的工作流里 Director 节点 id 恒为同一个（实测 12），于是：
+    #   · 第 1 场 28 段写进 12/seg_0000..seg_0027；
+    #   · 第 2 场又从 seg_0000 开始写 → **覆盖第 1 场的段**。
+    # 表现为「段号莫名回到 0」「后台预构建结果互相覆盖」，与那次 OOM 后的
+    # 「Segment cache pruned 224 stale file(s) for node 12」是同一条链路。
+    #
+    # 插件 2026-10-12 更新后提供 resolve_segment_cache_key(cache_name, node_id)：
+    #   有 cache_name → <name>_<node_id>；为空 → 退回 <node_id>（旧行为）。
+    # 所以**只要填 cache_name 就能分目录**，不必等插件改默认值。
+    #
+    # ## 命名口径
+    # <项目>__ep<集号>__s<场次>：同一场次重跑复用同一目录（断点续跑的收益保住），
+    # 不同场次/不同集彼此隔离（不再互相覆盖）。非法字符由插件侧
+    # normalize_cache_name 统一清洗，这里只管取一个人类可读的名字。
+    @staticmethod
+    def _inject_director_cache_name(wf: dict, cache_name: str) -> int:
+        """给工作流里的 MiniMaxH3Director 节点写入 cache_name，返回改了几个节点。"""
+        if not cache_name or not isinstance(wf, dict):
+            return 0
+        n = 0
+        for nd in (wf.get("nodes") or []):
+            if not isinstance(nd, dict):
+                continue
+            if nd.get("class_type") == "MiniMaxH3Director" or nd.get("type") == "MiniMaxH3Director":
+                named = nd.get("widgets_values_named")
+                if not isinstance(named, dict):
+                    named = {}
+                    nd["widgets_values_named"] = named
+                if str(named.get("cache_name") or "").strip() != str(cache_name):
+                    named["cache_name"] = str(cache_name)
+                    n += 1
+        return n
+
+    def load_workflow(self, workflow_file: str, return_meta: bool = False,
+                      cache_name: str = None):
+        """加载工作流文件并转换为 API prompt 格式
+
+        cache_name（2026-10-12 新增）：非空时给 Director 节点注入插件新增的
+        cache_name 控件 → 分段缓存落到独立目录，避免多场次互相覆盖。
+        """
         workflow_path = resolve_workflow_path(workflow_file)
         with open(workflow_path, "r", encoding="utf-8-sig") as f:   # 兼容 UTF-8 BOM
             wf = json.load(f)
+        if cache_name:
+            _hit = self._inject_director_cache_name(wf, cache_name)
+            if _hit:
+                logger.info("[H3-Director] 分段缓存目录名 cache_name=%r（%d 个节点）"
+                            "—— 本批产物与其它场次/集次互不覆盖", cache_name, _hit)
         return self.to_api(wf, return_meta=return_meta)
 
     @staticmethod
@@ -4530,6 +4577,7 @@ class ComfyUIClient:
         common_prompt: str = None,
         build_only: bool = False,
         save_build_to: str = None,
+        cache_name: str = None,
     ) -> dict:
         """H3 整集视频生成（N 段一个工作流，原生 H3ContinuousSeamlessJoinV14 衔接）
         + 整片 QC 门控。
@@ -4565,7 +4613,7 @@ class ComfyUIClient:
                 save_build_to=save_build_to, build_only=True, size=size,
                 seg_audios=seg_audios, audio_mode=audio_mode,
                 common_refs=common_refs, common_ref_audios=common_ref_audios,
-                common_prompt=common_prompt)
+                common_prompt=common_prompt, cache_name=cache_name)
             return {"files": [], "build_only": True,
                     "workflow": _r.get("workflow"),
                     "layout": _r.get("layout") or {},
@@ -4614,6 +4662,7 @@ class ComfyUIClient:
             try:
                 result = self.generate_h3_sequence(
                     segments=segs,
+                    cache_name=cache_name,
                     filename_prefix=filename_prefix,
                     seed=cur_seed,
                     timeout_per_segment=timeout_per_segment,
@@ -4750,7 +4799,8 @@ class ComfyUIClient:
                              audio_mode: str = None,
                              common_refs: List[str] = None,
                              common_ref_audios: List[str] = None,
-                             common_prompt: str = None) -> dict:
+                             common_prompt: str = None,
+                             cache_name: str = None) -> dict:
         """H3 多段一次生成：**工作流段数 = len(segments)**，一个分镜对应一段。
 
         两条实现路径（按**模板结构**自动分流，见 `_use_director_builder`）：
@@ -4794,7 +4844,8 @@ class ComfyUIClient:
                 seg_audios=seg_audios, audio_mode=audio_mode,
                 common_refs=common_refs,
                 common_ref_audios=common_ref_audios,
-                common_prompt=common_prompt)
+                common_prompt=common_prompt,
+                cache_name=cache_name)
 
         if common_refs:
             # 旧连续拼接路径按段重建子图、没有「公共参数」概念（global.refs 零引用）。
@@ -5183,7 +5234,8 @@ class ComfyUIClient:
         audio_mode: str = None,
         common_refs: Optional[List[str]] = None,
         common_ref_audios: Optional[List[str]] = None,
-        common_prompt: Optional[str] = None) -> dict:
+        common_prompt: Optional[str] = None,
+        cache_name: str = None) -> dict:
         """Director 路径实现：一条 ``timeline_data`` 承载 N 段，返回结构对齐旧路径。
 
         与旧连续拼接路径的**语义差异（务必知道）**：
@@ -5433,6 +5485,16 @@ class ComfyUIClient:
         self._drop_missing_director_refs(wf, seg_ref_names, seg_audio_names, n,
                                          common_names=(common_names
                                                        if _use_global_common else None))
+
+        # ⭐ 2026-10-12：给 Director 节点写入分段缓存目录名 —— 插件旧版缓存目录是
+        #   minimax_seg_cache/<node_id>（节点 id 恒为 12），导致第 2 场的 seg_0000
+        #   覆盖第 1 场的 seg_0000。插件本次更新后支持 cache_name → <name>_<node_id>，
+        #   填上它即按「项目+集+场」分目录，多场次互不覆盖（详见 load_workflow）。
+        if cache_name:
+            _cn_hit = self._inject_director_cache_name(wf, cache_name)
+            if _cn_hit:
+                logger.info("[H3-Director] 分段缓存目录名 cache_name=%r（%d 个节点）",
+                            cache_name, _cn_hit)
 
         if build_only:
             # 只构建不提交（Director 路径，2026-10-03）：UI 工作流**随结果内存返回**，

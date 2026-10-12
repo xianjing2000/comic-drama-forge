@@ -310,6 +310,8 @@ def _video_retry_shot_impl():
     try:
         result = comfyui_client.generate_h3_sequence(
             segments=_rs_segs,
+            # ⭐ 2026-10-12：单镜重跑也用自己的缓存名，避免踩到整集那批的缓存
+            cache_name=f"{project}_retry_shot{seq:02d}",
             filename_prefix=f"comic_drama_retry/{project}_shot_{seq:02d}",
             seed=data.get('seed'), timeout_per_segment=int(data.get('timeout') or 900))
     except Exception as e:  # noqa: BLE001
@@ -1635,6 +1637,10 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
 
             result = comfyui_client.generate_h3_sequence_sequential(
                 segments=segs,
+                # ⭐ 2026-10-12：分段缓存目录名（插件新能力）—— 插件旧版目录名只按节点 id
+                #   （恒为 12），第 2 场会覆盖第 1 场的同名段。按「项目_集」命名后，
+                #   本集各批与其它集互不覆盖，同集重跑仍能命中自己的断点缓存。
+                cache_name=f"{project_name}_{episode_tag or 'episode'}",
                 filename_prefix=f"comic_drama/{project_name}_{episode_tag or 'episode'}",
                 # 崩溃免重渲（2026-09-29）：整集一次提交要跑几十分钟，若中途崩溃/重启，
                 # 种子必须还能复原 —— 否则重建出的工作流哈希变了、检查点直接失效。

@@ -1,0 +1,4290 @@
+"""
+AI 质检模块（图片 / 视频）—— 可开关、可配置、不达标自动重生成
+
+职责：
+1) 质检配置持久化（qc_config.json）：总开关 / 图片·视频独立开关 / 质检独立接口（base_url / api_key / model，
+   不复用文本分析 LLM 接口）/
+   判定标准（合格线分数 + 自定义质检提示词）/ 最大重试次数 / 视频抽帧策略
+2) 图片质检：把生成图交给「OpenAI 兼容 + 支持视觉输入」的多模态模型，返回
+   {passed, score, reason, issues}
+3) 视频质检：先用 ffmpeg 抽帧（首/中/尾等），再把多帧一并交给多模态模型判定
+4) 质检与重试历史：output/qc/<项目>/<类型>_<镜头>.json（每次尝试一条记录，持续追加）
+
+设计约束（重要）：
+- 任何质检失败（未开启 / 未配置 / 网络异常 / 返回非法 JSON / ffmpeg 缺失）都不得抛异常打断生成流程，
+  统一通过返回值里的 ok / skipped / error 字段表达。
+- api_key 永不回显明文，只返回脱敏值。
+"""
+from __future__ import annotations
+
+import base64
+import io
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+from datetime import datetime
+from urllib.parse import urlparse
+
+import requests
+
+# 单镜时长等口径的**唯一权威**（2026-09-30 提到 config）：质检期的 OK 区间必须与生成期同源，
+# 否则出现「剧本端 3~12 秒 vs 质检端 1~15 秒」互相打架、正常剧本反被判不可执行的历史缺陷。
+# config 只依赖 env_loader，不会形成循环导入。
+import config
+
+# 音频客观层（ffmpeg 指标 + 频谱/波形渲染）。⚠️ audio_qc **不反向依赖本模块**，
+# 因此这里 import 不会形成循环；硬阈值与渲染逻辑都由它持有（谁消费谁定义）。
+import audio_qc
+
+# 性别兜底工具（2026-09-28）：本模块只借它的中文性别判定做「能否启用性别核对项」的门控。
+# ⚠️ asset_prompt_kit 只依赖标准库（re/logging/typing），不会形成循环导入。
+import asset_prompt_kit
+
+# 提示词模板中心（2026-10-07 外置改造）：DEFAULT_SCRIPT_PROMPT 的生效值从这里加载
+# （只依赖标准库、config 延迟导入，不会形成循环导入）。
+import prompt_templates
+
+from common_util import mask_key as mask_key
+logger = logging.getLogger(__name__)
+
+# 数据根目录（定位加密密钥库 output/secrets.enc 与主密钥 .secret_key）。
+# 走 env_loader.PROJECT_DATA_DIR（MJSCXT_DATA_DIR 守卫，默认=源根，行为不变）。
+try:
+    from env_loader import PROJECT_DATA_DIR as _PROJECT_ROOT
+except Exception:  # noqa: BLE001  兜底：env_loader 未就绪时退回源根
+    _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# P2-T3（审计 T-3）：qc_config 落盘此前三处（save_config / set_endpoint /
+# reset_endpoint）都用**固定 `.tmp`** 且模块无锁 —— 两个线程同时 save_config
+# 时固定临时名会互相截断（一边写到一半被另一边 os.replace 换走 → json 残半），
+# 损坏的配置文件会被 load_config 标 _config_corrupt 回退默认值（不阻断但配置丢失）。
+# 手法同 P1-1（project_store._write_json）：唯一临时名 + fsync + Windows 占用退避
+# replace + 模块级锁串行化整个「读改写」段（锁加在各写函数外层，见下方调用点）。
+_QC_WRITE_LOCK = threading.Lock()
+
+
+def _atomic_write_json(config_path: str, cfg: dict) -> None:
+    """原子写 JSON（唯一临时名 + fsync + 占用退避 replace），不截断、不留垃圾。"""
+    os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
+    # 临时名每次唯一（pid+threadid+随机），并发写者各写各的，互不截断
+    tmp = f"{config_path}.{os.getpid()}.{threading.get_ident()}.{os.urandom(3).hex()}.tmp"
+    last = None
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())          # 先落盘再 replace，避免断电后只剩空文件
+        for i in range(8):
+            try:
+                os.replace(tmp, config_path)   # 同分区原子换名
+                return
+            except PermissionError as e:       # Windows 目标被并发读取占用（WinError 5/32）
+                last = e
+                time.sleep(0.02 * (i + 1))
+        raise last
+    except Exception:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)               # 失败不留垃圾临时文件
+        except OSError as e:
+            logger.debug("清理临时文件失败（忽略）：%s", e)
+        raise
+
+# ===================== 默认配置 =====================
+
+# 质检判定口径：水印 / 角标 / 字幕 / 「AI 生成」标识一律不计为质量缺陷（B 项⑥）
+# 该口径会追加到「默认提示词」与「用户自定义提示词」之后，保证历史配置同样生效。
+WATERMARK_EXEMPT_NOTE = (
+    "\n【判定口径·重要】画面中若仅存在水印、角标、logo、平台标识、字幕或「AI 生成」标识，"
+    "一律不得视为质量缺陷，不得因此扣分，也不得据此判定不通过；"
+    "请只针对画面本身的崩坏 / 畸变 / 糊化 / 闪烁 / 撕裂 / 一致性问题做判定。"
+    # ⚠️ 2026-09-24 补：只写「水印/字幕豁免」不够 —— 质检模型对「画面里有文字」自带一条
+    # **先验规则**（「无文字规范」），实测把「卷轴上的 7 列古篆」判成违规（score=35），
+    # 而同一件道具在「图里没文字」时又依据**设定**判「缺少古篆文字」——同一件道具
+    # 两个方向都能判出缺陷，形成无解循环（出图侧还有去水印负向词压字）。
+    # 这里把口径写死，让质检在「内容文字」上有唯一立场。
+    "\n【文字口径·重要】「不得出现文字」类约束**只针对叠加物**（字幕条、台词字幕、标题条、"
+    "水印、logo、生成标识）。**画面内容本身需要的文字不算违规，一律不得因此扣分或判不通过** —— "
+    "器物铭文、卷轴古篆、牌匾刻字、系统面板数值等属于画面内容，设定要求时应正常呈现："
+    "既不得因「画面里有文字」判缺陷，也不得因「画面里没有文字」判缺陷（那属于设定问题，"
+    "不是出图质量问题）。⭐ 但**设定要求出现文字时**（提示词给出了确切原文，如工牌抬头、"
+    "告示标题、书名、数字编号），文字若**乱码 / 错字 / 缺笔多笔 / 不可读**，**必须计为缺陷**"
+    "——Qwen-Image 官方已原生支持简体中文与英文的文字渲染（官方明确公布的能力），"
+    "乱码不再是「模型能力边界」，而是必须重画的信号。⭐ **逐字核对（2026-10-10 用户要求）**：当提示词以「物品表面必须呈现文字：…「XXX」…」或类似形式给出了**确切原文**时，请把画面上的文字与该原文**逐字比对**：（a）字数不符、缺字多字、错字别字 → 必须计为缺陷并指出「第几个字应为X、实际像Y」；（b）该原文若含**多条条目**（如「1禁止奔跑 2保持安静 3随手关门」），逐条确认每一条都出现且顺序正确，缺条或串序都要点名；（c）原文未给出的部分（背景虚化文本）**不作要求**，不得因此扣分。未要求文字的普通画面里出现文字，"
+    "仍按叠加物口径判。请同时针对画面本身的崩坏 / 畸变 / 糊化 / "
+    "闪烁 / 撕裂 / 一致性 / 主体形态 / 风格做判定。"
+)
+
+# 景别（镜头类型）判定容差：图像生成模型对取景范围的控制力有限，实测 43% 的分镜图
+# 因「景别不符」被判不通过 —— 其中绝大多数只差一档（如目标中景、实际给了近景或全景），
+# 反复重试仍难命中，白白烧 GPU。这里明确容差口径，避免把「差一档」当成硬缺陷。
+# 与 SHOT_CAMERA_SPECS（comfyui_client）配套：判定标准由镜头信息里的「判定标准：…」给出。
+FRAMING_TOLERANCE_NOTE = (
+    "\n【景别判定口径·重要】判定景别时**必须以上方「镜头信息」里给出的「判定标准」为准**，"
+    "不要用你自己的习惯理解。容差口径：\n"
+    "  · 与判定标准相符，或仅相差一档（如目标中景，实际偏近景、或略偏全景）→ "
+    "至多在 issues 里记一条轻微偏差，**不得据此判不通过**，score 只做小幅扣分（不超过 8 分）；\n"
+    "  · 相差两档及以上（如目标特写却给全景/中景，或目标全景却给特写）→ 才算景别不符，"
+    "写明「景别不符」并在 score 上明显扣分；\n"
+    "  · 若「判定标准」写明**本镜未指定景别**（camera 只给了机位/运镜，如「俯拍缓推」）："
+    "**不得判「景别不符」**，请只按画面内容描述里的取景要求判定；\n"
+    "  · 机位与景别正交：镜头信息里给了「机位：俯拍 / 仰拍 / 平视 / 环绕 …」时，画面必须与之一致，"
+    "机位明显不符（如要求俯拍却给了平视）按**两档级**偏差处理，写明「机位不符」并明显扣分；\n"
+    "  · 取景范围本身不影响主体与动作的清晰表达时，宁可放过也不要误杀。"
+)
+
+# 连续性判定口径（2026-09-25 需求 J / P1 补）：
+# 业界做漫剧/短剧时，单张分镜图「画得好看」只是及格线，**跨镜连续性**才是成片能否
+# 连起来的关键 —— 相邻两镜如果背景结构、光位方向、服化道细节漂移，剪在一起就是
+# 「跳戏」。此前 DEFAULT_IMAGE_PROMPT 只查单图内部质量（人物/糊化/构图/景别/风格），
+# 完全没有这一层，而 **视频侧质检反而有**（DEFAULT_VIDEO_PROMPT 第 2 条查「人物外观与
+# 场景在整段视频中保持稳定」）—— 图片侧是能力缺口，这里补齐。
+#
+# ⚠️ 只在**提供了上一镜参考**时才有效判定：调用方若未注入上一镜信息，模型无从对比，
+# 此时必须明确「不得因无法对比而判缺陷」，否则会凭空臆造一条「与上一镜不一致」。
+CONTINUITY_NOTE = (
+    "\n【跨镜连续性判定口径】若上方「镜头信息」提供了**上一镜的参考画面或场景描述**，"
+    "请额外判定本图与上一镜的连续性：\n"
+    "  · 背景结构、建筑形制、环境陈设是否与上一镜一致（同场景下不得无理由改变）；\n"
+    "  · 光照方向与色温是否一致（如上一镜是左侧月光，本镜不得变成右侧暖光）；\n"
+    "  · 角色的发型、服装配色与配饰是否与上一镜保持一致（同场景连续镜头必须一致）；\n"
+    "  · 上述任一项**明显漂移**时，在 issues 里写明「与上一镜不连续：<具体项>」并扣分；\n"
+    "  · ⚠️ 仅当场景确实发生变化（换场）时，背景与光照改变属**正常**，不得判缺陷；\n"
+    "  · ⚠️ 若「镜头信息」**未提供**上一镜参考，则**不得**判定连续性 —— "
+    "不要凭空臆造「与上一镜不一致」，直接跳过本项。"
+)
+
+# 逐段主体一致性门禁（2026-10-01，借鉴 Story Claw 的逐段 VLM 门禁）：整集视频按
+# 镜头时间戳切帧送检时，追加本段——要求 QC 模型**逐时间区间**核对同一角色的
+# 面部/服装/体型是否漂移（换装/换脸/发色漂移均算），命中即列「主体一致性漂移」。
+# ⚠️ 接线点（P2-3 待实施）：check_video 的帧切片按镜头时间戳分组后，对每组追加
+#    本段 + 该组对应的角色设定图；常量先行以固化判定口径，接线前不产生行为变化。
+SUBJECT_CONSISTENCY_NOTE = (
+    "\n【逐段主体一致性判定·重要】本次待检视频的抽帧已按「镜头时间区间」分组：\n"
+    "  · 同一角色在**同一镜头区间内**：面部 / 发型 / 服装 / 体型 必须保持一致，"
+    "区间中途出现换脸 / 换装 / 发色漂移 属**致命缺陷**；\n"
+    "  · 同一角色**跨镜头区间**：在场景未切换的前提下，服装与配饰必须延续；"
+    "镜头切换导致背景变化属正常，不得据此扣分；\n"
+    "  · 每个区间独立给出结论：在 issues 中以「[Shot N] 主体一致性漂移：<具体项>」"
+    "格式逐条写明，便于定位到具体镜头；\n"
+    "  · 若某区间画面无法辨认（过暗/过糊），如实标注「无法核对」，不得臆造缺陷。"
+)
+
+# 人物性别一致性（2026-09-28）：资产图实测出现「角色名是「三百年旧怨女子」（女性）、
+# 出图却是短发男性脸型体格」的致命错误 —— 而质检侧**完全没有性别判据**，模型只按
+# 发色/瞳色/服装比对，性别画反也能拿高分入库。这里补一条资产核对项。
+#
+# ⚠️ 只在**能拿到性别设定**时启用：调用方（app.py 资产生成）已把「性别：女/男」写进
+# 「资产设定」，本函数据此判定；推断不出性别时**整段不追加** —— 否则模型会凭画面
+# 气质臆测性别、把正确出图判成缺陷。
+GENDER_CHECK_NOTE = (
+    "\n【人物性别一致性判定·重要】上方「资产设定」里已写明该人物性别"
+    "（如「性别：女」「女性」「男子」）。请额外判定：**画面中该人物的性别形象必须与设定一致**"
+    "（设定为女性则必须是女性形象，设定为男性则必须是男性形象）；"
+    "性别不符 —— 例如设定为女性却画成短发男性脸型与体格 —— 属**致命缺陷**，"
+    "必须在 issues 中写明「性别不符：…」并按上方硬性规则输出 pass=false 且 score ≤ 50。"
+    "⚠️ 若上方「资产设定」并未写明性别，则**不得**判定本项，也不要凭画面气质臆测性别。"
+)
+
+#: 角色资产质检描述的前缀（app.py._generate_asset_task 构造）。
+#: ⚠️ 分镜质检同样走 check_image，而分镜画面描述里出现「女子」只是画面内容 ——
+#: 必须靠这个前缀把性别判据**限定在角色资产**上，否则会把分镜误判成性别不符。
+_CHAR_ASSET_DESC_MARK = "资产类型：character"
+
+
+def _should_check_gender(shot_desc: str) -> bool:
+    """角色资产质检且描述里能拿到性别 → 才追加性别核对项（2026-09-28）。
+
+    拿不到性别时返回 False（不追加），避免模型凭空臆测性别造成误杀。
+    """
+    d = str(shot_desc or "")
+    return _CHAR_ASSET_DESC_MARK in d and bool(asset_prompt_kit.gender_zh(d))
+
+# 关键缺陷硬规则（P0：收紧放行）：模型偶尔给有明显崩坏的图打高分/放行，
+# 因此在提示词里下达硬性规则，并在代码侧再加一道不可绕过的闸门（见 _finalize_verdict）。
+CRITICAL_RULE_NOTE = (
+    "\n【硬性判定规则·最高优先级】若画面存在下列任一关键缺陷：人物畸变/崩坏/五官错位、"
+    "多手多脚/缺肢/手指异常、肢体错位或断裂、画面撕裂/闪烁/重影、严重糊化或大色块、"
+    "黑屏/白屏、主体缺失或变形、与镜头描述明显不符 —— 必须输出 pass=false 且 score ≤ 50，"
+    "并在 issues 中逐条写明。**禁止在存在上述缺陷时给出通过结论或高分**；"
+    "宁可严格也不得放过有明显缺陷的画面。"
+)
+
+# 3D 国漫渲染 vs 占位人偶区分（2026-10-03 修复）：
+# 根因：视觉质检模型反复把「高质量 3D 国漫渲染分镜图」误判为「3D 占位人偶」，
+# 给出 score=0 + "画面仅显示3D基础人偶" 的荒谬结论（实测 shot_03 九宫格完整、角色/道具/
+# 场景全部正确，仍被判定为"人偶"）。
+# 本质：模型无法区分「有面部细节/服装纹理/光影的 3D 国漫角色」与「灰蓝色无面几何体人偶」。
+# 解法：在提示词中给出**视觉可辨别的硬判据**，让模型能靠图像特征自行区分。
+MANNEQUIN_DISTINCTION_NOTE = (
+    "\n【3D 渲染风格识别·重要】本系统的目标风格为 3D 国漫（三维动画渲染），"
+    "画面中的角色是**有完整面部五官、发型细节、服装纹理、光影效果的 3D 渲染人物**，"
+    "这是正常的目标输出风格，**不是缺陷**。\n"
+    "⚠️ 以下才是「占位人偶」的视觉特征（仅当画面呈现这些时才判缺陷）：\n"
+    "  · 全身灰/蓝/白单色填充，无任何面部五官（无眼睛、鼻子、嘴巴）；\n"
+    "  · 身体为简单几何体拼接（圆柱手臂、球形头、方块躯干），无服装纹理；\n"
+    "  · 背景为纯灰/纯白平面，无任何场景元素。\n"
+    "✅ 以下属于正常的 3D 国漫渲染，**不得**判为「人偶/占位图」：\n"
+    "  · 角色有清晰可辨的五官（眼睛、眉毛、嘴唇）、发型细节；\n"
+    "  · 角色穿着有纹理的服装（布料褶皱、腰带、配饰）；\n"
+    "  · 画面有光影效果（高光、阴影、环境光）；\n"
+    "  · 背景有场景元素（石壁、家具、道具、植被等）。\n"
+    "**严禁**把有面部细节的 3D 国漫角色误判为「占位人偶」并给出 score=0。"
+)
+
+# 九宫格故事板分析指南（2026-10-03 修复）：
+# 根因：QC 模型分析 3x3 故事板时，只看 1-2 个面板就下结论，导致误判。
+# 实测：shot_05_try1 的 9 个面板中 8 个都有主角方源，但 QC 判定「角色完全缺失」。
+# 本质：模型没有「逐面板分析 → 综合判定」的能力，需要显式指令引导。
+STORYBOARD_GRID_ANALYSIS_NOTE = (
+    "\n【九宫格故事板分析·重要】本图是 3x3 九宫格故事板（9 个关键帧按时间顺序排列）：\n"
+    "  · 第 1 格（左上）= 起始状态；第 5 格（中心）= 高潮/关键动作；第 9 格（右下）= 结束状态；\n"
+    "  · 其余格子 = 中间过渡帧，展示动作/表情的渐变过程。\n"
+    "⚠️ **必须逐格分析**，不得只看 1-2 格就下结论：\n"
+    "  · 先扫描全部 9 格，确认哪些格子有角色/道具/场景；\n"
+    "  · 若**多数格子**（≥5/9）包含所需元素 → 判定为「有」，不得因个别格子缺失判「无」；\n"
+    "  · 仅当**全部或绝大多数格子**（≥7/9）都缺失某元素时，才判「缺失」。\n"
+    "✅ 正确示例：若 9 格中 7 格有角色 → 角色存在（score 不因 2 格无角色而扣大分）。\n"
+    " 错误示例：只看第 1 格无角色 → 判「角色完全缺失」score=0（这是严重误判）。\n"
+    "⚠️ **面板间变化检查**：逐格对比九宫格的动作与构图；若 ≥4/9 格动作与构图"
+    "基本相同（仅微小位移/表情差），判为「面板雷同」，score 不合格，并在 issues "
+    "中写明『九宫格面板雷同』及涉及格号。"
+    "⚠️ **逐格内容核对**：分镜提示词若已逐格给出画面内容，请逐格核对画面与对应格内容的一致性；"
+    "仍执行面板雷同判据。"
+    # 2026-10-08 新增（用户实测：出现换场景与左右手镜像）：面板雷同之外，再查两项
+    # 九宫格结构性缺陷 —— 它们的根因在规划/渲染提示词，判官必须先"看得见"才能拦住。
+    "⚠️ **场景一致性检查**：逐格确认 9 格的**地点与环境是否为同一处**；若某格出现本镜"
+    "描述之外的场景元素（例：镜头在公寓沙发上，某格却是走廊/电梯/街道），必须在 issues "
+    "中写明『九宫格场景不一致（第N格）』。"
+    "⚠️ **方位 / 镜像检查**：逐格确认同一角色做同一动作时**惯用手与身体朝向是否一致**；"
+    "若出现左手换右手、姿势左右镜像翻转、朝向颠倒，必须在 issues 中写明"
+    "『九宫格左右手镜像（第N格）』。"
+    # ⭐ 2026-10-10（用户实测：视频里手指畸变，追到分镜层就是根因）：
+    #    出图模型在手部大特写下畸变率极高，而远景/中景正常 —— 判官必须先「看得见」
+    #    才能拦住。实测缺陷：shot_07 格4 手指过长/关节缺失；shot_08 格6 指头粘连成块。
+    "⚠️ **手部结构检查**：逐格确认**可见的手**的手指结构，重点看四类畸变："
+    "①**末端形态**——指尖是否异常膨大呈球状（「杵状指/鼓槌指」：从指根到中段渐细，"
+    "指尖反而比中段更粗、软组织鼓出）、指尖是否钝化或形状失真；"
+    "②**数量**——是否多指/少指；③**分离度**——指头是否粘连/融合成一团；"
+    "④**比例**——手指是否过长过细、粗细不均、关节是否反向或缺失。"
+    "若任一格出现上述畸变，必须在 issues 中写明『九宫格手指畸变（第N格）』，"
+    "并**指明是哪一种**（如「指尖膨大呈球状」「指头粘连」）。"
+    "注意：手在画面中占比越小越稳定，故**大特写的手**要格外仔细看 —— "
+    "实测畸变全部出现在手部特写格（shot_05 格5 / shot_07 格4 / shot_08 格6）。"
+)
+
+# 风格一致性硬规则：追加到所有图片/视频质检提示词末尾，保证用户自定义的旧配置
+# 也同样具备风格检测能力（与 WATERMARK_EXEMPT_NOTE / CRITICAL_RULE_NOTE 同一机制）。
+# {style} 由 check_image / check_video 在运行时替换为目标风格串；无风格时整段不追加。
+STYLE_CHECK_NOTE = (
+    "\n【风格一致性判定·重要】若上方「目标风格」非空，请务必额外检查画面整体画风/"
+    "渲染方式/笔触/配色是否与「{style}」一致；若明显偏离（例如目标为国漫偏写实，"
+    "却出现写实照片、真人摄影、3D 写实渲染、卡通赛璐璐等），必须在 issues 中写明"
+    "「风格不符/画风不符」并输出 style_match=false。"
+)
+
+# 设定一致性核对（分镜质检带「本镜出现的角色 / 物品 / 场景」的设定图）：
+# 分镜图是**按参考图生成**的，但旧实现只把成品图单独送检 —— 模型手里没有锚点，
+# 「这个角色是不是长成了设定里的样子」只能靠它自己想象，实测「角色不像设定 /
+# 道具走形」这类问题要么被放过、要么被误判。这里把生成时用的参考图一并送检，
+# 让判定有据可依。与 WATERMARK_EXEMPT_NOTE / CRITICAL_RULE_NOTE 同一「运行时追加」
+# 机制：用户自定义的旧 image_prompt 也自动获得该能力。
+MAX_REF_IMAGES = 4     # 质检最多附带几张设定参考图（去重后）
+_REF_LABEL_PREFIX_RE = re.compile(r"^参考图\s*\d+\s*是")
+
+
+def build_blocking_note(n_ref_after: int) -> str:
+    """生成「3D 导演台构图基准核对」段落（2026-09-27）。
+
+    分镜图现在按「3D 站位基准图」定构图，但**没人核对它到底有没有照做** —— 站位左右颠倒、
+    人数不对、机位/景别跑偏这类问题，只靠设定图是看不出来的。这里把基准图一并送检。
+
+    ⚠️ 判据必须写清「**只比构图、不比外观**」：基准图是无面人偶的预演图，若不说清楚，
+    模型会拿人偶的灰彩色身体 / 无面头部去判「角色与设定不符」，整批假红。
+
+    ⚠️ 2026-10-01 起默认改走**文字规格模式**（:func:`build_blocking_spec_note`，不送基准图）；
+    仅当调用方没给文字规格、却真的传了基准图路径时，才使用本段（保留「第 2 张=基准图、
+    设定图从第 3 张起」的旧编号）。
+
+    :param n_ref_after: 基准图之后还有几张设定图（用于说明总张数）
+    """
+    total = 2 + max(0, int(n_ref_after))
+    return (
+        "\n【构图基准核对·重要】本次按顺序传入 %d 张图：\n"
+        "  第 1 张 = 待检的分镜图（AI 生成结果）；\n"
+        "  第 2 张 = **3D 导演台构图基准图**（灰/彩色**无面人偶**的站位与机位预演图）；\n"
+        "  其余 = 角色 / 物品 / 场景的设定图。\n"
+        "请把第 1 张与**第 2 张**逐项核对**构图**：\n"
+        "  · 画面内**人物数量**是否一致；\n"
+        "  · 各人物的**左右位置**与**前后层次**是否一致；\n"
+        "  · **景别（取景范围）**与**机位角度**（俯拍 / 仰拍 / 平视 / 侧向 / 过肩）是否一致；\n"
+        "  · ⚠️ 第 2 张只是构图预演：其人物的**外观、配色、无面头部、体块比例一律不得**"
+        "作为判定依据 —— 角色/物品像不像设定，只看后面的设定图，**禁止**因为「画面里的人物"
+        "不像人偶」而扣分；\n"
+        "  · 允许人物姿态、动作过程、表情、光影与画面细节不同（那些由画面描述决定）；\n"
+        "  · 仅当出现**明显**构图偏差（人数不符、左右颠倒、前后层次错乱、景别差两档以上、"
+        "机位方向相反）时，在 issues 里写明「构图不符：<具体项>」并扣分。\n"
+        % total
+    )
+
+
+def build_blocking_spec_note(n_ref_after: int) -> str:
+    """生成「构图文字规格核对」段落（2026-10-01 起的默认模式）。
+
+    2026-10-01 定论：无面人偶基准图本身会污染视觉判定（同一张合格图实测 88→35），
+    构图核对改送 ``blocking_spec`` 的**确定性文字规格**（人数/左右顺序/景别/机位），
+    不再随图送基准图 —— 图片序列因此只有「待检图 + 设定图」两类，
+    设定图从第 2 张数起（调用方须配套 ``build_ref_consistency_note(..., start=2)``）。
+
+    :param n_ref_after: 待检图之后还有几张设定图（用于说明总张数）
+    """
+    total = 1 + max(0, int(n_ref_after))
+    return (
+        "\n【构图规格核对·重要】本次按顺序传入 %d 张图：\n"
+        "  第 1 张 = 待检的分镜图（AI 生成结果）；\n"
+        "  其余 = 角色 / 物品 / 场景的设定图（本次**没有**构图基准图）。\n"
+        "构图核对依据是上方给出的**文字规格**（人物数量 / 左右顺序 / 前后层次 / 景别 / 机位），"
+        "请把第 1 张与该规格逐项核对：\n"
+        "  · 画面内**人物数量**是否与规格一致；\n"
+        "  · 各人物的**左右位置**与**前后层次**是否与规格一致；\n"
+        "  · **景别（取景范围）**与**机位角度**（俯拍 / 仰拍 / 平视 / 侧向 / 过肩）是否与规格一致；\n"
+        "  · 允许人物姿态、动作过程、表情、光影与画面细节不同（那些由画面描述决定）；\n"
+        "  · 仅当出现**明显**构图偏差（人数不符、左右颠倒、前后层次错乱、景别差两档以上、"
+        "机位方向相反）时，在 issues 里写明「构图不符：<具体项>」并扣分。\n"
+        % total
+    )
+
+
+def build_ref_consistency_note(refs: list, start: int = 2) -> str:
+    """生成「设定一致性核对」段落。
+
+    refs 为 [(label, path), ...]，label 形如「角色「方源」的外貌、服装与发型」。
+    ⚠️ 第 1 张图固定是待检成品图，因此设定图从「第 2 张」开始编号
+    （生成侧 label 里的「参考图N」是相对参考图自身的编号，必须剥掉，否则模型会数错图）。
+    :param start: 设定图起始序号；带了构图基准图（占第 2 张）时调用方传 3。
+    """
+    items = []
+    for i, (label, _p) in enumerate(refs or [], start=max(2, int(start))):
+        lab = _REF_LABEL_PREFIX_RE.sub("", str(label or "").strip()).strip()
+        items.append("  第 %d 张 = 设定图：%s" % (i, lab or "（未标注）"))
+    if not items:
+        return ""
+    return (
+        "\n【设定一致性核对·重要】本次按顺序传入 %d 张图：\n"
+        "  第 1 张 = 待检的分镜图（AI 生成结果）；\n%s\n"
+        "请**逐张**核对第 1 张里出现的角色 / 物品 / 场景是否与对应设定图一致：\n"
+        "  · 角色：脸型 / 五官 / 发型 / 发色 / 服装款式与配色 / 配饰 必须与设定一致；"
+        "出现「换脸 / 换装 / 发色不符 / 配饰丢失 / 年龄或气质明显不同」都算设定不符；\n"
+        "  · 物品：形状 / 材质 / 配色 / 纹样 必须与设定一致；"
+        "出现「形状走样 / 配色错误 / 纹样改变 / 材质感突变」都算设定不符；\n"
+        "  · 场景：主要结构与氛围一致即可，**机位与构图允许不同**，不得据此扣分；\n"
+        "  · 设定图是「三视图 / 多视图」时，分镜图与其中**任一视图**一致即算一致；\n"
+        "  · 参考图对应的角色 / 物品**没有出现在画面里**时（例如本镜只有场景），"
+        "不得因「画面里找不到」而扣分。\n"
+        "⚠️ 只要存在角色或物品**明显变形 / 走样 / 与设定不符**，必须在 issues 里逐条写明"
+        "（以「角色变形：…」或「物品变形：…」开头），并按上方硬性规则输出 pass=false 且 score ≤ 50。"
+        % (len(items) + 1, "\n".join(items))
+    )
+
+
+# 代码侧关键缺陷词表（命中即阻断，与模型分数无关）
+# 注意：不含「水印/字幕/logo/文字」——这些按 WATERMARK_EXEMPT_NOTE 不计缺陷。
+CRITICAL_ISSUE_KEYWORDS = (
+    "畸变", "扭曲", "崩坏", "崩了", "脸部崩", "面部崩", "五官错位", "五官畸变", "五官错误",
+    # task#7 词表补漏：五官 + 「不 + 形容词」类缺陷（旧词表只有 五官错位/畸变/错误，
+    # 「五官不自然」这种最常见表述反而漏判）。这些「不X」是**缺陷描述**而非否定 —— 与
+    # _has_negative_context 的收紧口径配套：句首真否定（「不是五官不自然」）仍判为空。
+    "五官不自然", "五官不协调", "五官不对称",
+    "多手", "多脚", "多头", "缺手", "缺脚", "断肢", "肢体错位", "肢体断裂", "手指异常", "六指",
+    "融合", "粘连", "穿模", "黑屏", "白屏", "纯色块", "大色块", "严重糊", "糊化", "失焦",
+    "撕裂", "闪烁", "重影", "鬼影", "变形", "比例失调", "主体缺失", "主体不完整", "残影",
+    "拼接痕迹", "画面崩", "错位",
+    # P0 独立复核补充（_qc_gate 侧会独立比对，命中即强制阻断，与模型 accepted 无关）：
+    # 覆盖「画面崩坏 / 拼接 / 人物重复」三类高频漏检表述（更宽的表达形态）。
+    "拼接", "画面异常", "人物重复", "重复人物", "人物多出", "多出人物", "多余人物",
+    "人物多余", "人物重叠", "人物数量异常", "多个人物", "分身",
+    # 九宫格面板重复（2026-10-07 加入；**2026-10-09 按用户决策降级为 warning**）。
+    #
+    # 降级原因：实跑 2 集实测，9 格对当前 7B 模型的「格间差异」要求过高，
+    #   分镜首轮通过率长期只有 1/7，且「面板雷同」反复成为唯一 critical ——
+    #   既拖住整条链路，又没有可操作的改进信号（提示词已用逐格写死 + 格间差异段 + 严禁雷同）。
+    # 现改为：判官仍会把它写进 issues（**信息量保留**，可在前端与教训库里看到），
+    #   但**不再进 critical_issues**，因此不触发硬阻断、也不再阻止 storyboard_soft_qc 软放行。
+    #
+    # ⚠️ 与 app._SB_STRUCTURAL_DEFECT_KEYWORDS 是**同一套判据的两处**，两处必须同时改，
+    #    否则「软放行被 _sb_structural_defect 拦住」→ 仍然会重跑，等于没降级。
+    # 回退：把下面这行取消注释即可恢复硬阻断。
+    # "面板雷同", "九宫格面板雷同", "面板重复",
+    # 九宫格场景 / 方位缺陷（2026-10-08，用户实测：出现换场景与左右手镜像）：
+    # 与「面板雷同」同级的**结构性生成失败信号**，判官按 STORYBOARD_GRID_ANALYSIS_NOTE
+    # 写进 issues 后由本词表命中 → _finalize_verdict 硬阻断。
+    # ⚠️ 主判据刻意用**长词**（九宫格场景不一致 / 九宫格左右手镜像）：
+    #    短词（镜像 / 翻转 / 场景）会与正常构图描述撞车，造成大面积误杀。
+    "九宫格场景不一致", "格间换场景",
+    "九宫格左右手镜像", "左右手互换", "左右手颠倒", "镜像翻转", "朝向翻转",
+    # 手部畸变（2026-10-10，用户实测：视频里手指畸变，根因在分镜图）。
+    # 与上述同级的结构性生成失败信号。⚠️ 同样刻意用**长词**：
+    # 「手指畸变」「指头粘连」这类双词组合几乎不会出现在正常构图描述里，
+    # 而「手指」单独成词会与「手指向远方」撞车，故不收。
+    "九宫格手指畸变", "手指粘连", "指头粘连", "手指融合", "六指", "多指畸形",
+    # ⭐ 2026-10-10 补充（用户截图实测：ep01_full.mp4 00:25 的食指呈「杵状指」——
+    #    指尖软组织膨大呈球状、比中段更粗，像鼓槌；而分镜图 shot_05 格5 已写明
+    #    「指尖钝化/球形隆起、指节模糊、手指粗细不均」。这类**末端膨大型**畸变
+    #    与「粘连/多指」不是同一种表现，上面那批词一个都不会命中，故单列。
+    "杵状指", "指尖膨大", "指尖钝化", "指尖球状", "手指粗细不均", "指节模糊",
+)
+
+# 音频关键缺陷词表（供 check_audio 的 AI 层结论做代码侧硬闸）。
+# ⚠️ 不能复用上面那张图片词表：音频缺陷与画面缺陷没有交集，拿「畸变/多手」去匹配
+#    音频结论等于永远不阻断；反过来把「杂音」加进图片词表又会让图片质检误杀。
+AUDIO_CRITICAL_KEYWORDS = (
+    "无声", "静音", "没声音", "没有声音", "听不到", "空白", "空音",
+    "爆音", "爆裂", "削波", "削顶", "失真", "过载", "破音",
+    "杂音", "噪声过大", "电流声", "底噪", "嘶嘶",
+    "断续", "断句异常", "跳音", "卡顿", "丢帧", "损坏", "无法播放",
+    "忽大忽小", "音量异常", "忽高忽低",
+    "漏配", "漏句", "缺少人声", "人声缺失", "不是人声", "非人声",
+)
+
+
+#: **强否定词**：语义明确表示「不存在 / 缺乏该缺陷」，在关键词前、同子句内出现即判否定。
+#: 这些词极少与缺陷词构成「描述缺陷」的复合词（不会有「无规则畸变」这类），故可直接生效。
+#: 口径 = 原 `_NEGATION_WORDS` 去掉歧义的「不 / 非」（见下），补一个同义「并无」。
+_NEGATION_STRONG = (
+    "无", "没有", "并无", "未", "未发现", "不存在", "缺少", "已消除",
+)
+
+#: **歧义前缀**「不 / 非」：既可能是否定（不是 / 不属 / 非为），也可能只是**缺陷描述词
+#: 的一部分**（不规则 / 不对称 / 非对称 / 不自然 / 非常）。因此仅当其后**紧跟**一个
+#: 「判定 / 系动词」字时才认定为否定，否则视为「修饰缺陷的形容词」，**不否定**关键词。
+#: 历史缺陷（P0-3 补强 / task#7）：「不规则畸变」「不对称扭曲」「五官不自然」里的「不」
+#: 被旧实现当作否定词 → 真缺陷被整条吞掉（`find_critical_issues → []` → 崩坏图入库）。
+_NEG_PREFIX_CHARS = ("不", "非")
+#: 允许出现在「不 / 非」之后的**判定 / 系动词**首字（即 不是 / 不属 / 非为 / 不构成 / 不等于…）。
+#: 维护约定：新增时只允许「不/非 + 该字」能表达『并非如此』这类**判断**的字；
+#: ⚠️ 严禁把「自 / 规 / 对 / 常 / 正 / 协 / 清 / 均 / 明 / 稳 / 统」等**构词**字加入 ——
+#: 它们恰恰是缺陷词（不自然 / 不规则 / 不对称 / 不正常 / 不协调 / 不清晰…）的前缀。
+_NEG_PREFIX_JUDGE = ("是", "属", "为", "算", "构", "存", "等", "符", "代", "像")
+
+
+#: 子句分隔符：否定词作用域以**子句**为界（跨子句的「不/无」不影响本子句的缺陷描述）。
+#: P0-3：『五官不自然，面部畸变』里的「不」属于前一个子句（修饰「自然」），
+#: 不得据此判定后一子句的「畸变」被否定——旧实现只看关键词前固定 window 个字符，
+#: 会跨子句误吞整条真缺陷（崩坏图 blocked=False 直接入库）。
+_CLAUSE_SEP_RE = re.compile(r"[，。；！？,.;!?、\n\r]+")
+
+
+def _has_negative_context(text: str, idx: int, window: int = 6) -> bool:
+    """判断 ``text[idx]`` 处的关键词是否处于否定语境（如「无明显畸变」）
+
+    作用域规则（P0-3 修复）：
+      · 只在关键词**所在子句内**、且位于关键词**前面** window 个字符里找否定词；
+      · 跨子句的否定词不生效（『五官不自然，面部畸变』→「畸变」不被前句的「不」否定）；
+      · 子句起点即关键词时前缀为空 → 视为非否定（正常命中）；
+      · 同子句内的「无/没有/未」仍正常生效（『无明显畸变』不误杀）。
+
+    修饰判定（task#7 补强）：否定词必须**真正否定该缺陷词**，而非「子句内出现过否定字就算」：
+      · 强否定词（``_NEGATION_STRONG``）直接生效；
+      · 「不 / 非」是歧义前缀 —— 只有「不/非 + 判定字」（不是 / 不属 / 非为…）才是否定，
+        「不规则畸变 / 不对称扭曲 / 五官不自然」里的「不」是构词前缀，**不构成否定**。
+    """
+    text = str(text or "")
+    # 关键词所在子句的起点 = 该位置之前最后一个子句分隔符之后
+    clause_start = 0
+    for _m in _CLAUSE_SEP_RE.finditer(text, 0, idx):
+        clause_start = _m.end()
+    ctx = text[max(clause_start, idx - window):idx]
+    if any(neg in ctx for neg in _NEGATION_STRONG):
+        return True
+    # 歧义前缀：仅「不/非 + 判定字」才算否定（避开「不规则/不对称/五官不自然」的构词前缀）
+    for _i, _ch in enumerate(ctx):
+        if _ch in _NEG_PREFIX_CHARS and ctx[_i + 1:_i + 2] in _NEG_PREFIX_JUDGE:
+            return True
+    # ⭐ 2026-10-08：**紧贴式否定** —— 「非/不」直接落在缺陷词前面（中间没有任何字符），
+    #    本身就是对它的否定。实测 ep01 整片质检的 issues 里有一条
+    #    「…异常睁眼表情，**非崩坏**」（判官在明确说明"这不是缺陷"），却因为上面只认
+    #    「非+判定字（非为/非是）」而被判为命中的关键缺陷 → 成片被硬阻断、无限重画。
+    #    ⚠️ 为什么这样不会误吞真缺陷：构词前缀会把「非/不」与缺陷词隔开 ——
+    #    「不规则畸变」（中间是「规则」）、「不对称扭曲」（中间是「对称」）都**不满足**
+    #    本条件，照常命中；只有「非崩坏 / 不崩坏 / 无畸变」这种真否定才会被放过。
+    if ctx.endswith(tuple(_NEG_PREFIX_CHARS)):
+        return True
+    return False
+
+
+def find_critical_issues(issues, keywords=None) -> list:
+    """从 issues 文本中筛出命中关键缺陷词的条目
+
+    带否定语境过滤：只有**真正否定该缺陷词**的表述（如「无明显畸变」「不是五官不自然」）
+    才不算关键缺陷——强否定词（无/没有/未/不存在/缺少/已消除…）直接生效，「不 / 非」需
+    后接判定字（不是 / 不属 / 非为…）才算否定；「不规则畸变 / 不对称扭曲 / 五官不自然」
+    里的「不」是构词前缀，**照常命中**（否则真缺陷被误吞，崩坏图入库）。
+
+    ``keywords`` 可换成音频词表（``AUDIO_CRITICAL_KEYWORDS``）；默认走图片/视频词表。
+    ⚠️ 必须可换：音频结论里根本不会出现「畸变/多手」，共用一张词表等于音频永不阻断。
+    """
+    table = tuple(keywords) if keywords else CRITICAL_ISSUE_KEYWORDS
+    hits: list = []
+    for it in (issues or []):
+        s = str(it)
+        for k in table:
+            found = False
+            start = 0
+            while True:
+                idx = s.find(k, start)
+                if idx == -1:
+                    break
+                if not _has_negative_context(s, idx):
+                    found = True
+                    break
+                start = idx + len(k)
+            if found:
+                hits.append(s[:200])
+                break
+    return hits
+
+
+# G1 重试止损（共享模块）：本文件是叶子模块（只 import requests/audio_qc，
+# 不 import app / comfyui_client），因此把「连续重试缺陷特征提取 + 止损判定」
+# 放这里，供 app / comfyui_client / keyframe 以注入回调（qc_stop_cb）方式复用，
+# 规避 app ↔ comfyui_client 的循环依赖。
+
+def qc_retry_features(rec: dict) -> set:
+    """从一条质检记录里提取「缺陷特征集」，用于止损比对。
+
+    特征 = 该记录 critical_issues ∪ issues 的归一化文本集合。
+    同一缺陷在多轮重试里逐字复现 → 特征集相等 → 换 seed/换提示词无收益。
+    """
+    rec = rec or {}
+    feats: set = set()
+    for k in ("critical_issues", "issues"):
+        for it in (rec.get(k) or []):
+            s = str(it).strip()
+            if s:
+                feats.add(s[:200])
+    return feats
+
+
+def qc_retry_hopeless(attempts: list, streak: int = 2) -> tuple:
+    """连续 N 次重试的缺陷特征集完全相同 → 判定重试无收益（止损）。
+
+    返回 ``(stop: bool, detail: str)``：
+      - 最后 ``streak`` 条记录特征集相等且非空 → ``(True, "缺陷摘要")``；
+      - 特征集为空（模型没报具体缺陷）或不足 streak 条 → ``(False, "")``。
+
+    ⚠️ 只读特征比对，不做风格/关键缺陷二次判定 —— 后者由调用方（_qc_gate）负责。
+    """
+    if not attempts or len(attempts) < streak:
+        return False, ""
+    tail = list(attempts[-streak:])
+    feats = [qc_retry_features(r) for r in tail]
+    if not feats[0]:
+        return False, ""
+    if any(f != feats[0] for f in feats[1:]):
+        return False, ""
+    return True, "；".join(list(feats[0]))[:200]
+
+
+# 风格达标检测：用户与总控敲定的风格串（如「国漫风格，偏写实」）在成图/成片上
+# 是否被落实。此前质检只查「畸变/糊化/一致性」，完全不管风格，导致风格跑偏也不会
+# 触发「不达标 → 改提示词重生成」。这里把风格也纳入质检判定维度。
+# 注意：风格不达标与「画面崩坏」是两类缺陷，前者只强制 passed=False（触发重试），
+# 后者（find_critical_issues）额外打 blocked=True（关键缺陷阻断）。
+
+# 「风格/画风」后接的否定词，覆盖「画风与目标不符」「风格不一致」等变体表述。
+_STYLE_NEG_WORDS = ("不符", "不一致", "不匹配", "不对", "偏离", "跑偏", "错误", "缺失", "不统一")
+
+# 独立的「风格错误」信号词（不需「风格/画风」前缀，直接命中；
+# 多为「目标风格被替换成别的风格」的表述）。
+STYLE_ISSUE_KEYWORDS = (
+    "写实照片", "真人摄影", "3D写实", "写实渲染", "卡通渲染", "赛璐璐",
+    "不是国漫", "不像国漫", "非国漫", "国漫风格缺失", "缺少国漫",
+)
+
+
+def find_style_issues(issues, style=None) -> list:
+    """从 issues 文本中筛出「风格/画风不达标」类条目。
+
+    匹配两路（任一命中即判定风格缺陷）：
+    1) 独立风格错误词（如「写实照片」「3D写实」，说明目标风格被替换）；
+    2) 「风格/画风」+ 否定词的组合（覆盖「画风与目标不符」「风格不一致」等变体）。
+
+    ⚠️ 第 2 路必须带**否定语境过滤**：否则「风格统一，无缺失」「画风稳定，没有偏差」
+    这类**肯定表述**会因为命中 _STYLE_NEG_WORDS 里的「缺失 / 偏离」而被误判成风格缺陷，
+    进而强制 passed=False 触发无意义的重生成（实测踩过）。
+    """
+    hits: list = []
+    for it in (issues or []):
+        s = str(it)
+        if any(k in s for k in STYLE_ISSUE_KEYWORDS):
+            hits.append(s[:200])
+            continue
+        if "风格" in s or "画风" in s:
+            bad = False
+            for neg in _STYLE_NEG_WORDS:
+                start = 0
+                while True:
+                    idx = s.find(neg, start)
+                    if idx == -1:
+                        break
+                    if not _has_negative_context(s, idx):
+                        bad = True
+                        break
+                    start = idx + len(neg)
+                if bad:
+                    break
+            if bad:
+                hits.append(s[:200])
+    return hits
+
+
+def _apply_style_gate(verdict: dict, style) -> dict:
+    """在质检结论上叠加「风格达标」判定（幂等，永不抛异常）。
+
+    判定来源（任一命中即判定风格不达标，强制 passed=False）：
+    1) 模型显式返回 style_match=false（prompt 里要求输出的字段）；
+    2) issues 命中 STYLE_ISSUE_KEYWORDS（代码侧兜底，不依赖模型自觉）。
+
+    结果写入 verdict["style_mismatch"] / verdict["style_issues"]，供入库闸门与
+    教训库识别「风格缺陷」以触发改写提示词重生成。
+    """
+    verdict = verdict or {}
+    if not style or not verdict.get("ok"):
+        return verdict
+    issues = list(verdict.get("issues") or [])
+    sm = verdict.get("style_match")
+    style_hits = find_style_issues(issues, style)
+    mismatch = bool(sm is False) or bool(style_hits)
+    verdict["style_mismatch"] = mismatch
+    verdict["style_issues"] = style_hits
+    if mismatch:
+        verdict["passed"] = False
+        if style_hits and not verdict.get("reason"):
+            verdict["reason"] = "画面风格与目标风格不符：" + "；".join(style_hits[:2])
+    return verdict
+
+
+def _finalize_verdict(verdict: dict, pass_score: int) -> dict:
+    """代码侧硬闸：单向收紧质检结论（只会把「通过」改成「不通过」，绝不反向放行）
+
+    1) issues 命中关键缺陷 → passed=False、blocked=True、score 压到 ≤50；
+    2) score < pass_score 时，即使模型给 pass=true 也强制 False；
+    3) 补 accepted（= passed，供入库判断）与 blocked（关键缺陷阻断）字段。
+    """
+    issues = verdict.get("issues") or []
+    hits = find_critical_issues(issues)
+    score = verdict.get("score")
+    blocked = False
+    if hits:
+        blocked = True
+        verdict["passed"] = False
+        if isinstance(score, int):
+            verdict["score"] = min(score, 50)
+    elif not isinstance(score, int):
+        # P1-17：模型未回可用分数（score=None / 非整数）→ 无法判定是否达线 → **fail-closed**。
+        # 旧实现把 score is None 当作「满足分数」（`score is None or score >= pass_score`），
+        # 于是 {"score":null,"pass":true} 被判 accept、漏回分数即放行。此处不再放行。
+        verdict["passed"] = False
+        verdict["score_missing"] = True
+        logger.warning("质检结论缺少可用分数（score=%r）→ fail-closed 判为不通过", score)
+    elif score < int(pass_score):
+        verdict["passed"] = False
+    verdict["critical_issues"] = hits
+    verdict["blocked"] = blocked
+    verdict["accepted"] = bool(verdict.get("passed"))
+    if blocked:
+        logger.warning(f"质检关键缺陷阻断（不通过）: {hits}")
+    return verdict
+
+DEFAULT_IMAGE_PROMPT = (
+    "你是漫剧分镜图片质检员。请检查这张 AI 生成的分镜图是否达到可直接使用的标准：\n"
+    "1) 人物：脸型/发型/服装/配饰与设定一致，无五官畸变、多手多脚、肢体错位；\n"
+    "2) 画面：无严重糊化、噪点、色块、扭曲；\n"
+    "3) 构图：主体完整清晰，场景与镜头描述相符；\n"
+    "4) 景别：取景范围是否落在「镜头信息」给出的判定标准内（判定口径见下方容差说明，"
+    "差一档不算缺陷）；\n"
+    "5) 风格：画面整体画风/渲染方式/笔触/配色必须与目标风格一致，不得偏离；\n"
+    "6) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分；「不得出现文字」类约束只针对"
+    "上述**叠加物**，画面内容本身需要的文字（器物铭文、牌匾、面板数值等）属于画面内容，"
+    "不得因画面有/无此类文字判缺陷，文字乱码/错字也不计缺陷（中文文字属模型能力边界）。\n"
+    "7) 连续性：与上一镜的背景结构、光照方向、角色服化道是否保持一致（判定口径见下方说明；"
+    "未提供上一镜信息时跳过本项，不得凭空判定）。\n"
+    "目标风格：{style}\n"
+    "镜头信息：{shot_desc}\n"
+    "判定线：score >= {pass_score} 且无关键缺陷 → pass=true，否则 pass=false"
+    "（请严格按合格线给 pass，不要凭直觉打分后由系统改判，避免模型判过、代码判不过的假失败）。\n"
+    "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
+    '{"score": 0-100 的整数, "pass": true 或 false, "style_match": true 或 false, '
+    '"reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
+)
+
+DEFAULT_AUDIO_PROMPT = (
+    "你是漫剧配音质检员。下面两张图不是画面，而是同一段配音音频的**频谱图**与**波形图**：\n"
+    "  第 1 张：频谱图（横轴时间，纵轴频率，颜色亮度=能量强弱）\n"
+    "  第 2 张：波形图（横轴时间，纵轴振幅）\n"
+    "请据此判断这段配音是否达到可直接使用的标准：\n"
+    "1) 人声能量分布是否正常（人声主要能量集中在数百 Hz 至数千 Hz 的中频段）；\n"
+    "2) 波形是否存在长时间「平坦零线」（说明整段无声、漏配音或合成失败）；\n"
+    "3) 波形上下是否被削成平直横线（说明增益过大导致爆音失真）；\n"
+    "4) 是否存在异常高频噪声、周期性爆破或明显断续（说明音频损坏或拼接异常）。\n"
+    "配音文本参考：{line_text}\n"
+    "判定线：score >= {pass_score} 且无关键缺陷 → pass=true，否则 pass=false"
+    "（请严格按合格线给 pass，不要凭直觉打分后由系统改判，避免模型判过、代码判不过的假失败）。\n"
+    "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
+    '{"score": 0-100 的整数, "pass": true 或 false, "reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
+)
+
+DEFAULT_VIDEO_PROMPT = (
+    "你是漫剧视频质检员。下面按顺序给出同一镜头视频的若干抽帧图片（首帧/中间帧/尾帧）。\n"
+    "请判断该视频片段是否达到可直接使用的标准：\n"
+    "1) 画面：无严重闪烁、撕裂、糊化、崩坏或色块；\n"
+    "2) 一致性：人物外观与场景在整段视频中保持稳定，无明显畸变；\n"
+    "3) 内容：与镜头描述相符，主体清晰；\n"
+    "4) 风格：画面整体画风/渲染方式/笔触/配色必须与目标风格一致，不得偏离；\n"
+    "5) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分。\n"
+    "目标风格：{style}\n"
+    "镜头信息：{shot_desc}\n"
+    "判定线：score >= {pass_score} 且无关键缺陷 → pass=true，否则 pass=false"
+    "（请严格按合格线给 pass，不要凭直觉打分后由系统改判，避免模型判过、代码判不过的假失败）。\n"
+    "请只输出一个 JSON 对象，不要任何解释文字，格式：\n"
+    '{"score": 0-100 的整数, "pass": true 或 false, "style_match": true 或 false, '
+    '"reason": "一句话结论", "issues": ["具体问题1", "具体问题2"]}'
+)
+
+# ===================== 剧本质检提示词 =====================
+# ⚠️ 字段名必须与 novel_to_script 的真实产物一致，否则模型会报「字段缺失」假问题。
+# 历史缺陷：本提示词检查 `visual_description`（镜头级）与角色级 `description` ——
+# **这两个字段都不存在**（真实字段是 shot.description / character.appearance），
+# 且完全没有检查 items / scenes 的结构，模型据此报出一堆不存在的缺陷。
+# 真实 schema（见 output/scripts/<项目>/第N集.json）：
+#   script   : title / episode_no / episode_title / theme / style / characters /
+#              items / scenes / shots / production_notes / metadata
+#   shot     : shot_id / duration / camera / location / description / visual_detail /
+#              dialogue[{speaker,text}] / emotion / edit_reason（剪辑动机，可选增强项）/
+#              audio_cues / characters_in_shot / items_in_shot / prompt_h3 / style
+#              （narration 是 2026-09-19 之前的旧字段，本系统已不产出旁白；
+#                edit_reason 是 2026-09-28 起的增强项，旧剧本可缺失，故不作硬缺失判定）
+#   character: name / age / identity / appearance / current_outfit / personality /
+#              voice_style / reference_prompt_zh / reference_prompt_en
+#   item     : name / category / appearance / owner / importance /
+#              reference_prompt_zh / reference_prompt_en
+#   scene    : name / location / appearance / reference_prompt_zh / reference_prompt_en
+# 2026-10-07 提示词外置（app/prompts/qc_script_check.txt）：常量改名保留为**代码内兜底**；
+# 实际生效值在常量定义之后由 prompt_templates.load("qc_script_check") 加载。
+# 已核实本常量无任何运行时改写（赋值仅此一处；消费点 = _empty_config 缺省值 + check_script 回落）。
+_DEFAULT_SCRIPT_PROMPT = (
+    "你是漫剧剧本质检员。请检查这个 JSON 剧本是否达到可直接进入生产的标准。\n"
+    "**只按下面列出的真实字段名判定，不要凭空要求其它字段名**（例如本剧本文档里"
+    "镜头画面描述就叫 description，不叫 visual_description）。\n\n"
+    "【结构完整性】\n"
+    "1. 顶层必须包含：title, style, characters, items, scenes, shots\n"
+    "2. 每个角色必须有：name, appearance, personality"
+    "（current_outfit / voice_style / identity / age 为可选增强项）\n"
+    "3. 每个物品必须有：name, category, appearance（owner / importance 可选）\n"
+    "4. 每个场景必须有：name, location, appearance\n"
+    "5. 每个镜头必须有：shot_id, duration, camera, location, description, "
+    "characters_in_shot, items_in_shot\n\n"
+    "【逻辑一致性】\n"
+    "6. characters_in_shot 中的角色必须在 characters 列表中有定义\n"
+    "7. items_in_shot 中的物品必须在 items 列表中有定义\n"
+    "8. 镜头的 location 应能在 scenes 列表中找到对应场景\n"
+    "9. 镜头顺序应有清晰的叙事逻辑，shot_id 连续\n\n"
+    "【风格一致性】\n"
+    "10. 画面描述与整体气质必须符合指定创作风格（{style}）\n"
+    "11. 角色外观描述应与该风格匹配\n\n"
+    "【提示词质量】\n"
+    "12. description **不设字数上下限**（2026-10-10 用户要求）：内容需要多长就写多长，"
+    "写清楚主体、关键动作分解"
+    "（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座），只写关键节点不写琐碎中间步；"
+    "只写人物动作与关键构图；"
+    "禁止堆砌背景陈述、世界观解说、来历评述这类「成片会被念成旁白」的内容；\n"
+    "13. camera 应为「景别+运镜」写法（如 中景跟拍 / 特写推入）\n\n"
+    "【可执行性评估】\n"
+    "14. 总时长应接近目标时长（{target_duration} 秒）\n"
+    "15. 每个镜头时长应在 {shot_duration_min}-{shot_duration_max} 秒范围内"
+    "（另有 {shot_duration_silent} 秒的纯画面静默镜基准）\n"
+    "16. 本系统不产出旁白：镜头没有台词是**允许**的（纯画面镜/空镜），"
+    "只要该镜的 audio_cues 写了音效或配乐提示即算合格；"
+    "但如果某镜既没有台词、又没写 audio_cues，成片到该镜会既无人声也无音效，判为问题。\n"
+    "17. 单个镜头的台词合计不宜超过 {speech_budget} 字：台词过多会溢出到后面几镜，"
+    "成片尾部被截断，应拆成更多镜头\n\n"
+    "【短剧叙事节奏】（2026-09-25 新增，按短剧行业通行标准判定；这几项直接决定完播率，"
+    "请认真判定，不要因为「结构完整」就放过节奏问题）\n"
+    "18. **前三秒钩子**：第 1 镜（或前 2 镜内）必须出现强钩子 —— 冲突、悬念、反常画面、"
+    "危机或一句有冲击力的台词。若开场只是平铺直叙的场景介绍/人物走路/天气描写，"
+    "写明「首镜无钩子」并扣分。这是短剧留存的第一道生死线。\n"
+    "19. **话轮轮换密度**：连续 4 镜以上完全没有台词（纯画面/空镜）会让观众流失；"
+    "反之，连续 6 镜以上都是同一组角色在同一场景对话、没有任何画面或场景变化，"
+    "也属节奏拖沓。命中任一种都应在 issues 里写明具体镜号区间。\n"
+    "20. **冲突强度与悬念**：整集应至少有一处明确的冲突升级（对抗、揭露、反转、"
+    "危机逼近）并保持悬念。若整集都是日常铺陈、无对抗无悬念，写明「缺冲突」并扣分。\n"
+    "21. **集尾钩子（cliffhanger）**：最后 1~2 镜必须留悬念或反转，把观众推向下一集"
+    "（如危机降临、身份揭露、关键人物出现、抛出未解问题）。若结尾是平淡的收束/总结，"
+    "写明「集尾无钩子」并扣分。\n"
+    "22. **景别节奏**：不应连续 5 镜以上使用同一景别（尤其连续中景），"
+    "长短镜与远近景应交替，形成呼吸感。命中时在 issues 里写明。\n"
+    "23. **旁白渗漏**（2026-09-26 新增）：本系统成片没有画外音，叙述性内容必须由画面承载。"
+    "检查每条 dialogue.text：若角色说出的内容实为**第三人称全知叙述**（世界观/势力背景交代、"
+    "环境说明、给读者听的解说句等「不像人话」的句子），判为「旁白渗漏」并在 issues 里写明镜号。"
+    "dialogue 只允许两种内容：① 原文的对话；② 原文明确心理活动/独白改写的**第一人称**自语"
+    "（角色以第一人称自然说出）。注意区分：角色之间正常的对话、第一人称回忆与自语是**合格**的，"
+    "不要误伤。\n"
+    "24. **描述臃肿度**（2026-09-27 新增）：统计全片 description+visual_detail 合计字数与 "
+    "dialogue 合计字数之比。若画面描述总字数超过台词总字数的 3 倍，说明剧情被背景描写拖累、"
+    "成片会一直「说背景描述」，判为缺陷并写明「描述/对白比 ≈X 倍」。描述应只写动作与构图，"
+    "纯环境铺陈、背景补叙应删除，而不是堆进 description。\n"
+    "25. **对白驱动率**（2026-09-27 新增）：有台词的镜头占比应 ≥40%。若超过一半镜头既无台词"
+    "又无明确人物动作（静态空镜/环境铺陈），说明叙事靠画面流水账而非人物互动推进，"
+    "判为缺陷并写明有台词镜数/总镜数。\n"
+    "26. **语义忠实度**（2026-09-27 新增）：核对剧本是否忠实表达了原著的情节意图——"
+    "即「冲突/转折/关键动作/金句」是否都在，且没有把原著**背景设定**误当成主线情节大段铺陈。"
+    "凡出现「大段背景解说/世界观介绍/环境气氛复述」压过「人物互动与冲突推进」的，"
+    "判为「偏离原著主线的背景化倾向」并在 issues 里写明。\n\n"
+    "27. 【镜头语言·软提示】（2026-09-28 新增，按 92 镜短片拆解口径，**仅作软提示，不直接判失败**）\n"
+    "  a) 剪辑动机：多数镜头应带 edit_reason（「为什么切到这一镜/承担什么叙事功能」）。"
+    "若整集 edit_reason 覆盖率明显偏低（一大半镜头没写），在 issues 写「剪辑动机缺失」，"
+    "suggestions 建议补每镜一句 15 字内的动机。\n"
+    "  b) 运镜克制：运镜应以**固定机位为主**（参照约 75% 固定），推/拉/摇/手持/跟随只在"
+    "情绪递进或空间转换时用。若本集活动运镜（非固定/定格）占比偏高、或特写+全景占比超过约 10%"
+    "（它们应只作情绪锚点而非主奏），在 issues 写「运镜过于活跃」或「特写/全景占比偏高」，"
+    "suggestions 建议改回固定机位、把特写/全景让给关键情绪点。\n"
+    "  c) 道具回环锚点：若同一关键道具（物品表里 importance 较高者）在 ≥2 镜出现，"
+    "却没有任何镜头的 description 写明它的位置/状态变化、也未标「（视觉锚点·第N次）」，"
+    "在 issues 写「道具回环缺锚点」，suggestions 建议把该道具做成跨镜头视觉锚点。\n"
+    "以上 a/b/c 命中时**不得**据此输出 pass=false、也**不得**扣到不及格——它们是可优化项，"
+    "只进 issues/suggestions 提示；结构、逻辑、时长、台词渗漏等硬缺陷才影响 pass。\n\n"
+    "剧本数据：\n{script_data}\n\n"
+    "请只输出一个JSON对象，格式：\n"
+    '{\"score\": 0-100, \"pass\": true/false, \"reason\": \"一句话结论\", '
+    '\"issues\": [\"问题1\", \"问题2\"], \"suggestions\": [\"建议1\", \"建议2\"], '
+    '\"categories\": {\"structure\": 0-100, \"logic\": 0-100, \"style\": 0-100, '
+    '\"prompt_quality\": 0-100, \"feasibility\": 0-100}}'
+)
+
+# 2026-10-07 提示词外置：实际生效 = app/prompts/qc_script_check.txt（可被
+# PROJECT_DATA_DIR/prompt_overrides/qc_script_check.txt 覆盖）；任一级读失败回落上方
+# _DEFAULT_SCRIPT_PROMPT，行为与外置前逐字一致（load 已剥离模板头注释）。
+# ⚠️ 消费机制保持不变：check_script 仍用 str.replace 逐占位符注入
+#    （{style}/{target_duration}/{shot_duration_*}/{speech_budget}/{script_data}）——
+#    模板含 JSON 花括号示例，**绝不能改成 str.format**；loader.render 的安全替换与之同口径。
+DEFAULT_SCRIPT_PROMPT = prompt_templates.load("qc_script_check") or _DEFAULT_SCRIPT_PROMPT
+prompt_templates.register_fallback("qc_script_check", _DEFAULT_SCRIPT_PROMPT)
+
+# ===================== 音频质检 =====================
+# 音频无法像图片那样直接交给视觉模型「听」，因此采用两层判定：
+#   客观层（`audio_qc.py`，ffmpeg 指标，零模型依赖，**始终执行**）负责硬闸：
+#     整段无声 / 近乎无声 / 空文件 / 不含音频流；
+#   AI 层（`check_audio`：把音频渲染成频谱图+波形图再送多模态模型）负责内容层判读。
+#
+# ⚠️ 2026-09-19 之前的状况：`audio_enabled` / `audio_prompt` / `audio_min_*` 等配置键、
+#    `DEFAULT_AUDIO_PROMPT`、以及六个 AUDIO_* 阈值常量**全部零消费** —— 配置写好了、
+#    提示词写好了、阈值写好了，但没有任何代码读它们，`audio_qc_ready` 也不存在，
+#    前端「音频质检」页写着「功能正在开发中」。用户打开开关、调阈值什么都不会发生。
+#    硬阈值现已**迁到实际消费它们的 `audio_qc.py`**（单一事实源：谁用谁定义），
+#    可调阈值仍留在本配置文件里，由用户按音色与语速整体调档。
+
+CONFIG_KEYS = (
+    "enabled", "image_enabled", "video_enabled", "audio_enabled", "script_enabled",
+    "base_url", "api_key", "model",
+    "endpoint_override",   # 被其它模块（如分镜链路）自动写入的接口，记录以便「恢复为 AI 设置」
+    "image_prompt", "video_prompt", "audio_prompt", "script_prompt",
+    "pass_score", "max_retries", "video_frame_count",
+    # best-of-N 分镜候选数（2026-09-29 新增，借 ViMax best_image_selector）：
+    # >1 时固定生成 N 张候选、按质检分选最佳入库；1=关闭（默认，保持「通过即停」现行为）
+    "best_of",
+    "image_max_side", "timeout", "api_retries", "api_backoff", "updated_at",
+    "script_categories",  # 剧本质检各维度权重和合格线
+    # 推理模型控制（2026-09-17 新增，确保配置能正确落盘）
+    "disable_thinking",
+    "min_tokens_when_thinking",
+    # 单次视觉质检请求的 max_tokens（_run_vision 消费；此前是「伪配置键」——代码一直读
+    # cfg.get("image_max_tokens", 8192)，却不在白名单里，用户配置永远落不了盘。转正 2026-10-05）
+    "image_max_tokens",
+    # 音频阈值（此前未在白名单，导致配置丢失）
+    "audio_min_speech_ratio", "audio_min_mean_db", "audio_max_drift",
+    # 图片质检是否附带「本镜出现的角色/物品/场景」设定图做一致性核对（2026-09-20 新增）
+    "image_ref_compare",
+    "image_blocking_ref_compare",
+    # 图片质检「二次复核」：首次判不过时同图再判一次，任一判过即放行（2026-09-25 新增）
+    "image_qc_recheck",
+    # G9/O1 图片/视频客观层阈值（2026-09-20 新增）
+    "image_pixel_std_min", "video_max_drift",
+    # ⭐ 分镜链路**专用**重试轮数（2026-10-07 用户指定「分镜重试 2→1」）。
+    #    为什么单独开一个键而不直接改 max_retries：分镜单镜最坏开销 =
+    #    (1 + 重试) × (一次 GPU 出图 + 一次质检)，而分镜每集 20~30 镜**逐镜串行** ——
+    #    2 轮把最坏开销从 3 倍砍到 2 倍，收益全在分镜；而资产/视频链路不受影响
+    #    （它们重试的性价比不同，用户没要求改）。
+    #    ⚠️ 消费侧以通用 max_retries 作**上限**：用户把 max_retries 调到 0（全局不重试）时，
+    #       分镜也随之 0，尊重更严的总开关。
+    "storyboard_max_retries",
+    # 提示词预检（生成前质检，见 prompt_qc.py）。⚠️ 它不依赖质检接口，默认开启
+    "prompt_enabled", "prompt_mode",
+    # 存量迁移标记（2026-10-XX 新增，见 migrate_enabled_default）：
+    # 质检总开关默认值由「关」改「开」后，老配置需**一次性**幂等补成开启。
+    # 本键默认 True（新建 / 清空即视为已迁移），仅当文件存在且缺此键时才触发迁移。
+    "_qc_migrated",
+)
+
+
+#: 质检配置的全部默认值（2026-10-10 从 _empty_config 提升为模块常量）。
+#  为什么要提出来：统一配置中心需要把数值型参数登记为可调项，
+#  而 config_doctor._resolve 只能解析「模块.属性」或「模块.字典.键」——
+#  函数返回值无法作为 owner。提为常量后 owner 可写
+#  qc_client.QC_CONFIG_DEFAULTS.<key>，且 overlay_config 能正确覆盖。
+def _empty_config() -> dict:
+    """返回一份配置默认值的**副本**（调用方可安全修改）。"""
+    return dict(QC_CONFIG_DEFAULTS)
+
+
+
+def _normalize_override(raw) -> dict:
+    if not isinstance(raw, dict):
+        return {"base_url": "", "api_key": "", "model": ""}
+    return {"base_url": (raw.get("base_url") or "").strip(),
+            "api_key": (raw.get("api_key") or "").strip(),
+            "model": (raw.get("model") or "").strip()}
+
+
+# ===================== 配置读写 =====================
+
+# G13（P1）说明：质检配置「逐镜反复 load_config + Fernet 解密」的开销，**不在
+# load_config 里加全局 mtime 缓存**解决 —— 那样会破坏 load_config 的「纯重读」
+# 契约（verify_qc_bool_parse F5 断言 load_config 以 `return _normalize(cfg)` 收尾），
+# 且 Windows mtime 分辨率粗、写→读快循环会读脏。正确做法是「worker 进循环前读一次
+# 并复用」（资产 worker 已如此），本批已把分镜/视频 worker 的逐镜 load 上提。
+# load_config 本身保持纯重读，任何直接写文件 + 立即读的场景都拿到最新值。
+
+
+def load_config(config_path: str) -> dict:
+    cfg = _empty_config()
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            for k in CONFIG_KEYS:
+                if k == "endpoint_override":
+                    continue
+                if k in data and data[k] is not None:
+                    cfg[k] = data[k]
+            cfg["endpoint_override"] = _normalize_override(data.get("endpoint_override"))
+            # P0-3：明文密钥自动迁移到加密库并清空 json 字段（含 endpoint_override 嵌套结构）
+            if data.get("api_key") or (isinstance(data.get("endpoint_override"), dict)
+                                       and data["endpoint_override"].get("api_key")):
+                try:
+                    import secret_store
+                    if secret_store.scrub_plaintext_key(config_path, "qc", _PROJECT_ROOT):
+                        logger.info("质检配置中的明文密钥已迁移至加密库")
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"质检密钥迁移失败（暂不阻断）：{e}")
+        except Exception as e:  # noqa: BLE001
+            # G14（P1）：文件**存在但解析失败** ≠ 文件不存在。
+            # 文件不存在是正常的（默认关闭）；文件损坏则必须 fail-loud——
+            # 否则静默回落 enabled=False 会让用户以为「我明明开了质检」却整条被跳过。
+            logger.error(f"质检配置文件损坏，解析失败（fail-loud，本次按默认关闭）：{e}")
+            cfg["_config_corrupt"] = True
+            cfg["_config_error"] = str(e)
+    # ⭐ 单一事实源：AI 凭证统一走 tasks.db 的 ai_credentials 表（qc 模块）。
+    # get_credentials 内部已按 env > DB 解析密钥（env 仍最高，运维部署可用 env 覆盖），
+    # 故这里直接信任其结果；DB 有非空字段就覆盖 json 值。
+    # 回落：DB 读不到（模块异常）才走旧的 secrets.enc「qc 槽 + env base/model」。
+    db_key = ""
+    try:
+        import ai_credentials_db
+        db_ep = ai_credentials_db.get_credentials("qc")
+        if db_ep.get("base_url"):
+            cfg["base_url"] = db_ep["base_url"]
+        if db_ep.get("model"):
+            cfg["model"] = db_ep["model"]
+        if db_ep.get("api_key"):
+            db_key = db_ep["api_key"]
+            cfg["api_key"] = db_key
+            # endpoint_override 若声明了 base_url/model 但密钥为空，用 DB 的密钥补齐，
+            # 否则 resolve_endpoint 会因 override 缺 key 而落到未配置分支
+            ov = cfg.get("endpoint_override")
+            if isinstance(ov, dict) and ov and not (ov.get("api_key") or "").strip():
+                ov["api_key"] = db_key
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"AI 凭证 DB（qc）读取失败，回落加密库/env：{e}")
+    # ⚠️「DB 没有该模块的密钥」≠「没配过密钥」。本模块的密钥写入点（save_config /
+    #    set_endpoint）写的是**旧加密库**的裸槽 `qc`；AI 设置页（ai_config.save_module）
+    #    写的是 `ai.qc`。DB 只在这两种之外（启动迁移 / UI 显式写库）才落行。
+    #    原实现只在 DB **抛异常**时才回落旧口径 →「DB 无行 + 加密库有钥」被判成无钥
+    #    → public_view.ready=False / video_qc_active=False → 质检被静默跳过，
+    #    前端还弹「质检接口信息不完整」的误导警告（verify_project_audit A2 守护的正是它）。
+    #    现改为：DB 未给出密钥就回落旧口径。槽位顺序沿用
+    #    ai_credentials_db.migrate_from_legacy 的 slot_map["qc"]（ai.qc → qc）。
+    if not db_key:
+        try:
+            import secret_store
+            store = secret_store.get_store(_PROJECT_ROOT)
+            for _slot in ("ai.qc", "qc"):
+                secure = (store.get_api_key(_slot) or "").strip()
+                if secure:
+                    cfg["api_key"] = secure
+                    ov = cfg.get("endpoint_override")
+                    if isinstance(ov, dict) and ov and not (ov.get("api_key") or "").strip():
+                        ov["api_key"] = secure
+                    break
+            env_base = secret_store.SecretStore.env_base_url("qc")
+            env_model = secret_store.SecretStore.env_model("qc")
+            if env_base:
+                cfg["base_url"] = env_base
+            if env_model:
+                cfg["model"] = env_model
+        except Exception as e2:  # noqa: BLE001
+            logger.warning(f"质检密钥读取异常（回退 json）：{e2}")
+    # 类型兜底：统一交给 `_normalize`（save_config / load_config_dict 用的是同一套规则）
+    # ⚠️ 审计 G2：这里原本手写了一份「简化版」归一化，且布尔项用的是裸 `bool()` ——
+    #    字符串 "false"/"0"/"no"/"off" 都是非空字符串 → 一律判 True（用户在页面或第三方
+    #    脚本里写 "false"，读回来反而是「开」）；而且它只覆盖 3 个开关，
+    #    audio_enabled / script_enabled / keyframe_qc_enabled / prompt_enabled 完全没归一化，
+    #    音频/剧本/尾帧质检的开关因此形同虚设。两份口径并存必然漂移，现收敛为单一实现。
+    # G14：若文件「存在但解析失败」，cfg 上带 _config_corrupt/_config_error，_normalize
+    #    只赋值已知键、不删除额外键，故损坏标记会随返回值带出，供 public_view 高亮。
+    # ⭐ 2026-10-10（P0 修复）：把**统一配置中心**的值叠加进来。
+    #   背景：本函数只读 qc_config.json + ai_credentials 表，完全不经过配置中心 ——
+    #   实测 qc_config.json 的 min_tokens_when_thinking=1024 与配置中心 DB 的 24576
+    #   同时存在，而本函数返回 1024（配置中心改的值对质检完全无效，还形成双写）。
+    #   overlay_config 只覆盖「被显式改过（来源 db/env）」的项，JSON 里其余 38 个键不受影响。
+    #   放在 _normalize 之后：让叠加进来的值也过同一套校验与默认补全。
+    try:
+        import config_center as _cc
+        cfg = _cc.overlay_config(_normalize(cfg))
+    except Exception as _e:  # noqa: BLE001  配置中心异常绝不影响质检自身配置
+        logger.warning(f"配置中心叠加失败（沿用质检自身配置）：{_e}")
+        cfg = _normalize(cfg)
+    return cfg
+
+
+# 存量迁移备份文件的时间戳格式（本地时间，秒级；同一秒重复迁移由幂等标记兜住）。
+_QC_MIGRATION_BAK_FMT = "%Y%m%d%H%M%S"
+
+
+def migrate_enabled_default(config_path: str) -> bool:
+    """存量迁移（一次性、幂等）：把「质检总开关默认关闭」时期遗留的配置补成默认开启。
+
+    背景
+    ----
+    历史版本 `_empty_config()` 的 `enabled` 为 False，`load_config` 对「文件不存在 /
+    文件里没有该键」一律回落到 False。用户升级到「质检默认开启」版本后，从未显式开过
+    质检的老项目仍是关闭状态。需求要求：默认开启质检，且**存量配置要迁移一次**。
+
+    契约（严格遵守，避免与 `load_config` 的「纯重读、不写盘」契约冲突）
+    -------------------------------------------------------------
+    - 只在「文件存在、可解析、且尚未带迁移标记 `_qc_migrated`」时执行一次；
+    - 执行前用 `shutil.copy2` 备份为 `<config>.bak.<时间戳>`（可回滚；备份失败不阻断迁移）；
+    - **只改两个字段**：`enabled=True`、`_qc_migrated=True`，其余字段逐字保留；
+    - 用 `_atomic_write_json` 原子落盘（唯一临时名 + fsync + 占用退避），全程持写锁；
+    - 返回 True 表示「本次确实做了迁移」，False 表示「无需迁移 / 文件不可用 / 写盘失败」。
+
+    ⚠️ 绝不放进 `load_config`（它有「纯重读、不写盘」契约，verify_qc_bool_parse F5）。
+       迁移必须由调用方**显式触发**（启动段 + GET /api/qc/config），且调用方要吞异常：
+       迁移失败不得影响启动、不得让接口 500。
+    """
+    if not config_path or not os.path.isfile(config_path):
+        return False
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:  # noqa: BLE001  文件损坏时不迁移（保持现状，交给 load_config fail-loud）
+        logger.warning("质检存量迁移：配置解析失败，跳过（不改动文件）：%s", e)
+        return False
+    if not isinstance(data, dict):
+        logger.warning("质检存量迁移：配置顶层不是对象，跳过")
+        return False
+    # 已迁移过 → 幂等返回，不重复备份、不重复写盘（绝大多数调用都会走这里）
+    if _as_bool(data.get("_qc_migrated"), False):
+        return False
+    with _QC_WRITE_LOCK:
+        # 双检：拿到锁后再读一次，防两个线程并发触发时重复迁移 / 重复备份。
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("质检存量迁移：二次读取失败，跳过：%s", e)
+            return False
+        if not isinstance(data, dict) or _as_bool(data.get("_qc_migrated"), False):
+            return False
+        # 备份原文件（copy2 保留元数据）。备份失败仅告警，不阻断迁移本身。
+        try:
+            bak = f"{config_path}.bak.{datetime.now().strftime(_QC_MIGRATION_BAK_FMT)}"
+            shutil.copy2(config_path, bak)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("质检存量迁移：备份失败（继续迁移）：%s", e)
+        # 只改总开关与迁移标记，其余字段逐字保留
+        data["enabled"] = True
+        data["_qc_migrated"] = True
+        try:
+            _atomic_write_json(config_path, data)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("质检存量迁移：写盘失败（保持原文件，下次启动再试）：%s", e)
+            return False
+        logger.info("质检存量迁移：已把 %s 的质检总开关默认值补为「开启」（原文件备份为 .bak.*）",
+                    config_path)
+        return True
+
+
+def _sync_credentials_db(cfg: dict = None, api_key: str = None, source: str = "qc_config",
+                         clear: bool = False) -> str:
+    """A2（2026-09-23 收口）：把质检端点同步进「AI 凭证单一事实源」（tasks.db 的 qc 模块）。
+
+    为什么要做：读侧（`load_config` / `ai_config.get_module`）自 P0-5 起**优先读 tasks.db**，
+    但质检端点此前只有旧加密库（裸槽 ``qc``）一个写点 —— 实际能工作全靠「DB 无该模块行时
+    回落旧库」这条读侧兜底，DB 并未真正成为单点（`/api/qc/config` 与 `/api/ai/config` 不对称）。
+
+    - `clear=True`：清空 DB 的 qc 模块（「恢复为 AI 设置」必须同步清，否则读侧仍读 DB 旧端点，
+      用户会看到「点了恢复却还是旧接口」）。
+    - 否则按**生效端点**（`resolve_endpoint`，会从加密库补齐密钥）写入；`api_key=None` 表示
+      本次未改密钥 → 库内原值不动。
+
+    返回 "" 表示成功；否则返回错误描述 —— 调用方需**响亮降级**（绝不阻断已完成的落盘）。
+    """
+    try:
+        import ai_credentials_db
+        if clear:
+            ai_credentials_db.clear_credentials("qc")
+            return ""
+        ep = resolve_endpoint(cfg)
+        # 安全阀：端点全空且本次未改密钥 → **不写 DB**。
+        # 否则「只改一个阈值再保存」这种调用方（cfg 里 base_url/model 为空）会把 DB 里
+        # 已有的端点覆盖成空串 —— 清空必须走显式的 clear（clear_config / reset_endpoint）。
+        if not (ep.get("base_url") or ep.get("model") or api_key):
+            return ""
+        ai_credentials_db.set_credentials(
+            "qc", base_url=ep.get("base_url") or "", model=ep.get("model") or "",
+            api_key=api_key, source=source)
+    except Exception as e:  # noqa: BLE001
+        msg = f"{type(e).__name__}: {e}"
+        logger.error("质检端点同步到 AI 凭证库失败（读侧将回落旧加密库，可能出现"
+                     "「保存成功但任务仍用旧值」的漂移，请检查 tasks.db）：%s", msg)
+        return msg
+    return ""
+
+
+def save_config(config_path: str, patch: dict, keep_key_if_blank: bool = True) -> dict:
+    # P2-T3：整段「读 load_config → 改 → 原子写」持锁串行化，
+    # 防两个线程同时 save 时读改写互相丢更新（唯一临时名只防文件截断，不防逻辑丢更新）。
+    with _QC_WRITE_LOCK:
+        return _save_config_impl(config_path, patch, keep_key_if_blank)
+
+
+def _save_config_impl(config_path: str, patch: dict, keep_key_if_blank: bool = True) -> dict:
+    cfg = load_config(config_path)
+    # A2（2026-09-23）：记录本次是否写入了**新**密钥。None = 未改密钥，
+    # 同步 DB 时保持库内原值（与 /api/ai/config 的 keep 语义一致）。
+    new_key = None
+    for k, v in (patch or {}).items():
+        if k not in CONFIG_KEYS or k == "updated_at":
+            continue
+        if k == "endpoint_override":
+            cfg["endpoint_override"] = _normalize_override(v)
+            continue
+        if k == "api_key":
+            if v is None:
+                continue
+            v = str(v).strip()
+            if not v and keep_key_if_blank:
+                continue          # 留空 = 不改动已保存密钥
+            if v and set(v) == {"*"}:
+                continue          # 误提交脱敏值，按不改动处理
+            if v and "*" in v:
+                continue          # 脱敏回显值（如 sk-a******wxyz），按不改动处理
+            # P0-3：有效新密钥写入加密库，json 中不落明文
+            try:
+                import secret_store
+                if not secret_store.get_store(_PROJECT_ROOT).set_api_key("qc", v):
+                    raise RuntimeError("密钥加密存储不可用")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"质检密钥加密保存失败：{e}")
+                raise ValueError(
+                    "质检密钥加密存储不可用（缺少 cryptography 或主密钥），已拒绝明文落盘。"
+                    f"请安装 cryptography 后重试，或改用环境变量 "
+                    f"{secret_store.ENV_KEY_MAP.get('qc', 'MJSCXT_API_KEY_QC')} 配置密钥。")
+            cfg["api_key"] = ""
+            new_key = v
+            continue
+        if k in ("enabled", "image_enabled", "video_enabled", "image_ref_compare",
+    "image_blocking_ref_compare",
+                 "image_qc_recheck",
+                 "storyboard_soft_qc"):
+            # ⚠️ 审计 G2：这里原本是 `bool(v)` —— 字符串 "false"/"0"/"no"/"off"/"none"
+            #    都是**非空字符串**，`bool()` 一律判 True。用户在页面或第三方脚本里把开关
+            #    存成 "false"，读回来反而是「开」，开关形同虚设。
+            #    同文件 `_as_bool` 的 docstring 恰好记录了这条坑，只有 save_config 自己漏改。
+            #    非法值沿用当前（已归一化的）取值，绝不静默翻转开关。
+            cfg[k] = _as_bool(v, bool(cfg.get(k, False)))
+        elif k in ("pass_score", "max_retries", "video_frame_count", "image_max_side",
+                   "image_max_tokens", "timeout", "api_retries", "best_of"):
+            try:
+                cfg[k] = int(v)
+            except Exception:  # noqa: BLE001
+                continue
+        elif k in ("image_pixel_std_min", "video_max_drift", "api_backoff"):
+            try:
+                cfg[k] = float(v)
+            except Exception:  # noqa: BLE001
+                continue
+        else:
+            cfg[k] = str(v or "")
+    cfg = load_config_dict(cfg)
+    cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    # P0-3：落盘前确保密钥字段不含明文（含 endpoint_override 嵌套结构）
+    # 明文密钥只存加密库；endpoint_override 的密钥由 load_config 从加密库补齐。
+    cfg["api_key"] = ""
+    ov = cfg.get("endpoint_override")
+    if isinstance(ov, dict):
+        ov["api_key"] = ""
+    _atomic_write_json(config_path, cfg)
+    # ⚠️ 必须重新 load_config 再返回，**不能返回上面那个已清空 api_key 的 cfg**：
+    # 明文密钥只存加密库，上面刚把 cfg["api_key"] 置空是为了防明文落盘；
+    # 若直接返回它，调用方拿到的就是「无密钥」的配置 → public_view 算出
+    # ready=False / image_qc_active=False → 前端每次保存都会弹
+    # 「质检开关已开启，但质检接口信息不完整，生成流程将跳过质检」的**误导性警告**
+    # （实测：仅提交 {"image_enabled": true} 后 video_qc_active 从 true 掉成 false）。
+    # 重新读取一次即可拿到 load_config 注入的密钥，且返回的正是应用真正会用的配置。
+    final = load_config(config_path)
+    # A2（2026-09-23 收口）：写侧与 /api/ai/config 对称地落「AI 凭证单一事实源」（tasks.db）。
+    # 此前质检端点只有旧加密库（裸槽 `qc`）一个写点，而读侧自 P0-5 起 DB 优先 ——
+    # 实际只能靠「DB 无该模块行时回落旧库」兜住，DB 并未真正成为单点。
+    # 这里按**生效端点**同步（resolve_endpoint 会从加密库补齐密钥）；
+    # api_key=None → 库内原密钥不动；失败只响亮降级，绝不阻断已完成的保存。
+    _sync_credentials_db(final, api_key=new_key)
+    return final
+
+
+def load_config_dict(raw: dict) -> dict:
+    """把内存字典按 load_config 的同一套规则规范化（供 save / 测试复用）"""
+    base = _empty_config()
+    base.update({k: v for k, v in (raw or {}).items()
+                 if k in CONFIG_KEYS and k not in ("endpoint_override",)})
+    base["endpoint_override"] = _normalize_override((raw or {}).get("endpoint_override"))
+    return _normalize(base)
+
+
+def pick_best_candidate(scores: list) -> int:
+    """best-of-N 选最佳候选（2026-09-29，借 ViMax ``best_image_selector``）：返回**最高分**索引。
+
+    - 分数为 ``None`` / 非数值 → 视为最低（不参与竞争）；
+    - 平局取**较后者**：更晚的那次尝试经过更多轮缺陷教训改写，通常更贴合要求；
+    - 全无有效分数 → 返回**最后一个索引**（保证总有一张被选中，绝不返回 -1 造成空选）。
+
+    ⚠️ 只比分数、**不判是否合格**：「最高分仍未达合格线」时的入库策略（是否仍入库并标记
+    未达标）由调用方决定 —— 本函数与 :func:`_qc_gate` 的 accept 判定**解耦**，便于单测。
+    """
+    if not scores:
+        return -1
+    best_i, best_s = len(scores) - 1, None
+    for i, s in enumerate(scores):
+        try:
+            v = float(s)
+        except (TypeError, ValueError):
+            continue
+        if best_s is None or v >= best_s:
+            best_i, best_s = i, v
+    return best_i
+
+
+def _as_bool(v, default: bool = False) -> bool:
+    """宽容布尔解析。
+
+    ⚠️ 不能用 ``bool(v)``：字符串 ``"false"`` / ``"0"`` / ``"no"`` / ``"off"`` 都是
+    非空字符串，``bool()`` 一律判 True —— 于是用户在页面或第三方脚本里把开关存成
+    ``"false"``，读回来反而是「开」，开关形同虚设（本轮审计发现的正是这类空壳开关）。
+    """
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("false", "0", "no", "off", "none", "null", ""):
+            return False
+        if s in ("true", "1", "yes", "on"):
+            return True
+        return default
+    if v is None:
+        return default
+    return bool(v)
+
+
+def _normalize(cfg: dict) -> dict:
+    cfg["enabled"] = _as_bool(cfg.get("enabled"), False)
+    cfg["image_enabled"] = _as_bool(cfg.get("image_enabled"), True)
+    cfg["video_enabled"] = _as_bool(cfg.get("video_enabled"), True)
+    # ⚠️ 这两个开关此前只出现在 CONFIG_KEYS / _empty_config，_normalize 里没有归一化：
+    #    用户在页面上把 audio_enabled 存成字符串 "false" 或 0，读回来就是真值，
+    #    开关形同虚设。补齐布尔归一化（与 image_enabled / video_enabled 同口径）。
+    cfg["audio_enabled"] = _as_bool(cfg.get("audio_enabled"), True)
+    cfg["script_enabled"] = _as_bool(cfg.get("script_enabled"), True)
+    # keyframe_qc_enabled（尾帧质检开关）已随 keyframe 流水线质检步骤删除（2026-10-05）：
+    # 它自始至终没有任何代码消费（纯配置空壳），CONFIG_KEYS 与本处的归一化一并移除。
+    # 提示词预检：默认开启；模式非法时回落到 repair（与 prompt_qc.prompt_qc_mode 同语义）
+    cfg["prompt_enabled"] = _as_bool(cfg.get("prompt_enabled"), True)
+    # 存量迁移标记：默认 True（新建 / 清空即视为已迁移）。老配置缺此键时读到 True，
+    # 真正把它**写回文件**由 migrate_enabled_default 负责 —— _normalize 只归一化、
+    # 不写盘（load_config 的「纯重读」契约不可破）。
+    cfg["_qc_migrated"] = _as_bool(cfg.get("_qc_migrated"), True)
+    # 图片质检是否附带设定图（save_config 的布尔组里也有它，读取侧必须同口径归一化）
+    cfg["image_ref_compare"] = _as_bool(cfg.get("image_ref_compare"), True)
+    # 3D 构图基准核对：2026-10-01 起**不再送无面人偶预演图**（会污染判定，实测 88→35），
+    # 改为送 te_3d_director.blocking_spec_text() 生成的确定性文字规格，故可以安全默认开启。
+    cfg["image_blocking_ref_compare"] = _as_bool(cfg.get("image_blocking_ref_compare"), True)
+    # 图片质检二次复核（默认开；同上：字符串 "false" 必须能真正关掉）
+    cfg["image_qc_recheck"] = _as_bool(cfg.get("image_qc_recheck"), True)
+    _pmode = str(cfg.get("prompt_mode") or "repair").strip().lower()
+    cfg["prompt_mode"] = _pmode if _pmode in ("warn", "repair", "block") else "repair"
+    cfg["endpoint_override"] = _normalize_override(cfg.get("endpoint_override"))
+    # G9/O1 图片客观层阈值：纯色/黑图 stddev 下限（float，默认 8.0，上限 50.0）
+    try:
+        cfg["image_pixel_std_min"] = max(0.0, min(50.0, float(cfg.get("image_pixel_std_min", 8.0))))
+    except Exception:  # noqa: BLE001
+        cfg["image_pixel_std_min"] = 8.0
+    # G9/O1 视频客观层阈值：时长偏差上限（float，默认 0.30，上限 5.0）
+    try:
+        cfg["video_max_drift"] = max(0.0, min(5.0, float(cfg.get("video_max_drift", 0.30))))
+    except Exception:  # noqa: BLE001
+        cfg["video_max_drift"] = 0.60   # 2026-10-08：见 _DEFAULT_QC 上方说明（H3 对齐膨胀）
+    for key, default, lo, hi in (("pass_score", 70, 0, 100), ("max_retries", 2, 0, 10),
+                                 # ⭐ 分镜专用重试（2026-10-07）：必须在此归一化，否则又是
+                                 #    「伪配置键」——CONFIG_KEYS 有、_empty_config 有，但字符串
+                                 #    "3" 或越界值原样生效（项目反复踩的坑）。范围与 max_retries 同。
+                                 ("storyboard_max_retries", 1, 0, 10),
+                                 ("video_frame_count", 3, 1, 6), ("image_max_side", 1024, 256, 2048),
+                                 ("image_max_tokens", 8192, 256, 131072),
+                                 ("timeout", 180, 10, 900),
+                                 ("api_retries", API_RETRY_ATTEMPTS, 0, 5),
+                                 # best-of-N 候选数：1=关闭（默认），上限 4（N 倍 GPU 渲染）
+                                 ("best_of", 1, 1, 4)):
+        try:
+            cfg[key] = max(lo, min(hi, int(cfg.get(key, default))))
+        except Exception:  # noqa: BLE001
+            cfg[key] = default
+    try:
+        cfg["api_backoff"] = max(0.0, min(30.0, float(cfg.get("api_backoff", API_RETRY_BACKOFF))))
+    except Exception:  # noqa: BLE001
+        cfg["api_backoff"] = API_RETRY_BACKOFF
+
+    # 音频客观层可调阈值。⚠️ 此前这三个键只在 _empty_config 里写死，_normalize 不碰它们，
+    # 于是任何越界值（负数占比、正数 dB、>1 的偏差上限）都会原样生效，把判定卡死或放空。
+    for key, default, lo, hi in (("audio_min_speech_ratio", 0.50, 0.0, 1.0),
+                                 ("audio_min_mean_db", -45.0, -100.0, 0.0),
+                                 ("audio_max_drift", 0.50, 0.0, 5.0)):
+        try:
+            cfg[key] = max(lo, min(hi, float(cfg.get(key, default))))
+        except Exception:  # noqa: BLE001
+            cfg[key] = default
+    return cfg
+
+
+def resolve_endpoint(cfg: dict, override: dict = None) -> dict:
+    """生效的质检接口：只认质检自己的独立配置（base_url / api_key / model）。
+
+    - 质检不再复用文本分析 LLM 接口（LLM 可能只配了纯文本模型，无法做视觉质检）。
+    - override：可选的临时覆盖（仅用于页面「测试连通性」传暂存参数，不落盘）。
+    - 若其它链路曾自动写入接口（endpoint_override 有值且与当前一致），标记为「自动写入」。
+    """
+    ov = _normalize_override(override) if override else {"base_url": "", "api_key": "", "model": ""}
+    saved = _normalize_override(cfg.get("endpoint_override"))
+    if ov["base_url"] and ov["api_key"] and ov["model"]:
+        return {**ov, "source": "test_override",
+                "auto_synced": bool(saved["base_url"]) and saved["base_url"] == ov["base_url"]}
+    ep = {"base_url": (cfg.get("base_url") or "").strip(),
+          "api_key": (cfg.get("api_key") or "").strip(),
+          "model": (cfg.get("model") or "").strip(),
+          # ⚠️ 审计 G2 同型：不能裸 `bool()` —— "false"/"0"/"off" 都是非空字符串，一律判 True，
+          #    于是「关闭思考」的开关在字符串写法下永远关不掉。
+          "disable_thinking": _as_bool(cfg.get("disable_thinking"), DISABLE_THINKING_DEFAULT),
+          "min_tokens_when_thinking": int(cfg.get("min_tokens_when_thinking")
+                                          or MIN_TOKENS_WHEN_THINKING)}
+    auto = bool(saved["base_url"] and saved["base_url"] == ep["base_url"]
+                and saved["api_key"] and saved["api_key"] == ep["api_key"]
+                and saved["model"] and saved["model"] == ep["model"])
+    return {**ep, "source": "qc_config", "auto_synced": auto}
+
+
+def qc_endpoint_ready(cfg: dict, override: dict = None) -> bool:
+    ep = resolve_endpoint(cfg, override)
+    return bool(ep["base_url"] and ep["api_key"] and ep["model"])
+
+
+def set_endpoint(config_path: str, base_url: str, api_key: str, model: str) -> dict:
+    """被其它链路（如分镜加速自动写入）调用的质检接口同步：落盘并记录 endpoint_override
+
+    P0-3：密钥写入加密库，json 只保留 base_url/model（不含明文密钥）。
+    """
+    with _QC_WRITE_LOCK:
+        return _set_endpoint_impl(config_path, base_url, api_key, model)
+
+
+def _set_endpoint_impl(config_path: str, base_url: str, api_key: str, model: str) -> dict:
+    cfg = load_config(config_path)
+    ep = {"base_url": (base_url or "").strip(), "api_key": (api_key or "").strip(),
+          "model": (model or "").strip()}
+    if not (ep["base_url"] and ep["api_key"] and ep["model"]):
+        return cfg
+    try:
+        import secret_store
+        secret_store.get_store(_PROJECT_ROOT).set_api_key("qc", ep["api_key"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"质检接口密钥加密保存失败（将不落盘明文）：{e}")
+    cfg["base_url"], cfg["api_key"], cfg["model"] = ep["base_url"], "", ep["model"]
+    # endpoint_override 只记录 base_url/model，密钥由加密库提供
+    cfg["endpoint_override"] = {"base_url": ep["base_url"], "api_key": "", "model": ep["model"]}
+    cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    _atomic_write_json(config_path, cfg)
+    # A2：自动写入的端点同样落 DB 单一事实源（读侧 DB 优先，漏这里会出现
+    # 「自动同步了旧加密库、但任务从 DB 读到旧端点」的分裂）
+    _sync_credentials_db(cfg, api_key=ep["api_key"], source="qc_endpoint_override")
+    return cfg
+
+
+def reset_endpoint(config_path: str) -> dict:
+    """「恢复为 AI 设置」：清空自动写入的接口，交还给用户在 AI 设置里独立配置"""
+    with _QC_WRITE_LOCK:
+        return _reset_endpoint_impl(config_path)
+
+
+def _reset_endpoint_impl(config_path: str) -> dict:
+    cfg = load_config(config_path)
+    try:
+        import secret_store
+        secret_store.get_store(_PROJECT_ROOT).clear_api_key("qc")
+    except Exception as e:  # noqa: BLE001
+        logger.error("清理加密库中的质检密钥失败，加密库可能残留旧密钥：%s", e)
+    cfg["base_url"], cfg["api_key"], cfg["model"] = "", "", ""
+    cfg["endpoint_override"] = {"base_url": "", "api_key": "", "model": ""}
+    cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    _atomic_write_json(config_path, cfg)
+    # A2：必须**同步清空** DB 的 qc 模块 —— 否则读侧（DB 优先）仍会读到旧端点，
+    # 用户点了「恢复为 AI 设置」却看不到任何变化（同一根因的镜像面）。
+    _sync_credentials_db(clear=True)
+    return cfg
+
+
+def public_view(cfg: dict) -> dict:
+    ep = resolve_endpoint(cfg)
+    ready = bool(cfg.get("enabled") and ep["base_url"] and ep["api_key"] and ep["model"])
+    view = {k: v for k, v in cfg.items()
+            if k not in ("api_key", "_config_corrupt", "_config_error")}
+    view.update({
+        # G14：配置文件「存在但损坏」的 fail-loud 标记，让 UI 如实提示而非静默关闭质检
+        "config_corrupt": bool(cfg.get("_config_corrupt")),
+        "config_error": str(cfg.get("_config_error") or ""),
+        "has_api_key": bool(cfg.get("api_key")),
+        "api_key_masked": mask_key(cfg.get("api_key") or ""),
+        "effective_base_url": ep["base_url"],
+        "effective_model": ep["model"],
+        "endpoint_source": ep["source"],
+        "endpoint_auto_synced": ep.get("auto_synced", False),
+        "ready": ready,
+        "image_qc_active": bool(cfg.get("enabled") and cfg.get("image_enabled") and ep["base_url"] and ep["api_key"] and ep["model"]),
+        "video_qc_active": bool(cfg.get("enabled") and cfg.get("video_enabled") and ep["base_url"] and ep["api_key"] and ep["model"]),
+        # 音频分两档：客观层只要开关打开就能跑（零模型依赖），AI 层还要接口就绪。
+        # 分开暴露是为了让前端能如实告诉用户「客观层在跑但 AI 层没配置」，
+        # 而不是笼统显示一个「未启用」让人误以为整条音频质检都没生效。
+        "audio_qc_active": bool(cfg.get("enabled") and cfg.get("audio_enabled")),
+        "audio_ai_active": bool(cfg.get("enabled") and cfg.get("audio_enabled")
+                                and ep["base_url"] and ep["api_key"] and ep["model"]),
+        # S1：剧本质检开关（与 image/video 同口径，需 enabled + script_enabled + 端点就绪）。
+        # 前端 /api/qc/config 据此如实回显「剧本质检是否真的在跑」，不再假装已质检。
+        "script_qc_active": bool(cfg.get("enabled") and cfg.get("script_enabled")
+                                and ep["base_url"] and ep["api_key"] and ep["model"]),
+        "default_image_prompt": DEFAULT_IMAGE_PROMPT,
+        "default_video_prompt": DEFAULT_VIDEO_PROMPT,
+        "default_audio_prompt": DEFAULT_AUDIO_PROMPT,
+    })
+    return view
+
+
+def clear_config(config_path: str) -> dict:
+    """清空配置：同时重置开关与独立接口（不含 prompt / 阈值以外的残留）"""
+    cfg = _empty_config()
+    cfg["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    os.makedirs(os.path.dirname(os.path.abspath(config_path)), exist_ok=True)
+    # D-03 同族收口：此处原为裸 `open(w)+json.dump`（非原子写，崩溃/并发会留半截 json），
+    # 改为与文件内其它落盘一致的原子写。
+    _atomic_write_json(config_path, cfg)
+    # A2：端点被一并重置 → 必须同步清空 DB 的 qc 模块，否则读侧（DB 优先）仍读旧端点。
+    _sync_credentials_db(clear=True)
+    return cfg
+
+
+# ===================== 开关判定（生成流程调用） =====================
+
+def image_qc_ready(cfg: dict, override: dict = None) -> bool:
+    return bool(cfg.get("enabled") and cfg.get("image_enabled")
+                and qc_endpoint_ready(cfg, override))
+
+
+def video_qc_ready(cfg: dict, override: dict = None) -> bool:
+    return bool(cfg.get("enabled") and cfg.get("video_enabled")
+                and qc_endpoint_ready(cfg, override))
+
+
+def audio_qc_ready(cfg: dict, override: dict = None) -> bool:
+    """音频质检**客观层**是否可执行。
+
+    ⚠️ 与 image_qc_ready / video_qc_ready 不同，这里**不要求质检接口就绪**：
+    客观层是纯 ffmpeg 指标判定（零模型依赖、零成本、毫秒级），没配多模态接口的项目
+    同样应该享受「整段无声 / 时长失控 / 削波」这些硬闸保护。AI 层是否可跑另见
+    ``audio_ai_ready``，``check_audio`` 内部会自行判断。
+    """
+    return bool(_as_bool(cfg.get("enabled"), False)
+                and _as_bool(cfg.get("audio_enabled"), True))
+
+
+def audio_ai_ready(cfg: dict, override: dict = None) -> bool:
+    """音频质检**AI 层**（频谱图 + 波形图送多模态模型）是否可执行。"""
+    return bool(audio_qc_ready(cfg) and qc_endpoint_ready(cfg, override))
+
+
+# ===================== 网络层重试与退避（仅针对瞬时故障） =====================
+# 说明：这里处理的是「同一次质检请求」内部的网络重试，与「不达标重生成」
+# （qc_cfg.max_retries，换 seed 重画）是两件事。
+# 目的：外部质检服务偶发 read timeout / HTTP 520 / 空返回时，先在网络层做有限次
+#       重试 + 指数退避，避免一次瞬时抖动就让资产被判为「质检调用异常」而阻断入库。
+# 语义不变：重试全部失败后仍按原逻辑阻断（不静默放行、不跳过质检）。
+
+API_RETRY_ATTEMPTS = 2      # 额外重试次数（总尝试 = 1 + 2），可被 qc_config.json 的 api_retries 覆盖
+API_RETRY_BACKOFF = 1.5     # 退避基数（秒）：第 n 次重试等待 base * 2^(n-1)，可被 api_backoff 覆盖
+API_RETRY_MAX_SLEEP = 8.0   # 单次退避等待上限（秒）
+API_CONNECT_TIMEOUT = 10    # 连接超时（秒）；读超时沿用配置里的 timeout
+
+# 可重试的 HTTP 状态码：限流 / 网关与上游瞬时故障（含 Cloudflare 系列 5xx）
+RETRYABLE_HTTP_STATUS = (408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524)
+# 明确不可重试的状态码：请求本身 / 鉴权 / 配置类错误，重试无意义
+FATAL_HTTP_STATUS = (400, 401, 403, 404, 405, 413, 415, 422)
+
+
+class QcApiError(RuntimeError):
+    """质检接口调用错误。
+
+    retryable=True 表示属瞬时故障（超时 / 可重试 5xx / 空返回 / 非 JSON），值得重试；
+    retryable=False 表示请求或配置本身有问题，重试无意义。
+    """
+
+    def __init__(self, message: str, *, retryable: bool = False, status: int = None,
+                 retry_after: float = None, kind: str = ""):
+        super().__init__(message)
+        self.retryable = bool(retryable)
+        self.status = status
+        self.retry_after = retry_after
+        # kind 供 _post_chat 决定「下一轮怎么改请求重试」：
+        #   reasoning_only    = 模型只吐了思考内容、正文为空
+        #   think_opt_rejected= 服务端不接受 chat_template_kwargs 字段
+        self.kind = kind or ""
+        self.attempts = 1
+        self.retry_errors: list = []
+
+    def with_attempts(self, attempts: int, retry_errors: list) -> "QcApiError":
+        """补上重试统计后的最终错误（供上层留痕与展示：共尝试几次、失败原因）"""
+        self.attempts = int(attempts)
+        self.retry_errors = list(retry_errors or [])
+        if self.attempts > 1:
+            self.args = (f"{self.args[0]}（共尝试 {self.attempts} 次，"
+                         f"含重试 {self.attempts - 1} 次）",)
+        return self
+
+
+# ===================== HTTP（OpenAI 兼容视觉输入） =====================
+
+def _chat_url(base_url: str) -> str:
+    u = (base_url or "").strip().rstrip("/")
+    if not u:
+        return ""
+    path = urlparse(u).path.rstrip("/")
+    if path.endswith("/chat/completions"):
+        return u
+    if path in ("", "/"):
+        return f"{u}/v1/chat/completions"
+    return f"{u}/chat/completions"
+
+
+def _is_local(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host in ("127.0.0.1", "localhost", "0.0.0.0", "::1") or host.endswith(".local")
+
+
+DISABLE_THINKING_DEFAULT = False
+MIN_TOKENS_WHEN_THINKING = 24576
+
+
+def _with_thinking_off(payload: dict) -> dict:
+    """注入「关闭思考」参数（OpenAI 兼容层事实标准：chat_template_kwargs）"""
+    p = dict(payload or {})
+    ctk = p.get("chat_template_kwargs")
+    ctk = dict(ctk) if isinstance(ctk, dict) else {}
+    ctk["enable_thinking"] = False
+    p["chat_template_kwargs"] = ctk
+    return p
+
+
+def _without_thinking_opt(payload: dict) -> dict:
+    return {k: v for k, v in (payload or {}).items() if k != "chat_template_kwargs"}
+
+
+def _bump_tokens(payload: dict, factor: int = 4) -> dict:
+    """放大 max_tokens：思考型模型把额度吃光时的兜底"""
+    p = dict(payload or {})
+    try:
+        cur = int(p.get("max_tokens") or 0)
+    except (TypeError, ValueError):
+        cur = 0
+    p["max_tokens"] = max(512, cur * factor)
+    return p
+
+
+def encode_image_data_url(path: str, max_side: int = 1024) -> str:
+    """读取本地图片 → 压缩 → data:image/jpeg;base64,...（控制 token 与带宽）"""
+    with open(path, "rb") as f:
+        raw = f.read()
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(raw))
+        im = im.convert("RGB")
+        w, h = im.size
+        scale = min(1.0, float(max_side) / max(w, h)) if max(w, h) else 1.0
+        if scale < 1.0:
+            im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=88)
+        raw = buf.getvalue()
+        mime = "image/jpeg"
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"图片压缩失败，按原图送检：{e}")
+        ext = os.path.splitext(path)[1].lower()
+        mime = {"png": "image/png", "webp": "image/webp"}.get(ext.lstrip("."), "image/jpeg")
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
+def _post_chat_once(ep: dict, payload: dict, timeout: int) -> dict:
+    """单次请求（不做重试）。失败时抛 QcApiError，并标注该错误是否值得重试。"""
+    url = _chat_url(ep["base_url"])
+    session = requests.Session()
+    if _is_local(url):
+        session.trust_env = False
+    headers = {"Content-Type": "application/json",
+               "Authorization": f"Bearer {ep['api_key']}"}
+    t0 = time.time()
+    try:
+        resp = session.post(url, headers=headers, json=payload,
+                            timeout=(min(API_CONNECT_TIMEOUT, timeout), timeout))
+    except requests.exceptions.Timeout as e:
+        raise QcApiError(f"质检接口请求超时（连接 {min(API_CONNECT_TIMEOUT, timeout)}s / "
+                         f"读取 {timeout}s）：{e}", retryable=True) from e
+    except requests.exceptions.RequestException as e:
+        # 连接被重置、TLS 抖动、分块传输中断等，均属瞬时故障
+        raise QcApiError(f"质检接口网络异常：{e}", retryable=True) from e
+    latency = int((time.time() - t0) * 1000)
+    if resp.status_code >= 400:
+        body = (resp.text or "")[:300]
+        # 少数服务端不认 chat_template_kwargs，直接 400。这里识别出来，
+        # 让 _post_chat 去掉该字段再试一次，而不是把「模型没配好」甩给用户。
+        if resp.status_code == 400 and any(
+                k in (body or "").lower()
+                for k in ("chat_template_kwargs", "enable_thinking", "unknown", "unsupported")):
+            raise QcApiError(f"质检接口不接受 chat_template_kwargs 字段：{body}",
+                             retryable=True, status=400, kind="think_opt_rejected")
+        if resp.status_code in RETRYABLE_HTTP_STATUS:
+            retry_after = None
+            try:
+                ra = (resp.headers.get("Retry-After") or "").strip()
+                if ra:
+                    retry_after = float(ra)
+            except Exception:  # noqa: BLE001
+                retry_after = None
+            raise QcApiError(f"质检接口 HTTP {resp.status_code}：{body}", retryable=True,
+                             status=resp.status_code, retry_after=retry_after)
+        raise QcApiError(f"质检接口 HTTP {resp.status_code}：{body}",
+                         retryable=resp.status_code not in FATAL_HTTP_STATUS,
+                         status=resp.status_code)
+    try:
+        data = resp.json()
+    except Exception as e:  # noqa: BLE001
+        raise QcApiError(f"质检接口返回非 JSON：{(resp.text or '')[:200]}",
+                         retryable=True) from e
+    choices = data.get("choices") or []
+    if not choices:
+        raise QcApiError(f"质检接口返回缺少 choices：{json.dumps(data, ensure_ascii=False)[:200]}",
+                         retryable=True)
+    msg = choices[0].get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):
+        content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
+    if not content:
+        content = choices[0].get("text") or ""
+    if not content:
+        reasoning = str(msg.get("reasoning_content") or "")
+        if reasoning:
+            # 推理型模型的典型症状：token 全被思考吃掉，正文为 ""。
+            # 不能拿思考内容当结论（它不是 JSON 判定），只能换打法重试。
+            raise QcApiError(
+                "质检模型只返回了思考内容（reasoning_content）而没有正文，"
+                "通常是推理型模型把 max_tokens 全花在思考上。系统会自动关闭思考模式重试",
+                retryable=True, kind="reasoning_only")
+        raise QcApiError("质检接口返回内容为空", retryable=True)
+    return {"content": str(content), "latency_ms": latency, "url": url}
+
+
+def _post_chat(ep: dict, payload: dict, timeout: int, retries: int = None,
+               backoff: float = None) -> dict:
+    """带重试与指数退避的请求：仅对瞬时故障重试，不可重试错误立即抛出。
+
+    返回体额外带 attempts（实际尝试次数）与 retry_errors（此前失败原因），供留痕。
+    """
+    total = 1 + max(0, int(API_RETRY_ATTEMPTS if retries is None else retries))
+    base = API_RETRY_BACKOFF if backoff is None else max(0.0, float(backoff))
+    errors: list = []
+    cur = dict(payload)
+    if ep.get("disable_thinking", DISABLE_THINKING_DEFAULT):
+        cur = _with_thinking_off(cur)          # 显式关思考（默认不关）
+    else:
+        # 允许思考 → 保证额度下限，否则思考吃光 token 只剩空正文
+        try:
+            mt = int(cur.get("max_tokens") or 0)
+        except (TypeError, ValueError):
+            mt = 0
+        floor = int(ep.get("min_tokens_when_thinking") or MIN_TOKENS_WHEN_THINKING)
+        if mt < floor:
+            cur["max_tokens"] = floor
+    for i in range(total):
+        try:
+            r = _post_chat_once(ep, cur, timeout)
+            r["attempts"] = i + 1
+            r["retry_errors"] = errors
+            if errors:
+                logger.warning(f"质检接口重试成功：共尝试 {i + 1} 次，此前失败：{errors[:2]}")
+            return r
+        except QcApiError as e:
+            last = (i >= total - 1)
+            kind = getattr(e, "kind", "") or ""
+            # 关思考也不管用（服务端不认该字段 / 已关仍空）→ 换打法再试，而不是干等
+            if not last and kind in ("reasoning_only", "think_opt_rejected"):
+                if kind == "think_opt_rejected" or "chat_template_kwargs" in cur:
+                    cur = _without_thinking_opt(cur)
+                cur = _bump_tokens(cur)
+                errors.append(str(e)[:200])
+                logger.warning(f"质检接口 {kind}（第 {i + 1}/{total} 次）："
+                               f"去掉思考抑制参数并放大 max_tokens={cur.get('max_tokens')} 后重试")
+                continue
+            if not e.retryable or last:
+                raise e.with_attempts(i + 1, errors)
+            wait = e.retry_after if (e.retry_after and e.retry_after > 0) else base * (2 ** i)
+            wait = min(float(wait), API_RETRY_MAX_SLEEP)
+            errors.append(str(e)[:200])
+            logger.warning(f"质检接口瞬时故障（第 {i + 1}/{total} 次尝试失败）：{e}；"
+                           f"{wait:.1f}s 后重试")
+            if wait > 0:
+                time.sleep(wait)
+    raise RuntimeError("质检接口重试流程异常结束")  # 理论不可达
+
+
+# 视觉连通性探测图（避免依赖本地文件）。
+#
+# ⚠️ 2026-10-11 修复：**绝不能用 1x1 像素图** —— 上游（FreeLLMAPI 网关）会把 1x1 判为
+#   「无效图像」直接拒收：
+#     HTTP 400 {"code":"image_invalid",
+#              "gateway_hint":"image data rejected by upstream; use a real/valid image"}
+#   而 routes/ai.py 又把这个 400 翻译成「该接口或模型不支持图像输入」，把排查方向
+#   彻底带偏（我本人就被误导去查模型能力，实际模型完全支持视觉）。
+#
+# 现改用 64x64 的真实小图（浅色底 + 橙色圆）：base64 仅 448 字符，
+# 实测 cn:deepseek-v4.1-flash 与 cn:glm-5v-turbo 都能正确识别内容。
+_PROBE_PNG_B64 = ("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAABFUlEQVR4nOWZ223EMBADqUGacH8pK/Xd/qaDuwoSSKuHRWt+DXBJUzIEq7x+33IGmYPMQeYgc5A5yBxkDjIHmYPMQeZ8zRC9fspfj+J78NGrDDzM/eN7XpIyJECT9bExSmeAtPVRMbjdvfp0uN19pxo7uO/RZBP3aWX2cZ/TZyv3iSn2Rwl2e/2ts45p4Fr4+psmHtOAd4Br+fqpn3tGAzuDzEHmIHOQOcgcdEKAGP03qpKomHtGA08IEMtXUdRNPKYBrS0hqmed1IBWlRAtU5obmJ0hGvUzS2hehmhXTu6BGRkipZnfxGMzRFat6ys0KkN06Bx/R/aQW8qH3BPfAjIHmYPMQeYgc5A5yBxkDjKHuw308gGGRGIjN0CLGAAAAABJRU5ErkJggg==")
+
+
+def test_vision(ep: dict, timeout: int = 60) -> dict:
+    """视觉连通性探测：用一张极小图片请求一次，确认该接口 / 模型支持图像输入。
+
+    永不抛异常：失败时返回 success=False + error。
+    """
+    if not (ep.get("base_url") and ep.get("api_key") and ep.get("model")):
+        return {"success": False, "vision": False,
+                "error": "接口未配置（base_url / api_key / model 均为必填）"}
+    content = [
+        {"type": "text", "text": "这是一张测试图片，请只回复：OK"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64," + _PROBE_PNG_B64}},
+    ]
+    # max_tokens 不能给小：混合推理模型（允许思考时）会先吐几百 token 的思考，
+    # 给 16 会让正文永远为空，用户看到「reply 为空」会误判成模型不支持视觉。
+    payload = {"model": ep["model"],
+               "messages": [{"role": "user", "content": content}],
+               "temperature": 0, "max_tokens": 256, "stream": False}
+    try:
+        r = _post_chat(ep, payload, timeout, retries=1, backoff=1.0)
+    except Exception as e:  # noqa: BLE001
+        # 只返回了思考内容 ⇒ 接口其实是通的、模型也响应了，只是额度被思考吃掉。
+        # 这时不能报「不支持图像」（那会把用户引去换模型），只能说「未确认」。
+        if getattr(e, "kind", "") == "reasoning_only":
+            return {"success": True, "vision": None, "uncertain": True,
+                    "verdict": "reachable_but_no_content",
+                    "error": str(e), "max_tokens": payload["max_tokens"],
+                    "hint": ("接口可达、模型有响应，但额度被思考占用、没有返回正文，"
+                             "因此无法确认是否支持图像输入。请提高质检模块的 max_tokens "
+                             "（建议 ≥1024）后重测。"),
+                    "attempts": getattr(e, "attempts", 1)}
+        return {"success": False, "vision": False, "error": str(e),
+                "attempts": getattr(e, "attempts", 1)}
+    reply = (r.get("content") or "").strip()
+    out = {"success": True, "latency_ms": r["latency_ms"], "url": r["url"],
+           "reply": reply[:100], "attempts": int(r.get("attempts", 1)),
+           "retries_used": max(0, int(r.get("attempts", 1)) - 1),
+           "max_tokens": payload["max_tokens"]}
+    if reply:
+        out["vision"] = True
+        out["verdict"] = "ok"
+    else:
+        # 接口可达，但这次没吐正文（额度被思考占用）→ 视觉能力「未确认」，
+        # 不要谎报 vision=True（否则用户以为质检模型已就绪，实际跑起来全是空判断）
+        out["vision"] = None
+        out["uncertain"] = True
+        out["verdict"] = "reachable_but_no_content"
+        out["hint"] = ("接口可达，但本次没有返回正文（可能额度被思考占用）。"
+                       "无法确认该模型是否支持图像输入；若质检时报「空判断/正文为空」，"
+                       "请提高质检模块的 max_tokens 或改用心智更轻的视觉模型。")
+    return out
+
+
+def _repair_json_quotes(text: str) -> str:
+    """修复「字符串值内嵌未转义双引号」——多模态模型最常见的 JSON 破坏方式。
+
+    实测案例：模型在 reason 里用引号强调剧本原文，返回
+        "reason": "场景与镜头描述不符：灯笼仍亮着而非"同时熄灭"，与核心叙事冲突。"
+    JSON 规范里字符串内的双引号必须转义，这种输出 json.loads 必然失败。
+    而质检解析失败会走「阻断入库」分支，导致图片永远不落盘、流水线无限重跑 ——
+    所以这里必须把它修回来，而不是让模型的一次措辞不当毁掉整条生产链。
+
+    做法：逐字符扫描并跟踪「是否在字符串内」。只有在字符串内遇到双引号、
+    且其后第一个非空白字符**不是**合法结构字符（: , } ] 或结束）时，
+    才判定为内嵌引号并补上转义；其余情况按正常结束引号处理。
+    """
+    out: list = []
+    in_str = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if not in_str:
+            if ch == '"':
+                in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        # —— 字符串内部 ——
+        if ch == "\\":
+            out.append(ch)
+            if i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+            else:
+                i += 1
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            nxt = text[j] if j < n else ""
+            if nxt in (":", ",", "}", "]", ""):
+                in_str = False           # 合法的字符串结束
+                out.append(ch)
+            else:
+                out.append('\\"')        # 内嵌引号 → 转义
+            i += 1
+            continue
+        # 字符串内裸换行/制表符同样非法，一并转义
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        else:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _balance_brackets(text: str) -> str:
+    """括号配平：丢掉多余的右括号 / 补齐缺失的右括号（模型另一种常见破坏方式）。
+
+    实测案例（2026-09-19 音频 AI 层）：模型返回的 issues 数组后面多了一个 ``]``
+        {"score": 5, ..., "issues": ["…", "…", "…"]]}
+    这种输出 json.loads 必然失败，而质检解析失败会走「AI 层调用失败」，让一次
+    措辞/括号失误把整条音频 AI 质检降级成「只有客观层结论」。
+
+    ⚠️ 必须**跳过字符串内部**的括号（reason 里出现「」【】都是正常内容），
+    只对结构括号 `{}` `[]` 做栈式配平；字符串内的括号原样保留。
+    """
+    out: list = []
+    stack: list = []
+    in_str = False
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if in_str:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+            i += 1
+            continue
+        if ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch in "{[":
+            stack.append(ch)
+            out.append(ch)
+            i += 1
+            continue
+        if ch in "}]":
+            want = "{" if ch == "}" else "["
+            if stack and stack[-1] == want:
+                stack.pop()
+                out.append(ch)
+            # 多余的右括号：直接丢弃（这是要修的那种情况）
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    closers = {"{": "}", "[": "]"}
+    out.extend(closers[c] for c in reversed(stack))
+    return "".join(out)
+
+
+def _loads_lenient(text: str):
+    """多级容错解析模型返回的 JSON（都失败时返回 None，由调用方决定如何处置）
+
+    顺序：原文 → 截取花括号区间 → 去尾逗号 → 修复内嵌未转义引号 → 括号配平。
+    逐级收紧，能救回就救回，绝不因一次措辞/括号失误就丢掉一份有效质检结论。
+    """
+    s, e = text.find("{"), text.rfind("}")
+    inner = text[s:e + 1] if (s != -1 and e > s) else ""
+    candidates = [text]
+    if inner:
+        candidates += [inner, re.sub(r",\s*([}\]])", r"\1", inner)]
+    for c in candidates:
+        for cand in (c, _repair_json_quotes(c),
+                     _balance_brackets(re.sub(r",\s*([}\]])", r"\1", c))):
+            try:
+                obj = json.loads(cand)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
+_FENCE_OPEN_RE = re.compile(r"^\s*```[a-zA-Z0-9_+\-]*[ \t]*\r?\n?")
+_FENCE_CLOSE_RE = re.compile(r"\r?\n?[ \t]*```\s*$")
+
+
+def _strip_code_fence(text: str) -> str:
+    """去掉 markdown 代码块围栏，露出里面的 JSON。
+
+    多模态模型经常把结论包成 ```json ... ```，而且**可能只有开头没有结尾**
+    （输出被 max_tokens 截断），此时旧的配对正则 ```` ```(?:json)?\\s*(.+?)``` ````
+    会整体失配，导致围栏原样进入解析、最终报「无法解析为 JSON」（缺陷 D7）。
+    这里做三级退化：配对围栏 → 只剥开头 → 只剥结尾。
+    """
+    if not text:
+        return text
+    raw = text.strip()
+    if "```" not in raw:
+        return raw
+
+    # 1) 标准配对围栏（允许围栏后有换行、允许 json 之外的语言标记）
+    m = re.search(r"```[a-zA-Z0-9_+\-]*[ \t]*\r?\n?(.*?)```", raw, re.S)
+    if m:
+        inner = m.group(1).strip()
+        if inner:
+            return inner
+
+    # 2) 只有开头围栏（结尾被截断）—— 先剥开头
+    stripped = _FENCE_OPEN_RE.sub("", raw)
+    # 3) 再尝试剥掉可能存在的结尾围栏
+    stripped = _FENCE_CLOSE_RE.sub("", stripped)
+    return stripped.strip()
+
+
+def parse_verdict(content: str, pass_score: int) -> dict:
+    text = _strip_code_fence(content or "")
+    obj = _loads_lenient(text)
+    if not isinstance(obj, dict):
+        # 多级容错仍失败：把完整原文落到日志，便于定位畸形输出的具体形态
+        logger.warning("质检结论无法解析为 JSON（清洗后 %d 字符）：%s", len(text), text)
+        raise RuntimeError(f"质检结论无法解析为 JSON：{text[:200]}")
+    score = obj.get("score")
+    try:
+        score = int(round(float(score)))
+    except Exception:  # noqa: BLE001
+        score = None
+    passed = obj.get("pass")
+    if passed is None:
+        passed = obj.get("passed")
+    if isinstance(passed, str):
+        # G11 修复：补全中文/英文/大小写变体白名单；识别不了 → None（未知），
+        # 而不是 False —— 否则"字段值写法差异"会变成 100% 假失败（合法结论被判不通过）。
+        # 归一化：去空白/小写/剥尾标点（。.!！），再比对白名单。
+        _s = _norm_bool_str(passed)
+        if _s in ("true", "yes", "1", "pass", "ok", "passed", "通过", "达标", "合格", "符合", "好"):
+            passed = True
+        elif _s in ("false", "no", "0", "fail", "failed", "不通过", "未通过", "不合格", "不达标", "差"):
+            passed = False
+        else:
+            passed = None
+    if passed is None:
+        # 模型没给布尔结论（或无法识别）→ 退用分数兜底：score>=pass_score 视为通过。
+        passed = (score is not None and score >= pass_score)
+    issues = obj.get("issues") or []
+    if isinstance(issues, str):
+        issues = [issues]
+    # P0：代码侧硬闸（关键缺陷阻断 + 分数不达标强制不通过），只收紧不放宽
+    sm = obj.get("style_match")
+    if isinstance(sm, str):
+        # G11 修复：style_match 更脆弱——任何非白名单字符串原来都被折成 False，
+        # 而 False 在 _apply_style_gate 里被当作"明确的风格不符证据"强制失败。
+        # 现补全白名单；识别不了 → None（未知），交给 _apply_style_gate 的 issues
+        # 关键词兜底，不再凭"写法差异"误杀。
+        _sm = _norm_bool_str(sm)
+        if _sm in ("true", "yes", "1", "pass", "ok", "match", "一致", "符合", "相同", "匹配"):
+            sm = True
+        elif _sm in ("false", "no", "0", "fail", "failed", "不一致", "不符", "不匹配", "偏离", "跑偏"):
+            sm = False
+        else:
+            sm = None
+    return _finalize_verdict({
+        # P1-17：分数缺失（score is None）不再视为「满足分数」——要求分数存在且达线。
+        "passed": bool(passed) and (score is not None and score >= pass_score),
+        "score": score,
+        "reason": str(obj.get("reason") or obj.get("comment") or "")[:500],
+        "issues": [str(x)[:200] for x in issues][:6],
+        "raw": text[:1000],
+        "style_match": sm if isinstance(sm, bool) else None,
+    }, pass_score)
+
+
+def _norm_bool_str(v: str) -> str:
+    """归一化布尔型字符串：去首尾空白 → 小写 → 剥尾标点（。.!！?？~～）。
+
+    G11 辅助：让白名单比对对"通过。" / "Yes" / "ok!" 这类带尾标点/大小写的写法鲁棒。
+    """
+    s = str(v or "").strip().lower()
+    while s and s[-1] in "。.!！?？~～,，;；:：":
+        s = s[:-1]
+    return s.strip()
+
+
+def _run_vision(ep: dict, prompt: str, image_paths: list, cfg: dict) -> dict:
+    content = [{"type": "text", "text": prompt}]
+    for p in image_paths:
+        content.append({"type": "image_url",
+                        "image_url": {"url": encode_image_data_url(p, cfg.get("image_max_side", 1024))}})
+    payload = {
+        "model": ep["model"],
+        "messages": [
+            {"role": "system", "content": "你是严格、客观的漫剧内容质检员，只输出一个 JSON 对象，禁止输出任何思考过程、分析或解释文字。"},
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0,
+        # 2026-10-03 fix：思考型模型把 token 花在 reasoning 里，800/1024 会在 JSON 完成前截断
+        # （content 里残留 Thinking Process 且无 “{”）→ 全部 fault_open 放行。提到 2064 后模型可输出完整 JSON。
+        # 实测：真实质检 prompt ≈1750+ 字符，思考型模型需 ~8k token 才能先想完再吐完整 JSON。
+        # 2064 在小 prompt（~100 字）够用，但真实 prompt 会被截断在思考里 → 全部 fault_open。
+        "max_tokens": cfg.get("image_max_tokens", 8192),
+        "stream": False,
+    }
+    t0 = time.time()
+    resp = _post_chat(ep, payload, cfg.get("timeout", 180),
+                      retries=cfg.get("api_retries", API_RETRY_ATTEMPTS),
+                      backoff=cfg.get("api_backoff", API_RETRY_BACKOFF))
+    verdict = parse_verdict(resp["content"], cfg.get("pass_score", 70))
+    verdict.update({"ok": True, "skipped": False, "latency_ms": resp["latency_ms"],
+                    "api_total_ms": int((time.time() - t0) * 1000),
+                    "api_attempts": int(resp.get("attempts", 1)),
+                    "retries_used": max(0, int(resp.get("attempts", 1)) - 1),
+                    "call_url": resp["url"], "model": ep["model"]})
+    return verdict
+
+
+# ===================== 通用多模态调用（供一致性校验等复用） =====================
+
+def run_custom_vision(prompt: str, image_paths: list, cfg: dict = None,
+                      override: dict = None, max_tokens: int = 900,
+                      system: str = None, temperature: float = 0) -> dict:
+    """通用多模态调用：给定提示词 + 多张图，返回模型原始文本与耗时。
+
+    与质检的区别：不做「合格/不合格」判定，只把判定权交给调用方（如一致性校验）。
+    复用质检的 endpoint 配置（base_url / api_key / model）与图片编码逻辑。
+    永不抛异常：失败返回 {"ok": False, "error": ...}。
+    """
+    cfg = cfg or _empty_config()
+    ep = resolve_endpoint(cfg, override)
+    if not (ep.get("base_url") and ep.get("api_key") and ep.get("model")):
+        return {"ok": False, "error": "多模态接口未配置（base_url/api_key/model）"}
+    if not image_paths:
+        return {"ok": False, "error": "未提供图片"}
+    missing = [p for p in image_paths if not p or not os.path.isfile(p)]
+    if missing:
+        return {"ok": False, "error": f"图片不存在：{missing[0]}"}
+
+    content = [{"type": "text", "text": prompt}]
+    for p in image_paths:
+        content.append({"type": "image_url",
+                        "image_url": {"url": encode_image_data_url(
+                            p, cfg.get("image_max_side", 1024))}})
+    payload = {
+        "model": ep["model"],
+        "messages": [
+            {"role": "system", "content": system or "你是严格、客观的漫剧视觉审校员，只输出 JSON。"},
+            {"role": "user", "content": content},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    t0 = time.time()
+    try:
+        resp = _post_chat(ep, payload, cfg.get("timeout", 180),
+                          retries=cfg.get("api_retries", API_RETRY_ATTEMPTS),
+                          backoff=cfg.get("api_backoff", API_RETRY_BACKOFF))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"通用多模态调用失败：{e}")
+        return {"ok": False, "error": str(e), "model": ep.get("model")}
+    return {"ok": True, "content": resp.get("content") or "",
+            "latency_ms": resp.get("latency_ms"),
+            "api_total_ms": int((time.time() - t0) * 1000),
+            "model": ep.get("model"), "url": resp.get("url")}
+
+
+def parse_json_loose(content: str) -> dict:
+    """宽松解析模型返回的 JSON（容忍 markdown 代码块 / 前后废话）。失败返回 {}"""
+    if not content:
+        return {}
+    text = _strip_code_fence(content)
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except Exception as e:  # noqa: BLE001
+        logger.debug("JSON 候选解析失败（试下一个候选）：%s", e)
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except Exception as e:  # noqa: BLE001
+            logger.debug("JSON 候选解析失败（试下一个候选）：%s", e)
+    # 最后再走一次多级容错（处理内嵌未转义引号等畸形输出）
+    obj = _loads_lenient(text)
+    return obj if isinstance(obj, dict) else {}
+
+
+# ===================== 图片质检 =====================
+
+def _apply_image_objective(verdict: dict, image_path: str, cfg: dict) -> dict:
+    """G9/O1 图片客观层（零模型依赖，与视频/音频客观层同构）。
+
+    全黑/全白/纯色（像素 stddev < 阈值）→ fatal 计入 critical_issues、blocked=True；
+    长宽比异常 → 非 fatal 计入 issues。AI 层失败也会透出（不因 AI 不可用漏掉黑图）。
+
+    **幂等**：二次复核会对「第二份 AI 结论」再跑一次本函数，因此这里先摘掉上一次
+    追加过的客观层 issues 再重新追加（否则重复调用会让 issues 越加越多）。
+    抽成独立函数的原因就是复核链路要复用同一份客观判定口径。
+    """
+    verdict = verdict or {}
+    try:
+        obj = image_objective(image_path, cfg)
+    except Exception as e:  # noqa: BLE001  客观层失败不阻断质检主流程
+        logger.warning("图片客观层执行失败（忽略）：%s: %s", type(e).__name__, e)
+        return verdict
+    obj_fatal = list(obj.get("critical_issues") or [])
+    obj_issues = list(obj.get("issues") or [])
+    verdict["objective"] = obj
+    verdict["objective_fatal"] = obj_fatal
+    verdict["objective_issues"] = obj_issues
+    base_issues = [x for x in (verdict.get("issues") or []) if x not in obj_issues]
+    if obj_issues:
+        verdict["issues"] = base_issues + obj_issues
+    else:
+        verdict["issues"] = base_issues
+    if obj_fatal:
+        base_crit = [x for x in (verdict.get("critical_issues") or []) if x not in obj_fatal]
+        verdict["critical_issues"] = base_crit + obj_fatal
+        verdict["blocked"] = True
+        verdict["passed"] = False
+        verdict["score"] = min(int(verdict.get("score") or 0), 50)
+    return verdict
+
+
+def _image_verdict_accepted(verdict: dict) -> bool:
+    """内容层是否「通过」。⚠️ 只看 ok/accepted —— skipped（质检未开启）不算通过。"""
+    return bool(verdict) and bool(verdict.get("ok")) and bool(verdict.get("accepted"))
+
+
+def _recheck_image_verdict(ep: dict, prompt: str, image_paths: list, cfg: dict,
+                           first: dict, image_path: str, style_norm: str) -> dict:
+    """图片质检「二次复核」：同一张图再判一次，任一判过即放行。
+
+    背景（实测）：同一张分镜图 + 同一组设定图 + temperature=0，重复 4 次送检得到
+    score = 85 / 78 / 45 / 92（通过率 2/4）；同一轮还会出现「景别完美符合」
+    与「景别严重不符（接近全景）」两个互斥结论。判官抖动**会直接变成一次 GPU 重画**
+    （1-2 分钟），而复核只用 2-5 秒 —— 交换比约 1:20，故默认开启。
+
+    决策（单向放宽，只在「首次判不过」时触发）：
+      · 客观层致命（黑图/纯色）→ **不复核**（确定性证据，复核无意义）；
+      · 复核调用抛异常 → 沿用首次结论（绝不把接口抖动变成放行）；
+      · 复核判过 → 返回复核结论（并在 recheck 里留档首次结论，便于复盘）；
+      · 两次都判不过 → 返回首次结论（保持「只有一处结论」的原有行为）。
+    """
+    info = {"used": True, "first_score": first.get("score"),
+            "first_accepted": bool(first.get("accepted"))}
+    if first.get("objective_fatal"):
+        info["used"] = False
+        info["skip_reason"] = "客观层致命（黑图/纯色）为确定性证据，无需复核"
+        first["recheck"] = info
+        return first
+    try:
+        second = _run_vision(ep, prompt, image_paths, cfg)
+    except Exception as e:  # noqa: BLE001  复核失败绝不能把「判不过」变成「判过」
+        logger.warning("图片二次复核调用失败，沿用首次结论：%s: %s", type(e).__name__, e)
+        info["error"] = str(e)
+        first["recheck"] = info
+        return first
+    second = _apply_style_gate(second, style_norm)
+    second = _apply_image_objective(second, image_path, cfg)
+    info["second_score"] = second.get("score")
+    info["second_accepted"] = bool(second.get("accepted"))
+    info["disagreed"] = bool(first.get("accepted")) != bool(second.get("accepted"))
+    if _image_verdict_accepted(second):
+        info["outcome"] = "复核放行（首次判不过判定为判官抖动）"
+        logger.info("图片质检二次复核放行：首次 score=%s(%s) → 复核 score=%s(%s)",
+                    first.get("score"), first.get("reason"),
+                    second.get("score"), second.get("reason"))
+        # 首次结论留档：复核放行不代表首次说的问题不存在，排查时仍需可见
+        second["recheck_first"] = {
+            "score": first.get("score"), "reason": first.get("reason"),
+            "issues": (first.get("issues") or [])[:3],
+            "critical_issues": (first.get("critical_issues") or [])[:3],
+        }
+        second["recheck"] = info
+        return second
+    info["outcome"] = "两次均判不通过"
+    first["recheck"] = info
+    return first
+
+
+def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
+                override: dict = None, style: str = "",
+                ref_images: list = None,
+                prev_shot_desc: str = "", prev_shot_ref: str = "",
+                blocking_ref: str = "", blocking_spec: str = "") -> dict:
+    """单张图片质检。永不抛异常：失败时返回 ok=False 并带 error。
+    override 仅用于「测试连通性」临时传参，不落盘。
+    style：目标风格串（用户与总控敲定），用于「风格达标」判定；为空则不做风格检测。
+    ref_images：设定参考图 [(label, path), ...]（也可以是 {"label","path"} dict）——
+      生成侧用的那几张角色 / 物品 / 场景设定图。给了就一并送检，让模型能**逐个核对
+      「画面里的角色 / 物品是否与设定一致、有没有变形」**，而不是凭想象判。
+      受 cfg["image_ref_compare"]（默认 True）控制；不存在的文件与重复图（同一张被多个
+      槽位复用）自动跳过。
+    prev_shot_desc / prev_shot_ref（2026-09-25 需求 J / P1）：**上一镜**的文字描述与画面
+      路径。给了就追加「跨镜连续性」判定口径，并把上一镜画面一并送检，让模型能真正比对
+      背景结构 / 光照方向 / 服化道是否漂移。两者都为空时**完全不加这部分**（零行为变更），
+      避免模型凭「上一镜」这几个字臆造一条不一致缺陷。
+    blocking_ref（2026-09-27）：3D 导演台站位/机位**构图基准图**（无面人偶预演图）。
+      给了就追加「构图基准核对」口径，让质检真正判定「这镜有没有照着 3D 站位/机位出图」。
+      送检顺序为 [成品图, 基准图, ...设定图]，与 :func:`build_blocking_note` 的编号一致；
+      该图**不占**设定图名额（``MAX_REF_IMAGES`` 只约束设定图）。"""
+    cfg = cfg or _empty_config()
+    if not cfg.get("enabled"):
+        return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
+    if not cfg.get("image_enabled"):
+        return {"ok": False, "skipped": True, "reason": "图片质检开关未开启"}
+    ep = resolve_endpoint(cfg, override)
+    if not (ep["base_url"] and ep["api_key"] and ep["model"]):
+        return {"ok": False, "skipped": True, "reason": "质检接口未配置（base_url/api_key/model）"}
+    if not image_path or not os.path.isfile(image_path):
+        return {"ok": False, "skipped": False, "error": f"图片不存在：{image_path}"}
+    style_norm = str(style or "").strip()
+    prompt = (cfg.get("image_prompt") or DEFAULT_IMAGE_PROMPT).replace(
+        "{shot_desc}", shot_desc or "（无）").replace(
+        "{pass_score}", str(cfg.get("pass_score", 70))).replace(
+        "{style}", style_norm or "（未指定）")
+    prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE + FRAMING_TOLERANCE_NOTE + MANNEQUIN_DISTINCTION_NOTE + STORYBOARD_GRID_ANALYSIS_NOTE
+    if style_norm:
+        prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
+    # ---- 角色资产的人物性别一致性（2026-09-28）：拿不到性别时整段不追加 ----
+    if _should_check_gender(shot_desc):
+        prompt = prompt + GENDER_CHECK_NOTE
+    # ---- 构图基准图（3D 导演台站位/机位）：不占设定图名额，单独一条口径 ----
+    # ⚠️⚠️ 2026-09-30 实测紧急关闭（注：2026-10-01 起该开关默认 True；此处 fallback False 仅防御配置键缺失）：
+    #     把 3D 基准图（灰/蓝色**无面人偶**预演图）与成品图一起送进视觉模型，会**严重污染**
+    #     判定 —— 同一张合格图实测：不传基准图 score=88 通过；传了基准图 score=35 拒绝，
+    #     且模型开始**凭空捏造**缺陷（「白色双眼」「彩色球体水系法术」「逻辑自相矛盾」）。
+    #     更早那批「画面内容为蓝色无面人偶」「提交图为构图预演人偶」的荒谬判定也是同一原因：
+    #     模型把送检的第 2 张人偶图当成了待检成品图。这正是分镜 2 连续 6 次、分镜 1~7
+    #     反复「质检不过→重试」的**真正元凶**（并非出图质量问题）。
+    #     基准图仍照常用于**出图**（构图约束有效）；只是不再作为质检输入。
+    #     如确需核对构图，必须走**独立的一次专用调用**，绝不能与成品图同批送检。
+    _blk_cmp_on = bool(cfg.get("image_blocking_ref_compare", False))
+    # ⛔️ 不再把「无面人偶预演图」送进视觉质检（2026-10-01 定论）。
+    # 实测：同一张合格分镜图，不送基准图 score=88 通过；送了 score=35 拒绝 ——
+    # 污染来自**图像本身**（灰蓝人偶、纯色底被当成画面内容），怎么加强提示词口径都压不住。
+    # 解法：改送 `blocking_spec`（te_3d_director.blocking_spec_text 生成的**确定性**文字规格：
+    # 人数 / 左右顺序 / 景别 / 机位），既保住「有没有照构图出图」的核对能力，又零视觉污染。
+    # 模式二分（2026-10-05）：blocking_spec 非空 → **文字规格模式**（不送任何基准图，
+    # 图片序列 = 待检图 + 设定图，设定图从第 2 张数起）；仅当没给文字规格、却真的传了
+    # 基准图路径时，才走旧「第 2 张=基准图」模式（build_blocking_note，设定图从第 3 张起）。
+    blocking_used = False       # 本镜启用「构图核对」（文字规格或基准图二选一）
+    blocking_img_used = False   # True = 真的把基准图作为第 2 张图送检（旧模式）
+    if _blk_cmp_on and str(blocking_spec or "").strip():
+        prompt = prompt + "\n" + str(blocking_spec).strip()
+        blocking_used = True
+    elif _blk_cmp_on and str(blocking_ref or "").strip() and os.path.isfile(blocking_ref):
+        # 兼容旧调用（只传基准图路径、无文字规格）
+        blocking_used = True
+        blocking_img_used = True
+    # ---- 设定一致性核对：把生成时用的参考图一并送检 ----
+    # ⚠️ 2026-10-02 修复：这里曾被写成三参 cfg.get("image_ref_compare",
+    #    "image_blocking_ref_compare", True) → dict.get 最多 2 个参数，只要
+    #    ref_images 非空就抛 TypeError（而生产三处调用都在传 ref_images），
+    #    导致有设定图的分镜质检 100% 失败。回落到两参原口径。
+    # ⚠️ 本开关与上面 :2130 的 image_blocking_ref_compare 是**两件事**，别混：
+    #    那个只控制 3D 构图核对（文字规格 / 旧基准图）是否生效，默认 True（2026-10-01 起）。
+    ref_list = []
+    if ref_images and cfg.get("image_ref_compare", True):
+        seen = {os.path.abspath(image_path)}
+        if blocking_img_used and blocking_ref:
+            seen.add(os.path.abspath(blocking_ref))
+        for item in ref_images:
+            if isinstance(item, dict):
+                label = item.get("label") or item.get("name") or ""
+                path = item.get("path") or item.get("file") or item.get("image")
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                label, path = item[0], item[1]
+            else:
+                continue
+            if not path or not os.path.isfile(path):
+                continue
+            ap = os.path.abspath(path)
+            if ap in seen:      # 同一张图被多个槽位复用（如主角色=次要角色）不重复送
+                continue
+            seen.add(ap)
+            ref_list.append((label, path))
+        ref_list = ref_list[:MAX_REF_IMAGES]
+    # ---- 跨镜连续性（P1，2026-09-25）：仅在提供了上一镜信息时启用 ----
+    # ⚠️ 放在 ref_list 之后：上一镜画面要作为**额外参考图**送检（模型才能真正比对），
+    #    而 ref_list 有 MAX_REF_IMAGES 上限，故先装满设定图、再追加上一镜，
+    #    且**不占用设定图名额**（设定图的一致性判定优先级更高）。
+    _prev_used = False
+    if prev_shot_desc or prev_shot_ref:
+        prompt = prompt + CONTINUITY_NOTE
+        _prev_lines = []
+        if prev_shot_desc:
+            _prev_lines.append(f"上一镜信息：{prev_shot_desc}")
+        if prev_shot_ref and os.path.isfile(prev_shot_ref):
+            _prev_lines.append("上一镜画面：见随附的「上一镜参考」图")
+            _prev_used = True
+        if _prev_lines:
+            prompt = prompt + "\n" + "\n".join(_prev_lines) + "\n"
+    if blocking_img_used:
+        prompt = prompt + build_blocking_note(len(ref_list))
+    elif blocking_used:
+        # 文字规格模式：本次没送基准图，文案不得再提「第 2 张=构图基准图」，
+        # 设定图从第 2 张数起（与下方 build_ref_consistency_note(start=2) 编号一致）
+        prompt = prompt + build_blocking_spec_note(len(ref_list))
+    if ref_list:
+        prompt = prompt + build_ref_consistency_note(ref_list, start=3 if blocking_img_used else 2)
+    image_paths = [image_path]
+    if blocking_img_used and blocking_ref:
+        # 判空防护（2026-10-05）：空字符串路径进 encode_image_data_url 会抛
+        # FileNotFoundError，让整次质检变成 interface_fault（而非「跳过基准图」）
+        image_paths.append(blocking_ref)
+    image_paths.extend(p for _l, p in ref_list)
+    if _prev_used:
+        # 上一镜画面追加在**最后**（顺序与 prompt 里「见随附的上一镜参考图」对应）
+        image_paths.append(prev_shot_ref)
+    try:
+        verdict = _run_vision(ep, prompt, image_paths, cfg)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"图片质检调用失败：{e}")
+        # P0-2：显式标注「接口级故障」——调用根本没拿到模型判定（鉴权 401/403/404、
+        # 超时、网络抖动等），**不是**「图片内容不合格」。上层闸门据此 fail-open
+        # （放行已出图资产 + 响亮告警），而不是把 ComfyUI 已出好的图按内容不合格丢弃。
+        return {"ok": False, "skipped": False, "error": str(e),
+                "api_attempts": getattr(e, "attempts", 1),
+                "retryable": getattr(e, "retryable", None),
+                "interface_fault": True}
+    verdict = _apply_style_gate(verdict, style_norm)
+    # 把「带了几张设定图」透出来，便于前端/体检确认该能力真的生效（而不是静默没带）
+    verdict["ref_images_used"] = len(ref_list)
+    if blocking_used:
+        # 透出「本镜构图核对已启用」（键名沿用旧名；2026-10-01 起文字规格模式下
+        # 并不随图送基准图，仅旧基准图模式才是真的带图），便于确认开关/渲染链路真的生效
+        verdict["blocking_ref_used"] = True
+    if ref_list:
+        verdict["ref_labels"] = [str(l)[:60] for l, _p in ref_list]
+    # G9/O1 图片客观层（零模型依赖，与视频/音频客观层同构）：
+    # 全黑/全白/纯色（像素 stddev < 阈值）→ fatal 计入 critical_issues、blocked=True；
+    # 长宽比异常 → 非 fatal 计入 issues。AI 层失败也会透出（不因 AI 不可用漏掉黑图）。
+    verdict = _apply_image_objective(verdict, image_path, cfg)
+    # ★ 二次复核（判官自洽性检查）：首次判不过时用**同一张图**再判一次，任一判过即放行。
+    #   实测判官自身抖动极大（同一张图 score 45/78/85/92），而每次「判不过」都会触发
+    #   一次 GPU 重画 —— 复核成本 2-5 秒 vs 重画 1-2 分钟。开关 cfg["image_qc_recheck"]。
+    if not _image_verdict_accepted(verdict) and cfg.get("image_qc_recheck", True):
+        verdict = _recheck_image_verdict(ep, prompt, image_paths, cfg, verdict,
+                                         image_path, style_norm)
+    return verdict
+
+
+# ===================== 视频质检（ffmpeg 抽帧） =====================
+
+def _decode_io(raw) -> str:
+    """subprocess 原始字节 → 文本。
+
+    Windows 下 text=True 会按 locale(cp936) 解码 ffmpeg/ffprobe 的 UTF-8 输出，
+    遇到非 GBK 字节会抛 UnicodeDecodeError 被外层 except 吞掉，导致帧率/时长静默解析为 0。
+    因此统一走「UTF-8 + replace」解码。
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw
+    return raw.decode("utf-8", "replace")
+
+
+def ffmpeg_exe() -> str:
+    return shutil.which("ffmpeg") or "ffmpeg"
+
+
+def _ffprobe_exe() -> str:
+    return shutil.which("ffprobe") or ""
+
+
+def _ffmpeg_stream_info(video_path: str) -> dict:
+    """解析 ffmpeg -i 输出里的 时长 / 帧率（不依赖 ffprobe）"""
+    info = {"fps": 0.0, "duration": 0.0}
+    try:
+        p = subprocess.run([ffmpeg_exe(), "-hide_banner", "-i", video_path],
+                           capture_output=True, timeout=60)
+        txt = _decode_io(p.stderr) + _decode_io(p.stdout)
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", txt)
+        if m:
+            info["duration"] = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        m2 = re.search(r"(\d+(?:\.\d+)?)\s*fps", txt) or re.search(r"(\d+(?:\.\d+)?)\s*tbr", txt)
+        if m2:
+            info["fps"] = float(m2.group(1))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"解析视频流信息失败：{e}")
+    return info
+
+
+def _count_video_frames(video_path: str) -> int:
+    """统计视频总帧数：优先 ffprobe -count_frames，其次 ffmpeg 解码计数"""
+    fp = _ffprobe_exe()
+    if fp:
+        try:
+            p = subprocess.run([fp, "-v", "error", "-select_streams", "v:0", "-count_frames",
+                                "-show_entries", "stream=nb_read_frames",
+                                "-of", "default=nw=1:nk=1", video_path],
+                               capture_output=True, timeout=300)
+            first = _decode_io(p.stdout).strip().splitlines()
+            if first and first[0].strip().isdigit():
+                return int(first[0].strip())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"ffprobe 统计帧数失败：{e}")
+    try:
+        p = subprocess.run([ffmpeg_exe(), "-hide_banner", "-nostats", "-i", video_path,
+                            "-map", "0:v:0", "-c", "copy", "-f", "null", "-"],
+                           capture_output=True, timeout=600)
+        txt = _decode_io(p.stderr) + _decode_io(p.stdout)
+        hits = re.findall(r"frame=\s*(\d+)", txt)
+        if hits:
+            return int(hits[-1])
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ffmpeg 统计帧数失败：{e}")
+    return 0
+
+
+def _fill_video_meta(meta: dict, video_path: str) -> dict:
+    """补全 fps / frame_count（已有时不重复探测）"""
+    if not meta.get("fps"):
+        meta["fps"] = _ffmpeg_stream_info(video_path).get("fps") or 0.0
+    if not meta.get("frame_count") and meta.get("fps") and meta.get("duration"):
+        meta["frame_count"] = int(round(float(meta["duration"]) * float(meta["fps"])))
+    return meta
+
+
+def video_meta(video_path: str, fallback: dict = None) -> dict:
+    """视频元信息 {duration, fps, frame_count, source, degraded}（B 项⑤）
+
+    时长三级回退：
+      ① ffprobe format=duration（最准）
+      ② ffmpeg -i 的 Duration 行
+      ③ 帧数 ÷ 帧率 推算（帧数 = ffprobe -count_frames / ffmpeg 解码计数 / 调用方传入；
+         帧率 = ffmpeg -i 解析值 / 调用方传入，如 ComfyUI 返回值）
+    """
+    fb = dict(fallback or {})
+    meta = {"duration": 0.0,
+            "fps": float(fb.get("fps") or 0.0),
+            "frame_count": int(fb.get("frame_count") or 0),
+            "source": "unknown", "degraded": False}
+    if not video_path or not os.path.isfile(video_path):
+        meta["degraded"] = True
+        return meta
+
+    fp = _ffprobe_exe()
+    if fp:
+        try:
+            p = subprocess.run([fp, "-v", "error", "-show_entries", "format=duration",
+                                "-of", "default=nw=1:nk=1", video_path],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+            s = (p.stdout or "").strip()
+            if s and s.upper() != "N/A":
+                d = float(s)
+                if d > 0:
+                    meta["duration"] = d
+                    meta["source"] = "ffprobe-format"
+                    return _fill_video_meta(meta, video_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"ffprobe 读取时长失败：{e}")
+
+    info = _ffmpeg_stream_info(video_path)
+    if info.get("fps") and not meta["fps"]:
+        meta["fps"] = info["fps"]
+    if info.get("duration", 0) > 0:
+        meta["duration"] = info["duration"]
+        meta["source"] = "ffmpeg-duration"
+        return _fill_video_meta(meta, video_path)
+
+    if not meta["frame_count"]:
+        meta["frame_count"] = _count_video_frames(video_path)
+    if meta["frame_count"] and meta["fps"]:
+        meta["duration"] = float(meta["frame_count"]) / float(meta["fps"])
+        meta["source"] = "frame_count/fps"
+    else:
+        meta["degraded"] = True          # 时长仍未知：抽帧将退化为固定时间点
+    return meta
+
+
+def video_duration(video_path: str, fallback: dict = None) -> float:
+    """视频时长（秒）。读不到时按「帧数 ÷ 帧率」或调用方（ComfyUI）返回值推算"""
+    return float(video_meta(video_path, fallback).get("duration") or 0.0)
+
+
+def extract_frames(video_path: str, out_dir: str, count: int = 3,
+                   prefix: str = "frame", fallback_meta: dict = None,
+                   frame_ratio: list = None) -> dict:
+    """全片均匀抽帧（片头/中段/片尾），并校验每帧实际时间戳。
+
+    返回 {ok, frames, frame_meta, timestamps, duration, meta, error}
+      frames      : 抽帧图片路径列表（喂给多模态模型）
+      frame_meta  : [{path, requested_ts, actual_ts, verified}]，actual_ts 由 ffmpeg showinfo 解析
+
+    D-05（P1）新增 ``frame_ratio``：按**占比**指定抽帧时间点（0~1 的小数，相对全片时长）。
+      整集模式（一次产出 20~44 段）必须用它按「每段中点」抽帧——只按 ``count`` 全片均布
+      3 帧时，中段几十段完全没有采样，模型拿 3 张无关帧去判整集是否崩坏 → 形同虚设。
+      传入且能读到视频时长时**不受 count 的 1~6 上限约束**（该上限只约束 count 路径，
+      保持既有配置语义不变）；时长读不到时告警并退回 count 路径（不静默）。
+    """
+    result = {"ok": False, "frames": [], "frame_meta": [], "timestamps": [],
+              "duration": 0.0, "meta": {}, "error": ""}
+    if not video_path or not os.path.isfile(video_path):
+        result["error"] = f"视频不存在：{video_path}"
+        return result
+    if not shutil.which("ffmpeg"):
+        result["error"] = "未找到 ffmpeg（请安装并加入 PATH）"
+        return result
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        result["error"] = f"抽帧目录创建失败：{e}"
+        return result
+
+    meta = video_meta(video_path, fallback_meta)
+    dur = float(meta.get("duration") or 0.0)
+    result["duration"] = round(dur, 3)
+    result["meta"] = meta
+
+    count = max(1, min(6, int(count or 3)))
+
+    # D-05：优先按占比抽帧（整集路径 = 每段中点），一次覆盖全片每段。
+    ratios = []
+    for r in (frame_ratio or []):
+        try:
+            rf = float(r)
+        except (TypeError, ValueError):
+            continue
+        ratios.append(min(1.0, max(0.0, rf)))
+    if ratios and dur > 0:
+        # 去重 + 保序：相邻段中点理论上互不相同，去重只为防御重复入参
+        times = sorted({round(dur * r, 3) for r in ratios})
+        result["meta"]["frame_mode"] = "ratio"
+        result["meta"]["frame_ratio_count"] = len(times)
+    else:
+        if ratios:  # 时长不可读 → 明确告警后退化，不静默丢帧
+            logger.warning(
+                "extract_frames 收到 frame_ratio(%d 个) 但视频时长不可读（%s）→ "
+                "退化按 count=%d 全片均布抽帧", len(ratios), video_path, count)
+        if dur > 0:
+            # 全片均匀覆盖：5% ~ 95%（避免首尾黑场/异常帧），count=1 时取正中间
+            if count == 1:
+                times = [round(dur * 0.5, 3)]
+            else:
+                lo, hi = dur * 0.05, dur * 0.95
+                times = [round(lo + (hi - lo) * i / (count - 1), 3) for i in range(count)]
+        else:
+            # 时长确实无法推算：退化按固定时间点抽帧（0s/1s/2s…），并标记 degraded
+            times = [float(i) for i in range(count)]
+            result["meta"]["degraded"] = True
+
+    frames, frame_meta = [], []
+    exe = ffmpeg_exe()
+    for i, ts in enumerate(times):
+        out = os.path.join(out_dir, f"{prefix}_{i + 1}_{int(ts * 1000)}ms.jpg")
+        cmd = [exe, "-y", "-hide_banner", "-loglevel", "info", "-copyts",
+               "-ss", f"{ts}", "-i", video_path, "-frames:v", "1",
+               "-vf", "showinfo", "-q:v", "2", out]
+        try:
+            p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+            actual = None
+            m = re.search(r"pts_time:([0-9]+(?:\.[0-9]+)?)", p.stderr or "")
+            if m:
+                actual = round(float(m.group(1)), 3)
+            if os.path.isfile(out) and os.path.getsize(out) > 0:
+                frames.append(out)
+                if actual is None:
+                    actual = round(ts, 3)      # ffmpeg 未回吐 pts 时，以请求时间戳兜底
+                frame_meta.append({
+                    "path": out,
+                    "requested_ts": round(ts, 3),
+                    "actual_ts": actual,
+                    "verified": abs(actual - ts) <= max(1.0, dur * 0.05) if dur > 0 else False,
+                })
+            else:
+                logger.warning(f"抽帧失败 ts={ts}s: {(p.stderr or '')[:200]}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"抽帧异常 ts={ts}s: {e}")
+    result["ok"] = bool(frames)
+    result["frames"] = frames
+    result["frame_meta"] = frame_meta
+    result["timestamps"] = [fm["actual_ts"] for fm in frame_meta]
+    if not frames:
+        result["error"] = "ffmpeg 抽帧未产出任何图片"
+    return result
+
+
+def _has_audio_stream(video_path: str) -> bool:
+    """探测视频是否含音频流（G9 确定性闸门：无音轨 → 计入 issues）。
+
+    ffprobe 不存在或探测失败 → 返回 False（与现状一致，仅不报缺音）；
+    能跑通 ffprobe 时，只要存在 audio codec 即返回 True。
+    """
+    fp = _ffprobe_exe()
+    if not fp or not os.path.isfile(video_path):
+        return False
+    try:
+        p = subprocess.run(
+            [fp, "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "default=nw=1:nk=1",
+             video_path],
+            capture_output=True, timeout=30)
+        out = _decode_io(p.stdout).strip()
+        return "audio" in out.lower()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ffprobe 音频流探测失败：{e}")
+        return False
+
+
+def image_objective(image_path: str, cfg: dict = None) -> dict:
+    """图片质检客观层（G9/O1 确定性闸门，与 check_audio.quick_check 同构）。
+
+    零模型依赖，**永远执行**：
+      1) 文件存在 + 非空；
+      2) 像素 stddev 检查 —— 全黑 / 全白 / 纯色（std < 阈值）→ 致命缺陷；
+      3) 长宽比异常（aspect < 1/10 或 > 10）→ 告警。
+
+    永不抛异常：Pillow 不可用 / 读图失败 → 仅记录 error，不阻断后续。
+    """
+    cfg = cfg or _empty_config()
+    base = {"ok": True, "skipped": False, "blocked": False, "passed": False,
+            "score": 0, "issues": [], "critical_issues": [], "fatal": [],
+            "error": "", "metrics": {}}
+    if not image_path or not os.path.isfile(image_path):
+        base["fatal"].append(f"图片文件不存在：{image_path}")
+        base["blocked"] = True
+        base["critical_issues"] = list(base["fatal"])
+        base["reason"] = base["fatal"][0]
+        return base
+    try:
+        import PIL.Image, PIL.ImageStat  # noqa: N811
+    except Exception as e:  # noqa: BLE001
+        base["skipped"] = True
+        base["ai_skip_reason"] = f"Pillow 不可用（{e}），客观层跳过"
+        return base
+    try:
+        with PIL.Image.open(image_path) as im:
+            im_d = im.convert("RGB")
+            w, h = im_d.size
+            stat = PIL.ImageStat.Stat(im_d)
+            # stat.stddev[i] 是第 i 通道的标准差。纯色图三通道 std 均 < 2；正常分镜图 std > 30。
+            # 取三通道中最大的 stddev，等价于灰度 stddev，鲁棒。
+            if stat.stddev:
+                stddev = max(float(s) for s in stat.stddev)
+            else:
+                stddev = 0.0
+            aspect = float(w) / max(1, h)
+    except Exception as e:  # noqa: BLE001
+        base["skipped"] = True
+        base["ai_skip_reason"] = f"图片读取失败（{e}），客观层跳过"
+        base["error"] = str(e)
+        return base
+
+    # 像素 stddev 阈值：纯色/黑图 < 8；正常分镜图通常 > 30
+    std_th = float(cfg.get("image_pixel_std_min", 8.0))
+    if stddev < std_th:
+        base["fatal"].append(
+            f"画面疑似黑图/纯色图（像素 stddev={stddev:.1f} < {std_th:.0f}）")
+        base["blocked"] = True
+    # 长宽比异常（极瘦/极宽）：aspect < 1/10 或 > 10 → 非 fatal 告警
+    if aspect < 0.1 or aspect > 10:
+        base["issues"].append(
+            f"图片长宽比 {aspect:.2f} 异常（正常 0.5~2.0），可能是拼接/裁剪错误")
+    base["metrics"] = {"width": w, "height": h, "stddev": round(stddev, 2),
+                       "aspect": round(aspect, 4)}
+    base["critical_issues"] = list(base["fatal"])
+    base["score"] = max(0, 100 - (len(base["issues"]) * 5 + len(base["fatal"]) * 50))
+    base["passed"] = not base["fatal"]
+    return base
+
+
+# =====================================================================
+# 景别后处理（C 方案，2026-09-30）
+# =====================================================================
+# 背景：实测 18 次分镜质检里 16 次因「景别不符」被拒 —— 模型默认给全景/远景，
+# 而镜头要求中近景/近景。自动裁剪：检测主体在画面中的垂直占比，若超出目标景别
+# 取景范围则裁掉多余空间，**不改变画面内容**，只做取景范围修正。
+
+# 景别 → 主体应占画面高度的比例范围（实测调参；偏保守，避免把脸切掉）
+_FRAMING_RANGE: dict = {
+    "特写":  (0.45, 1.0),
+    "近景":  (0.35, 0.75),
+    "中近景": (0.30, 0.65),
+    "中景":  (0.20, 0.55),
+    "全景":  (0.10, 0.45),
+    "远景":  (0.05, 0.30),
+}
+
+
+def _detect_subject_bbox(image_path: str) -> dict:
+    """检测主体（人物）在画面中的边界框。
+
+    优先用 YOLOv8n（若已安装 ultralytics）；否则回退到 PIL + numpy 的简单梯度检测
+    （找非背景区域的行范围）。返回 {x, y, w, h, method}（归一化 0~1）；失败返回 fallback。
+    """
+    import os
+    try:
+        from ultralytics import YOLO
+        model = YOLO("yolov8n.pt")
+        results = model(image_path, verbose=False)
+        if results[0].boxes is not None and len(results[0].boxes) > 0:
+            persons = results[0].boxes[results[0].boxes.cls == 0]
+            if len(persons) > 0:
+                cx, cy, w, h = persons[0].xywh[0].tolist()
+                W, H = results[0].orig_shape[1], results[0].orig_shape[0]
+                return {"x": cx - w / 2 / W, "y": cy - h / 2 / H,
+                        "w": w / W, "h": h / H, "method": "yolo"}
+    except Exception:
+        # 
+        from degradation import note as _dg_note
+        _dg_note('qc_client.py:2792', '静默降级')
+    try:
+        import PIL.Image
+        import numpy as np
+        with PIL.Image.open(image_path) as im:
+            arr = np.array(im.convert("L"), dtype=np.float32)
+            H, W = arr.shape
+            col_grad = np.abs(np.diff(arr, axis=0)).max(axis=1)
+            thresh = col_grad.mean() * 0.8
+            rows = np.where(col_grad > thresh)[0]
+            if len(rows) < 10:
+                return {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "method": "gradient_fallback"}
+            y_top, y_bot = int(rows.min()), int(rows.max())
+            return {"x": 0.0, "y": y_top / H, "w": 1.0,
+                    "h": max(0.05, (y_bot - y_top) / H), "method": "gradient"}
+    except Exception:
+        return {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0, "method": "fallback"}
+
+
+def auto_crop_framing(image_path: str, shot_type: str, out_path: str = None) -> dict:
+    """若画面主体**偏小**（构图太松/退成全景），自动裁剪收紧到目标景别。
+
+    ⚠️ 只处理「主体偏小」这一个方向（2026-09-30 修正）：主体**偏大**时裁剪只会让它
+    更大，方向相反 —— 要靠拉远/重出图才能解决，本函数无能为力，直接跳过（fail-open）。
+    旧实现两个方向都走同一条裁剪公式，主体占 96% 时会算出 min(H, 2.0*H)=H → 裁出
+    与原图等大的一张图却返回 cropped=True，日志「自动裁剪至 1216x672」是**假动作**，
+    掩盖了「这镜其实景别过近」的真实问题。
+
+    返回 {"cropped": bool, "out_path": str, "method": str, "bbox": dict, "reason": str}
+    """
+    import os
+    import PIL.Image
+    if not shot_type or shot_type not in _FRAMING_RANGE:
+        return {"cropped": False, "out_path": image_path, "method": "unknown_shot_type",
+                "bbox": {}, "reason": f"未知景别类型：{shot_type}"}
+    lo, hi = _FRAMING_RANGE[shot_type]
+    bbox = _detect_subject_bbox(image_path)
+    if bbox.get("method") in ("fallback", "gradient_fallback"):
+        return {"cropped": False, "out_path": image_path, "method": bbox.get("method", "fallback"),
+                "bbox": bbox, "reason": "主体检测失败，不裁剪（fail-open）"}
+    subject_h = bbox["h"]
+    if lo <= subject_h <= hi:
+        return {"cropped": False, "out_path": image_path, "method": "in_range",
+                "bbox": bbox, "reason": f"主体占 {subject_h:.0%}，在 [{lo:.0%},{hi:.0%}] 内"}
+    if subject_h > hi:
+        # 主体比目标景别**更近**（该镜实际是特写却要求中近景）→ 裁剪方向相反，跳过。
+        return {"cropped": False, "out_path": image_path, "method": "subject_too_large",
+                "bbox": bbox,
+                "reason": f"主体占 {subject_h:.0%} > 上限 {hi:.0%}（比目标景别更近）"
+                          f"→ 裁剪只会更近，跳过（fail-open）"}
+    with PIL.Image.open(image_path) as im:
+        W, H = im.size
+        cx, cy = bbox["x"] + bbox["w"] / 2, bbox["y"] + bbox["h"] / 2
+        target_h = (lo + hi) / 2
+        new_h = min(H, int(bbox["h"] * H / target_h))
+        new_w = min(W, int(new_h * (W / H)))
+        if new_h >= H and new_w >= W:
+            # 算出的裁剪区不比原图小 → 没有可裁的空间，别写一张等大的假产物。
+            return {"cropped": False, "out_path": image_path, "method": "no_room",
+                    "bbox": bbox, "reason": "裁剪区域不小于原图，跳过"}
+        x1 = max(0, min(int(cx - new_w / 2), W - new_w))
+        y1 = max(0, min(int(cy - new_h / 2), H - new_h))
+        cropped_im = im.crop((x1, y1, x1 + new_w, y1 + new_h))
+        out = out_path or os.path.join(os.path.dirname(image_path),
+                                       "auto_cropped_" + os.path.basename(image_path))
+        cropped_im.save(out)
+        return {"cropped": True, "out_path": out, "method": bbox["method"],
+                "bbox": bbox,
+                "reason": f"主体占 {subject_h:.0%}，目标景别 {shot_type} 需 [{lo:.0%},{hi:.0%}]"
+                          f" → 自动裁剪至 {new_w}x{new_h}"}
+
+# A-19（P2-8）：视频客观层缺陷的**结构化判定码** + 致命性由「检测逻辑」决定，
+# **不再靠中文字文案包含**。旧实现在 check_video 里写
+#   obj_fatal = [s for s in obj_issues if ("无音轨" in s or "时长" in s
+#                                           or "帧率" in s or "未通过校验" in s)]
+# 一旦上游把文案「无音轨」改成「音轨缺失」、把「时长」措辞微调，致命集合立刻
+# 变空 → objective_fatal=[] → blocked=False（**静默降级**，无音轨视频放行进成品）。
+# 这里给每条客观缺陷带稳定的 ``code`` + ``fatal`` 布尔：``fatal`` 在「检测出该缺陷」
+# 时由逻辑直接置位，与文案措辞彻底解耦。文案（msg）可随意改，code/fatal 不变，
+# 从而保证「改文案后 objective_fatal 集合不变」。
+#
+# 四类致命码（与旧子串筛选 4 类一一对应，口径不变）：
+#   · no_audio          ← 旧 "无音轨"
+#   · duration_drift    ← 旧 "时长"
+#   · frames_unverified ← 旧 "未通过校验"（全帧 / 部分帧都算）
+#   · fps_abnormal      ← 旧 "帧率"
+_VIDEO_OBJ_FATAL_CODES = ("no_audio", "duration_drift",
+                          "frames_unverified", "fps_abnormal")
+
+
+def _video_objective_issues(video_path: str, expected_duration: float,
+                           cfg: dict, fr: dict) -> list:
+    """视频质检确定性闸门（G9/O1）：不依赖模型的硬指标检测。
+
+    A-19：返回**结构化**项列表，每项为 ``{"code", "fatal", "msg"}``：
+      · ``code``  稳定判定码（见 ``_VIDEO_OBJ_FATAL_CODES``）；
+      · ``fatal`` 该缺陷是否致命（由检测逻辑直接决定，与文案无关）；
+      · ``msg``   人类可读文案（可自由改措辞，不影响致命性）。
+    ``check_video`` 据此把 ``fatal=True`` 项的 msg 塞进 critical_issues / objective_fatal。
+
+    检测项（口径与旧实现一致，仅判定依据从「中文字串包含」换成「结构化 fatal 字段」）：
+      1) 时长偏差：``|fr.duration - expected| / expected > video_max_drift`` → fatal；
+         expected_duration 为空 / 0 → 跳过该项（调用方没传就不断言）。
+      2) 音轨：``_has_audio_stream(video_path) == False`` → fatal。
+      3) 抽帧时间戳 verified：``frame_meta[i].verified == False`` → fatal（全帧/部分帧）。
+      4) fps 异常（< 8 或 > 60）→ fatal。
+    """
+    items: list = []
+    meta = fr.get("meta") or {}
+    fr_duration = float(meta.get("duration") or fr.get("duration") or 0.0)
+    fps = float(meta.get("fps") or 0.0)
+
+    def _add(code: str, msg: str, fatal: bool = True) -> None:
+        items.append({"code": code, "fatal": bool(fatal), "msg": msg})
+
+    # 1) 时长偏差
+    if expected_duration and expected_duration > 0 and fr_duration > 0:
+        drift_th = float(cfg.get("video_max_drift", 0.30))
+        drift = abs(fr_duration - float(expected_duration)) / float(expected_duration)
+        if drift > drift_th:
+            _add("duration_drift",
+                 f"视频实测时长 {fr_duration:.2f}s 与期望 {float(expected_duration):.2f}s "
+                 f"偏差 {drift*100:.0f}% 超阈值 {drift_th*100:.0f}%（H3 可能截断/补白）")
+
+    # 2) 音轨探测
+    if not _has_audio_stream(video_path):
+        _add("no_audio", "视频无音轨（H3 输出无声 / 未合轨），需检查 ComfyUI 音轨")
+
+    # 3) frame_meta.verified=False 计入 fatal
+    unverified = sum(1 for fm in (fr.get("frame_meta") or [])
+                     if fm and not fm.get("verified"))
+    total_frames = len(fr.get("frame_meta") or [])
+    if total_frames and unverified == total_frames:
+        _add("frames_unverified",
+             f"全部 {total_frames} 帧时间戳均未通过校验（抽帧可能失败/丢帧）")
+    elif unverified:
+        _add("frames_unverified",
+             f"{unverified}/{total_frames} 帧时间戳未通过校验（可能存在丢帧）")
+
+    # 4) fps 异常
+    if fps and (fps < 8.0 or fps > 60.0):
+        _add("fps_abnormal", f"视频帧率 {fps:.1f} fps 异常（正常 24-30 fps）")
+
+    return items
+
+
+def _video_obj_texts(items: list) -> list:
+    """结构化客观缺陷项 → 人类可读文案列表（供 ``issues`` / meta 落盘）。"""
+    return [str(it.get("msg") or "") for it in (items or []) if it.get("msg")]
+
+
+def _video_obj_fatal(items: list) -> list:
+    """结构化客观缺陷项 → **致命**项的文案列表（A-19：读 ``fatal`` 字段，非中文字串包含）。"""
+    return [str(it.get("msg") or "") for it in (items or [])
+            if it.get("fatal") and it.get("msg")]
+
+
+def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
+                override: dict = None, frames_dir: str = None,
+                fallback_meta: dict = None, style: str = "",
+                expected_duration: float = None,
+                frame_ratio: list = None,
+                segment_ranges: list = None,
+                ref_images: list = None) -> dict:
+    """视频质检：ffmpeg 抽帧 → 多模态判定。永不抛异常。
+    override 仅用于「测试连通性」临时传参，不落盘。
+    style：目标风格串，用于「风格达标」判定；为空则不做风格检测。
+    expected_duration：期望时长（秒）—— G9/O1 确定性闸门：实测时长与期望偏差
+        超 video_max_drift（默认 30%）计入 issues；为空 / 0 时跳过该项判定。
+    frame_ratio：D-05（P1）—— 按占比指定抽帧时间点，整集模式传「每段中点」，
+        使抽帧真正覆盖每一段（不再受 video_frame_count 默认 3 / 上限 6 约束）。
+    segment_ranges：P2-3 逐段主体一致性门禁（2026-10-01 接线）—— 各镜头段时间区间
+        [{"name", "start", "end"}]（秒，整集模式按段时长累加）。提供时抽帧按区间分组、
+        追加 SUBJECT_CONSISTENCY_NOTE 逐段判定口径；未提供时行为与旧版完全一致。
+    ref_images：角色设定图锚点（本地路径列表），附在抽帧之后送检（≤MAX_REF_IMAGES），
+        供「角色是否漂移」的比对；仅与 segment_ranges 同时生效。
+    """
+    cfg = cfg or _empty_config()
+    if not cfg.get("enabled"):
+        return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
+    if not cfg.get("video_enabled"):
+        return {"ok": False, "skipped": True, "reason": "视频质检开关未开启"}
+    ep = resolve_endpoint(cfg, override)
+    if not (ep["base_url"] and ep["api_key"] and ep["model"]):
+        return {"ok": False, "skipped": True, "reason": "质检接口未配置（base_url/api_key/model）"}
+
+    if not frames_dir:
+        frames_dir = os.path.join(os.path.dirname(os.path.abspath(video_path)),
+                                  "_qc_frames", os.path.splitext(os.path.basename(video_path))[0])
+    fr = extract_frames(video_path, frames_dir, cfg.get("video_frame_count", 3),
+                        fallback_meta=fallback_meta, frame_ratio=frame_ratio)
+    if not fr["ok"]:
+        return {"ok": False, "skipped": False, "error": fr["error"], "duration": fr["duration"],
+                "frame_meta": fr.get("frame_meta") or [], "video_meta": fr.get("meta") or {}}
+
+    style_norm = str(style or "").strip()
+    prompt = (cfg.get("video_prompt") or DEFAULT_VIDEO_PROMPT).replace(
+        "{shot_desc}", shot_desc or "（无）").replace(
+        "{frame_count}", str(len(fr["frames"]))).replace(
+        "{pass_score}", str(cfg.get("pass_score", 70))).replace(
+        "{style}", style_norm or "（未指定）")
+    ts_brief = "、".join(f"第{i + 1}帧 {fm['actual_ts']}s"
+                        for i, fm in enumerate(fr.get("frame_meta") or []))
+    prompt = f"共 {len(fr['frames'])} 张抽帧图片（按时间顺序；实际时间戳：{ts_brief}）。\n" + prompt
+    prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE + FRAMING_TOLERANCE_NOTE + MANNEQUIN_DISTINCTION_NOTE
+    if style_norm:
+        prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
+    # P2-3 逐段主体一致性门禁（2026-10-01 接线，借鉴 Story Claw 逐段 VLM 门禁）：
+    # 整集模式传入「各段(镜头)时间区间 + 角色设定图锚点」时，抽帧按区间分组、提示词
+    # 追加 SUBJECT_CONSISTENCY_NOTE 逐段判定口径，并把锚点图附在抽帧之后送检 ——
+    # 「同一角色段内换脸/换装/跨段服装漂移」从此有据可判。未传时与旧版完全一致（零回归）。
+    segs_norm: list = []
+    for _r in (segment_ranges or []):
+        if not isinstance(_r, dict):
+            continue
+        try:
+            _s0 = float(_r.get("start") or 0.0)
+            _e0 = float(_r.get("end") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if _e0 > _s0:
+            segs_norm.append({"name": str(_r.get("name") or ""),
+                              "start": _s0, "end": _e0})
+    refs_norm: list = []
+    for _p in (ref_images or []):
+        _p = str(_p or "")
+        if _p and os.path.isfile(_p) and _p not in refs_norm:
+            refs_norm.append(_p)
+    refs_norm = refs_norm[:MAX_REF_IMAGES]
+    vision_images = list(fr["frames"])
+    if segs_norm:
+        def _seg_idx(ts: float) -> int:
+            # 帧时间戳落在哪个区间算哪段；因时长漂移落不进任何区间时归到最近段
+            # （H3 截断/补白会让实测时间轴与期望累计时长错位，不能因此丢帧）
+            for _i, _sr in enumerate(segs_norm):
+                if _sr["start"] <= ts < _sr["end"]:
+                    return _i
+            _best, _bd = 0, None
+            for _i, _sr in enumerate(segs_norm):
+                _d = min(abs(ts - _sr["start"]), abs(ts - _sr["end"]))
+                if _bd is None or _d < _bd:
+                    _best, _bd = _i, _d
+            return _best
+        _fmeta = fr.get("frame_meta") or []
+        _frame_seg = [_seg_idx(float((fm or {}).get("actual_ts") or 0.0))
+                      for fm in _fmeta]
+        _groups = []
+        for _i, _sr in enumerate(segs_norm):
+            _hits = [f"第{k + 1}帧" for k, _si in enumerate(_frame_seg) if _si == _i]
+            _label = _sr["name"] or f"Shot {_i + 1}"
+            _groups.append(f"{_label}（{_sr['start']:.1f}~{_sr['end']:.1f}s）："
+                           + ("、".join(_hits) if _hits else "无抽帧命中"))
+        prompt = prompt + ("\n【抽帧分组（按镜头时间区间）】" + "；".join(_groups) + "\n")
+        prompt = prompt + SUBJECT_CONSISTENCY_NOTE
+        if refs_norm:
+            prompt = (prompt + f"\n【设定参考锚点】抽帧图片之后另有 {len(refs_norm)} 张"
+                      "该集生成时使用的角色设定参考图（按角色顺序）：请以它们为外观锚点，"
+                      "判定各镜头区间内角色面部/发型/服装/体型是否漂移；"
+                      "参考图本身不是待检画面，不得因参考图的构图/画质/风格扣分。\n")
+            vision_images = list(fr["frames"]) + refs_norm
+        logger.info("视频质检[逐段一致性]：%d 段区间分组，%d 张角色锚点图随帧送检",
+                    len(segs_norm), len(refs_norm))
+    # G9/O1 确定性闸门（视频客观层，零模型依赖）：命中致命缺陷（无音轨/时长超差/全帧未校验/fps异常）
+    # → blocked=True、passed=False，AI 层仍跑但不短路，避免误杀。
+    # A-19：``_video_objective_issues`` 现返回结构化项 {code, fatal, msg}，致命性由
+    # ``fatal`` 字段（检测逻辑直接置位）决定，**不再靠中文字文案包含** —— 上游改措辞
+    # （如「无音轨」→「音轨缺失」）不再让 objective_fatal 静默变空、漏掉致命缺陷。
+    obj_items = _video_objective_issues(video_path, expected_duration, cfg, fr)
+    obj_issues = _video_obj_texts(obj_items)      # 全部客观缺陷文案（并入 issues / 落盘）
+    obj_fatal = _video_obj_fatal(obj_items)       # 仅致命项文案（读 fatal 字段，非中文字串）
+    (fr.get("meta") or {}).update({"objective_issues": obj_issues,
+                                  "objective_fatal": obj_fatal})
+    try:
+        verdict = _run_vision(ep, prompt, vision_images, cfg)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"视频质检调用失败：{e}")
+        # AI 层失败也要透出客观层致命缺陷（不能让视频质检因 AI 不可用就漏掉无音轨/时长问题）
+        # P0-2：interface_fault=True 表示接口级故障（鉴权/超时/网络），非「视频内容不合格」。
+        # 客观层缺陷仍照常透出（fatal 会阻断），但 AI 层故障本身不丢弃已渲染的成片。
+        return {"ok": False, "skipped": False, "error": str(e),
+                "api_attempts": getattr(e, "attempts", 1),
+                "retryable": getattr(e, "retryable", None),
+                "interface_fault": True,
+                "frames": fr["frames"], "duration": fr["duration"],
+                "frame_meta": fr.get("frame_meta") or [],
+                "timestamps": fr.get("timestamps") or [],
+                "video_meta": fr.get("meta") or {},
+                "issues": list(obj_issues),
+                "critical_issues": list(obj_fatal),
+                "blocked": bool(obj_fatal),
+                "objective_only": True}
+    verdict.update({"frames": fr["frames"], "duration": fr["duration"],
+                    "frame_count": len(fr["frames"]),
+                    "frame_meta": fr.get("frame_meta") or [],
+                    "timestamps": fr.get("timestamps") or [],
+                    "duration_source": (fr.get("meta") or {}).get("source"),
+                    "video_meta": fr.get("meta") or {}})
+    if segs_norm:
+        # P2-3 接线留痕：本次质检按段分组判定，便于报表/教训库区分整集抽帧口径
+        verdict["subject_gate"] = {"segments": len(segs_norm),
+                                   "ref_images": len(refs_norm),
+                                   "frames_total": len(fr["frames"])}
+    # G9：把客观层 issues 并入 AI 层 verdict（AI 不报的客观缺陷仍保留；
+    # 客观 fatal 项命中关键缺陷词表的会被 find_critical_issues 进一步识别）
+    if obj_issues:
+        verdict["issues"] = list(verdict.get("issues") or []) + list(obj_issues)
+    if obj_fatal:
+        verdict["critical_issues"] = list(verdict.get("critical_issues") or []) + list(obj_fatal)
+        verdict["blocked"] = True
+        verdict["passed"] = False
+        verdict["objective_fatal"] = True
+    return _apply_style_gate(verdict, style_norm)
+
+
+# ===================== 音频质检（客观层 + AI 层） =====================
+
+def _merge_audio_verdict(objective: dict, ai: dict) -> dict:
+    """把客观层与 AI 层结论合成一份 verdict。
+
+    合成规则是**单向收紧**（与 ``_finalize_verdict`` 同一取向，绝不反向放行）：
+
+    * ``blocked`` = 客观层致命 OR AI 命中音频关键缺陷词；
+    * ``passed``  = 两层都通过（任何一层说不通过就是不通过）；
+    * ``score``   = 两层取**较小值**（避免「客观层 20 分、AI 层 90 分 → 平均 55 分」
+      这种把硬缺陷摊薄的算法）；
+    * ``issues``  = 两层合并去重，并把客观层的硬缺陷放在最前面。
+    """
+    obj = objective or {}
+    aiv = ai or {}
+    obj_issues = list(obj.get("issues") or [])
+    obj_fatal = list(obj.get("critical_issues") or [])
+    ai_issues = [str(x) for x in (aiv.get("issues") or [])]
+    ai_fatal = find_critical_issues(ai_issues, AUDIO_CRITICAL_KEYWORDS) if aiv.get("ok") else []
+
+    issues = []
+    for it in list(obj_fatal) + list(ai_fatal) + obj_issues + ai_issues:
+        s = str(it)
+        if s and s not in issues:
+            issues.append(s)
+
+    scores = [s for s in (obj.get("score"), aiv.get("score"))
+              if isinstance(s, int)]
+    score = min(scores) if scores else None
+    passed = bool(obj.get("passed")) and bool(aiv.get("passed")) if aiv.get("ok") \
+        else bool(obj.get("passed"))
+    blocked = bool(obj_fatal) or bool(ai_fatal)
+
+    fatal_all = list(obj_fatal)
+    for it in ai_fatal:
+        if it not in fatal_all:
+            fatal_all.append(it)
+    if blocked:
+        reason = "关键缺陷：" + "；".join([str(x) for x in fatal_all][:2])
+    elif not passed:
+        reason = "存在可优化项：" + "；".join([str(x) for x in issues][:2])
+    elif issues:
+        reason = "存在可优化项（不阻断）：" + "；".join([str(x) for x in issues][:2])
+    else:
+        reason = obj.get("reason") or aiv.get("reason") or "音频达标"
+
+    out = dict(obj)
+    out.update({
+        "ok": True,
+        "skipped": False,
+        "objective_only": False,
+        "ai_used": bool(aiv.get("ok")),
+        "passed": passed,
+        "accepted": not blocked,
+        "blocked": blocked,
+        "issues": [str(x)[:300] for x in issues][:8],
+        "critical_issues": [str(x)[:200] for x in fatal_all][:6],
+        "reason": str(reason)[:500],
+        "objective": {"passed": obj.get("passed"), "score": obj.get("score"),
+                      "issues": obj_issues, "critical_issues": obj_fatal},
+        "ai": {k: v for k, v in aiv.items() if k != "raw"} if aiv.get("ok") else None,
+    })
+    if isinstance(score, int):
+        out["score"] = score
+    # 音频没有「画面风格」维度，AI 层返回的 style_match 字段在这里没有意义，删掉以免误导
+    out.pop("style_match", None)
+    return out
+
+
+def check_audio(audio_path: str, expect_sec: float = None, line_text: str = "",
+                cfg: dict = None, override: dict = None, visuals_dir: str = None,
+                check_speech_ratio: bool = True) -> dict:
+    """音频质检：客观层（ffmpeg 指标）→ AI 层（频谱图 + 波形图送多模态）。永不抛异常。
+
+    参数
+    ----
+    ``expect_sec``  期望时长（单句传台词推算时长，整轨传视频时长）。只用于「时长偏差」判定。
+    ``line_text``   该句台词，注入 ``audio_prompt`` 的 ``{line_text}`` 占位符供模型比对。
+    ``check_speech_ratio``
+        是否启用「有声占比下限」判定。⚠️ 整集/成片音轨必须传 ``False``：这类音轨本来就有
+        大量刻意留白（无台词镜头），拿单句的 50% 标准去卡它必然误判成「漏句」。
+
+    执行策略（两层都不阻断生成，只给结论）
+    ------------------------------------
+    1. 客观层永远执行；**客观层已判致命时直接返回，不再花一次模型调用** ——
+       整段无声的音频没必要再让模型看频谱图。
+    2. AI 层仅在 ``audio_ai_ready`` 为真时执行；未配置接口时如实标注
+       ``ai_skip_reason``，客观层结论单独生效（不假装做过 AI 质检）。
+    """
+    cfg = cfg or _empty_config()
+    if not cfg.get("enabled"):
+        return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
+    if not cfg.get("audio_enabled"):
+        return {"ok": False, "skipped": True, "reason": "音频质检开关未开启"}
+    if not audio_path or not os.path.isfile(audio_path):
+        return {"ok": False, "skipped": False, "blocked": True, "passed": False,
+                "score": 0, "issues": [], "critical_issues": [f"音频文件不存在：{audio_path}"],
+                "reason": f"音频文件不存在：{audio_path}", "metrics": {},
+                "objective_only": True}
+
+    # ---- ① 客观层（零模型依赖，始终执行）----
+    objective = audio_qc.quick_check(
+        audio_path, expect_sec=expect_sec,
+        min_speech_ratio=(cfg.get("audio_min_speech_ratio", 0.50)
+                          if check_speech_ratio else None),
+        min_mean_db=cfg.get("audio_min_mean_db", -45.0),
+        max_drift=cfg.get("audio_max_drift", 0.50))
+
+    if objective.get("blocked"):
+        objective["ai_skipped"] = True
+        objective["ai_skip_reason"] = "客观层已判定致命缺陷（整段无声/无音轨/空文件），跳过 AI 层"
+        return objective
+
+    # ---- ② AI 层（需要质检接口）----
+    if not audio_ai_ready(cfg, override):
+        objective["ai_skipped"] = True
+        objective["ai_skip_reason"] = "质检接口未配置（base_url/api_key/model），仅客观层结论生效"
+        return objective
+
+    if not visuals_dir:
+        visuals_dir = os.path.join(os.path.dirname(os.path.abspath(audio_path)),
+                                   "_qc_audio",
+                                   os.path.splitext(os.path.basename(audio_path))[0])
+    vis = audio_qc.render_visuals(
+        audio_path, visuals_dir,
+        prefix=os.path.splitext(os.path.basename(audio_path))[0])
+    if not vis.get("ok"):
+        objective["ai_skipped"] = True
+        objective["ai_skip_reason"] = f"频谱/波形图渲染失败：{vis.get('error')}"
+        return objective
+
+    m = objective.get("metrics") or {}
+    facts = [f"实测时长 {float(m.get('duration') or 0):.2f} 秒"]
+    if expect_sec:
+        facts.append(f"期望时长 {float(expect_sec):.2f} 秒")
+    if isinstance(m.get("speech_ratio"), float):
+        facts.append(f"有声占比 {float(m['speech_ratio']) * 100:.1f}%")
+    if isinstance(m.get("mean_db"), float):
+        facts.append(f"平均电平 {float(m['mean_db']):.1f} dB")
+    if isinstance(m.get("max_db"), float):
+        facts.append(f"峰值电平 {float(m['max_db']):.1f} dB")
+    prompt = (cfg.get("audio_prompt") or DEFAULT_AUDIO_PROMPT)
+    prompt = prompt.replace("{line_text}", str(line_text or "（未提供）")[:200])
+    prompt = prompt.replace("{pass_score}", str(cfg.get("pass_score", 70)))
+    prompt = ("以下是该段配音的 ffmpeg 客观指标（可信的实测值，请结合图片一并判断）："
+              + "，".join(facts) + "。\n") + prompt
+
+    try:
+        ep = resolve_endpoint(cfg, override)
+        ai = _run_vision(ep, prompt, vis["images"], cfg)
+    except Exception as e:  # noqa: BLE001 - 质检失败不能影响主流程
+        logger.warning(f"音频 AI 层质检调用失败：{e}")
+        objective["ai_skipped"] = True
+        objective["ai_skip_reason"] = f"AI 层调用失败：{e}"
+        objective["visuals"] = vis["images"]
+        return objective
+
+    merged = _merge_audio_verdict(objective, ai)
+    merged["visuals"] = vis["images"]
+    return merged
+
+
+# ===================== 质检历史持久化 =====================
+
+# 只替换文件系统非法字符（\ / : * ? " < > | 与控制字符），保留中文等 Unicode 字符。
+# 旧规则「非 ASCII 一律折叠成下划线」会让「青玉短笛_top」与「雨后石桥_top」都变成
+# 「______top」而命中同一历史文件、互相覆盖 shot_id（物品 top 视角记录被写成了场景名），
+# 这里改为保真命名以根治该命名复用问题。
+_ILLEGAL_NAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def safe_token(raw, fallback: str = "0") -> str:
+    s = str(raw if raw not in (None, "") else fallback).strip()
+    safe = _ILLEGAL_NAME_CHARS.sub("_", s).strip(" .")
+    return safe or fallback
+
+
+def history_path(qc_root: str, project: str, kind: str, shot_key) -> str:
+    safe_kind = safe_token(kind, "asset")
+    safe_shot = safe_token(shot_key, "0")
+    return os.path.join(qc_root, project, f"{safe_kind}_{safe_shot}.json")
+
+
+def append_history(qc_root: str, project: str, kind: str, shot_key,
+                   entry: dict) -> str:
+    """追加一条质检/重试记录，返回历史文件绝对路径"""
+    path = history_path(qc_root, project, kind, shot_key)
+    data = {"project": project, "kind": kind, "shot_id": shot_key,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "records": []}
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                old = json.load(f) or {}
+            data["records"] = old.get("records") or []
+            data["created_at"] = old.get("created_at")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"质检历史读取失败（将重建）：{e}")
+    data.setdefault("created_at", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    entry = dict(entry or {})
+    entry.setdefault("time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    data["records"].append(entry)
+    data["total_attempts"] = len(data["records"])
+    data["last_passed"] = bool(entry.get("passed"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return os.path.abspath(path)
+
+
+def read_history(qc_root: str, project: str, kind: str, shot_key) -> dict:
+    path = history_path(qc_root, project, kind, shot_key)
+    if os.path.isfile(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+    return {}
+
+
+# ===================== 剧本质检 =====================
+
+def _validate_script_structure(script: dict) -> list:
+    """验证剧本JSON结构完整性
+
+    ⚠️ 字段名必须与 novel_to_script 的真实产物一致：
+    历史缺陷：这里要求角色/物品有 ``description``、镜头有 ``visual_description``
+    —— 这三个字段**都不存在**（真实字段是 character.appearance / item.appearance /
+    shot.description）。于是每一份剧本都会被报出一堆「缺少字段」，而 check_script
+    把 structure_issues 当关键问题**直接判失败并跳过 AI 质检**，
+    导致剧本质检 100% 假失败、AI 层从未真正运行过。
+    """
+    issues = []
+
+    # 检查顶层字段
+    required_top = ["title", "characters", "items", "scenes", "shots"]
+    for field in required_top:
+        if field not in script:
+            issues.append(f"缺少必要字段: {field}")
+
+    # 检查角色结构（真实字段：name / appearance / personality）
+    if "characters" in script:
+        for i, char in enumerate(script["characters"]):
+            if not isinstance(char, dict):
+                issues.append(f"角色 {i} 不是有效对象")
+                continue
+            for field in ["name", "appearance", "personality"]:
+                if field not in char:
+                    issues.append(f"角色 {char.get('name', f'[{i}]')} 缺少字段: {field}")
+
+    # 检查物品结构（真实字段：name / category / appearance）
+    if "items" in script:
+        for i, item in enumerate(script["items"]):
+            if not isinstance(item, dict):
+                issues.append(f"物品 {i} 不是有效对象")
+                continue
+            for field in ["name", "category", "appearance"]:
+                if field not in item:
+                    issues.append(f"物品 {item.get('name', f'[{i}]')} 缺少字段: {field}")
+
+    # 检查场景结构（真实字段：name / location / appearance）
+    if "scenes" in script:
+        for i, scene in enumerate(script["scenes"]):
+            if not isinstance(scene, dict):
+                issues.append(f"场景 {i} 不是有效对象")
+                continue
+            if not scene.get("name"):
+                issues.append(f"场景 {i} 缺少名称")
+
+    # 检查镜头结构（真实字段：description，不是 visual_description）
+    if "shots" in script:
+        for i, shot in enumerate(script["shots"]):
+            if not isinstance(shot, dict):
+                issues.append(f"镜头 {i} 不是有效对象")
+                continue
+            required_shot = ["shot_id", "duration", "camera", "location", "description"]
+            for field in required_shot:
+                if field not in shot:
+                    issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 缺少字段: {field}")
+
+    return issues
+
+
+def _matches_defined(name, defined: set) -> bool:
+    """引用名是否指向某个已定义名字（支持别名的包含匹配）
+
+    项目其它环节（``dialogue_utils.match_prefix_speaker``、``novel_to_script._norm_shots``）
+    对角色/物品名都用「相等或互相包含」的宽松匹配。剧本里常出现全名/简称混用
+    （实测：角色表登记「方源」，镜头里写「古月方源」），若按精确相等判定，
+    会刷出一堆「引用了未定义的角色」假错误，把真正的缺陷埋掉。
+    """
+    s = str(name or "").strip()
+    if not s:
+        return False
+    if s in defined:
+        return True
+    return any(s in d or d in s for d in defined if d)
+
+
+def _validate_script_logic(script: dict) -> list:
+    """验证剧本逻辑一致性（角色/物品引用用宽松别名匹配，见 _matches_defined）"""
+    issues = []
+
+    # 提取定义的角色名和物品名
+    defined_chars = {c.get("name") for c in script.get("characters", []) if isinstance(c, dict)}
+    defined_items = {i.get("name") for i in script.get("items", []) if isinstance(i, dict)}
+
+    # 检查镜头中的引用
+    for i, shot in enumerate(script.get("shots", [])):
+        if not isinstance(shot, dict):
+            continue
+
+        shot_id = shot.get("shot_id", f"[{i}]")
+
+        # 检查角色引用（宽松匹配：别名/全名简称不报错）
+        for char in shot.get("characters_in_shot", []):
+            if not _matches_defined(char, defined_chars):
+                issues.append(f"镜头 {shot_id} 引用了未定义的角色: {char}")
+
+        # 检查物品引用（宽松匹配）
+        for item in shot.get("items_in_shot", []):
+            if not _matches_defined(item, defined_items):
+                issues.append(f"镜头 {shot_id} 引用了未定义的物品: {item}")
+    
+    # 检查镜头顺序逻辑（简单检查shot_id是否连续）
+    shot_ids = [s.get("shot_id") for s in script.get("shots", []) if isinstance(s, dict)]
+    if shot_ids:
+        # 尝试将shot_id转换为数字并检查连续性
+        try:
+            numeric_ids = []
+            for sid in shot_ids:
+                if isinstance(sid, (int, float)):
+                    numeric_ids.append(int(sid))
+                elif isinstance(sid, str) and sid.isdigit():
+                    numeric_ids.append(int(sid))
+            
+            if numeric_ids:
+                sorted_ids = sorted(numeric_ids)
+                for i in range(1, len(sorted_ids)):
+                    if sorted_ids[i] - sorted_ids[i-1] > 1:
+                        issues.append(f"镜头ID不连续: {sorted_ids[i-1]} -> {sorted_ids[i]}")
+        except (ValueError, TypeError):
+            pass  # 非数字ID，跳过连续性检查
+    
+    return issues
+
+
+def _style_tokens(text: str) -> set:
+    """把风格串拆成可比较的词元
+
+    风格串常常是一整串没有分隔符的中文（如「中国古风玄幻漫剧」），按分隔符切只得一个词元，
+    与「国漫古风」完全无法比较 → 同义风格被误判为冲突。因此同时加入**字符二元组**：
+    「中国古风玄幻漫剧」与「国漫古风」共享二元组「古风」，即视为一致。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return set()
+    toks = {t.strip() for t in re.split(r"[,，、;；/|\s]+", s) if len(t.strip()) >= 2}
+    compact = re.sub(r"[,，、;；/|\s]+", "", s)
+    toks |= {compact[i:i + 2] for i in range(len(compact) - 1)}
+    return toks
+
+
+def _validate_script_style(script: dict, style: str) -> list:
+    """验证风格一致性
+
+    ⚠️ 原实现用「整串互相包含」判定（``script_style.lower() not in style.lower()``），
+    只要用户风格与剧本风格措辞不同就报不一致 —— 例如剧本写「中国古风玄幻漫剧」、
+    指定风格「国漫古风」，两者明明同义却被判冲突。
+    改为**词元重叠**判定：有任一共同词元即视为一致，完全不重叠才提示。
+    """
+    issues = []
+
+    script_style = str(script.get("style") or "").strip()
+    if script_style and style:
+        a, b = _style_tokens(script_style), _style_tokens(style)
+        # 词元有交集，或一方是另一方的子串，都算一致
+        if not (a & b) and script_style not in style and style not in script_style:
+            issues.append(f"剧本风格 '{script_style}' 与指定风格 '{style}' 可能不一致（无共同风格词）")
+
+    return issues
+
+
+def _validate_script_prompts(script: dict) -> list:
+    """验证提示词质量
+
+    ⚠️ 真实字段是 shot.description / character.appearance。
+    历史缺陷：这里读的是 ``shot.visual_description``（不存在）→ 每个镜头都被报
+    「缺少视觉描述」，把提示词质量校验变成了纯噪声。
+    """
+    issues = []
+
+    # 检查镜头画面描述质量（真实字段：description）
+    for i, shot in enumerate(script.get("shots", [])):
+        if not isinstance(shot, dict):
+            continue
+
+        shot_id = shot.get("shot_id", f"[{i}]")
+        visual_desc = str(shot.get("description") or "")
+
+        if not visual_desc:
+            issues.append(f"镜头 {shot_id} 缺少画面描述")
+        # ⚠️ 2026-10-10（用户明确要求）：**不再按字数判缺陷**。
+        #    原文是「<100 字判过短、>120 字判过长（疑似背景铺陈堆砌）」——
+        #    用户已多次强调「分镜提示词生成不限制长度」，此处是漏改的一处：
+        #    它既逼模型压缩掉必要信息，又会把写足内容的镜头判成缺陷。
+        #    长度不再参与判定；「内容是否覆盖了本镜要呈现的东西」由
+        #    _content_coverage() 负责（主体/空间位置/关键动作/关键道具/跨镜跳变），
+        #    那才是用户真正在意的（「人物不能突然出现在别的地方」）。
+        #    只保留一个「极短」兜底：低于 10 字几乎不可能承载一个可拍镜头，
+        #    属于明显残缺而非长度偏好。
+        elif len(visual_desc) < 10:
+            issues.append(f"镜头 {shot_id} 画面描述过短（{len(visual_desc)}字），不足以描述一个可拍镜头；请写清主体、关键动作与构图（不设字数上限）")
+
+
+    # 检查角色外貌描述（真实字段：appearance）
+    for i, char in enumerate(script.get("characters", [])):
+        if not isinstance(char, dict):
+            continue
+
+        char_name = char.get("name", f"[{i}]")
+        appearance = str(char.get("appearance") or "")
+        if not appearance:
+            issues.append(f"角色 {char_name} 缺少外貌描述")
+        elif len(appearance) < 20:
+            issues.append(f"角色 {char_name} 外貌描述过短（{len(appearance)}字）")
+
+    return issues
+
+
+#: 描述/对白字数比上限（压缩提炼口径：剧情主要由台词+动作推进，画面描述只做必要补充）。
+#: 与 novel_to_script.REWRITE_RULES 的「description+visual_detail ≤ dialogue×3」同源，此处做客观复检。
+DESC_TO_DIALOGUE_RATIO_MAX = 3.0
+#: 对白驱动率下限：有台词的镜头占比低于该值，说明剧情靠画面铺陈推进、易退化成「背景描述流水账」。
+DIALOGUE_SHOT_RATIO_MIN = 0.40
+
+
+def _shot_dialogue_chars(shot: dict) -> int:
+    """统计单个镜头 dialogue 的合计字数（含 visual_detail 之外的画面补充不计入）"""
+    total = 0
+    dlg = shot.get("dialogue")
+    if isinstance(dlg, list):
+        for d in dlg:
+            if isinstance(d, dict):
+                total += len(str(d.get("text") or ""))
+            elif isinstance(d, str):
+                total += len(d)
+    elif isinstance(dlg, str):
+        total += len(dlg)
+    return total
+
+
+def _validate_script_bloat(script: dict) -> list:
+    """描述臃肿度 + 对白驱动率 客观校验（2026-09-27 新增，补「剧本一开始就偏」的漏检）
+
+    两条判据直击「视频一直说背景描述」的病根：
+    ① 描述臃肿度：全片 description+visual_detail 合计字数 vs dialogue 合计字数，
+       超过 DESC_TO_DIALOGUE_RATIO_MAX 倍说明画面描述压过台词、成片大概率变成背景复述；
+    ② 对白驱动率：有台词的镜头占比低于 DIALOGUE_SHOT_RATIO_MIN，
+       说明大量静态空镜、叙事靠画面铺陈而非人物互动。
+    """
+    issues = []
+    shots = [s for s in (script.get("shots") or []) if isinstance(s, dict)]
+    if not shots:
+        return issues
+
+    desc_chars = 0
+    dialogue_chars = 0
+    dialogue_shots = 0
+    for s in shots:
+        desc_chars += len(str(s.get("description") or ""))
+        desc_chars += len(str(s.get("visual_detail") or ""))
+        d = _shot_dialogue_chars(s)
+        dialogue_chars += d
+        if d > 0:
+            dialogue_shots += 1
+
+    # ① 描述臃肿度
+    if dialogue_chars > 0:
+        ratio = desc_chars / float(dialogue_chars)
+        if ratio > DESC_TO_DIALOGUE_RATIO_MAX:
+            issues.append(
+                f"描述臃肿：全片画面描述+细节 {desc_chars} 字 / 台词 {dialogue_chars} 字 "
+                f"= {ratio:.1f} 倍（> {DESC_TO_DIALOGUE_RATIO_MAX:g} 倍），"
+                f"剧情应由台词+动作驱动，请压缩画面描述、删纯背景铺陈")
+    elif desc_chars > 0:
+        issues.append("全片无台词：画面描述 {0} 字但没有任何 dialogue，"
+                      "成片会退化成纯背景解说/空镜流水账".format(desc_chars))
+
+    # ② 对白驱动率
+    ratio_shots = dialogue_shots / float(len(shots))
+    if ratio_shots < DIALOGUE_SHOT_RATIO_MIN:
+        issues.append(
+            f"对白驱动率过低：{dialogue_shots}/{len(shots)} 个镜头有台词（{ratio_shots*100:.0f}% < "
+            f"{DIALOGUE_SHOT_RATIO_MIN*100:.0f}%），静态空镜过多，观众流失，"
+            f"请把纯环境铺陈改成人物动作/台词推进")
+
+    return issues
+
+
+# ======================================================================
+# 92 镜拆解法「五层全吸收」→ 剧本质检侧软告警（2026-09-28 三层 / 2026-09-30 补 ④⑤）
+#
+# 背景：写剧本层（novel_to_script.REWRITE_RULES 第 9/10 条 + edit_reason 字段）
+# 已按 92 镜短片的拆解口径约束了镜头语言克制 / 剪辑动机 / 视觉锚点道具回环。
+# 本组纯函数在**剧本质检**侧做同口径的客观复检，但全部走**软告警**：
+# 只写进 issues 提示，不命中 CRITICAL_ISSUE_KEYWORDS、不进 structure/logic
+# critical 桶、不直接判 pass=false —— 避免判官抖动与百分比分布误伤重画。
+#
+# 五层：
+#   ① edit_reason 覆盖率：镜头写了剪辑动机的占比，过低说明「为什么切」缺失；
+#   ② 镜头语言克制分布：固定机位占比下限 / 特写+全景占比上限（做情绪锚点，非主奏）；
+#   ③ 视觉锚点·道具回环：全片出现 ≥2 次的关键道具，其出现镜头是否在
+#      description 里落了「视觉锚点」标注或道具状态变化（位置/动作）；
+#   ④ 一镜一动作（2026-09-30）：单镜动作节拍数，过多说明模型把多个动作塞进同一镜
+#      （成片表现 = 一个分镜不切换、里面演好几件事），违背参考片「一镜一动作」口径；
+#   ⑤ 主力景别区间（2026-09-30）：近景/中近景/局部 合计占比下限、大特写/远景/大远景
+#      占比上限、「局部」插入镜占比下限，全部对齐参考片 92 镜实测分布。
+
+#: ① edit_reason 覆盖率下限：低于此值提示「剪辑动机缺失」。（样本 < 5 镜时跳过）
+EDIT_REASON_COVERAGE_MIN = 0.5
+#: ② 固定机位占比下限：92 镜参照 77% 固定，软告警阈值取 60%（克制口径，防运镜滥用）。
+LOCKED_OFF_RATIO_MIN = 0.6
+#: ② 特写+全景占比上限：参照 92 镜（特写 2 + 全景 3 = 5.4%），软告警阈值取 10%。
+ANCHOR_SHOT_RATIO_MAX = 0.10
+#: ③ 道具回环的最小出现次数：同一道具出现在 ≥ 该数镜头才认定「回环锚点」。
+PROP_RECURRENCE_MIN = 2
+
+#: ④ 一镜一动作（2026-09-30 新增）：单镜动作节拍数上限。参考片 92 镜几乎每镜只有
+#: 1 个动作节拍；description 里可数出的动作节拍 ≥ 此值即视为「一镜多动作」。
+ACTION_BEATS_MAX = 2
+#: ④ 触发阈值：出现「一镜多动作」的镜头数达到该值（或占比 > 20%）时提示，防单镜误伤。
+ACTION_BEATS_SHOT_MIN = 3
+#: ⑤ 主力景别（参考片 92 镜实测：近景 26% + 中近景 25% + 局部 25% ≈ 76%）。
+MAIN_SHOT_TYPES = ("近景", "中近景", "局部")
+MAIN_SHOT_RATIO_MIN = 0.55
+#: ⑤ 极端景别占比上限：参考片 92 镜里大特写/远景/大远景 = 0%。
+EXTREME_SHOT_TYPES = ("大特写", "远景", "大远景")
+EXTREME_SHOT_RATIO_MAX = 0.05
+#: ⑤「局部」插入镜下限：参考片 25%（只拍手部/道具、不出现完整人脸的插入镜）。
+LOCAL_SHOT_RATIO_MIN = 0.10
+
+
+def _shot_camera_kind(shot: dict) -> str:
+    """把镜头 camera 串归一成 {locked, anchor, other} 三档（景别+运镜克制分布用）。
+
+    判定顺序（先锚点特写/全景，再固定，其余算活动运镜）：
+    · camera 含「特写」或「全景」→ anchor（情绪锚点，参照 92 镜占比 ~5%）；
+    · 否则运镜部分含「固定」或「定格」，或 camera 本身只有景别无机位 → locked；
+    · 其余（推/拉/摇/手持/跟/环绕/升降…）→ other。
+    """
+    cam = str(shot.get("camera") or "").strip()
+    if not cam:
+        return "other"
+    if "特写" in cam or "全景" in cam:
+        return "anchor"
+    # 固定/定格 视为锁定机位（含「固定中景」「近景固定」等写法）
+    if "固定" in cam or "定格" in cam:
+        return "locked"
+    return "other"
+
+
+def _shot_action_beats(shot: dict) -> int:
+    """数一个镜头里可辨认的「动作节拍」个数（一镜多动作检测用）。
+
+    ⚠️ 口径与**生成期拆镜**（novel_to_script._split_multi_action_row）同源：
+    都走 config.count_action_beats / config.ACTION_WORDS（唯一权威表）。
+    动作词表若在两处各写一份，会出现「生成期拆了、质检期不认」（或反之），
+    拆镜与告警互相打架 —— 与景别白名单曾经五处漂移是同一类缺陷。
+    """
+    import config as _config
+    # ⚠️ 只看 description：它是 schema 里唯一的「谁做了什么」权威字段；
+    # visual_detail（补充细节/环境）与 motion（摄影机运动）会把**同一个动作**再写一遍，
+    # 合并计数会让「一个动作写三遍」被算成 3 个节拍（实测误报）。
+    # 必须与生成期拆镜（_split_multi_action_row 也只切 description）同口径。
+    return _config.count_action_beats(str(shot.get("description") or ""))
+
+
+def _shot_type_of(shot: dict) -> str:
+    """本镜景别：优先 shot_type 字段，其次从 camera 复合串里取景别词，最后返回空串。
+
+    ⚠️ 关键词顺序必须是「长词优先」（中近景在近景之前、大特写在大特写之前），
+    否则「中近景」会被「近景」抢先命中，分布统计随之失真。
+    """
+    st = str(shot.get("shot_type") or "").strip()
+    if st:
+        return st
+    cam = str(shot.get("camera") or "")
+    for name in ("大特写", "特写", "中近景", "近景", "局部", "中景", "全景", "大远景", "远景"):
+        if name in cam:
+            return name
+    return ""
+
+
+def _validate_script_92rules(script: dict) -> list:
+    """92 镜拆解法五层软告警（2026-09-28 三层 + 2026-09-30 补 ④⑤，全部非 critical）。
+
+    返回的 issues 措辞刻意避开 CRITICAL_ISSUE_KEYWORDS（不用「错位/拼接/变形/崩坏」
+    等硬缺陷词），仅作为提示写进 check_script 的 objective issues（进 prompt_quality
+    维度扣分，但不触发 critical 短路），符合「软告警口径」。
+    """
+    issues = []
+    shots = [s for s in (script.get("shots") or []) if isinstance(s, dict)]
+    n = len(shots)
+    if n < 5:  # 样本太少，分布/覆盖率判据无统计意义，跳过全部三层
+        return issues
+
+    # ① edit_reason 覆盖率
+    with_reason = sum(
+        1 for s in shots if str(s.get("edit_reason") or "").strip())
+    coverage = with_reason / float(n)
+    if coverage < EDIT_REASON_COVERAGE_MIN:
+        issues.append(
+            f"剪辑动机缺失：仅 {with_reason}/{n} 镜写了 edit_reason（{coverage*100:.0f}% < "
+            f"{EDIT_REASON_COVERAGE_MIN*100:.0f}%）。建议按 92 镜口径给每镜补一句「为什么切到这一镜」"
+            f"的剪辑动机（20~30 字，写具体叙事功能），作为构图与取舍依据")
+
+    # ② 镜头语言克制分布
+    kinds = [_shot_camera_kind(s) for s in shots]
+    locked_ratio = kinds.count("locked") / float(n)
+    anchor_ratio = kinds.count("anchor") / float(n)
+    if locked_ratio < LOCKED_OFF_RATIO_MIN:
+        issues.append(
+            f"运镜过于活跃：固定机位仅 {kinds.count('locked')}/{n} 镜"
+            f"（{locked_ratio*100:.0f}% < {LOCKED_OFF_RATIO_MIN*100:.0f}%）。"
+            f"按 92 镜口径运镜应以固定为主（~75%），推/拉/摇/手持/跟随仅在情绪递进或空间转换时用")
+    if anchor_ratio > ANCHOR_SHOT_RATIO_MAX:
+        issues.append(
+            f"特写/全景占比偏高：{kinds.count('anchor')}/{n} 镜"
+            f"（{anchor_ratio*100:.0f}% > {ANCHOR_SHOT_RATIO_MAX*100:.0f}%）。"
+            f"按 92 镜口径特写与全景只做情绪锚点（各 ≤3%），不宜作为主奏景别")
+
+    # ③ 视觉锚点·道具回环
+    from collections import Counter
+    prop_shots = Counter()
+    prop_shot_ids = {}
+    for s in shots:
+        sid = str(s.get("shot_id") or "")
+        for it in (s.get("items_in_shot") or []):
+            it_name = str(it or "").strip()
+            if it_name:
+                prop_shots[it_name] += 1
+                prop_shot_ids.setdefault(it_name, []).append(sid)
+    for prop, cnt in prop_shots.items():
+        if cnt < PROP_RECURRENCE_MIN:
+            continue
+        ids = [i for i in prop_shot_ids.get(prop, []) if i]
+        # 该道具出现的镜头，description 是否落了「视觉锚点」标注或道具名（状态变化）
+        marked = 0
+        for s in shots:
+            if str(s.get("shot_id") or "") in ids:
+                desc = str(s.get("description") or "")
+                if "视觉锚点" in desc or prop in desc:
+                    marked += 1
+        if marked == 0:
+            issues.append(
+                f"道具回环缺锚点：「{prop}」全片出现 {cnt} 次（镜头 "
+                f"{'/'.join(ids[:6])}{'…' if len(ids) > 6 else ''}）但没有任何镜头"
+                f" description 写明它的位置/状态变化，也没标「（视觉锚点·第N次）」。"
+                f"按 92 镜口径，反复出现的关键道具应作为跨镜头视觉锚点，"
+                f"在 description 里写道具的位置与状态变化（如「折叠/展开/递出/攥紧」）")
+
+    # ④ 一镜一动作（2026-09-30 新增）：单镜动作节拍过多 → 模型把多个动作塞进同一镜，
+    #    成片表现为「一个分镜不切换、里面却演了好几件事」。参考片口径是一镜只推进一个动作。
+    beats = [_shot_action_beats(s) for s in shots]
+    over = [i for i, b in enumerate(beats) if b >= ACTION_BEATS_MAX + 1]
+    # 双门槛：既要达到最小镜数，占比也要过线 —— 长剧本里 1~2 个镜头多动作不足以说明系统性问题
+    _min_shots = max(ACTION_BEATS_SHOT_MIN, int(0.15 * n + 0.5))
+    if len(over) >= _min_shots and (len(over) / float(n)) >= 0.15:
+        worst = sorted(over, key=lambda i: -beats[i])[:4]   # 只列举真正超标的镜头
+        _ids = [str(shots[i].get("shot_id") or (i + 1)) for i in worst]
+        issues.append(
+            f"一镜多动作：{len(over)}/{n} 镜的动作节拍 ≥{ACTION_BEATS_MAX + 1} 个"
+            f"（最多 {max(beats)} 个，如镜头 {'/'.join(_ids)}）。"
+            f"按参考片口径每镜只应承载 1 个动作节拍，连续动作必须拆成相邻镜头——"
+            f"否则成片会出现「一个分镜不切换、里面演好几件事」")
+
+    # ⑤ 主力景别区间（2026-09-30 新增，对齐参考片 92 镜实测分布：
+    #    近景 26% / 中近景 25% / 局部 25% / 中景 17% / 全景 3% / 特写 2% / 大特写·远景·大远景 0%）
+    types = [_shot_type_of(s) for s in shots]
+    _typed = [x for x in types if x]
+    if len(_typed) >= 5:
+        _main = sum(1 for x in types if x in MAIN_SHOT_TYPES)
+        _ext = sum(1 for x in types if x in EXTREME_SHOT_TYPES)
+        _loc = sum(1 for x in types if x == "局部")
+        main_ratio = _main / float(len(_typed))
+        ext_ratio = _ext / float(len(_typed))
+        local_ratio = _loc / float(len(_typed))
+        if main_ratio < MAIN_SHOT_RATIO_MIN:
+            issues.append(
+                f"主力景别偏少：近景/中近景/局部 仅 {_main}/{len(_typed)} 镜"
+                f"（{main_ratio*100:.0f}% < {MAIN_SHOT_RATIO_MIN*100:.0f}%）。"
+                f"参考片 92 镜里这三类合计约 76%，是叙事主力；"
+                f"建议把中景/全景承载的信息收进近景与中近景，补足主力景别")
+        if ext_ratio > EXTREME_SHOT_RATIO_MAX:
+            issues.append(
+                f"大特写/远景/大远景偏多：{_ext}/{len(_typed)} 镜"
+                f"（{ext_ratio*100:.0f}% > {EXTREME_SHOT_RATIO_MAX*100:.0f}%）。"
+                f"参考片 92 镜这三类一次未用，情绪锚点请只用特写与全景（各 ≤3%）")
+        if local_ratio < LOCAL_SHOT_RATIO_MIN:
+            issues.append(
+                f"「局部」插入镜偏少：仅 {_loc}/{len(_typed)} 镜"
+                f"（{local_ratio*100:.0f}% < {LOCAL_SHOT_RATIO_MIN*100:.0f}%）。"
+                f"参考片 25% 的镜头是只拍手部/道具、不出现完整人脸的插入镜——"
+                f"它能把叙事压到道具上，也是规避人脸崩坏的有效手段，建议适当补足")
+
+    return issues
+
+
+#: 单镜时长下限/上限：**直接从 config 取**，与生成期（novel_to_script）同源。
+#:
+#: 历史缺陷一：这里曾自己写一份（1~15 秒）且「镜头数 > 30 就告警」，而剧本生成端是 3~12 秒、
+#:   真实剧集单集可达 56 镜 —— 约束互相打架，正常剧本反被判不可执行。
+#: 历史缺陷二（2026-09-30）：旧口径 MIN 3s / 静默基准 3s / 描述 +2s / 动作 +1.5s / 高潮 +2s，
+#:   使每个镜头地板就是 4~6 秒，而**参考片单镜中位只有 2.08 秒** —— 剪辑点稀疏，
+#:   成片观感「一个分镜演半天不切换」。已按参考片重标定到 1.5~8 秒，故这里必须跟着 config 走。
+#:
+#: ⚠️ 这里校验的是**剧本级**单镜时长；**生成期**已由 ``h3_prompt_kit.segment_durations``
+#: 自动切成 ≤4 秒的子段提交给模型（「AI 视频可信窗口约 4 秒」的红线在**单次生成**这一层，
+#: 不在剧本这一层）。
+SHOT_DURATION_MIN_OK = config.SHOT_DURATION_MIN
+SHOT_DURATION_MAX_OK = config.SHOT_DURATION_MAX
+#: 超出边界的容差（模型四舍五入 / 台词长度微调）。
+#:
+#: ⚠️⚠️ 2026-10-02 修复（静默死规则）：容差必须**小于** MIN，否则下限判据
+#:   `duration < MIN - TOL` 恒不成立 → 「单镜过短」这条校验**形同虚设**。
+#:   历史经过：MIN 从 3.0 重标定到 2.0 时，容差 2.0 未跟着下调 →
+#:   `2.0 - 2.0 = 0.0`，连 0.5 秒的镜头都不再报警（0.6 秒的静默镜基准也一并失去保护）。
+#:   现按 0.5s 设定（保留浮点/取整宽容，且远小于 MIN）：
+#:   · 下限判据 `MIN - TOL = 1.5` → 短于 1.5 秒才报「过短」（有效）
+#:   · 上限判据 `MAX + TOL = 8.5` → 长于 8.5 秒才报「过长」（有效）
+#: 改 MIN/MAX 时**必须同批复核本值是否仍 < MIN**。
+SHOT_DURATION_TOLERANCE = 0.5
+
+#: 每集总时长的**产品口径容差**（2026-09-26 新增）。
+#: ⚠️ 上下文：产品口径是「每集 1-2 分钟，最长不超过 3 分钟」
+#: （`novel_to_script.EPISODE_MAX_SEC`=180）。本函数原来固定用 60 秒作默认目标、
+#: 容差 30%，这在旧口径（一集 1 分钟）下成立，但对新口径会**批量误报** ——
+#: 一集 175 秒（合法，在上限内）会被判「与目标 60 秒偏差 192%」。
+#:
+#: 处置：容差不按「相对目标值的百分比」，而按**是否落在产品允许区间内**判定：
+#:   下限 = `EPISODE_MIN_SEC`(60) - 本容差；上限 = `EPISODE_MAX_SEC`(180) + 本容差。
+#: 即 60 秒下限放宽到 50 秒、180 秒上限放宽到 190 秒，区间内一律不报。
+#: 本容差因此只兜「四舍五入/台词长度微调」级别的小幅越界，不做百分比缩放。
+EPISODE_DURATION_TOLERANCE = 10.0
+
+
+def _episode_duration_bounds() -> tuple:
+    """每集时长的产品允许区间 `(lo, hi)`（秒），含容差。
+
+    从 `novel_to_script` 取口径常量（单一事实来源），取不到时退回
+    (60, 180) —— 与产品需求「1-2 分钟、最长 3 分钟」一致，**不静默放宽**。
+    """
+    try:
+        import novel_to_script as _nts
+        lo = float(getattr(_nts, "EPISODE_MIN_SEC", 60) or 60)
+        hi = float(getattr(_nts, "EPISODE_MAX_SEC", 180) or 180)
+    except Exception:  # noqa: BLE001 —— 常量不可读不许让质检崩，退回产品默认值
+        lo, hi = 60.0, 180.0
+    return (max(0.0, lo - EPISODE_DURATION_TOLERANCE),
+            hi + EPISODE_DURATION_TOLERANCE)
+
+
+def _validate_script_feasibility(script: dict, target_duration: int = None) -> list:
+    """验证可执行性（阈值与剧本生成端保持一致，见上方常量说明）
+
+    ⚠️ `target_duration` 默认 **None**（2026-09-26 起）：
+    空的语义 = 「按产品区间判」（60~180 秒，见 `_episode_duration_bounds`），
+    这是生产路径的默认。显式传正数才走旧的「相对偏差 ≤30%」判据。
+    """
+    issues = []
+
+    shots = script.get("shots", [])
+    if not shots:
+        issues.append("剧本没有镜头，无法执行")
+        return issues
+
+    # 计算总时长
+    total_duration = 0
+    shot_durations = []
+    for i, shot in enumerate(shots):
+        if not isinstance(shot, dict):
+            continue
+        duration = shot.get("duration", 0)
+        if not isinstance(duration, (int, float)):
+            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长无效: {duration}")
+            continue
+
+        shot_durations.append(duration)
+        total_duration += duration
+
+        # 检查单个镜头时长（留 2 秒容差，避免浮点/取整误报）
+        if duration < SHOT_DURATION_MIN_OK - SHOT_DURATION_TOLERANCE:
+            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长过短: {duration}秒"
+                          f"（建议 {SHOT_DURATION_MIN_OK:g}~{SHOT_DURATION_MAX_OK:g} 秒）")
+        elif duration > SHOT_DURATION_MAX_OK + SHOT_DURATION_TOLERANCE:
+            issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长过长: {duration}秒"
+                          f"（建议 {SHOT_DURATION_MIN_OK:g}~{SHOT_DURATION_MAX_OK:g} 秒）")
+
+    # 检查总时长是否落在**产品允许区间**内（2026-09-26：由「相对 60 秒目标 ±30%」
+    # 改为「是否落在 [下限-容差, 上限+容差]」——见 EPISODE_DURATION_TOLERANCE 注释）。
+    #
+    # ⚠️ target_duration 的语义变更（重要）：
+    #   旧口径下它是「一集应有的总时长」（60 秒），判据是相对偏差 ≤30%。
+    #   新口径下「一集多长」是一个**区间**（60~180 秒，由拆集逻辑保证），单一目标值
+    #   不再成立。因此：
+    #     · target_duration 为 None / 0 / 空 → 走**区间判据**（新默认，也是生产路径）；
+    #     · 调用方**显式**传了一个正数 → 保留旧的相对偏差判据（不破坏显式调用与历史测试）。
+    #   生产路径（app.api_generate_script → check_script）本来就传 duration=60，
+    #   那正是旧默认值；改成 None 让区间判据生效，是本次口径切换的关键一步。
+    if shot_durations:
+        lo, hi = _episode_duration_bounds()
+        _explicit = bool(target_duration) and float(target_duration or 0) > 0
+        if _explicit:
+            # 调用方给了明确目标 → 沿用相对偏差判据（容差 30%，与改造前一致）
+            duration_diff = abs(total_duration - target_duration) / float(target_duration)
+            if duration_diff > 0.3:
+                issues.append(f"总时长 {total_duration}秒 与目标 {target_duration}秒 偏差过大"
+                              f"（{duration_diff*100:.0f}%）")
+        elif total_duration > hi:
+            issues.append(f"总时长 {total_duration}秒 超过单集上限 {hi:g} 秒"
+                          f"（产品口径：每集 1~2 分钟、最长 3 分钟）")
+        elif total_duration < lo:
+            issues.append(f"总时长 {total_duration}秒 低于单集下限 {lo:g} 秒"
+                          f"（产品口径：每集 1~2 分钟、最长 3 分钟）")
+
+    # 镜头数量：只卡「少到无法叙事」的下限。不设上限 —— 原文越长镜头越多是设计目标
+    #（novel_to_script 按实测约 36 字/镜承载原文，实测单集可达 63 镜）。
+    if len(shots) < 3:
+        issues.append(f"镜头数量过少（{len(shots)}个），建议至少 5 个镜头")
+
+    return issues
+
+
+def check_script(script_path: str = None, script_data: dict = None,
+                 style: str = "国漫古风", target_duration: int = None,
+                 cfg: dict = None, override: dict = None) -> dict:
+    """剧本质检：结构+逻辑+风格+提示词质量+可执行性
+    
+    参数:
+        script_path: 剧本文件路径（与script_data二选一）
+        script_data: 剧本数据字典
+        style: 指定创作风格
+        target_duration: 目标总时长（秒）。
+            ⚠️ 默认 None（2026-09-26 起）= 按**产品区间**判（每集 60~180 秒）。
+            显式传正数则按「与目标的相对偏差 ≤30%」判 —— 兼容历史调用与测试。
+        cfg: 质检配置
+        override: 临时覆盖配置
+    
+    返回:
+        dict: {
+            "ok": bool,           # 质检是否成功执行
+            "passed": bool,       # 是否通过质检
+            "score": int,         # 综合得分
+            "reason": str,        # 一句话结论
+            "issues": list,       # 问题列表
+            "suggestions": list,  # 改进建议
+            "categories": dict,   # 各维度得分
+            "skipped": bool,      # 是否跳过
+            "error": str,         # 错误信息
+        }
+    """
+    cfg = cfg or _empty_config()
+    
+    # 检查开关
+    if not cfg.get("enabled"):
+        return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
+    if not cfg.get("script_enabled"):
+        return {"ok": False, "skipped": True, "reason": "剧本质检开关未开启"}
+    
+    # 检查接口配置
+    ep = resolve_endpoint(cfg, override)
+    if not (ep["base_url"] and ep["api_key"] and ep["model"]):
+        return {"ok": False, "skipped": True, "reason": "质检接口未配置（base_url/api_key/model）"}
+    
+    # 加载剧本数据
+    if script_data is None:
+        if script_path and os.path.isfile(script_path):
+            try:
+                with open(script_path, "r", encoding="utf-8") as f:
+                    script_data = json.load(f)
+            except Exception as e:
+                return {"ok": False, "skipped": False, "error": f"剧本文件读取失败: {e}"}
+        else:
+            return {"ok": False, "skipped": False, "error": "未提供有效的剧本数据或文件"}
+    
+    # 执行客观验证（不依赖AI）
+    structure_issues = _validate_script_structure(script_data)
+    logic_issues = _validate_script_logic(script_data)
+    style_issues = _validate_script_style(script_data, style)
+    prompt_issues = _validate_script_prompts(script_data)
+    bloat_issues = _validate_script_bloat(script_data)
+    feasibility_issues = _validate_script_feasibility(script_data, target_duration)
+    # 92 镜拆解法五层软告警（2026-09-28 三层 + 2026-09-30 补 ④⑤）：剪辑动机覆盖率 /
+    # 镜头语言克制分布 / 道具回环锚点 / 一镜一动作 / 主力景别区间。
+    # 全部非 critical，进 prompt_quality 桶软扣分，不短路判失败。
+    rhythm_issues = _validate_script_92rules(script_data)
+
+    all_objective_issues = (
+        structure_issues + logic_issues + style_issues +
+        prompt_issues + bloat_issues + feasibility_issues + rhythm_issues
+    )
+    
+    # 计算客观验证得分（每个问题扣5分，最低0分）
+    objective_score = max(0, 100 - len(all_objective_issues) * 5)
+    
+    # 如果客观验证有严重问题（结构或逻辑错误），直接返回失败
+    critical_issues = structure_issues + logic_issues
+    if critical_issues:
+        return {
+            "ok": True,
+            "passed": False,
+            "score": min(objective_score, 50),
+            "reason": f"客观验证发现{len(critical_issues)}个关键问题",
+            "issues": all_objective_issues,
+            "suggestions": ["修复结构和逻辑问题后重试"],
+            "categories": {
+                "structure": max(0, 100 - len(structure_issues) * 10),
+                "logic": max(0, 100 - len(logic_issues) * 10),
+                "style": max(0, 100 - len(style_issues) * 5),
+                "prompt_quality": max(0, 100 - (len(prompt_issues) + len(bloat_issues)
+                                                + len(rhythm_issues)) * 5),
+                "feasibility": max(0, 100 - len(feasibility_issues) * 5)
+            },
+            "skipped": False,
+            "objective_only": True,
+        }
+    
+    # 调用AI进行深度质检
+    prompt_template = cfg.get("script_prompt") or DEFAULT_SCRIPT_PROMPT
+    script_json = json.dumps(script_data, ensure_ascii=False, indent=2)
+
+    # ⚠️ 单镜时长口径**必须由 config 常量生成**（2026-10-02 修复）：
+    #    这里曾硬编码「3-12 秒」，而生成端已按参考片重标定到 2~8 秒 →
+    #    送检大模型拿到的合规区间与确定性校验（下面 _validate_script_92rules 用的
+    #    SHOT_DURATION_MIN_OK/MAX_OK，同为 config 单一来源）**互相打架**：
+    #    模型会放过 9-10 秒镜头、或把 2.5 秒镜头报成过短。
+    #    改成占位符后，改 config 就自动同步，杜绝再次漂移。
+    #    ⚠️ 用户若在配置里自定义了 script_prompt（旧文本仍含「3-12 秒」），
+    #    replace 不会命中占位符 → 保持用户原文，属预期（用户口径优先）。
+    # 台词预算（第 17 条）同样从 config 单一来源注入（2026-10-05）：旧文案写死
+    # 「30 字（约 6.7 秒配音）」，而生成端台词预算（SHOT_SPEECH_BUDGET_CHARS，默认 16 字）
+    # 早已收紧 —— 质检口径与生成端必须同源，改 config 即自动同步，杜绝再次漂移。
+    # ⚠️ 与上面时长占位符同一机制：用户自定义的旧 script_prompt 不含该占位符 → 保持原文。
+    speech_budget = getattr(config, "SHOT_SPEECH_BUDGET_CHARS", 16)
+    prompt = prompt_template.replace(
+        "{style}", style or "国漫古风"
+    ).replace(
+        "{target_duration}", str(target_duration)
+    ).replace(
+        "{shot_duration_min}", f"{SHOT_DURATION_MIN_OK:g}"
+    ).replace(
+        "{shot_duration_max}", f"{SHOT_DURATION_MAX_OK:g}"
+    ).replace(
+        "{shot_duration_silent}", f"{config.SHOT_DURATION_SILENT:g}"
+    ).replace(
+        "{speech_budget}", str(speech_budget)
+    ).replace(
+        "{script_data}", script_json[:8000]  # 限制长度，避免超出上下文
+    )
+    
+    # 调用多模态模型（虽然剧本质检不需要图像，但复用现有接口）
+    content = [{"type": "text", "text": prompt}]
+    payload = {
+        "model": ep["model"],
+        "messages": [
+            {"role": "system", "content": "你是严格、客观的漫剧剧本质检员，只输出JSON。"},
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0,
+        # ⚠️ 2026-10-10：原为 1200，实测太小 —— _post_chat 的思考额度下限逻辑是
+        #   「mt < floor 才抬高」，1200 > floor(旧值1024) 故不被抬高，导致模型思考
+        #   吃光额度就截断（finish_reason=length），JSON 解析失败，质检每次失败。
+        #   这里直接给足（与 llm_client.REASONING_ONLY_TOKEN_FLOOR 同量级），
+        #   并让 _post_chat 的 floor 逻辑继续兜底。
+        "max_tokens": 24576,
+        "stream": False,
+    }
+    
+    t0 = time.time()
+    try:
+        resp = _post_chat(ep, payload, cfg.get("timeout", 180),
+                          retries=cfg.get("api_retries", API_RETRY_ATTEMPTS),
+                          backoff=cfg.get("api_backoff", API_RETRY_BACKOFF))
+    except Exception as e:
+        # AI调用失败，回退到客观验证结果
+        logger.warning(f"剧本质检AI调用失败，使用客观验证结果：{e}")
+        return {
+            "ok": True,
+            "passed": objective_score >= cfg.get("pass_score", 70),
+            "score": objective_score,
+            "reason": f"AI质检调用失败，基于客观验证（{len(all_objective_issues)}个问题）",
+            "issues": all_objective_issues,
+            "suggestions": [],
+            "categories": {
+                "structure": max(0, 100 - len(structure_issues) * 10),
+                "logic": max(0, 100 - len(logic_issues) * 10),
+                "style": max(0, 100 - len(style_issues) * 5),
+                "prompt_quality": max(0, 100 - (len(prompt_issues) + len(bloat_issues)
+                                                + len(rhythm_issues)) * 5),
+                "feasibility": max(0, 100 - len(feasibility_issues) * 5)
+            },
+            "skipped": False,
+            "ai_failed": True,
+            "ai_error": str(e),
+        }
+    
+    # 解析AI返回结果
+    verdict = parse_verdict(resp["content"], cfg.get("pass_score", 70))
+    
+    # 合并客观验证和AI质检结果
+    ai_issues = verdict.get("issues", [])
+    ai_suggestions = verdict.get("suggestions", [])
+    all_issues = all_objective_issues + ai_issues
+    
+    # 合并各维度得分
+    categories = verdict.get("categories", {})
+    objective_categories = {
+        "structure": max(0, 100 - len(structure_issues) * 10),
+        "logic": max(0, 100 - len(logic_issues) * 10),
+        "style": max(0, 100 - len(style_issues) * 5),
+        "prompt_quality": max(0, 100 - (len(prompt_issues) + len(bloat_issues)
+                                        + len(rhythm_issues)) * 5),
+        "feasibility": max(0, 100 - len(feasibility_issues) * 5)
+    }
+    
+    # 取客观验证和AI质检的较低分
+    for cat in ["structure", "logic", "style", "prompt_quality", "feasibility"]:
+        obj_score = objective_categories.get(cat, 100)
+        ai_score = categories.get(cat, 100)
+        categories[cat] = min(obj_score, ai_score)
+    
+    # 计算加权综合分
+    script_cats = cfg.get("script_categories", {})
+    weighted_score = 0
+    total_weight = 0
+    for cat, score in categories.items():
+        cat_config = script_cats.get(cat, {"weight": 0.2})
+        weight = cat_config.get("weight", 0.2)
+        weighted_score += score * weight
+        total_weight += weight
+    
+    if total_weight > 0:
+        final_score = int(weighted_score / total_weight)
+    else:
+        final_score = verdict.get("score", objective_score)
+    
+    # 合并关键缺陷
+    critical_hits = find_critical_issues(all_issues)
+    
+    return {
+        "ok": True,
+        "passed": verdict.get("passed", False) and not critical_hits and final_score >= cfg.get("pass_score", 70),
+        "score": final_score,
+        "reason": verdict.get("reason", ""),
+        "issues": all_issues[:20],  # 限制数量
+        "suggestions": ai_suggestions[:10],
+        "categories": categories,
+        "critical_issues": critical_hits,
+        "skipped": False,
+        "latency_ms": resp.get("latency_ms"),
+        "api_total_ms": int((time.time() - t0) * 1000),
+        "objective_issues": {
+            "structure": structure_issues,
+            "logic": logic_issues,
+            "style": style_issues,
+            "prompt_quality": prompt_issues,
+            "bloat": bloat_issues,
+            "feasibility": feasibility_issues
+        }
+    }
+
+
+def script_qc_ready(cfg: dict, override: dict = None) -> bool:
+    """检查剧本质检是否就绪"""
+    return bool(cfg.get("enabled") and cfg.get("script_enabled")
+                and qc_endpoint_ready(cfg, override))
+
+
+QC_CONFIG_DEFAULTS = {
+        # ⭐ 2026-10-XX：质检总开关默认值由 False 改 True —— 需求「质检默认开启」。
+        # ⚠️ 存量老配置（文件里没有该键）不会被这里改变：load_config 只在「键存在且非 None」
+        #    时覆盖，缺失则回落本默认值 → 老配置会**自然**读到 True；但为了让用户配置
+        #    文件本身也显式写上 True（且只做一次），由 migrate_enabled_default 幂等补写。
+        "enabled": True,             # 质检总开关（默认开启）
+        "image_enabled": True,       # 图片质检开关
+        "video_enabled": True,       # 视频质检开关
+        "audio_enabled": True,       # 音频质检开关（客观层零模型依赖；AI 层复用质检接口）
+        "script_enabled": True,      # 剧本质检开关
+        # 质检必须使用自己独立配置的 base_url / api_key / model（不再复用文本分析 LLM 接口）
+        "base_url": "",
+        "api_key": "",
+        "model": "",
+        "endpoint_override": {"base_url": "", "api_key": "", "model": ""},
+        "image_prompt": DEFAULT_IMAGE_PROMPT,
+        "video_prompt": DEFAULT_VIDEO_PROMPT,
+        "audio_prompt": DEFAULT_AUDIO_PROMPT,
+        "script_prompt": DEFAULT_SCRIPT_PROMPT,
+        # 音频客观层阈值（可按音色/语速调档）
+        "audio_min_speech_ratio": 0.50,   # 有声占比下限（低于此值扣分）
+        "audio_min_mean_db": -45.0,       # 平均电平下限（低于此值扣分）
+        "audio_max_drift": 0.50,          # 与预期时长偏差上限（比例，超限扣分）
+        "pass_score": 70,            # 合格线（0-100），score >= pass_score 且 pass != false 视为达标
+        "max_retries": 2,            # 不达标最大重试次数
+        # ⭐ 分镜链路专用重试轮数（2026-10-07 用户指定 2→1）。未配置时取本默认值 1
+        #    （存量配置没有这个键 → 自然读到 1，无需迁移）；消费侧再与 max_retries 取 min。
+        "storyboard_max_retries": 1,
+        # ⭐ 2026-10-08（用户拍板 A 方案）：分镜图质检「软放行」—— 质检不达标只记录、
+        #    仍写入正式目录。动机（实测）：同一项目内已通过的镜3 九宫格雷同度 0.831，
+        #    而信息量更大的镜4/28/37（边缘密度 8.29/11.83/8.55，均高于已通过镜1 的
+        #    6.58）却被判「主体缺失/内容错误」硬阻断 —— VLM 判官双标，把可用图长期挡在
+        #    门外。False = 回到旧的「关键缺陷硬阻断」。仅作用于分镜图，资产/视频不受影响。
+        "storyboard_soft_qc": True,
+        # best-of-N 分镜候选数（借 ViMax best_image_selector）：固定生成 N 张候选，
+        # 按质检分选**最佳**那张入库，替代「第一个通过即停」。1=关闭（默认，保持现行为），
+        # 上限 4（N 倍 GPU 渲染，慎调）。仅对**分镜图**生效（视频链路未接入）。
+        "best_of": 1,
+        "video_frame_count": 3,      # 视频抽帧数量（1-6）
+        "image_max_side": 1024,      # 送检前压缩的最长边（控制 token 与耗时）
+        # 图片质检是否附带「本镜出现的角色/物品/场景」的设定图：
+        # 分镜图是按参考图生成的，只送成品图的话模型没有锚点，「角色不像设定/道具变形」
+        # 这类问题只能靠猜。开启后按 shot.characters_in_shot / items_in_shot 顺序附带
+        # 最多 MAX_REF_IMAGES 张设定图，并要求逐张核对是否变形、与设定是否一致。
+        "image_ref_compare": True,
+    "image_blocking_ref_compare": True,
+        # ★ 图片质检「二次复核」（判官自洽性检查），默认开：
+        #   实测同一张图 + 同一组设定图 + temperature=0 重复送检，score 可为
+        #   45 / 78 / 85 / 92（同一张图通过率 2/4），还会出现「景别完美符合」与
+        #   「景别严重不符」两个相反结论 —— 判官自身抖动会让每次「判不过」都真烧一次
+        #   GPU 重画（1-2 分钟），而复核一次只要 2-5 秒。故：首次判不过时用**同一张图**
+        #   再判一次，任一判过即放行；两次都判不过才真重跑。
+        #   ⚠️ 客观层致命（黑图/纯色，确定性证据）不复核；⚠️ 接口故障不复核。
+        "image_qc_recheck": True,
+        # G9/O1 客观层确定性闸门（图片黑图 stddev 下限 / 视频时长偏差上限）
+        "image_pixel_std_min": 8.0,  # 像素 stddev < 8 → 黑图/纯色图 fatal
+        # ⚠️ 2026-10-08：默认从 0.30 提到 0.60。原因（实测 ep01 场次1）：H3 Director 的
+    #    分段是「17k+5 帧网格对齐」+ 段间连续性重叠，成片时长**系统性长于**剧本名义时长
+    #    —— 场次1 名义 47.67s，实际 66.08s（+38.6%），30% 阈值 100% 触发 → 成片被
+    #    硬阻断并无限重画（画面本身通过了全部内容判据）。0.60 仍能拦住真正的截断
+    #    （成片只剩一半 ≈ -50%）与明显异常，只是不再把 H3 的固有对齐膨胀当缺陷。
+    "video_max_drift": 0.60,      # 视频 |实测-期望|/期望 > 60% → fatal
+        "timeout": 180,              # 单次质检请求读超时（秒）
+        "api_retries": API_RETRY_ATTEMPTS,   # 网络层额外重试次数（瞬时故障时退避重试，与 max_retries 重画无关）
+        "api_backoff": API_RETRY_BACKOFF,    # 网络重试退避基数（秒），按 2 的幂增长、单次上限见 API_RETRY_MAX_SLEEP
+        # ⚠️ 推理型模型（如 agnes-2.5-flash、R1 系）会把 token 花在 reasoning_content 上，
+        # 额度给小时正文 content 直接为 ""，质检就永远「返回内容为空」。
+        # 2026-09-17 起**默认允许思考**（关思考会让质检退化成直觉判断、漏掉明显问题），
+        # 改用「token 下限 + 空正文自动加码重试」兜底。确需关掉的模块把这里设为 true。
+        "disable_thinking": False,
+        # 允许思考时质检请求的最小 max_tokens（思考本身就要吃几百 token）
+        "min_tokens_when_thinking": 24576,
+        # 单次视觉质检请求的 max_tokens（思考型模型要「先想完再吐完整 JSON」，8k 起步不易截断）
+        "image_max_tokens": 8192,
+        # 剧本质检各维度权重和合格线
+        "script_categories": {
+            "structure": {"weight": 0.2, "pass_threshold": 80},
+            "logic": {"weight": 0.3, "pass_threshold": 70},
+            "style": {"weight": 0.2, "pass_threshold": 70},
+            "prompt_quality": {"weight": 0.15, "pass_threshold": 60},
+            "feasibility": {"weight": 0.15, "pass_threshold": 70}
+        },
+        # 提示词预检（生成前质检，实现见 prompt_qc.py）
+        # ⚠️ 与图片/视频质检不同：它**不依赖质检接口**（纯确定性检查、零成本、零模型依赖），
+        # 因此即使没配质检接口也默认开启 —— 提示词是出图/出片的输入，输入错了后面白跑。
+        "prompt_enabled": True,
+        # warn=只记录 / repair=确定性自愈后放行（默认）/ block=有问题就拦
+        "prompt_mode": "repair",
+        # 存量迁移标记：默认 True —— 新建 / 清空即视为「已迁移」，不走老配置补写分支。
+        # 仅当配置文件**存在但缺此键**时才由 migrate_enabled_default 补写为 True。
+        "_qc_migrated": True,
+        "updated_at": None,
+    }
