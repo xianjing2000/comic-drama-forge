@@ -60,6 +60,29 @@ def _cleanup_scratch_dir(dir_path: str, logger=None) -> None:
         _log.warning("清理 scratch 目录失败：%s", e)
 
 
+_MIX_SCRATCH_PREFIX = ".mix_scratch_"
+
+
+def _cleanup_mix_scratch(scratch_dir: str, logger=None) -> None:
+    """删除本次混音的任务级 scratch 目录（含内容），失败只记日志不抛异常。
+
+    仅接受以 .mix_scratch_ 命名的任务专属目录（本次混音的隔离区），删除它是安全的；
+    对任何其它目录（尤其项目级 out_dir）一律拒绝，从根上杜绝「清错目录」把历史成片
+    删掉的风险（B-16 P2-11 / t19 数据丢失修复）。
+    """
+    _log = logger or logging.getLogger(__name__)
+    if not scratch_dir or not os.path.isdir(scratch_dir):
+        return
+    if not os.path.basename(scratch_dir).startswith(_MIX_SCRATCH_PREFIX):
+        _log.warning("拒绝清理非混音 scratch 目录：%s", scratch_dir)
+        return
+    try:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+        _log.info("已清理混音 scratch 目录：%s", scratch_dir)
+    except OSError as e:
+        _log.warning("清理混音 scratch 目录失败（忽略）：%s", e)
+
+
 def _audio_line_expect_sec(line: dict) -> float:
     """该句配音的期望时长（由台词字数推算；推算不出时退回镜头时长）
 
@@ -519,14 +542,23 @@ def _dub_worker(task_id: str, project_name: str, plan: dict, out_dir: str,
 
 def _mix_worker(task_id: str, prepared: dict, out_name: str):
     """后台合成：逐句对齐混音 → 落盘带配音成片 + 报告"""
+    out_dir = ""
+    scratch_dir = ""
     try:
         project_name = prepared["project_name"]
         out_dir = mix_out_dir(project_name)
         out_path = os.path.join(out_dir, out_name)
+        report_path = os.path.join(out_dir, f"{os.path.splitext(out_name)[0]}_mix_report.json")
+        # B-16 P2-11（t19 数据丢失修复）：混音先写进本次任务专属 scratch 子目录，
+        # 完整产出并质检通过后再原子 move 到最终 out_path。任何失败都只清 scratch，
+        # 绝不触碰项目级 out_dir 里的历史成片（旧实现失败时 _cleanup_scratch_dir(out_dir)
+        # 会把整个项目的带配音成片全部删掉）。
+        scratch_dir = os.path.join(out_dir, _MIX_SCRATCH_PREFIX + str(task_id))
+        scratch_out = os.path.join(scratch_dir, out_name)
         with mix_lock:
             mix_tasks[task_id].update({"phase": "音画对齐混音中", "progress": 30})
         report = mix_video_with_entries(prepared["video_path"], prepared["entries"],
-                                        out_path, prepared["params"])
+                                        scratch_out, prepared["params"])
         # ---- 成品音频质检：成片音轨是不是真的有人声 ----
         # ffmpeg 返回成功、文件也有音频流，并不代表「配音真的混进去了」：
         # 条目路径错、amix 被压成静音、源片段本身无声，都能产出一条「合法但没声音」的
@@ -540,7 +572,10 @@ def _mix_worker(task_id: str, prepared: dict, out_name: str):
             "timeline": prepared["timeline"], "entries": prepared["entries"],
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         })
-        report_path = os.path.join(out_dir, f"{os.path.splitext(out_name)[0]}_mix_report.json")
+        # 成片已在 scratch 里完整产出并完成质检：原子 move 到最终位置，
+        # 并同步报告里的产物路径为最终路径（后续 URL / 验收登记都读它）。
+        os.replace(scratch_out, out_path)
+        report["output_path"] = os.path.abspath(out_path)
         write_mix_report(report, report_path)
         _aq = report.get("audio_qc") or {}
         _aq_msg = ""
@@ -577,17 +612,21 @@ def _mix_worker(task_id: str, prepared: dict, out_name: str):
         if not reg.get("registered"):
             logger.info(f"成片未登记待验收（{project_name} 第{prepared['episode']}集）："
                             f"{reg.get('reason')}")
+        # 成功：成片已 move 到最终位置，清理本次任务 scratch 目录残留（应已空）
+        _cleanup_mix_scratch(scratch_dir, logger)
     except DubMixError as e:
         logger.warning(f"混音合成失败: {e}")
-        # B-16 P2-11：混音失败 → 清理本任务产生的中间产物（未完成的 report / 半成品）
-        _cleanup_scratch_dir(out_dir, logger)
+        # B-16 P2-11：混音失败 → 只清本次任务 scratch 目录（半成品成片），
+        # 绝不清理项目级 out_dir（历史成片）。
+        _cleanup_mix_scratch(scratch_dir, logger)
         with mix_lock:
             mix_tasks[task_id].update({"status": "failed", "phase": "合成失败",
                                        "message": str(e), "progress": 100})
     except Exception as e:  # pragma: no cover - 兜底
         logger.exception("音画合成异常")
-        # B-16 P2-11：混音异常 → 清理中间产物
-        _cleanup_scratch_dir(out_dir, logger)
+        # B-16 P2-11：混音异常 → 只清本次任务 scratch 目录（半成品成片），
+        # 绝不清理项目级 out_dir（历史成片）。
+        _cleanup_mix_scratch(scratch_dir, logger)
         with mix_lock:
             mix_tasks[task_id].update({"status": "failed", "phase": "合成异常",
                                        "message": f"{type(e).__name__}: {e}", "progress": 100})
