@@ -1232,21 +1232,25 @@ def gallery_summary(ref: str) -> dict:
     key = rec["dir_key"] if rec else safe_key(ref)
     p = paths(key)
     out = {k: len(v) for k, v in g.items()}
-    out["storyboards"] = sum(len(files) for _, _, files in
-                             [(0, 0, [f for f in os.listdir(d) if f.lower().endswith(".png")])
-                              for d in project_dirs(p["storyboards"], key)])
-    out["videos"] = sum(len(files) for _, _, files in
-                        [(0, 0, [f for f in os.listdir(d) if f.lower().endswith((".mp4", ".mov", ".mkv"))])
-                         for d in project_dirs(p["videos"], key)])
-    out["final"] = sum(len(files) for _, _, files in
-                       [(0, 0, [f for f in os.listdir(d) if f.lower().endswith((".mp4", ".mov", ".mkv"))])
-                        for d in project_dirs(p["final"], key)])
-    out["upscale"] = sum(len(files) for _, _, files in
-                         [(0, 0, [f for f in os.listdir(d) if f.lower().endswith((".mp4", ".mov", ".mkv"))])
-                          for d in project_dirs(p["upscale"], key)])
-    out["dub"] = sum(len(files) for _, _, files in
-                     [(0, 0, [f for f in os.listdir(d) if f.lower().endswith((".wav", ".flac", ".mp3"))])
-                      for d in project_dirs(p["dub"], key)])
+
+    def _count_files(kind_dir: str, exts) -> int:
+        """统计某产物根目录下该项目全部子目录里、指定扩展名的文件数。
+
+        t69：原实现用 [(0, 0, [f for f in os.listdir(d) ...]) for d in project_dirs(...)]
+        的「三元组占位 + 解包」绕圈推导式统计数量，可读性差；改为普通循环，行为完全等价。
+        """
+        n = 0
+        for d in project_dirs(kind_dir, key):
+            for f in os.listdir(d):
+                if f.lower().endswith(exts):
+                    n += 1
+        return n
+
+    out["storyboards"] = _count_files(p["storyboards"], ".png")
+    out["videos"] = _count_files(p["videos"], (".mp4", ".mov", ".mkv"))
+    out["final"] = _count_files(p["final"], (".mp4", ".mov", ".mkv"))
+    out["upscale"] = _count_files(p["upscale"], (".mp4", ".mov", ".mkv"))
+    out["dub"] = _count_files(p["dub"], (".wav", ".flac", ".mp3"))
     return out
 
 

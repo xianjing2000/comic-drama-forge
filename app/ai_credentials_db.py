@@ -216,11 +216,11 @@ def set_credentials(module: str, base_url: str = "", model: str = "",
             existing_key = _decipher(row["api_key_cipher"]) if row else ""
             existing_re = row["reasoning_effort"] if row else ""
 
+            # final_key 只在「提供新密钥」分支有语义（待加密的明文）；None/"" 分支的
+            # cipher_col 直接取值/清空，原 final_key 赋值是死变量（t69 删除冗余赋值）。
             if api_key is None:
-                final_key = existing_key
                 cipher_col = row["api_key_cipher"] if row else ""
             elif api_key == "":
-                final_key = ""
                 cipher_col = ""
             else:
                 final_key = str(api_key).strip()
