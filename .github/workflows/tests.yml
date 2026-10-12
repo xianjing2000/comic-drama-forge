@@ -1,0 +1,35 @@
+name: Tests
+
+# 测试门禁（2026-10-12 t80）：今晚修的所有回归（cache_name 分场/软超时续等/t2 合并/
+# fail-open/统一隔离）此前只靠人跑，无 CI 兜底。本流水线把全量 unittest 接入 push/PR。
+#
+# 为什么可行（t60 已论证）：测试链路不 import torch/cv2，软超时/cache_name/t2 合并
+# 都用 mock/仿真不真连 ComfyUI，依赖生产数据的用例自带 skipUnless。纯 CPU，约 15 秒。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15  # 防挂死：全量实测约 15 秒，15 分钟上限足够富余
+    env:
+      PYTHONIOENCODING: utf-8
+      # 防 import app/autopilot 拉起托管线程（守卫脚本同款环境钉）
+      MJSCXT_AUTOPILOT: '0'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: pip install -r app/requirements.txt
+
+      - name: Run tests
+        run: python tools/run_all_tests.py
