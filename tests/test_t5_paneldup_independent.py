@@ -13,6 +13,17 @@
   故 tests/_t5_frozen/sb_helpers_live_1620.py 是本轮复核时点的逐字快照（sha256 见常量），
   所有「现状/台账」断言针对它；所有「修复前 vs 修复后」断言针对 git 提交。
 
+⚠️ 2026-10-13 t14「语料口径」改造（本文件新增，专治假红）：
+  A1~A5 的语料是**实时生产 qc 目录**（%APPDATA%\\mjscxt-desktop\\mjscxt-data\\output\\qc），
+  它随生产增长：本文件 docstring 记的 274 records 已涨到 299（passed=False 161→175）。
+  于是任何「绝对条数」断言都会随语料增长而上浮 —— test_A3 长期报「38 != 35」
+  就是这么来的：三个版本同步上浮 35→38、36→39，而实现（git show 导出的历史模块）
+  一字未动。**那是假红，不是回归**（本测试根本不加载工作区实现）。
+  现全部改断稳定口径：**方向性**（newer vs older 的大小关系）、**下界**（>= 历史量级）、
+  **比率**（占达标/不达标记录的比例）、**相对量级**（漏判 ≫ 修复收益）。
+  这些口径对语料增长恒稳，且仍能抓到真回归（t14 注入缺陷验证：V44 行为退化、
+  ROOTS_WIDE 被缩小、工作区实现被改坏，均能命中）。
+
 跑法：python -m pytest tests/test_t5_paneldup_independent.py -v
 """
 import hashlib
@@ -86,7 +97,14 @@ NEED_GIT = unittest.skipUnless(PRE and AC27 and V44, "需要 git 历史做对照
 
 
 # ------------------------------------------------------------------ #
-# 生产语料
+# 生产语料（**实时**，随生产增长 —— 故禁止绝对条数断言）
+#
+# ⚠️ 2026-10-13 t14：本文件所有断言只允许用以下四种口径，因为它们对语料增长恒稳：
+#   · 方向性：newer vs older 的大小关系（如 v44 >= ac27、fp_v44 <= fp_pre）；
+#   · 下界：>= 历史台账量级（语料增长只会更安全）；
+#   · 比率：占达标 / 不达标记录的比例（分子分母同步涨）；
+#   · 相对量级：宽口径漏判 ≫ 修复收益（归一化的「≪」）。
+# 绝对条数（8/6/5、35/35/36 …）只允许作为**注释里的历史台账**出现，不得进断言。
 # ------------------------------------------------------------------ #
 def _qc_root():
     return os.path.join(os.environ.get("APPDATA", ""), "mjscxt-desktop",
@@ -175,6 +193,10 @@ class T5_A_ProductionReplay(unittest.TestCase):
       结论 A-2：「真缺陷零放过」**不成立** —— 口径 A 有 2~3 条，口径 B 有 35~36 条。
       结论 A-3：captain 口径（含不达标/阻断/不合格）下也有 **4 条**被放过，
                 全部因词根面不含「动作/构图」而漏（见 test_zero_pass_claim_is_false）。
+
+      ⚠️ 2026-10-13 t14：上表是 **274 records 语料**上的历史台账，只作背景、**不进断言**。
+        语料涨到 299 后三列数字同步上浮（FP 8/6/5 不变但 FN(B) 35/35/36 → 38/38/39），
+        绝对条数断言遂变假红。本类断言已全部改口径：方向性 / 下界 / 比率 / 相对量级。
     """
 
     ROOTS_NARROW = ("面板", "九宫格", "格间")
@@ -225,28 +247,127 @@ class T5_A_ProductionReplay(unittest.TestCase):
                 and self._indep(r["reason"], roots)
                 and not mod._panel_dup_hit(r["reason"])]
 
+    #: A1 的历史台账收益（8→5 = 3 条）。用**下界**：语料增长只会让收益更大，
+    #: 只有真退化（误判没降下来）才红。
+    FP_GAIN_FLOOR = 3
+    #: A3：宽口径漏判相对「误判收益」的倍数下限 —— 原始意图「治好的少数 ≪ 没被
+    #: 覆盖的多数」的可迁移形式（与语料条数无关）。
+    WIDE_MISS_OVER_FP_GAIN = 10
+    #: A3：宽口径漏判的历史量级下界（原台账 35 条级，取约一半做保守下界）与
+    #: 占不达标记录的占比下界。刻意用**下界**：语料增长只会更安全；规模真的塌下去
+    #: 才红 —— 那一刻该做的是重核复核结论，而不是让门禁悄悄放过。
+    WIDE_MISS_FLOOR = 20
+    WIDE_MISS_FAIL_RATIO = 0.10
+
     @NEED_GIT
     def test_A1_false_positive_rate_dropped(self):
-        self.assertEqual(len(self._fp(PRE)), 8)
-        self.assertEqual(len(self._fp(AC27)), 6)
-        self.assertEqual(len(self._fp(V44)), 5)
-        self.assertLess(len(self._fp(V44)), len(self._fp(PRE)), "误判没有下降")
+        """A1：达标误判 pre → ac27 → v44 **单调下降**，且净收益 >= 3 条。
+
+        ⚠️ t14：原断言是绝对条数 8/6/5。语料是**实时**的，新增记录也会带误判，
+        绝对条数随语料增长上浮 → 假红（实测 +50 条后为 11/9/8，实现一字未动）。
+        改断单调性 + 收益下界：既守住「两个提交确实在降误判」这个事实，
+        又不把台账数字钉成语料快照。
+        """
+        fp_pre = len(self._fp(PRE))
+        fp_ac27 = len(self._fp(AC27))
+        fp_v44 = len(self._fp(V44))
+        self.assertLessEqual(fp_ac27, fp_pre,
+                             "第 1 提交没有降低误判：%d → %d" % (fp_pre, fp_ac27))
+        self.assertLessEqual(fp_v44, fp_ac27,
+                             "第 2 提交没有继续降低误判：%d → %d" % (fp_ac27, fp_v44))
+        self.assertGreaterEqual(
+            fp_pre - fp_v44, self.FP_GAIN_FLOOR,
+            "两个提交合计只降了 %d 条误判（台账下界 %d）—— 修复收益消失"
+            % (fp_pre - fp_v44, self.FP_GAIN_FLOOR))
 
     @NEED_GIT
     def test_A2_true_defect_miss_rose(self):
-        """A2：口径 A（提交版词根面）漏判 2 → 3 —— 弱窗口放宽的代价。"""
-        self.assertEqual(len(self._fn(PRE, self.ROOTS_NARROW)), 2)
-        self.assertEqual(len(self._fn(AC27, self.ROOTS_NARROW)), 2)
-        self.assertEqual(len(self._fn(V44, self.ROOTS_NARROW)), 3)
+        """A2：口径 A（窄词根面）下 WEAK 3→6 让漏判**上升** —— 弱窗口放宽的代价。
+
+        ⚠️ t14：原断言是 2/2/3 绝对条数（其中 ac27 == pre 是等式）。语料增长会
+        让新记录参与计数，等式不再稳（实测含「不达标，面板雷同」句式的增长会把
+        pre 的窄口径漏判抬到 7，而 ac27 仍是 2）。改断**方向性**：
+          · ac27 不差于 pre（移除「达标/合格」否定只会多命中，不会少）；
+          · v44 严格差于 ac27（这就是「3→6 引入新假阴性」本身）。
+        """
+        fn_pre = len(self._fn(PRE, self.ROOTS_NARROW))
+        fn_ac27 = len(self._fn(AC27, self.ROOTS_NARROW))
+        fn_v44 = len(self._fn(V44, self.ROOTS_NARROW))
+        self.assertLessEqual(
+            fn_ac27, fn_pre,
+            "ac27 在窄口径下反而比 pre 漏得更多（%d > %d）—— 「移除达标/合格」结论被推翻"
+            % (fn_ac27, fn_pre))
+        self.assertGreater(
+            fn_v44, fn_ac27,
+            "WEAK 3→6 没有引入新的窄口径漏判（%d → %d）—— 归因（A-2）不成立"
+            % (fn_ac27, fn_v44))
 
     @NEED_GIT
     def test_A3_wide_scope_miss_is_huge(self):
-        """A3：口径 B（把「动作/构图/机位…雷同」也算真缺陷）漏判 35~36 条。
+        """A3：口径 B（把「动作/构图/机位…雷同」也算真缺陷）漏判规模「巨大」。
 
-        即：治好的 3 条（8→5）远小于**没被覆盖**的 35 条。
+        原始意图（**不弱化**）：治好的误判只有 3 条（8→5），远小于**没被覆盖**的
+        宽口径漏判（历史台账 35~36 条）。本条守的就是这个「≪」关系。
+
+        ⚠️ 2026-10-13 t14 —— 为什么不再断言 35/35/36：
+          那两个数是**早期语料快照**（274 records）的产物。语料涨到 299 条后，
+          三个版本的宽口径漏判同步上浮为 38/38/39，而实现（git 历史提交）
+          **一字未动** —— 于是长期报「38 != 35」。这是魔数钉死语料快照造成的
+          **假红**，不是回归：本测试用 git show 加载历史模块，根本不加载工作区实现。
+          同理「差值恒定」（ac27-pre == 0、v44-ac27 == 1）也不能钉：它只在语料不变时
+          恒定，实测对抗式增长后 v44-ac27 会变成 6。
+
+        现在的稳定口径（均与语料条数无关，实测 +50/对抗增长下全稳）：
+          ① 方向性：v44 是三者中最差的（WEAK 放宽只会多漏），ac27 不差于 pre；
+          ② 规模：漏判条数仍达历史量级下界，且占不达标记录的比例不低于一成；
+          ③ 归一化：漏判规模仍**数量级大于**修复收益（「≪」的量化形式）。
         """
-        for mod, want in ((PRE, 35), (AC27, 35), (V44, 36)):
-            self.assertEqual(len(self._fn(mod, self.ROOTS_WIDE)), want)
+        n_pre = len(self._fn(PRE, self.ROOTS_WIDE))
+        n_ac27 = len(self._fn(AC27, self.ROOTS_WIDE))
+        n_v44 = len(self._fn(V44, self.ROOTS_WIDE))
+        fp_gain = len(self._fp(PRE)) - len(self._fp(V44))
+        n_fail = sum(1 for r in _CORPUS if r["passed"] is False)
+
+        # ① 方向性 —— 语料怎么长都不该反过来。
+        #    刻意用**严格大于**：WEAK 窗口 3→6 的代价必须**真实存在**（v44 比 ac27 多漏）。
+        #    若退化成相等（=把 v44 的行为改回 ac27），这里立刻红 —— 这就是「判定差值
+        #    不再是恒定 1」之后仍能抓到「改动被回滚」的那条线（t14 注入 I1 验证）。
+        self.assertGreater(
+            n_v44, n_ac27,
+            "v44 没有比 ac27 多漏（%d vs %d）—— WEAK 3→6 的代价不存在，或对照逻辑被改坏"
+            % (n_v44, n_ac27))
+        self.assertLessEqual(
+            n_ac27, n_pre,
+            "ac27 的宽口径漏判多于 pre（%d > %d）—— 移除「达标/合格」否定后反而更差"
+            % (n_ac27, n_pre))
+
+        # ② 规模（绝对量级下界 + 占不达标记录的比例下界）
+        self.assertGreaterEqual(
+            n_v44, self.WIDE_MISS_FLOOR,
+            "宽口径漏判塌到 %d 条（下界 %d）—— 要么真被治好了（请重核 A-2/A-3 结论"
+            "并同步收紧本条），要么 ROOTS_WIDE 的独立标注被改坏"
+            % (n_v44, self.WIDE_MISS_FLOOR))
+        self.assertGreaterEqual(
+            n_v44, self.WIDE_MISS_FAIL_RATIO * n_fail,
+            "宽口径漏判占不达标记录的比例降到 %.1f%%（下界 %.1f%%，%d/%d）—— "
+            "复核结论「真缺陷零放过不成立」不再站得住"
+            % (100.0 * n_v44 / max(n_fail, 1), 100.0 * self.WIDE_MISS_FAIL_RATIO,
+               n_v44, n_fail))
+
+        # ③ 归一化：「≫ 修复收益」（原始意图的量化形式）
+        self.assertGreater(fp_gain, 0, "修复没有带来任何误判收益")
+        self.assertGreaterEqual(
+            n_v44, fp_gain * self.WIDE_MISS_OVER_FP_GAIN,
+            "宽口径漏判（%d 条）不再数量级大于误判收益（%d 条）："
+            "「治好的少数 ≪ 没被覆盖的多数」这一复核结论不再成立" % (n_v44, fp_gain))
+
+    #: A4 复核台账（2026-10-12 t5）：这 4 个文件同时含 (a) 硬判语 (b) 动作/构图
+    #: 雷同表述，而 v44 全部放过。
+    #: ⚠️ t14：语料增长会带来**新成员**，所以断「台账 4 条仍是子集」而不是
+    #: 「集合恰好相等」—— 后者碰上语料增长就假红（新成员把等式打破）。
+    #: 子集口径不弱化：只要这 4 条被救回（=captain「零放过」说法成立），仍然红。
+    A4_LEDGER = ("进境_整本小说/image_19.json", "进境_整本小说/image_60.json",
+                 "逆天系统_全书/image_39.json", "逆天系统_全书/image_45.json")
 
     @NEED_GIT
     def test_A4_zero_pass_claim_is_false(self):
@@ -260,21 +381,58 @@ class T5_A_ProductionReplay(unittest.TestCase):
                    if any(h in r["reason"] for h in hard)
                    and self._cands(r["reason"], self.ROOTS_WIDE)
                    and not V44._panel_dup_hit(r["reason"])]
+        got = set(v["file"] for v in victims)
+        lost = [fn for fn in self.A4_LEDGER if fn not in got]
         self.assertEqual(
-            sorted(v["file"] for v in victims),
-            ["进境_整本小说/image_19.json", "进境_整本小说/image_60.json",
-             "逆天系统_全书/image_39.json", "逆天系统_全书/image_45.json"],
-            "「硬判语 + 雷同表述」漏判集合变了，请重算 A4")
+            lost, [],
+            "复核台账里这些「硬判语 + 雷同表述」被 v44 放过的事实不见了：%s"
+            "（若实现真修好了，请重核 A-3 结论并同步更新 A4_LEDGER）" % lost)
+
+    #: A5 的历史基线（t5 复核报告），一律用**分数**表达 —— 率才是「不恶化」的正确口径：
+    #:   ac27d91^  FP 8/113 = 7.08%   FN(B) 35/133 = 26.32%
+    #:   44d3977   FP 5/113 = 4.42%   FN(B) 36/133 = 27.07%  ← 取作上界
+    #: 基线语料规模（t5 复核时点）：113 达标 / 133 不合格。
+    FP_RATE_BASELINE = 5.0 / 113.0
+    FN_WIDE_RATE_BASELINE = 36.0 / 133.0
+    BASE_PASS_COUNT = 113
+    BASE_FAIL_COUNT = 133
 
     def test_A5_current_implementation_baseline(self):
-        """A5：当前实现（t17 之后）的生产语料口径 —— 只钉「不恶化」。
+        """A5：现行实现跑**实时**生产语料 —— 只钉「率不恶化」。
 
         历史数字（t5 复核报告）：ac27d91^ FP 8/113、FN(A) 2/100、FN(B) 35/133；
         44d3977 FP 5/113、FN(A) 3/100、FN(B) 36/133；t17 之后 FN(B) 大幅下降。
+
+        ⚠️ 2026-10-13 t14：原断言钉的是**绝对条数**（FP <= 5、FN(B) <= 36）。
+        语料从 274 records（113/161）涨到 299（124/175）后，即使实现的误判**率**
+        一字未变，绝对条数也会同步上涨 —— 那是语料增长的算术后果，不是回归
+        （实测：只加 50 条新记录就能让 FP 由 3 涨到 6，旧口径直接红）。
+        故改钉**率**（fp/达标数、fn/不合格数），并保留一条兜底：当实时语料规模
+        未超基线时，额外钉更严的绝对上界，防止用比率把标准偷偷放宽。
         """
-        self.assertLessEqual(len(self._fp(LIVE)), 5, "达标误判超过复核基线 5/113")
-        self.assertLessEqual(len(self._fn(LIVE, self.ROOTS_WIDE)), 36,
-                             "口径 B 漏判超过复核基线 36/133")
+        n_pass = sum(1 for r in _CORPUS if r["passed"] is True)
+        n_fail = sum(1 for r in _CORPUS if r["passed"] is False)
+        self.assertGreater(n_pass, 0, "实时语料没有达标记录，基线无法计算")
+        self.assertGreater(n_fail, 0, "实时语料没有不合格记录，基线无法计算")
+        fp = self._fp(LIVE)
+        fn = self._fn(LIVE, self.ROOTS_WIDE)
+        fp_rate = len(fp) / n_pass
+        fn_rate = len(fn) / n_fail
+        self.assertLessEqual(
+            fp_rate, self.FP_RATE_BASELINE,
+            "达标误判率 %.2f%% 超过复核基线 %.2f%%（%d 条达标里误判 %d 条）"
+            % (fp_rate * 100, self.FP_RATE_BASELINE * 100, n_pass, len(fp)))
+        self.assertLessEqual(
+            fn_rate, self.FN_WIDE_RATE_BASELINE,
+            "口径 B 漏判率 %.2f%% 超过复核基线 %.2f%%（%d 条不合格里漏判 %d 条）"
+            % (fn_rate * 100, self.FN_WIDE_RATE_BASELINE * 100, n_fail, len(fn)))
+        # 语料规模未超基线时，绝对上界更严 —— 同时钉住，不许只靠比率兜底
+        if n_pass <= self.BASE_PASS_COUNT:
+            self.assertLessEqual(len(fp), 5,
+                                 "语料规模未超基线，达标误判绝对条数超过 5")
+        if n_fail <= self.BASE_FAIL_COUNT:
+            self.assertLessEqual(len(fn), 36,
+                                 "语料规模未超基线，口径 B 漏判绝对条数超过 36")
 
 
 # ================================================================== #
@@ -476,14 +634,24 @@ class T5_E_WeakWindowNewFalseNegatives(unittest.TestCase):
         self.assertEqual(hit, [], "冻结快照上已命中（%s）—— 请改断言并收紧" % hit)
 
     def test_E3_production_record_flipped(self):
+        """E3：生产语料里那类「不足构成 = 否定判据，不是否定雷同」的实证。
+
+        ⚠️ t14：原断言 `len(hit) == 1` 是绝对条数 —— 语料再出现同类句式就假红。
+        改断「至少一条，且**每一条**都复现 3→6 的行为反转」：语料增长只会多查几条，
+        不会假红；行为一旦反过来（ac27 漏 / v44 命中）立刻红。
+        """
         if not _CORPUS:
             self.skipTest("无生产语料")
         hit = [r for r in _CORPUS if "构图差异不足构成面板雷同" in r["reason"]]
-        self.assertEqual(len(hit), 1, "生产语料里的该条记录数变了：%d" % len(hit))
-        r = hit[0]
-        self.assertEqual(r["passed"], False)
-        self.assertTrue(AC27._panel_dup_hit(r["reason"]), "ac27d91 本应命中")
-        self.assertFalse(V44._panel_dup_hit(r["reason"]), "44d3977 本应放过（回归）")
+        self.assertGreaterEqual(
+            len(hit), 1,
+            "实时语料里已找不到该句式 —— E3 失去实证依据，请重核归因")
+        for r in hit:
+            self.assertEqual(r["passed"], False)
+            self.assertTrue(AC27._panel_dup_hit(r["reason"]),
+                            "ac27d91 本应命中：%s" % r["file"])
+            self.assertFalse(V44._panel_dup_hit(r["reason"]),
+                             "44d3977 本应放过（回归）：%s" % r["file"])
 
 
 # ================================================================== #
