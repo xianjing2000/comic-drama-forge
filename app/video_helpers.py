@@ -90,6 +90,104 @@ from shared_project import _first_existing, _shot_num_key, comfyui_client  # noq
 from fs_atomic import atomic_write_json, read_json_strict
 import cancellation
 import comfyui_job_store  # 崩溃免重渲检查点（2026-09-29）：种子沿用判据 + 台账查询
+
+
+def _recompose_episode_video(videos_dir: str, episode_tag: str) -> str:
+    """用当前 seg_*.mp4 重新拼接本集成片（返回成片路径；失败返回 ""）。
+
+    用途（2026-10-12 用户需求「只重生成有问题的分镜，再拼回去」）：
+      1. 整集生成时导出了 seg_0000.mp4..seg_NNNN.mp4 与 seg_map.json；
+      2. 某镜有问题 → 单镜重跑 → 产出新的 shot_NN.mp4，落到 rework/shot_NN.mp4；
+      3. 调本函数：按 seg_map.json 把该镜原本占用的段位替换成返工段，
+         再 concat 全部段 → 覆盖 <episode_tag>_full.mp4。
+
+    设计要点：
+      · **不改动 sed 序列长度**：返工段只在原「第一个段位」落位，原其余段位置空
+        （用同一个返工文件占位会导致画面重复，故宁可少段也不重复）；
+      · 任何异常都返回 ""，由调用方 fail-open 保留旧成片，绝不阻断生产；
+      · 没有 seg_map.json（旧数据 / 未开分段导出）→ 返回 ""，行为与改动前一致。
+    """
+    try:
+        import re as _re3
+        import video_postprocess as _vp
+        _mapf = os.path.join(videos_dir, "seg_map.json")
+        if not os.path.isfile(_mapf):
+            logger.warning("[重新合成] 无 seg_map.json，跳过（退回旧成片）")
+            return ""
+        _sm = read_json_strict(_mapf) or {}
+        # ⚠️ 集 tag 以 seg_map.json 为准：调用方推导的名字未必与生成时一致
+        #    （ep01 / episode 等历史命名兼容），写错会覆盖到错误的成片。
+        _tag_from_map = str(_sm.get("episode_tag") or "").strip()
+        if _tag_from_map:
+            episode_tag = _tag_from_map
+        _s2s = _sm.get("shot_to_seg") or {}
+        if not _s2s:
+            logger.warning("[重新合成] seg_map 为空，跳过")
+            return ""
+        # 现有段文件（按序号排序）
+        _present = {}
+        for _f in os.listdir(videos_dir):
+            _m = _re3.match(r"seg_(\d{4})\.mp4$", _f)
+            if _m:
+                _present[int(_m.group(1))] = os.path.join(videos_dir, _f)
+        if not _present:
+            logger.warning("[重新合成] 目录里没有 seg_*.mp4，跳过")
+            return ""
+        _rework_dir = os.path.join(videos_dir, "rework")
+        _replaced = []
+        for _shot, _idxs in _s2s.items():
+            if not _idxs:
+                continue
+            _rw = os.path.join(_rework_dir, "shot_%s.mp4" % str(_shot).zfill(2))
+            if not os.path.isfile(_rw):
+                continue
+            _first = min(int(x) for x in _idxs)
+            if _first in _present:
+                _present[_first] = _rw
+                _replaced.append(_shot)
+        if not _replaced:
+            logger.info("[重新合成] 无返工段，直接按现有段拼接")
+        _ordered = [_present[k] for k in sorted(_present)]
+        _out = os.path.join(videos_dir, "%s_full.mp4" % (episode_tag or "episode"))
+        _tmp = _out + ".recompose.mp4"
+        _ret = _vp.VideoPostProcessor().concat_videos(
+            _ordered, _tmp, caller="video_helpers._recompose_episode_video")
+        if not _ret or not os.path.isfile(_ret):
+            logger.error("[重新合成] concat 失败（保留旧成片）")
+            return ""
+        try:
+            if os.path.isfile(_out):
+                _trash_move(_out)
+        except Exception:  # noqa: BLE001
+            pass
+        _move_with_retry(_ret, _out)
+        logger.info("[重新合成] 完成：%d 段（返工 %d 镜：%s）-> %s",
+                    len(_ordered), len(_replaced), _replaced, os.path.basename(_out))
+        return _out
+    except Exception as _e:  # noqa: BLE001
+        logger.error("[重新合成] 异常（保留旧成片）：%s", _e)
+        return ""
+
+
+def _seg_sort_key(path: str):
+    """分段 mp4 的排序键：按文件名里最后一段数字排序（seg_0007 / _00007_ 都能排对）。
+
+    为什么不能直接 sorted(files)：
+      export_mode=segments 时插件按段输出多个 mp4，文件名形如
+      ``<prefix>_<序号>_.mp4``（历史实测：逆天系统_ep01_00001_.mp4 … _00004_.mp4）。
+      而 ``get_output_files`` 遍历的是 dict，**顺序不保证** —— 若按原始顺序 concat，
+      段会乱序拼接（用户看到的就是画面前后颠倒）。故一律按文件名数字升序。
+      取不到数字的（异常命名）排到最后，保持相对稳定，绝不抛异常。
+    """
+    import re as _re
+    base = os.path.basename(str(path or ""))
+    nums = _re.findall(r"(\d+)", base)
+    if not nums:
+        return (1, 0)
+    try:
+        return (0, int(nums[-1]))
+    except Exception:  # noqa: BLE001
+        return (1, 0)
 import contextvars
 from tts_client import (
     QwenTTSClient, TTSError, check_environment as tts_env_check,
@@ -322,7 +420,28 @@ def _video_retry_shot_impl():
     vid_dir = _ep_dir(os.path.join(VIDEOS_DIR, project), _rs_ep)
     os.makedirs(vid_dir, exist_ok=True)
     dst = os.path.join(vid_dir, f"shot_{seq:02d}.mp4")
-    _move_with_retry(files[0], dst)
+    # ⭐ 2026-10-12：export_mode 默认 segments 后，一个镜头若被切成多个子段，
+    #   files 会有多个（长镜切段见上方 _rs_sub_shots）。必须先按序号排序再 concat，
+    #   绝不能直接取 files[0]（顺序不保证，会取到中间某段 → 该镜只剩半截）。
+    #   单文件时走原路径，行为与改动前完全一致（向后兼容）。
+    _rs_files = sorted([f for f in files if f], key=_seg_sort_key)
+    if len(_rs_files) > 1:
+        _rs_cat = os.path.join(vid_dir, f"shot_{seq:02d}.tmp.mp4")
+        try:
+            import video_postprocess as _vp_mod2
+            _rs_merged = _vp_mod2.VideoPostProcessor().concat_videos(
+                _rs_files, _rs_cat, caller="video_helpers.retry_shot")
+        except Exception as _rce:  # noqa: BLE001
+            _rs_merged = ""
+            logger.error("[单镜重跑] 子段 concat 异常：%s", _rce)
+        if _rs_merged and os.path.isfile(_rs_merged):
+            _move_with_retry(_rs_merged, dst)
+            logger.info("[单镜重跑] shot=%s 由 %d 个子段 concat 而成", seq, len(_rs_files))
+        else:
+            logger.error("[单镜重跑] shot=%s 子段 concat 失败，回退首个子段", seq)
+            _move_with_retry(_rs_files[0], dst)
+    else:
+        _move_with_retry(_rs_files[0] if _rs_files else files[0], dst)
     # 该镜已更新 → 同集的旧成片失效，打上「已过期」标记，避免用户对着旧成片点验收
     stale = {}
     try:
@@ -332,11 +451,31 @@ def _video_retry_shot_impl():
              "video": os.path.basename(dst)})
     except Exception as e:  # noqa: BLE001 - 打标失败不影响重做本身
         logger.warning(f"标记成片过期失败：{e}")
+    # ⭐ 2026-10-12：把返工段登记到 rework/ 并**自动重新拼接本集成片**。
+    #   「只重生成有问题的分镜，再拼回去」的最后一步 —— 否则用户拿到新 shot_NN.mp4
+    #   却还要自己想办法替换进成片。
+    #   · 登记：rework/shot_NN.mp4（recompose 按 seg_map.json 找它该占哪个段位）；
+    #   · 拼接：仅当本集已有 seg_*.mp4 + seg_map.json（即曾按分段导出生成）才有效；
+    #     老数据 / 旧成片没有这套结构时，_recompose 返回 ""，行为等同改动前（保留旧成片）。
+    #   · 全程 fail-open：任何失败都只是「成片没自动更新」，绝不影响重跑本身。
+    _recomposed = ""
+    try:
+        _rw_dir = os.path.join(vid_dir, "rework")
+        os.makedirs(_rw_dir, exist_ok=True)
+        _rw_dst = os.path.join(_rw_dir, f"shot_{seq:02d}.mp4")
+        import shutil as _sh
+        _sh.copy2(dst, _rw_dst)
+        _recomposed = _recompose_episode_video(
+            vid_dir, (f"ep{int(_rs_ep):02d}" if _rs_ep else "episode"))
+    except Exception as _rc_e:  # noqa: BLE001
+        logger.warning(f"[单镜重跑] 自动重新合成失败（保留旧成片）：{_rc_e}")
     return jsonify({"success": True, "project": project, "shot_id": shot_id, "seq": seq,
                     "mode": mode, "path": dst,
                     "url": f"/api/videos/{project}/{_rs_sub}{os.path.basename(dst)}",
                     "ref_count": len(seg["reference_images"]), "duration": seg["duration"],
-                    "deliverable_marked_stale": bool(stale)})
+                    "deliverable_marked_stale": bool(stale),
+                    "recomposed": bool(_recomposed),
+                    "recomposed_file": os.path.basename(_recomposed) if _recomposed else ""})
 
 
 def _ensure_voice_bank_refs(common: list, project_name: str, all_characters=None) -> None:
@@ -1715,10 +1854,81 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     })
                 return
 
-            src = files[0]
+            # ⭐ 2026-10-12 分段导出支持（用户需求：只重生成有问题的分镜，再拼回去）。
+            #
+            # 背景：export_mode 已改默认 segments，插件按段输出多个 mp4。此前这里写死
+            #   `src = files[0]`，多段时只会取其中一段（顺序还不保证）→ 成片残缺。
+            # 现在的处理：
+            #   ① 按文件名序号排序（顺序不保证，必须排）；
+            #   ② 全部落盘为 seg_0000.mp4..seg_NNNN.mp4 —— 这是「可返工素材」，
+            #      单段出问题后只需替换对应 seg 再重新 concat，无需整集重跑；
+            #   ③ 用 VideoPostProcessor.concat_videos 合成 <tag>_full.mp4，
+            #      **保持既有契约**（probe_video / final / 下游全部按老路径取片，零改动）。
+            # 向后兼容：只有 1 个文件时走原路径，行为与改动前完全一致。
+            # 保底：concat 失败不得阻断整集（回退首段作为成片并记 error）。
+            _seg_files = sorted([f for f in files if f], key=_seg_sort_key)
             dst = os.path.join(videos_dir, ep_name)
-            if os.path.abspath(src) != os.path.abspath(dst):
-                _move_with_retry(src, dst)
+            # ⭐ 2026-10-12：建 shot -> seg 索引映射并落盘（seg_map.json）。
+            #   为什么需要：导出改为 segments 后，「整集成片」变成 seg_0000..NNNN 的
+            #   concat 结果。用户重跑某个分镜时，必须知道「这个 shot 对应哪几段」
+            #   才能替换对应 seg 并重新 concat —— 没有这张表就只能整集重跑。
+            #   段顺序 = segs 顺序（插件按 timeline_data.segments 顺序导出），
+            #   与 _seg_sort_key 的数字升序一致，故索引可直接对应 seg_%04d.mp4。
+            #   name 形如 shot_07 / shot_07a / shot_07b（长镜切段的子段后缀）。
+            try:
+                import re as _re2
+                _seg_map = {}
+                for _mi, _ms in enumerate(segs or []):
+                    _mname = str((_ms or {}).get("name") or "")
+                    _mm = _re2.match(r"shot_(\d+)", _mname)
+                    if _mm:
+                        _seg_map.setdefault(_mm.group(1), []).append(_mi)
+                if _seg_map:
+                    atomic_write_json(os.path.join(videos_dir, "seg_map.json"), {
+                        "episode_tag": episode_tag or "episode",
+                        "total_segments": len(_seg_files),
+                        "shot_to_seg": _seg_map,
+                        "order": [os.path.basename(p) for p in _seg_files],
+                        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+                    logger.info("[分段导出] shot->seg 映射已落盘：%d 镜 / %d 段",
+                                len(_seg_map), len(_seg_files))
+            except Exception as _me:  # noqa: BLE001
+                logger.warning("[分段导出] 映射落盘失败（不影响成片）：%s", _me)
+            if len(_seg_files) > 1:
+                _seg_paths = []
+                for _si, _sf in enumerate(_seg_files):
+                    _sp = os.path.join(videos_dir, "seg_%04d.mp4" % _si)
+                    try:
+                        if os.path.abspath(_sf) != os.path.abspath(_sp):
+                            _move_with_retry(_sf, _sp)
+                        _seg_paths.append(_sp)
+                    except Exception as _se:  # noqa: BLE001
+                        logger.warning("[分段导出] 第 %d 段落盘失败（跳过该段）：%s", _si, _se)
+                _concat_ok = False
+                if _seg_paths:
+                    try:
+                        import video_postprocess as _vp_mod
+                        _cat = _vp_mod.VideoPostProcessor().concat_videos(
+                            _seg_paths, dst, caller="video_helpers.episode")
+                    except Exception as _ce:  # noqa: BLE001
+                        _cat = ""
+                        logger.error("[分段导出] concat 异常：%s", _ce)
+                    if _cat and os.path.isfile(_cat):
+                        _concat_ok = True
+                        logger.info("[分段导出] %d 段已落盘 + concat 成 %s",
+                                    len(_seg_paths), os.path.basename(dst))
+                    else:
+                        logger.error("[分段导出] concat 失败，回退首段作为成片：%s",
+                                     os.path.basename(dst))
+                if not _concat_ok and _seg_files:
+                    src = _seg_files[0]
+                    if os.path.abspath(src) != os.path.abspath(dst):
+                        _move_with_retry(src, dst)
+            else:
+                src = _seg_files[0] if _seg_files else files[0]
+                if os.path.abspath(src) != os.path.abspath(dst):
+                    _move_with_retry(src, dst)
             qc_passed = not episode_failed
             # ★ 用户决策 2：整集成片**保留现行为** —— 不通过仍写入正式目录（dst）供人工复核，
             # 故 app.py 这里的 fail-open **不动**。但**必须清理 ComfyUI 侧历次重试的整集 mp4**

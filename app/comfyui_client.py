@@ -5414,8 +5414,23 @@ class ComfyUIClient:
             ov_env = str(os.environ.get("MJSCXT_H3_CONTINUITY_OVERLAP") or "").strip()
             continuity_overlap = (int(ov_env) if ov_env.isdigit()
                                   else h3_director_builder.CONTINUITY_OVERLAP_DEFAULT)
+        # ⭐ 2026-10-12 用户需求：「分段导出 + 只重生成有问题的分镜，再拼回去」。
+        #
+        # 为什么默认从 all 改为 segments：
+        #   all      -> 插件内部把 N 段拼成 1 个 mp4；某一段坏了只能**整集重跑**
+        #              （实测代价：28 段 / 数小时，且 Retry 会连带换种子重跑全部段）。
+        #   segments -> 插件按段导出 N 个 mp4；调用方（video_helpers）把 N 段落盘为
+        #              seg_0000.mp4..seg_NNNN.mp4 后**自己 concat** 成 <集>_full.mp4。
+        #              这样单段返工只需替换那一段再重新 concat，成本从「整集」降到「一段」。
+        #
+        # 向后兼容（务必保持）：video_helpers 仍会产出 <tag>_full.mp4，
+        #   probe_video / final / 下游一切按老路径取片，行为不变；
+        #   新增的只有 seg_*.mp4 这一份「可返工素材」。
+        #
+        # 覆盖优先级：函数参数 > 环境变量 MJSCXT_H3_EXPORT_MODE > 默认。
+        # 需要退回旧行为时设 MJSCXT_H3_EXPORT_MODE=all 即可，无需改代码。
         export_mode = (export_mode or os.environ.get("MJSCXT_H3_EXPORT_MODE")
-                       or "all").strip().lower()
+                       or "segments").strip().lower()
         if export_mode not in ("all", "segments"):
             logger.warning(f"[H3-Director] 未知 exportMode={export_mode}，回落 all")
             export_mode = "all"
