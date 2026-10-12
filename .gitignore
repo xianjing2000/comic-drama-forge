@@ -282,3 +282,6 @@ t24_audio_*/
 t18_*/
 taskstore_upsert_*/
 orrec2_*/
+
+# 工具路径参数为 undefined 时产生的垃圾目录（禁止入库）
+undefined/
