@@ -3,6 +3,28 @@
 // 职责：管理本地 Flask 后端（serve.py）的生命周期，并把 BrowserWindow 指向运行中的
 //       Flask URL（http://127.0.0.1:<port>）。UI 的唯一事实源仍是 Flask，不复制 app/static。
 
+
+// ---------------------------------------------------------------------------
+// CLI 自检出口（t15，2026-10-12）
+// ---------------------------------------------------------------------------
+// 允许在没有 Electron 运行时的纯 node 下加载本文件，用于验证镜像指纹与播种决策：
+//   node electron-app/main.js --mirror-fingerprint <root> [--mirror-side] [--json]
+//   node electron-app/main.js --mirror-compare <installedRoot> <mirrorRoot> [--json]
+//   node electron-app/main.js --mirror-decide <installedRoot> <mirrorRoot> [选项]
+//   node electron-app/main.js --mirror-selftest [--json]
+// 跑的就是本文件里运行时真正在用的那批函数（不复制第二份实现），不带这些参数时
+// 行为与此前完全一致（正常启动 Electron）。
+const MIRROR_CLI_ARGV = process.argv.slice(2);
+const MIRROR_CLI_CMD = (function () {
+  const a = MIRROR_CLI_ARGV[0];
+  if (a === '--mirror-fingerprint') return 'fingerprint';
+  if (a === '--mirror-compare') return 'compare';
+  if (a === '--mirror-decide') return 'decide';
+  if (a === '--mirror-seed') return 'seed';
+  if (a === '--mirror-selftest') return 'selftest';
+  return '';
+})();
+
 // ⭐ 2026-10-06：Electron/Chromium 静默崩溃诊断
 // 打包版是 GUI 子系统程序，stdout/stderr 被系统丢弃，whenReady 之前的任何异常
 // 表现就是「双击闪退、无日志」（用户实测 10/6 多次遇到）。这里在**任何 Electron
@@ -12,7 +34,7 @@
 // 同时再写一个独立的「超早期」日志：连 Electron 启动器本身都崩掉时，desktop.log
 // 不会有任何 bootLog 行，但下面这行会在进程一启动就立刻落盘，至少能区分
 // 「进程根本没起」vs「起了但 main.js 没加载到」。
-if (process.platform === 'win32') {
+if (process.platform === 'win32' && !MIRROR_CLI_CMD) {
   try {
     process.env.ELECTRON_ENABLE_LOGGING = '1';
     process.env.ELECTRON_ENABLE_STACK_DUMPING = '1';
@@ -28,6 +50,15 @@ if (process.platform === 'win32') {
   } catch { /* 日志失败绝不影响启动 */ }
 }
 
+// ⭐ t15（2026-10-12）：CLI 自检模式下容忍「没有 Electron 运行时」——
+//    纯 node 里 require('electron') 可能返回二进制路径字符串、也可能直接抛错，
+//    两种情况都不该让 --mirror-* 的部署自检用不了。正常启动路径行为不变。
+let electronModule = null;
+try {
+  electronModule = require('electron');
+} catch (e) {
+  if (!MIRROR_CLI_CMD) throw e;
+}
 const {
   app,
   BrowserWindow,
@@ -35,7 +66,10 @@ const {
   dialog,
   ipcMain,
   shell,
-} = require('electron');
+} = (electronModule && typeof electronModule === 'object') ? electronModule : {};
+
+// ⭐ t15：全量指纹要逐文件算 sha1（见 computeMirrorFingerprint）
+const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 const http = require('node:http');
 const net = require('node:net');
@@ -379,62 +413,493 @@ const MIRROR_CONTENT_FILE = '.mirror-content';
 //: 同版本内容检测见到它就跳过重播种（见 runResourceUpdate）。
 const MIRROR_CONTENT_REMOTE = 'remote';
 
-//: 参与指纹的关键文件（相对安装区 resourcesPath）。后端正文 + 前端产物入口。
-//: 只哈希这几个文件（合计约 2MB），启动开销可忽略。
-const MIRROR_FINGERPRINT_FILES = [
-  'backend/app.py',
-  'backend/comfyui_client.py',
-  'backend/style_kit.py',
-  'backend/prompt_qc.py',
-  'backend/serve.py',
-  'backend/config.py',
+// ===========================================================================
+// 资源镜像：全量清单指纹 + 播种方向决策（t15，2026-10-12）
+// ===========================================================================
+// 修的两个高风险部署缺陷（t7 基础设施审计）：
+//   ① 旧指纹只哈希 6 个 backend/*.py（外加 static 产物名与 workflows/*.json），
+//      其余 120+ 文件（routes/ workers/ 各子目录…）改了**不触发重播种** ——
+//      重新打包后桌面版启动仍跑镜像里的老代码，用户看不到改动且无任何报错。
+//   ② 「同版本内容不一致 → 用安装区整体覆盖镜像」这条路径是**静默**的：开发者/会话
+//      把工作区修复同步进可写镜像后，下次启动会被安装区旧代码回滚（生产代码倒退），
+//      而且没有任何提示。
+//
+// 唯一事实源：下面的 MIRROR_TREES 既是**指纹范围**也是**播种范围**（同一份清单，
+//   不会出现「指纹算了但没播」或「播了但指纹没算」的两套口径）。
+// 口径对齐：快照文件与编译产物不参与 —— 与 tools/check_app_sync.py 的
+//   SNAPSHOT_MARKERS / SKIP_DIRS / SKIP_SUFFIX 保持一致（同一套「需同步文件」定义）。
+
+//: 参与指纹与播种的子树/文件：安装区相对路径 -> 镜像相对路径
+//: ⚠️ 这里是**整棵子树**（不是文件白名单）—— 任何新增目录/文件自动纳入指纹。
+const MIRROR_TREES = [
+  ['backend', 'app'],
+  ['workflows', 'workflows'],
+  ['locales', 'locales'],
+  ['.env', '.env'],
 ];
 
-function computeMirrorFingerprint(res) {
-  try {
-    const crypto = require('crypto');
-    const parts = [];
-    for (const rel of MIRROR_FINGERPRINT_FILES) {
+//: 遍历时跳过的目录（缓存 / 版本控制，不属于要分发的源码）
+const MIRROR_SKIP_DIRS = new Set([
+  '__pycache__', '.git', '.ipynb_checkpoints', '.mypy_cache', '.pytest_cache',
+  '.venv', 'venv', 'node_modules',
+]);
+//: 跳过的文件后缀（编译产物）
+const MIRROR_SKIP_SUFFIX = ['.pyc', '.pyo', '.pyd'];
+//: 跳过的文件名（系统元数据 + 镜像自身的标记/日志/基准文件）
+const MIRROR_SKIP_NAMES = new Set([
+  '.DS_Store', 'Thumbs.db', '.mirror-content', '.mirror-version',
+  '.mirror-seed.json', '.mirror-seed.log',
+]);
+//: 历史快照/备份标记 —— 与 tools/check_app_sync.py 的 SNAPSHOT_MARKERS **同源**。
+//: 这类文件是历史备份、不参与分发；若纳入指纹，「安装区留了几个 .bak」就会让镜像
+//: 永远判为不一致（每次启动都重播种）。
+const MIRROR_SNAPSHOT_MARKERS = ['.bak_', '.bak.', '.bak-', '.rollback_'];
+
+//: 单文件哈希前缀长度（sha1 前 12 位，与改造前一致，便于对照历史值）
+const MIRROR_HASH_PREFIX = 12;
+//: 目录指纹长度（sha1 前 16 位）—— .mirror-content 的格式不变
+const MIRROR_FP_LENGTH = 16;
+
+function mirrorSkipFile(name) {
+  if (MIRROR_SKIP_NAMES.has(name)) return true;
+  const low = String(name).toLowerCase();
+  if (MIRROR_SKIP_SUFFIX.some(function (s) { return low.endsWith(s); })) return true;
+  return MIRROR_SNAPSHOT_MARKERS.some(function (m) { return String(name).includes(m); });
+}
+
+//: 递归列出 dir 下参与同步的文件：Map<相对路径(POSIX), "size:sha1(12)">。
+//: 逐个文件读内容算哈希 —— 这是「任何文件改动都能被发现」的根本。
+function walkMirrorEntries(dir) {
+  const out = new Map();
+  const walk = function (cur, rel) {
+    let items;
+    try {
+      items = fs.readdirSync(cur, { withFileTypes: true });
+    } catch (e) {
+      return;
+    }
+    items.sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
+    for (const it of items) {
+      const relPath = rel ? rel + '/' + it.name : it.name;
+      const full = path.join(cur, it.name);
+      if (it.isDirectory()) {
+        if (MIRROR_SKIP_DIRS.has(it.name)) continue;
+        walk(full, relPath);
+        continue;
+      }
+      if (!it.isFile()) continue;
+      if (mirrorSkipFile(it.name)) continue;
       try {
-        const p = path.join(res, rel);
-        const buf = fs.readFileSync(p);
-        parts.push(rel + ':' + buf.length + ':' +
-          crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12));
-      } catch {
-        parts.push(rel + ':missing');
+        const buf = fs.readFileSync(full);
+        out.set(relPath, buf.length + ':' +
+          crypto.createHash('sha1').update(buf).digest('hex').slice(0, MIRROR_HASH_PREFIX));
+      } catch (e) {
+        out.set(relPath, 'unreadable');
       }
     }
-    // 前端产物入口（vite 产物名自带内容哈希，重建即变 → 前端改动同样能被发现）
+  };
+  walk(dir, '');
+  return out;
+}
+
+//: 把一棵树映射成「条目名 -> size:hash」的表。
+//: ⚠️ 条目名一律用**安装区**的相对路径（如 backend/routes/agent.py），两侧才能直接比较。
+//: kind='installed' 取安装区名字；kind='mirror' 取镜像名字（backend -> app 等映射）。
+function mirrorEntryMap(root, kind) {
+  const map = new Map();
+  const trees = [];
+  let bytes = 0;
+  for (const pair of MIRROR_TREES) {
+    const srcName = pair[0];
+    const dstName = pair[1];
+    const rel = kind === 'mirror' ? dstName : srcName;
+    const full = path.join(root, rel);
+    let st = null;
     try {
-      const dir = path.join(res, 'backend', 'static', 'assets');
-      const names = fs.readdirSync(dir).filter((n) => /^index-.*\.(js|css)$/.test(n)).sort();
-      parts.push('static:' + names.join(','));
-    } catch {
-      parts.push('static:missing');
+      st = fs.statSync(full);
+    } catch (e) {
+      st = null;
     }
-    // ⭐ 2026-10-07：工作流模板纳入指纹。此前只算 backend/*.py —— 只改模板
-    //   （例如把「提示词增强节点」固化进 Qwen21 模板）而没碰 .py 时，镜像内容
-    //   指纹不变 → 永不重播种 → 用户看到的工作流仍然是旧的（节点不出现）。
-    //   这里把 workflows/ 下所有 .json 的名称+大小+内容哈希一起算进去。
-    try {
-      const wfDir = path.join(res, 'workflows');
-      const names = fs.readdirSync(wfDir).filter((n) => n.toLowerCase().endsWith('.json')).sort();
-      for (const n of names) {
-        try {
-          const buf = fs.readFileSync(path.join(wfDir, n));
-          parts.push('wf/' + n + ':' + buf.length + ':' +
-            crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12));
-        } catch {
-          parts.push('wf/' + n + ':unreadable');
-        }
+    trees.push({ name: srcName, exists: !!st });
+    if (!st) continue;
+    if (st.isDirectory()) {
+      for (const kv of walkMirrorEntries(full)) {
+        map.set(srcName + '/' + kv[0], kv[1]);
+        const sz = parseInt(String(kv[1]).split(':')[0], 10);
+        if (Number.isFinite(sz)) bytes += sz;
       }
-    } catch {
-      parts.push('wf:missing');
+    } else {
+      try {
+        const buf = fs.readFileSync(full);
+        map.set(srcName, buf.length + ':' +
+          crypto.createHash('sha1').update(buf).digest('hex').slice(0, MIRROR_HASH_PREFIX));
+        bytes += buf.length;
+      } catch (e) {
+        map.set(srcName, 'unreadable');
+      }
     }
-    return crypto.createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 16);
+  }
+  return { map: map, bytes: bytes, trees: trees };
+}
+
+//: 全量清单指纹：对清单内**每一个文件**取「条目名:大小:sha1(12)」，排序拼接后再
+//: sha1 取前 16 位。新增/删除/改内容都会改变它（这就是「任何改动都触发重播种」）。
+//: 缺失的子树记 tree:<name>:missing ——「整棵树没了」与「树为空」必须可区分。
+function computeMirrorFingerprint(root, kind) {
+  try {
+    const em = mirrorEntryMap(root, kind || 'installed');
+    const parts = [];
+    for (const t of em.trees) {
+      parts.push('tree:' + t.name + ':' + (t.exists ? 'present' : 'missing'));
+    }
+    const keys = Array.from(em.map.keys()).sort();
+    for (const k of keys) parts.push(k + ':' + em.map.get(k));
+    return crypto.createHash('sha1').update(parts.join('|')).digest('hex').slice(0, MIRROR_FP_LENGTH);
   } catch (e) {
     return '';
   }
+}
+
+//: 两侧逐条目差异 —— 覆盖前留痕用：把「将被覆盖/丢弃的内容」写进日志，回退可审计。
+function diffMirrorTrees(installedRoot, mirrorRoot, limit) {
+  const lim = Number.isFinite(limit) ? limit : 40;
+  const a = mirrorEntryMap(installedRoot, 'installed');
+  const b = mirrorEntryMap(mirrorRoot, 'mirror');
+  const onlyInstalled = [];
+  const onlyMirror = [];
+  const differing = [];
+  for (const k of Array.from(a.map.keys()).sort()) {
+    if (!b.map.has(k)) onlyInstalled.push(k);
+    else if (b.map.get(k) !== a.map.get(k)) differing.push(k);
+  }
+  for (const k of Array.from(b.map.keys()).sort()) {
+    if (!a.map.has(k)) onlyMirror.push(k);
+  }
+  const cap = function (arr) {
+    return arr.length > lim ? arr.slice(0, lim).concat(['...(共 ' + arr.length + ' 项)']) : arr;
+  };
+  return {
+    installedCount: a.map.size, mirrorCount: b.map.size,
+    installedBytes: a.bytes, mirrorBytes: b.bytes,
+    onlyInstalled: cap(onlyInstalled), onlyMirror: cap(onlyMirror), differing: cap(differing),
+    onlyInstalledCount: onlyInstalled.length, onlyMirrorCount: onlyMirror.length,
+    differingCount: differing.length,
+  };
+}
+
+//: 清单范围内文件的最新 mtime（毫秒）。空树 -> 0。
+function newestMtimeMs(root, kind) {
+  let newest = 0;
+  for (const pair of MIRROR_TREES) {
+    const rel = kind === 'mirror' ? pair[1] : pair[0];
+    const full = path.join(root, rel);
+    let st = null;
+    try {
+      st = fs.statSync(full);
+    } catch (e) {
+      st = null;
+    }
+    if (!st) continue;
+    if (!st.isDirectory()) {
+      newest = Math.max(newest, st.mtimeMs || 0);
+      continue;
+    }
+    const walk = function (cur) {
+      let items;
+      try {
+        items = fs.readdirSync(cur, { withFileTypes: true });
+      } catch (e) {
+        return;
+      }
+      for (const it of items) {
+        const fp = path.join(cur, it.name);
+        if (it.isDirectory()) {
+          if (MIRROR_SKIP_DIRS.has(it.name)) continue;
+          walk(fp);
+          continue;
+        }
+        if (!it.isFile() || mirrorSkipFile(it.name)) continue;
+        try {
+          newest = Math.max(newest, fs.statSync(fp).mtimeMs || 0);
+        } catch (e) { /* 单个文件 stat 失败不影响整体 */ }
+      }
+    };
+    walk(full);
+  }
+  return newest;
+}
+
+//: 上次播种的时间基准（.mirror-seed.json）。
+//: ⚠️ 为什么必须有它：播种本身会把镜像文件 mtime 刷成「现在」，直接拿
+//:   「镜像 mtime vs 安装区 mtime」比会让镜像永远显得更新、永远不重播种
+//:   （新包永不生效）。改用「播种完成时刻」作基准，才能区分
+//:   「播种带来的 mtime」与「播种之后被外部改动」。
+const MIRROR_SEED_STATE_FILE = '.mirror-seed.json';
+//: 判定「播种之后又被改过」的时间容差：播种完成时刻写基准，被复制文件的 mtime
+//: 必然 <= 完成时刻，留 60s 容忍时钟/IO 抖动。
+const MIRROR_MTIME_TOLERANCE_MS = 60 * 1000;
+
+function readMirrorSeedState(mirror) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(mirror, MIRROR_SEED_STATE_FILE), 'utf8'));
+    return (raw && typeof raw === 'object') ? raw : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function writeMirrorSeedState(mirror, obj) {
+  try {
+    fs.mkdirSync(mirror, { recursive: true });
+    fs.writeFileSync(path.join(mirror, MIRROR_SEED_STATE_FILE),
+      JSON.stringify(obj, null, 2), 'utf8');
+  } catch (e) {
+    console.warn('[更新] 写入镜像播种基准失败（忽略）：', e && e.message);
+  }
+}
+
+//: 覆盖方向策略：auto（默认，按证据判断）/ mirror（永远保留镜像）/ installed（永远以安装区为准）。
+//: 环境变量 MJSCXT_MIRROR_POLICY 可在不重新打包的前提下改向 —— 排障出口。
+function mirrorPolicy() {
+  const v = String(process.env.MJSCXT_MIRROR_POLICY || '').trim().toLowerCase();
+  return (v === 'mirror' || v === 'installed') ? v : 'auto';
+}
+
+//: 播种决策（**纯函数**）：运行时与 CLI 自检共用，保证「测的就是跑的」。
+//: 返回 {seed, action, reason, note}，action: 'seed' | 'keep' | 'none'。
+function decideMirrorSeed(o) {
+  const same = !!(o.installedFp && o.mirrorFp && o.installedFp === o.mirrorFp);
+  if (!o.mirrorExists) {
+    return { seed: true, action: 'seed', reason: 'mirror-missing',
+      note: '镜像不存在 → 首次播种（安装区为准）' };
+  }
+  if (o.policy === 'installed') {
+    return { seed: true, action: 'seed', reason: 'policy-installed',
+      note: 'MJSCXT_MIRROR_POLICY=installed → 安装区为准' };
+  }
+  if (o.policy === 'mirror') {
+    return { seed: false, action: 'keep', reason: 'policy-mirror',
+      note: 'MJSCXT_MIRROR_POLICY=mirror → 镜像为准，不覆盖' };
+  }
+  if (o.contentMarker === MIRROR_CONTENT_REMOTE) {
+    return { seed: false, action: 'keep', reason: 'remote-content',
+      note: '镜像来自远端资源增量 → 以镜像为准，不用安装区覆盖' };
+  }
+  if (same) {
+    return { seed: false, action: 'none', reason: 'in-sync',
+      note: '安装区与镜像内容一致，无需动作' };
+  }
+  // ⭐ 核心防线：镜像在上次播种**之后**被外部改过（典型：工作区/会话把新代码同步进
+  //   镜像）→ 绝不用安装区覆盖它。这正是 t7 实测的「静默回退生产代码」。
+  const seededAtMs = Number(o.seededAtMs || 0);
+  const mirrorNewestMs = Number(o.mirrorNewestMs || 0);
+  const installedNewestMs = Number(o.installedNewestMs || 0);
+  // 基准优先「上次播种完成时刻」（.mirror-seed.json，最可靠）；存量用户首次跑本版本
+  // 时没有基准，退化为「安装区内容最新 mtime」—— 镜像比安装区还新同样视为外部更新。
+  const baseMs = seededAtMs > 0 ? seededAtMs : installedNewestMs;
+  if (baseMs > 0 && mirrorNewestMs > baseMs + MIRROR_MTIME_TOLERANCE_MS) {
+    return { seed: false, action: 'keep', reason: 'mirror-touched-after-seed',
+      note: '镜像比上次播种基准更新（镜像最新 mtime ' + new Date(mirrorNewestMs).toISOString() +
+        ' > 基准 ' + new Date(baseMs).toISOString() +
+        (seededAtMs > 0 ? '（播种完成时刻）' : '（存量镜像无播种基准，改用安装区最新 mtime）') +
+        '）→ 保留镜像，不用安装区覆盖；如确需以安装区为准请设 MJSCXT_MIRROR_POLICY=installed' };
+  }
+  if (String(o.installedVersion || '') !== String(o.mirrorVersion || '')) {
+    return { seed: true, action: 'seed', reason: 'version-changed',
+      note: '安装区版本 ' + (o.mirrorVersion || '(无)') + ' -> ' + (o.installedVersion || '(无)') +
+        '（整包更新）→ 安装区为准' };
+  }
+  return { seed: true, action: 'seed', reason: 'content-changed',
+    note: '同版本但内容指纹不一致（安装区 ' + (o.installedFp || '(空)') +
+      ' / 镜像 ' + (o.mirrorFp || '(空)') + '）→ 安装区为准' };
+}
+
+//: 覆盖前把「将被安装区覆盖/删除」的镜像文件**备份**到 <mirror>/.mirror-overwritten-<ts>/。
+//: 目的：即便判定为「安装区为准」，被覆盖的内容也能一键找回 —— 彻底消除
+//: 「静默且不可逆的回退」。备份有上限（超出只留清单与日志）。
+function mirrorToInstalledName(name) {
+  for (const pair of MIRROR_TREES) {
+    if (name === pair[0]) return pair[1];
+    if (name.indexOf(pair[0] + '/') === 0) return pair[1] + name.slice(pair[0].length);
+  }
+  return name;
+}
+
+function backupMirrorDiff(installedRoot, mirrorRoot, limitFiles, limitBytes) {
+  const lf = Number.isFinite(limitFiles) ? limitFiles : 2000;
+  const lb = Number.isFinite(limitBytes) ? limitBytes : 64 * 1024 * 1024;
+  const a = mirrorEntryMap(installedRoot, 'installed');
+  const b = mirrorEntryMap(mirrorRoot, 'mirror');
+  const victims = [];
+  let bytes = 0;
+  let skipped = 0;
+  for (const kv of b.map.entries()) {
+    const name = kv[0];
+    if (a.map.has(name) && a.map.get(name) === kv[1]) continue; // 与安装区一致 → 不涉及
+    const relMirror = mirrorToInstalledName(name);
+    const full = path.join(mirrorRoot, relMirror);
+    let sz = 0;
+    try {
+      sz = fs.statSync(full).size;
+    } catch (e) {
+      sz = 0;
+    }
+    if (victims.length >= lf || bytes + sz > lb) {
+      skipped += 1;
+      continue;
+    }
+    victims.push(relMirror);
+    bytes += sz;
+  }
+  if (!victims.length) return { dir: '', files: 0, bytes: 0, skipped: skipped };
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const dir = path.join(mirrorRoot, '.mirror-overwritten-' + stamp);
+  let copied = 0;
+  for (const rel of victims) {
+    try {
+      const dst = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(path.join(mirrorRoot, rel), dst);
+      copied += 1;
+    } catch (e) { /* 单文件失败不影响其余 */ }
+  }
+  return { dir: dir, files: copied, bytes: bytes, skipped: skipped };
+}
+
+//: 决策留痕（追加 JSONL，>512KB 时保留最后 500 行）——「绝不静默」的可审计证据。
+function appendMirrorSeedLog(mirror, obj) {
+  const line = JSON.stringify(Object.assign({ ts: new Date().toISOString() }, obj));
+  try {
+    fs.mkdirSync(mirror, { recursive: true });
+    const p = path.join(mirror, '.mirror-seed.log');
+    fs.appendFileSync(p, line + '\n');
+    try {
+      if (fs.statSync(p).size > 512 * 1024) {
+        const tail = fs.readFileSync(p, 'utf8').split('\n').filter(Boolean).slice(-500);
+        fs.writeFileSync(p, tail.join('\n') + '\n', 'utf8');
+      }
+    } catch (e) { /* 轮转失败不影响启动 */ }
+  } catch (e) { /* 日志失败绝不影响启动 */ }
+  return line;
+}
+
+//: 执行「安装区 -> 镜像」的重播种（**运行时与 CLI 共用**，保证测的就是跑的）：
+//: 备份镜像差异文件 -> 按 MIRROR_TREES 复制 -> 写版本/内容标记与播种基准 -> 复核指纹。
+//: 返回 {decision, installedFp, mirrorFp, backup, copied, afterFp, verifyOk}。
+//: ⚠️ 决策为 keep/none 时**不做任何写入**（绝不覆盖镜像）。
+function applyMirrorSeed(installedRoot, mirrorRoot, opts) {
+  const o = opts || {};
+  const policy = o.policy || mirrorPolicy();
+  const mirrorExists = fs.existsSync(path.join(mirrorRoot, 'app'));
+  const installedFp = computeMirrorFingerprint(installedRoot, 'installed');
+  const mirrorFp = mirrorExists ? computeMirrorFingerprint(mirrorRoot, 'mirror') : '';
+  const contentMarker = mirrorExists ? readMirrorContent(mirrorRoot) : '';
+  const seedState = mirrorExists ? readMirrorSeedState(mirrorRoot) : {};
+  const mirrorVer = mirrorExists ? readMirrorVersion(mirrorRoot) : '';
+  const mirrorNewestMs = mirrorExists ? newestMtimeMs(mirrorRoot, 'mirror') : 0;
+  const installedNewestMs = newestMtimeMs(installedRoot, 'installed');
+  const decision = decideMirrorSeed({
+    policy: policy,
+    mirrorExists: mirrorExists,
+    installedFp: installedFp,
+    mirrorFp: mirrorFp,
+    contentMarker: contentMarker,
+    installedVersion: o.installedVersion || '',
+    mirrorVersion: mirrorVer,
+    seededAtMs: seedState.seededAtMs || 0,
+    mirrorNewestMs: mirrorNewestMs,
+    installedNewestMs: installedNewestMs,
+  });
+  const out = {
+    decision: decision, installedFp: installedFp, mirrorFp: mirrorFp,
+    contentMarker: contentMarker, mirrorVersion: mirrorVer, policy: policy,
+    seededAtMs: seedState.seededAtMs || 0, mirrorNewestMs: mirrorNewestMs,
+    installedNewestMs: installedNewestMs, backup: null, copied: [],
+    afterFp: '', verifyOk: true,
+  };
+  if (decision.action !== 'seed') {
+    // ⭐ keep = 「保护镜像、拒绝被安装区覆盖」的关键动作，必须留痕（绝不静默）；
+    //    none = 两侧一致，不必每次启动都写日志（否则日志天天刷）。
+    if (decision.action === 'keep') {
+      appendMirrorSeedLog(mirrorRoot, {
+        action: 'keep', reason: decision.reason, note: decision.note,
+        installedFp: installedFp, mirrorFp: mirrorFp, contentMarker: contentMarker,
+        installedVersion: o.installedVersion || '', mirrorVersion: mirrorVer, policy: policy,
+        seededAtMs: seedState.seededAtMs || 0,
+        mirrorNewestMs: mirrorNewestMs, installedNewestMs: installedNewestMs,
+      });
+    }
+    return out;
+  }
+
+  appendMirrorSeedLog(mirrorRoot, {
+    action: 'seed', reason: decision.reason, note: decision.note,
+    installedFp: installedFp, mirrorFp: mirrorFp, contentMarker: contentMarker,
+    installedVersion: o.installedVersion || '', mirrorVersion: mirrorVer, policy: policy,
+    seededAtMs: seedState.seededAtMs || 0,
+    diff: mirrorExists ? diffMirrorTrees(installedRoot, mirrorRoot) : null,
+  });
+
+  // ⭐ 覆盖前先备份「会被覆盖/删除的镜像文件」：即使判断失误也能一键找回，
+  //   不存在「静默且不可逆的回退」；备份目录写进日志。
+  if (mirrorExists) {
+    try {
+      out.backup = backupMirrorDiff(installedRoot, mirrorRoot);
+    } catch (e) {
+      out.backup = null;
+      console.warn('[更新] 覆盖前备份镜像差异失败（继续播种）：', e && e.message);
+    }
+    if (out.backup && out.backup.files) {
+      appendMirrorSeedLog(mirrorRoot, {
+        action: 'backup-before-seed', reason: decision.reason,
+        backupDir: out.backup.dir, backupFiles: out.backup.files,
+        backupBytes: out.backup.bytes, backupSkipped: out.backup.skipped,
+      });
+    }
+  }
+
+  // 先删后拷：cpSync 是覆盖式合并，不先删的话「上游已删除的文件」会在镜像里复活
+  fs.mkdirSync(mirrorRoot, { recursive: true });
+  for (const pair of MIRROR_TREES) {
+    const srcName = pair[0];
+    const dstName = pair[1];
+    const src = path.join(installedRoot, srcName);
+    const dst = path.join(mirrorRoot, dstName);
+    if (!fs.existsSync(src)) continue;
+    try {
+      if (fs.existsSync(dst)) {
+        if (fs.statSync(dst).isDirectory()) fs.rmSync(dst, { recursive: true, force: true });
+        else fs.rmSync(dst, { force: true });
+      }
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      if (fs.statSync(src).isDirectory()) fs.cpSync(src, dst, { recursive: true });
+      else fs.copyFileSync(src, dst);
+      out.copied.push(srcName);
+    } catch (e) {
+      console.error('[更新] 播种资源镜像失败 ' + srcName + ': ', e && e.message);
+    }
+  }
+
+  out.afterFp = computeMirrorFingerprint(mirrorRoot, 'mirror');
+  if (o.installedVersion) writeMirrorVersion(mirrorRoot, o.installedVersion);
+  writeMirrorContent(mirrorRoot, installedFp);
+  // 播种基准 = **完成时刻**：此后镜像若被改动（mtime 更新），下次启动判为「外部更新」
+  // 并保留镜像，绝不再用安装区覆盖。
+  writeMirrorSeedState(mirrorRoot, {
+    seededAtMs: Date.now(), installedFp: installedFp,
+    installedVersion: o.installedVersion || '', installedRoot: installedRoot, policy: policy,
+    note: '播种基准：镜像在此时间之后被改动则不再被安装区覆盖（MJSCXT_MIRROR_POLICY 可强制改向）',
+  });
+  out.verifyOk = out.afterFp === installedFp;
+  if (!out.verifyOk) {
+    console.error('[更新] 播种后镜像指纹仍与安装区不一致（' + out.afterFp + ' != ' +
+      installedFp + '）—— 请检查 MIRROR_TREES 清单与镜像目录权限');
+    appendMirrorSeedLog(mirrorRoot, {
+      action: 'verify-failed', reason: 'post-seed-fingerprint-mismatch',
+      installedFp: installedFp, mirrorFp: out.afterFp,
+    });
+  }
+  return out;
 }
 
 function readMirrorContent(mirror) {
@@ -474,63 +939,33 @@ function seedResourceMirror() {
   if (!app.isPackaged) return null; // 开发态直接用项目根，无镜像
   const res = process.resourcesPath;
   const mirror = resourceMirrorDir();
-  const installed = updateConfig.currentVersion();
-  const mirrorVer = readMirrorVersion(mirror);
-  const mirrorExists = fs.existsSync(path.join(mirror, 'app'));
-  // 需要（重新）播种的两种情况：镜像还没有；或安装区版本与镜像版本不一致
-  // （整包更新替换了安装区 → 安装区为准，必须覆盖旧镜像）。
-  const needSeedByVersion = !mirrorExists || mirrorVer !== installed;
-  // 同版本内容漂移检测：版本号没变但安装区代码/前端产物变了（重建覆盖安装目录）。
-  // ⚠️ 指纹**缺失**（''）同样判定为漂移并重播种：升级到带本机制的版本时，
-  //    存量用户的镜像可能正是「同版本的老代码」（本次事故形态），
-  //    若把「缺失」当成「已同步」跳过，本机制对存量用户永远不触发 = 修复不生效。
-  //    重播种的来源就是安装区本身，代价是一次拷贝，无数据风险。
-  // ⚠️ 标记值 'remote' = 「镜像来自远端资源增量，以镜像为准」，**绝不**据此重播种
-  //    （否则增量更新会被本地安装区旧代码回滚，见 runResourceUpdate）。
-  let needSeedByContent = false;
-  if (!needSeedByVersion && mirrorExists) {
-    const fpNow = computeMirrorFingerprint(res);
-    const fpMirror = readMirrorContent(mirror);
-    if (fpMirror !== MIRROR_CONTENT_REMOTE && fpNow && fpNow !== fpMirror) {
-      needSeedByContent = true;
-      console.log(`[更新] 同版本内容已变化/未记录（${fpMirror || '(无标记)'} -> ${fpNow}），重新播种资源镜像`);
-    }
+  const r = applyMirrorSeed(res, mirror, {
+    installedVersion: updateConfig.currentVersion(),
+    policy: mirrorPolicy(),
+  });
+  const d = r.decision;
+  if (d.action === 'none') return mirror; // 两侧一致：不写日志、不做任何 IO
+  const head = '[更新] 镜像播种决策：' + d.action + ' / ' + d.reason + ' —— ' + d.note;
+  if (d.action === 'keep') {
+    console.warn(head);
+    console.warn('[更新] 已保留镜像内容（未用安装区覆盖）。镜像目录：' + mirror);
+    bootLog('mirror-keep ' + d.reason + ' ' + d.note);
+    return mirror;
   }
-  const needSeed = needSeedByVersion || needSeedByContent;
-  // 安装区目录名 → 镜像目录名：后端源码在安装区叫 backend，镜像内仍叫 app
-  // （后端代码里的相对引用不变，只有安装区这层名字避让 .asar / app 冲突）。
-  // ⚠️ '.env' 是**文件**（安全子集配置，见 pack_backend.js）：播种时要区分文件/目录，
-  //    否则 rmSync/cpSync 的 recursive 语义会按目录处理而抛错。
-  const subs = [['backend', 'app'], ['workflows', 'workflows'], ['locales', 'locales'],
-                ['.env', '.env']];
-  if (needSeed) {
-    console.log(`[更新] 资源镜像需(重新)播种：镜像版本=${mirrorVer || '(无)'} 安装区版本=${installed}`);
+  console.log(head);
+  if (r.backup && r.backup.files) {
+    console.warn('[更新] 已备份将被覆盖的镜像文件 ' + r.backup.files + ' 个（' +
+      Math.round(r.backup.bytes / 1024) + ' KB）-> ' + r.backup.dir +
+      (r.backup.skipped ? ('；' + r.backup.skipped + ' 个超出备份上限，仅记录在日志') : ''));
   }
-  for (const [srcName, dstName] of subs) {
-    const src = path.join(res, srcName);
-    const dst = path.join(mirror, dstName);
-    if (!fs.existsSync(src)) continue;
-    if (!fs.existsSync(dst) || needSeed) {
-      try {
-        // 重新播种前清掉旧目标：cpSync 是覆盖式合并，若不先删，**已被上游删除的文件**
-        // 会残留在镜像里继续被后端读到（旧代码复活）。
-        if (needSeed && fs.existsSync(dst)) {
-          if (fs.statSync(dst).isDirectory()) fs.rmSync(dst, { recursive: true, force: true });
-          else fs.rmSync(dst, { force: true });
-        }
-        fs.mkdirSync(path.dirname(dst), { recursive: true });
-        if (fs.statSync(src).isDirectory()) fs.cpSync(src, dst, { recursive: true });
-        else fs.copyFileSync(src, dst);
-        console.log(`[更新] 播种资源镜像 ${srcName} -> ${dst}`);
-      } catch (e) {
-        console.error(`[更新] 播种资源镜像失败 ${srcName}: `, e && e.message);
-      }
-    }
+  if (!r.verifyOk) {
+    console.error('[更新] 播种后镜像指纹与安装区仍不一致（' + r.afterFp + ' != ' +
+      r.installedFp + '），请检查 MIRROR_TREES 清单与镜像目录权限');
   }
-  if (needSeed) writeMirrorVersion(mirror, installed);
-  if (needSeed) writeMirrorContent(mirror, computeMirrorFingerprint(res));
+  bootLog('mirror-seed ' + d.reason + ' ' + d.note);
   return mirror;
 }
+
 
 // 更新编排结果（交给 UI 展示 / IPC 回传）
 async function checkForUpdatesNow(manual) {
@@ -1134,6 +1569,314 @@ function buildMenu() {
     },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+
+// ===========================================================================
+// CLI 自检实现（t15）—— node electron-app/main.js --mirror-* 系列
+// ===========================================================================
+// 部署 / CI / 排障：不启动 Electron 直接验证镜像指纹与播种决策。
+// 退出码：0 = 成功 / 两侧一致 / 自检通过；1 = 不一致 / 自检失败；2 = 参数错误。
+function mirrorCliUsage() {
+  return [
+    '用法：',
+    '  node electron-app/main.js --mirror-fingerprint <root> [--mirror-side] [--json]',
+    '  node electron-app/main.js --mirror-compare <installedRoot> <mirrorRoot> [--json]',
+    '  node electron-app/main.js --mirror-decide <installedRoot> <mirrorRoot> [选项]',
+    '      --policy auto|mirror|installed   覆盖方向（默认 auto）',
+    '      --seeded-at <ms>                 上次播种基准（默认读镜像的 .mirror-seed.json）',
+    '      --installed-version <v> --mirror-version <v>',
+    '      --marker <v>                     .mirror-content 的值（remote = 远端增量）',
+    '      --fail-on-seed                   决策为 seed 时退出码 1（CI 拦「即将覆盖」）',
+    '      --json',
+    '  node electron-app/main.js --mirror-seed <installedRoot> <mirrorRoot> [选项]',
+    '      （真正执行重播种：备份差异 -> 按清单复制 -> 写标记与基准 -> 复核指纹）',
+    '  node electron-app/main.js --mirror-selftest [--json]',
+    '退出码：0 = 成功/一致/通过；1 = 不一致/自检失败；2 = 参数错误',
+  ].join('\n');
+}
+
+function mirrorCliFail(msg) {
+  console.error('[mirror-cli] ' + msg + '\n' + mirrorCliUsage());
+  return 2;
+}
+
+function mirrorCliMain(cmd, argv) {
+  const flags = new Set(argv.filter(function (a) { return a.indexOf('--') === 0; }));
+  const args = argv.filter(function (a) { return a.indexOf('--') !== 0; });
+  const asJson = flags.has('--json');
+  const val = function (name, dflt) {
+    const i = argv.indexOf(name);
+    return (i >= 0 && i + 1 < argv.length) ? argv[i + 1] : dflt;
+  };
+
+  if (cmd === 'fingerprint') {
+    const root = args[0];
+    if (!root) return mirrorCliFail('缺少目录参数');
+    const kind = flags.has('--mirror-side') ? 'mirror' : 'installed';
+    const em = mirrorEntryMap(root, kind);
+    const fp = computeMirrorFingerprint(root, kind);
+    if (asJson) {
+      console.log(JSON.stringify({ root: root, kind: kind, fingerprint: fp,
+        files: em.map.size, bytes: em.bytes, trees: em.trees }, null, 2));
+    } else {
+      console.log('目录   : ' + root);
+      console.log('视角   : ' + kind + (kind === 'mirror' ? '（镜像侧：app -> backend 映射）' : '（安装区侧）'));
+      console.log('指纹   : ' + fp);
+      console.log('文件数 : ' + em.map.size);
+      console.log('总字节 : ' + em.bytes);
+    }
+    return 0;
+  }
+
+  if (cmd === 'compare') {
+    const a = args[0];
+    const b = args[1];
+    if (!a || !b) return mirrorCliFail('需要「安装区目录」与「镜像目录」两个参数');
+    const fpA = computeMirrorFingerprint(a, 'installed');
+    const fpB = computeMirrorFingerprint(b, 'mirror');
+    const diff = diffMirrorTrees(a, b);
+    const same = !!fpA && fpA === fpB;
+    if (asJson) {
+      console.log(JSON.stringify({ installed: { root: a, fingerprint: fpA },
+        mirror: { root: b, fingerprint: fpB }, same: same, diff: diff }, null, 2));
+    } else {
+      console.log('安装区 : ' + a + '  ' + fpA);
+      console.log('镜像   : ' + b + '  ' + fpB);
+      console.log('一致   : ' + (same ? '是' : '否'));
+      if (!same) {
+        console.log('仅在安装区 (' + diff.onlyInstalledCount + ') : ' + diff.onlyInstalled.join(', '));
+        console.log('仅在镜像   (' + diff.onlyMirrorCount + ') : ' + diff.onlyMirror.join(', '));
+        console.log('内容不同   (' + diff.differingCount + ') : ' + diff.differing.join(', '));
+      }
+    }
+    return same ? 0 : 1;
+  }
+
+  if (cmd === 'decide') {
+    const a = args[0];
+    const b = args[1];
+    if (!a || !b) return mirrorCliFail('需要「安装区目录」与「镜像目录」两个参数');
+    const mirrorExists = fs.existsSync(path.join(b, 'app'));
+    const seedState = mirrorExists ? readMirrorSeedState(b) : {};
+    const seededAtMs = Number(val('--seeded-at', seedState.seededAtMs || 0)) || 0;
+    const installedFp = computeMirrorFingerprint(a, 'installed');
+    const mirrorFp = mirrorExists ? computeMirrorFingerprint(b, 'mirror') : '';
+    const marker = String(val('--marker', mirrorExists ? readMirrorContent(b) : '') || '');
+    const decision = decideMirrorSeed({
+      policy: String(val('--policy', mirrorPolicy()) || 'auto').toLowerCase(),
+      mirrorExists: mirrorExists,
+      installedFp: installedFp,
+      mirrorFp: mirrorFp,
+      contentMarker: marker,
+      installedVersion: String(val('--installed-version', '') || ''),
+      mirrorVersion: String(val('--mirror-version', mirrorExists ? readMirrorVersion(b) : '') || ''),
+      seededAtMs: seededAtMs,
+      mirrorNewestMs: mirrorExists ? newestMtimeMs(b, 'mirror') : 0,
+      installedNewestMs: newestMtimeMs(a, 'installed'),
+    });
+    if (asJson) {
+      console.log(JSON.stringify({ decision: decision, installedFp: installedFp,
+        mirrorFp: mirrorFp, mirrorExists: mirrorExists, seededAtMs: seededAtMs,
+        mirrorNewestMs: mirrorExists ? newestMtimeMs(b, 'mirror') : 0,
+        contentMarker: marker }, null, 2));
+    } else {
+      console.log('安装区指纹 : ' + installedFp);
+      console.log('镜像指纹   : ' + (mirrorFp || '(无镜像)'));
+      console.log('播种基准   : ' + (seededAtMs ? new Date(seededAtMs).toISOString() : '(无)'));
+      console.log('决策       : ' + decision.action + '（' + decision.reason + '）');
+      console.log('说明       : ' + decision.note);
+    }
+    if (flags.has('--fail-on-seed') && decision.action === 'seed') return 1;
+    return 0;
+  }
+
+  if (cmd === 'seed') {
+    const a = args[0];
+    const b = args[1];
+    if (!a || !b) return mirrorCliFail('需要「安装区目录」与「镜像目录」两个参数');
+    const r = applyMirrorSeed(a, b, {
+      installedVersion: String(val('--installed-version', '') || ''),
+      policy: String(val('--policy', mirrorPolicy()) || 'auto').toLowerCase(),
+    });
+    if (asJson) {
+      console.log(JSON.stringify(r, null, 2));
+    } else {
+      console.log('安装区指纹 : ' + r.installedFp);
+      console.log('镜像指纹   : ' + (r.mirrorFp || '(无镜像)'));
+      console.log('决策       : ' + r.decision.action + '（' + r.decision.reason + '）');
+      console.log('说明       : ' + r.decision.note);
+      if (r.decision.action === 'seed') {
+        console.log('已复制     : ' + r.copied.join(', '));
+        console.log('覆盖前备份 : ' + (r.backup && r.backup.files
+          ? (r.backup.files + ' 个文件 -> ' + r.backup.dir) : '无（无差异或首次播种）'));
+        console.log('播种后指纹 : ' + r.afterFp + '  与安装区一致：' + (r.verifyOk ? '是' : '否'));
+      } else {
+        console.log('（未写入任何内容：镜像被保留）');
+      }
+    }
+    if (r.decision.action === 'seed' && !r.verifyOk) return 1;
+    return 0;
+  }
+  if (cmd === 'selftest') return mirrorCliSelftest(asJson);
+  return mirrorCliFail('未知命令：' + cmd);
+}
+
+//: 自检：在临时目录里复现 t7 的两个缺陷场景，验证新策略（**不碰真实环境**）。
+function mirrorCliSelftest(asJson) {
+  const osMod = require('node:os');
+  const results = [];
+  const ok = function (name, pass, extra) {
+    results.push({ name: name, ok: !!pass, extra: extra || '' });
+  };
+  const tmp = fs.mkdtempSync(path.join(osMod.tmpdir(), 'mjscxt-mirror-selftest-'));
+  const installedRoot = path.join(tmp, 'resources');
+  const mirrorRoot = path.join(tmp, 'resource-mirror');
+  const writeInstalled = function (rel, body) {
+    const p = path.join(installedRoot, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, body, 'utf8');
+  };
+  const reseedMirror = function () {
+    fs.rmSync(mirrorRoot, { recursive: true, force: true });
+    fs.mkdirSync(mirrorRoot, { recursive: true });
+    fs.cpSync(path.join(installedRoot, 'backend'), path.join(mirrorRoot, 'app'), { recursive: true });
+    if (fs.existsSync(path.join(installedRoot, 'workflows'))) {
+      fs.cpSync(path.join(installedRoot, 'workflows'), path.join(mirrorRoot, 'workflows'), { recursive: true });
+    }
+    if (fs.existsSync(path.join(installedRoot, 'locales'))) {
+      fs.cpSync(path.join(installedRoot, 'locales'), path.join(mirrorRoot, 'locales'), { recursive: true });
+    }
+    if (fs.existsSync(path.join(installedRoot, '.env'))) {
+      fs.copyFileSync(path.join(installedRoot, '.env'), path.join(mirrorRoot, '.env'));
+    }
+  };
+  const decideHere = function (extra) {
+    const o = Object.assign({
+      policy: 'auto',
+      mirrorExists: fs.existsSync(path.join(mirrorRoot, 'app')),
+      installedFp: computeMirrorFingerprint(installedRoot, 'installed'),
+      mirrorFp: computeMirrorFingerprint(mirrorRoot, 'mirror'),
+      contentMarker: '',
+      installedVersion: '1.0.0',
+      mirrorVersion: '1.0.0',
+      seededAtMs: 0,
+      mirrorNewestMs: newestMtimeMs(mirrorRoot, 'mirror'),
+      installedNewestMs: newestMtimeMs(installedRoot, 'installed'),
+    }, extra || {});
+    return decideMirrorSeed(o);
+  };
+
+  try {
+    writeInstalled(path.join('backend', 'app.py'), 'print("a")\n');
+    writeInstalled(path.join('backend', 'serve.py'), 'print("s")\n');
+    writeInstalled(path.join('backend', 'routes', 'agent.py'), 'AGENT = 1\n');
+    writeInstalled(path.join('backend', 'workers', 'episodes.py'), 'W = 2\n');
+    writeInstalled(path.join('backend', 'static', 'assets', 'index-abc.js'), 'console.log(1)\n');
+    writeInstalled(path.join('workflows', 'qwen.json'), '{"nodes": []}\n');
+    writeInstalled(path.join('locales', 'zh.json'), '{"a": "x"}\n');
+    writeInstalled('.env', 'MJSCXT=1\n');
+    writeInstalled(path.join('backend', 'app.py.bak_20260101'), 'bak\n');
+    writeInstalled(path.join('backend', '__pycache__', 'app.cpython-311.pyc'), 'pyc\n');
+
+    const keys = Array.from(mirrorEntryMap(installedRoot, 'installed').map.keys());
+
+    // ① 清单覆盖面：旧实现只哈希 6 个 backend/*.py；多级子目录与其它树现在必须都在
+    ok('指纹覆盖 backend 多级子目录（routes/ workers/ static/）',
+      keys.indexOf('backend/routes/agent.py') >= 0 &&
+      keys.indexOf('backend/workers/episodes.py') >= 0 &&
+      keys.indexOf('backend/static/assets/index-abc.js') >= 0, keys.length + ' 个条目');
+    ok('指纹覆盖 workflows / locales / .env',
+      keys.indexOf('workflows/qwen.json') >= 0 &&
+      keys.indexOf('locales/zh.json') >= 0 && keys.indexOf('.env') >= 0);
+
+    // ② 敏感性（t7 缺陷①）：改一个**旧指纹完全没覆盖**的文件 → 指纹必须变
+    const fpBefore = computeMirrorFingerprint(installedRoot, 'installed');
+    writeInstalled(path.join('backend', 'routes', 'agent.py'), 'AGENT = 999\n');
+    const fpAfter = computeMirrorFingerprint(installedRoot, 'installed');
+    ok('改 backend/routes/agent.py（旧指纹未覆盖）→ 指纹变化', fpBefore !== fpAfter,
+      fpBefore + ' -> ' + fpAfter);
+
+    // ③ 快照/编译产物不参与（与 check_app_sync 口径一致）
+    ok('快照与 __pycache__ 不参与指纹',
+      !keys.some(function (k) { return k.indexOf('.bak_') >= 0 || k.indexOf('__pycache__') >= 0; }));
+
+    // ④ 一致 → 不动作
+    reseedMirror();
+    // 模拟「上次播种发生在 10 分钟前」：这样随后对镜像的修改才落在基准之后
+    const seededAt1 = Date.now() - 10 * 60 * 1000;
+    const d0 = decideHere({ seededAtMs: seededAt1 });
+    ok('安装区与镜像一致 → none', d0.action === 'none', d0.reason);
+
+    // ⑤ 核心场景（t7 缺陷②）：镜像被外部同步更新、安装区仍是旧的 → 必须 keep
+    fs.writeFileSync(path.join(mirrorRoot, 'app', 'routes', 'agent.py'),
+      'AGENT = "NEW-FROM-WORKSPACE"\n', 'utf8');
+    const d1 = decideHere({ seededAtMs: seededAt1 });
+    ok('镜像在上次播种后被更新 → keep（绝不被安装区覆盖）',
+      d1.action === 'keep' && d1.reason === 'mirror-touched-after-seed', d1.reason);
+
+    // ⑥ 只有安装区变化（重新打包）→ seed
+    reseedMirror();
+    const seededAt2 = Date.now();
+    writeInstalled(path.join('backend', 'app.py'), 'print("rebuilt")\n');
+    const d2 = decideHere({ seededAtMs: seededAt2 });
+    ok('只有安装区变化（重新打包）→ seed', d2.action === 'seed', d2.action + '/' + d2.reason);
+
+    // ⑦ 远端资源增量 → 永不覆盖
+    const d3 = decideHere({ seededAtMs: seededAt2, contentMarker: 'remote' });
+    ok('contentMarker=remote → keep', d3.action === 'keep' && d3.reason === 'remote-content', d3.reason);
+
+    // ⑧ 显式策略出口
+    ok('MJSCXT_MIRROR_POLICY=installed → seed',
+      decideHere({ policy: 'installed' }).action === 'seed');
+    ok('MJSCXT_MIRROR_POLICY=mirror → keep',
+      decideHere({ policy: 'mirror' }).action === 'keep');
+
+    // ⑨ 存量用户（没有播种基准）→ 仍按版本/内容判断（不能因为缺基准就永不播种）
+    const d4 = decideHere({ seededAtMs: 0, installedFp: 'aaa', mirrorFp: 'bbb' });
+    ok('无播种基准（存量用户）→ seed', d4.action === 'seed', d4.reason);
+
+    // ⑨b 存量用户（无播种基准）且镜像比安装区新 → 同样必须 keep
+    const d4b = decideHere({
+      seededAtMs: 0, installedFp: 'aaa', mirrorFp: 'bbb',
+      mirrorNewestMs: Date.now(), installedNewestMs: Date.now() - 3600 * 1000,
+    });
+    ok('无播种基准但镜像明显比安装区新 → keep',
+      d4b.action === 'keep' && d4b.reason === 'mirror-touched-after-seed', d4b.reason);
+
+    // ⑩ 整包换版（版本变化，镜像未被外部改）→ seed
+    const d5 = decideHere({ seededAtMs: seededAt2, installedVersion: '2.0.0', mirrorVersion: '1.0.0' });
+    ok('整包换版 → seed（安装区为准）', d5.action === 'seed' && d5.reason === 'version-changed', d5.reason);
+  } finally {
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    } catch (e) { /* 清理失败不影响结论 */ }
+  }
+
+  const failed = results.filter(function (r) { return !r.ok; });
+  if (asJson) {
+    console.log(JSON.stringify({ ok: failed.length === 0, checks: results }, null, 2));
+  } else {
+    for (const r of results) {
+      console.log((r.ok ? '  [PASS] ' : '  [FAIL] ') + r.name + (r.extra ? '   （' + r.extra + '）' : ''));
+    }
+    console.log('镜像策略自检：' + (results.length - failed.length) + '/' + results.length +
+      ' 通过' + (failed.length ? '（失败 ' + failed.length + ' 项）' : ''));
+  }
+  return failed.length === 0 ? 0 : 1;
+}
+
+// CLI 自检出口：命中 --mirror-* 时只跑上面的逻辑并退出，**不会启动 Electron**
+// （下面的 App 生命周期代码不会被执行）。
+if (MIRROR_CLI_CMD) {
+  let cliCode = 0;
+  try {
+    cliCode = mirrorCliMain(MIRROR_CLI_CMD, MIRROR_CLI_ARGV.slice(1));
+  } catch (e) {
+    console.error('[mirror-cli] 执行失败：' + ((e && e.stack) || e));
+    cliCode = 2;
+  }
+  process.exit(typeof cliCode === 'number' ? cliCode : 0);
 }
 
 // ---------------------------------------------------------------------------

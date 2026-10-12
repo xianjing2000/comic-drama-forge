@@ -12,6 +12,18 @@ r"""代码副本漂移检查器（只读，T7 建议①的最小实现；t9 补�
     python tools/check_app_sync.py --json          # 机器可读输出（CI 用）
     python tools/check_app_sync.py --strict-stale  # 允许陈旧目标不一致也算失败
 
+退出码语义（t15：可直接当门禁用）::
+    0 = 所有「必须同步」目标一致（打包产物的陈旧**不**影响退出码）
+    1 = 至少一个「必须同步」目标不一致（diff / missing / extra 任一非空）
+    2 = 源目录不存在（参数或工作目录错误）
+    ⚠️ --strict-stale 会把「允许陈旧」的打包产物也计入失败（交付前重新打包时用）。
+
+接入为可执行门禁::
+    · 单点使用：python tools/check_app_sync.py   → 退出码非 0 即判失败
+    · 一键门禁：python tools/deploy_gates.py     → 连同 electron-app/main.js 语法、
+      镜像播种策略自检一起跑（退出码语义见该脚本 docstring）
+    · 本工具**只读**：不复制、不删除任何文件；同步动作由人工/发布流程完成。
+
 默认副本集合（不存在则跳过，不报错）：
     electron-app\_backend\app                        （Electron 打包源，【必须同步】）
     C:\mjscxt_p139\resources\backend                  （生产/开发部署镜像，【必须同步】）
@@ -155,7 +167,11 @@ def main(argv=None) -> int:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    ap = argparse.ArgumentParser(description="代码副本漂移检查（只读，递归含子目录）")
+    ap = argparse.ArgumentParser(
+        description="代码副本漂移检查（只读，递归含子目录）",
+        epilog=("退出码：0=一致；1=有不一致（可当门禁）；2=源目录不存在。"
+                "一键门禁见 tools/deploy_gates.py。"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", default=str(ROOT / "app"), help="源目录（默认 app/）")
     ap.add_argument("--target", action="append", default=None,
                     help="目标目录，可重复（默认集合见模块 docstring）")
