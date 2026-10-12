@@ -1372,3 +1372,54 @@ class FailoverLLMClient:
 
 def client_from_config(config_path: str, timeout: int = DEFAULT_TIMEOUT) -> LLMClient:
     return LLMClient(config_path=config_path, timeout=timeout)
+
+
+def build_failover_chain(primary: LLMClient, model_fallbacks: list = None,
+                         fallbacks: list = None, config_path: str = None,
+                         timeout: int = None, module: str = "") -> LLMClient:
+    """按三层顺序构建故障转移链（t74）：主模型 → 同提供商 model_fallbacks → 其它提供商 fallbacks。
+
+    三层语义：
+      1) primary          —— 主模型（base_url/api_key/model）；
+      2) model_fallbacks  —— 同提供商备用**模型**（复用 primary 的 base_url/api_key，
+                             只换 model / reasoning_effort / label，**不新建密钥槽**）；
+      3) fallbacks        —— 不同提供商（各自 base_url/api_key/model）。
+
+    无任何备用时原样返回 primary；有备用返回 FailoverLLMClient（顺序即优先级）。
+    """
+    if not isinstance(primary, LLMClient):
+        raise LLMError("build_failover_chain 需要 LLMClient 主实例")
+    _cp = config_path or getattr(primary, "config_path", "")
+    _to = timeout or DEFAULT_TIMEOUT
+    clients = [primary]
+    labels = ["主模型"]
+    # 第二层：同提供商备用模型（复用 primary.base_url / primary.api_key）
+    for _mf in (model_fallbacks or []):
+        if not isinstance(_mf, dict):
+            continue
+        _m = str(_mf.get("model") or "").strip()
+        if not _m:
+            continue
+        clients.append(LLMClient(_cp, config={
+            "base_url": primary.base_url,
+            "api_key": primary.api_key,
+            "model": _m,
+            "reasoning_effort": str(_mf.get("reasoning_effort") or "").strip(),
+        }, timeout=_to))
+        labels.append(str(_mf.get("label") or "").strip() or _m)
+    # 第三层：不同提供商备用（各自 base_url/api_key/model）
+    for _fb in (fallbacks or []):
+        if not isinstance(_fb, dict):
+            continue
+        if not (_fb.get("base_url") and _fb.get("model") and _fb.get("api_key")):
+            continue
+        clients.append(LLMClient(_cp, config={
+            "base_url": _fb["base_url"],
+            "api_key": _fb["api_key"],
+            "model": _fb["model"],
+            "reasoning_effort": str(_fb.get("reasoning_effort") or "").strip(),
+        }, timeout=_to))
+        labels.append(str(_fb.get("label") or "").strip() or _fb.get("model") or "备用")
+    if len(clients) == 1:
+        return primary
+    return FailoverLLMClient(clients, labels=labels, module=module)

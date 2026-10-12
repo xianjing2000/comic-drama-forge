@@ -27,7 +27,7 @@ from flask import jsonify
 
 import ai_config
 from config import AI_CONFIG_PATH, AI_MODULES, LLM_CONFIG_PATH, LLM_REQUEST_TIMEOUT
-from llm_client import FailoverLLMClient, LLMClient, LLMError
+from llm_client import FailoverLLMClient, LLMClient, LLMError, build_failover_chain
 from shared_base import _app_logger
 
 
@@ -59,32 +59,19 @@ def _ai_client_for_module(module: str, base_url: str = None, api_key: str = None
         raise LLMError(f"「{AI_MODULE_LABEL.get(module, module)}」尚未配置"
                        "（base_url / api_key / model 均为必填）")
     primary = LLMClient(AI_CONFIG_PATH, config=ep, timeout=timeout or LLM_REQUEST_TIMEOUT)
-    # 备用模型故障转移链（顺序即优先级）：主模型连续 3 次 API 报错自动切备用，
-    # 任务继续跑不中断；备用全挂才抛错。缺密钥的备用跳过。
-    _fb_clients = []
-    _fb_labels = []
-    # ⚠️ 2026-09-30 修复：这里原本读的是 `ep.get("fallbacks")`，而 `ep` 是上面刚拼出来的
-    # 四字段字典（base_url/api_key/model/reasoning_effort），**从来不含 fallbacks** ——
-    # 于是这个循环永远拿不到备用模型，故障转移链从来就没被构造过，
-    # 「备用模型」在配置页配了也完全不生效（实测：配好后 _ai_client_for_module 仍返回裸 LLMClient）。
-    # 正确来源是 saved（ai_config.get_module 返回的完整模块视图，含已解密的备用密钥）。
-    for _fb in (saved.get("fallbacks") or []):
-        if not (_fb.get("base_url") and _fb.get("model") and _fb.get("api_key")):
-            continue
-        _fb_clients.append(LLMClient(AI_CONFIG_PATH, config={
-            "base_url": _fb["base_url"], "api_key": _fb["api_key"],
-            "model": _fb["model"],
-            "reasoning_effort": _fb.get("reasoning_effort") or "",
-        }, timeout=timeout or LLM_REQUEST_TIMEOUT))
-        _fb_labels.append(_fb.get("label") or _fb.get("model") or "备用")
-    # with_fallbacks=False 用于「测试连接」：探针只应该测**这一个端点**。
-    # ⚠️ 2026-10-01 实测：修好 fallbacks 取值来源之后，探针也把故障转移链带上了 ——
-    # 于是点一次「测试连接」会先连挂主模型 3 次、再切备用连挂 3 次（各带退避），
-    # 在限速网关上要几分钟才返回；用户侧表现为「点了测试没反应、什么信息都不显示」。
-    # 按索引测某条备用时更荒谬：primary 与备用是同一个端点，等于把同一个地址连测 6 次。
-    if _fb_clients and with_fallbacks:
-        return FailoverLLMClient([primary] + _fb_clients,
-                                 labels=["主模型"] + _fb_labels, module=module)
+    # ⭐ t74：三层故障转移链 = 主模型 → 同提供商 model_fallbacks（复用主 api_key）→
+    #   其它提供商 fallbacks（各自 base_url/api_key/model）。组装逻辑统一在
+    #   llm_client.build_failover_chain，这里只把 saved 的两层备用传进去。
+    # with_fallbacks=False 用于「测试连接」：探针只应该测这一个端点，不带故障转移链。
+    if with_fallbacks:
+        return build_failover_chain(
+            primary,
+            model_fallbacks=saved.get("model_fallbacks") or [],
+            fallbacks=saved.get("fallbacks") or [],
+            config_path=AI_CONFIG_PATH,
+            timeout=timeout,
+            module=module,
+        )
     return primary
 
 

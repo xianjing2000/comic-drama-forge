@@ -173,7 +173,7 @@ def _now() -> str:
 def _empty_module() -> dict:
     return {"base_url": "", "api_key": "", "model": "",
             "reasoning_effort": "", "updated_at": None,
-            "fallbacks": []}
+            "fallbacks": [], "model_fallbacks": []}
 
 
 def _empty_config() -> dict:
@@ -221,6 +221,29 @@ def _normalize_fallbacks(raw, module: str = "") -> list:
         }
         if entry["base_url"] and entry["model"]:
             out.append(entry)
+    return out
+
+
+def _normalize_model_fallbacks(raw) -> list:
+    """同提供商备用模型列表归一化（顺序即故障转移顺序）。
+
+    每项 = {model, reasoning_effort, label}。**复用模块自身 api_key**，不新建密钥槽
+    （t74 数据契约）：base_url / api_key 由消费方（get_module 的调用方）取模块主配置。
+    """
+    out = []
+    if not isinstance(raw, list):
+        return out
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        _m = str(item.get("model") or "").strip()
+        if not _m:
+            continue
+        out.append({
+            "model": _m,
+            "reasoning_effort": normalize_reasoning_effort(item.get("reasoning_effort")),
+            "label": str(item.get("label") or "").strip() or f"备用{i + 1}",
+        })
     return out
 
 
@@ -457,6 +480,11 @@ def _migrate_merge_chat(raw: dict, config_path: str) -> tuple:
         merged["api_key"] = _cv_key
     merged["updated_at"] = merged.get("updated_at") or chat.get("updated_at")
     merged["fallbacks"] = _merge_fallback_items(text.get("fallbacks"), chat.get("fallbacks"))
+    # ⭐ t74：model_fallbacks 也要合并（text 优先，text 空取 chat 的；复用主密钥无独立槽）
+    _mf = _normalize_model_fallbacks(text.get("model_fallbacks"))
+    if not _mf:
+        _mf = _normalize_model_fallbacks(chat.get("model_fallbacks"))
+    merged["model_fallbacks"] = _mf
     _migrate_chat_key_to_text()
 
     modules["text"] = merged
@@ -535,6 +563,7 @@ def get_module(cfg: dict, module: str) -> dict:
     _raw_m = modules.get(module)
     ep = _normalize_module(_raw_m)
     ep["fallbacks"] = _normalize_fallbacks((_raw_m or {}).get("fallbacks") if isinstance(_raw_m, dict) else [], module)
+    ep["model_fallbacks"] = _normalize_model_fallbacks((_raw_m or {}).get("model_fallbacks") if isinstance(_raw_m, dict) else [])
     ns = f"ai.{module}"
     # ⭐ 单一事实源：DB（ai_credentials 表）优先。get_credentials 内部已按
     # env > DB 解析，直接信任其结果；DB 有非空字段就覆盖 json 值。
@@ -583,7 +612,8 @@ def get_module(cfg: dict, module: str) -> dict:
 @_locked
 def save_module(config_path: str, module: str, base_url: str = None, model: str = None,
                 api_key: str = None, legacy_path: str = None,
-                reasoning_effort: str = None, fallbacks: list = None) -> dict:
+                reasoning_effort: str = None, fallbacks: list = None,
+                model_fallbacks: list = None) -> dict:
     """保存单个模块。
 
     密钥处理（P0-3 加固）：
@@ -666,6 +696,21 @@ def save_module(config_path: str, module: str, base_url: str = None, model: str 
                         _entry["api_key_masked"] = str(_prev.get("api_key_masked") or "")
                 _norm_fb.append(_entry)
         ep["fallbacks"] = _norm_fb
+    # 同提供商备用模型：复用模块自身 api_key，**不新建密钥槽**（t74 契约）
+    if model_fallbacks is not None:
+        _norm_mf = []
+        for _i, _mf in enumerate(model_fallbacks or []):
+            if not isinstance(_mf, dict):
+                continue
+            _m = str(_mf.get("model") or "").strip()
+            if not _m:
+                continue
+            _norm_mf.append({
+                "model": _m,
+                "reasoning_effort": normalize_reasoning_effort(_mf.get("reasoning_effort")),
+                "label": str(_mf.get("label") or "").strip() or f"备用{_i + 1}",
+            })
+        ep["model_fallbacks"] = _norm_mf
     if key and "*" not in key:
         if not _store().set_api_key(f"ai.{module}", key):
             raise ValueError(
@@ -751,6 +796,21 @@ def _fallbacks_public_view(fallbacks) -> list:
     return out
 
 
+def _model_fallbacks_public_view(model_fallbacks) -> list:
+    """同提供商备用模型的对外脱敏视图（无 api_key —— 复用模块主密钥，故无密钥字段）。"""
+    out = []
+    for i, mf in enumerate(model_fallbacks or []):
+        if not isinstance(mf, dict):
+            continue
+        out.append({
+            "model": mf.get("model") or "",
+            "reasoning_effort": normalize_reasoning_effort(mf.get("reasoning_effort")),
+            "label": mf.get("label") or f"备用{i + 1}",
+            "index": i,
+        })
+    return out
+
+
 def module_public_view(ep: dict) -> dict:
     """单个模块的对外视图（绝不含 api_key 明文）"""
     key = (ep or {}).get("api_key") or ""
@@ -768,6 +828,8 @@ def module_public_view(ep: dict) -> dict:
         "updated_at": (ep or {}).get("updated_at"),
         # 备用模型（脱敏视图：api_key 永不回显明文）
         "fallbacks": _fallbacks_public_view(ep.get("fallbacks")),
+        # 同提供商备用模型（复用模块主密钥，无独立密钥字段）
+        "model_fallbacks": _model_fallbacks_public_view(ep.get("model_fallbacks")),
     }
 
 
