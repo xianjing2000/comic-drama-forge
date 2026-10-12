@@ -58,7 +58,7 @@
       "provider": "wb-vision",
       "model": "cn:deepseek-v4.1-flash",
       "joinedAt": 1791780911210,
-      "status": "idle"
+      "status": "working"
     },
     {
       "id": "cabc2490-0f89-454b-8453-f16fe0f62c34",
@@ -121,7 +121,7 @@
       "provider": "wb-vision",
       "model": "cn:deepseek-v4.1-flash",
       "joinedAt": 1791782924979,
-      "status": "working"
+      "status": "idle"
     },
     {
       "id": "357b0a4e-84b1-45dd-a5ab-3e06cc2845a0",
@@ -405,7 +405,7 @@
       "profileSeedId": "T4",
       "subject": "独立验证 t1-t15 全部审计结论（全功能域 + 设计层 + 前端）",
       "description": "对全部任务逐条复核（含横切层）：\n  t1 分段导出/单镜返工方案 ｜ t2 面板雷同量化 ｜ t3 性能画像\n  t5 提示词工程链路 ｜ t6 质检与质量门 ｜ t7 基础设施与流水线\n  t8 一致性/连续性+前端 ｜ t9 资产/参考图 ｜ t10 配音/音频 ｜ t11 超分/成片\n  t12 项目设计审计（架构层） ｜ t13 代码审核（质量层）\n\n复核要点：结论是否被证据支撑、是否遗漏反例、是否与生产现状矛盾、\n任何「声称已验证但实际未运行」的内容。\n产出：每条标注 通过 / 存疑 / 驳回 + 复核方式与反证；汇总必须修的阻塞项清单（按严重度排序）。\n约束：只读复核。",
-      "status": "pending",
+      "status": "claimed",
       "dependencies": [
         "t1",
         "t2",
@@ -422,11 +422,12 @@
         "t14",
         "t15"
       ],
-      "attempt": 0,
+      "attempt": 1,
       "createdAt": 1791780768250,
-      "updatedAt": 1791782924926,
-      "handoffId": "627f853c-9463-4576-abfb-55e16716066e",
-      "reassigning": false
+      "updatedAt": 1791783528768,
+      "reassigning": false,
+      "assignee": "audio-dev",
+      "attemptId": "3595073d-d118-498c-a82c-a2ebcf09f887"
     },
     {
       "id": "t5",
@@ -1081,16 +1082,16 @@
       "id": "t13",
       "subject": "代码审核：本次 8 个提交逐行 review + 全库代码质量/安全/并发审查",
       "description": "定位：这是**代码质量层**审核。分两部分。\n\n【A. 本次会话的 8 个提交逐行 review】\n  d7af64b  九宫格反雷同提示词（模板重写）\n  7f685de  补「角色与设定不符」硬阻断词（两处词表同步）\n  a436dc1  修物品图背景口径必然失败矛盾\n  c4d3165  补回「格间差异」判据字样\n  3455c0d  预检结果缓存（新增 _PF_CACHE + 包装器）\n  9e19791  修正「空槽位已留空」日志措辞\n  3ffc7a6  分段导出 + 单镜返工自动重新拼接\n  ffdbe09  修分段排序键取错数字（mp4 里的 4）\n  对每个提交：判断逻辑是否正确、边界是否覆盖、是否有引入回归的可能、注释与代码是否一致。\n  ⚠️ 特别审查 3455c0d 与 3ffc7a6（改动最重）：\n    · _PF_CACHE 的 key 是否真的覆盖全部影响判决的输入？ctx 只取 8 个字段够不够？\n    · 缓存与「教训库召回」叠加的顺序是否会互相污染？\n    · _recompose_episode_video 的段位替换（返工段只占第一个段位）是否会丢帧或产生空位？\n    · 若 concat 返回空串，各调用点是否都判空了？\n\n【B. 全库代码质量 / 安全 / 并发】\n1) **安全性**：用户可控字符串进入路径拼接或 shell 命令的地方（目录穿越、命令注入）。\n   已知入口：project 名、shot_id、filename_prefix。逐条给出风险等级与修复建议。\n2) **并发安全**：多线程共享状态的锁覆盖是否完整（预取线程 / 托管守护 / 预热线程 / 心跳线程）。\n   指出任何「读写不加锁」或「锁顺序可能死锁」的位置。\n3) **异常处理**：找出 `except Exception: pass` 这类静默吞错，评估哪些应至少记日志。\n4) **死代码/重复代码**：可安全删除或合并的部分。\n\n约束：**只读审查**，不得改写任何文件（发现问题只报告，不自行修复）。\n证据：每条结论附 路径:行号；对 A 部分要引用具体 diff 行。",
-      "status": "in_progress",
+      "status": "completed",
       "dependencies": [],
       "attempt": 2,
       "createdAt": 1791781251601,
-      "updatedAt": 1791782977439,
+      "updatedAt": 1791783528753,
       "kind": "work",
       "reassigning": false,
       "assignee": "pipeline-dev",
       "attemptId": "1edaad22-f4c0-4a53-ac47-05ce06b8000c",
-      "output": "开始只读代码审核：A 部分 8 个提交逐行 review + B 部分全库安全性/并发/异常/死代码审查。"
+      "output": "【t13 代码审核报告｜只读，未修改任何文件】\n审核对象：d7af64b、7f685de、a436dc1、c4d3165、3455c0d、9e19791、3ffc7a6、ffdbe09（HEAD=ffdbe09）\n审核方式：git show 逐行 diff + 源码精读 + AST 只读扫描（锁覆盖 / shell 调用 / 静默吞错 / 词表一致性 / sync 校验）\n\n══════ 结论摘要 ══════\nREJECT（不通过）。8 个提交里 7 个逻辑正确（其中 c4d3165 是对 d7af64b 的同批自救），但 3ffc7a6 有 2 条阻断级缺陷（P0-1 能力不可达、P0-2 成片被截断回归）+ 4 条重要缺陷；3455c0d 的缓存 key 覆盖不全（cfg 与 ctx 多字段缺失），会造成静默错判。另发现 HEAD 与工作区/线上副本对 export_mode 的默认值不一致（未提交），需 captain 决策。\n\n══════ A. 8 个提交逐行 review ══════\n\nA1 d7af64b 九宫格反雷同模板重写 —— 逻辑正确，但引入 2 个副作用\n· 正确：删除冲突句「所有分镜…保持高度一致」、把反雷同段从 {panel_plans} 后移到角色设定之后、拆 5 维度+阈值（diff @@ -21,22 +21,33 @@；现行 app/prompts/storyboard_grid_main.txt:27-41、:43-47）。模板占位符与头部变量说明一一对应（同文件 :9-20 vs :22-65），无未注入变量。\n· 副作用①（已由 c4d3165 补救）：删掉了字面量「格间差异」，而 prompt_qc.py:549 与 storyboard_helpers.py:1885 靠该字样判据（字面匹配）→ 单独看 d7af64b 是一次「提示词层修复引入 QC 回归」。\n· 副作用②（未修）：把 .bak 快照提交进版本库（git show d7af64b --stat: app/prompts/storyboard_grid_main.txt.bak-20261012 | 53 +）。同一批 71894e8 已在 .gitignore 补 *.bak-*，但对**已跟踪**文件无效 → 该文件至今仍在索引（git ls-files 命中）。建议 git rm --cached（仅取消跟踪）。\n· 边界：prompt_templates.load 是「用户覆盖 > app/prompts」分层（prompt_templates.py:4），若数据目录已存在旧 storyboard_grid_main.txt 覆盖文件，本次改动不生效；提交说明未提示。\n\nA2 7f685de 硬阻断词补齐（两处词表）—— 正确，验证通过\n· AST 提取两表比对：新增 20 条在 qc_client.CRITICAL_ISSUE_KEYWORDS(95 条) 与 sb_helpers._SB_STRUCTURAL_DEFECT_KEYWORDS(40 条) 两侧**完全一致**，且 sb 表是 qc 表子集（差集为空）。\n· 匹配实现 qc_client.py:549-567 是 **子串扫描 + 否定语境过滤**（_has_negative_context，:560），所以「无明显不符」「未出现与设定不符」不会被误杀 —— 误杀面比想象小。\n· 残留风险（低-中）：「明显不符 / 明显不一致」是无前置词的宽短语，会把**非角色类**缺陷（如「画面与剧本明显不符」「与上一镜明显不一致」的场景/剧情缺陷）一并升级为 critical 硬阻断。这属于用词表逼近语义的固有代价，建议中期改为让判官输出结构化 kind 字段，Python 侧按 kind 判级，而不是继续堆词。\n· 措辞漂移仍未封死（如判官写「和设定图对不上」）——本次只覆盖了「不符/不一致」这一支。\n\nA3 a436dc1 物品图背景口径 —— 正确，风险低\n· 判据追加位于 if str(asset_type) == \"item\" 分支内（asset_worker.py:979 附近的 :989-1006），只影响物品图，角色/场景不受影响；文本自洽且明确「真画出承托物实体仍判关键缺陷」，未放宽实体判定。\n· 唯一提示：该段是注入质检模型的自然语言，新增约 250 字会稀释通用判据注意力（不可测，仅提示）。\n\nA4 c4d3165 补回「格间差异」字样 —— 正确，且未引入新误报\n· 模板标题改回「格间差异（先读这条…）」（storyboard_grid_main.txt:27-28）。\n· 两处判据都只在**中文逐格范式**分支触发：prompt_qc.py:542 if grid_zh: → :549；storyboard_helpers.py:1879 if _grid_zh_protocol(t): → :1885。英文回落路径不会命中判据 → 与提交说明「fail-open」一致。\n· 脆弱性（建议）：模板与 QC 判据用字面量字符串跨文件耦合，且同一判据在两处复制。建议提常量（如 SB_MARK_GRID_ZH_DIFF）并加一条「模板必须含该字样」的断言测试，避免第三次踩坑。\n\nA5 3455c0d 预检缓存（_PF_CACHE）—— ⚠️ key 覆盖不全，会静默错判\n· 缓存层本身实现规范：命中深拷贝返回（prompt_qc.py:1438）、只读不改判定、FIFO 淘汰（:1449）、开关 MJSCXT_PROMPT_QC_CACHE（:1388-1390）、全部状态访问都在 _PF_LOCK 内（:1395/1434/1437/1439/1447）——线程安全无问题。\n· 【缺陷 1｜中高】key 漏掉 cfg。_pf_cache_key(:1416-1428) 只含 kind/style/ref_count/expect_refs/ctx 8 字段/prompt，但 _preflight_uncached 的判决直接依赖 cfg：mode = prompt_qc_mode(cfg)(:1512)、prompt_qc_ready(cfg)(:1514)、check_prompt(..., cfg=cfg)(:1542/1565/1614)。cfg 在调用点**真实存在且可变**（keyframe_helpers.py:172 每镜读质检配置；routes/qc.py:389、workers/audio.py:108 直传 cfg）。后果：用户改 prompt_qc 模式/阈值（不重启）后，同一 prompt 命中缓存 → 返回旧模式的 accept/blocked；极端情况「关掉预检」仍会拿到旧结论，与「关闭即旁路」契约冲突。修复：把 cfg 的判决相关字段（mode/ready/阈值/开关）纳入 key，或对 cfg 做规范化序列化入 key。\n· 【缺陷 2｜中高】ctx 只取 8 字段，不足以覆盖判决输入。check_prompt 还读：dialogue(:321)、items_in_shot/items(:404)、characters/characters_in_shot(:434-436)、prev_shot(:461,:652)、_blocking_ref(:599)、chained(:1022)、voice_mode(:1142)、speaker_fallback(:1150)、require_style(:1154)。这些字段不出现在 prompt 文本里、也不在 key 里 → 同文本不同上下文会串味（可构造：第二次带 _blocking_ref 的调用命中第一次的 accept=True → 漏阻断）。修复：ctx 全量规范化后入 key（排序键 + 截断哈希），并同步 prompt_enhance._CTX_KEYS 口径。\n· 【缺陷 3｜中】except 兜底会重跑一次预检：prompt_qc.py:1483-1486 捕获任何异常后再次调用 _preflight_uncached。改动前异常直接上抛；现在若 _preflight_uncached 自身抛错（含其内部 LLM 已计费/已耗时 80s+ 的路径），会**再跑一遍**，失败场景耗时翻倍。修复：区分「缓存层异常」与「预检本体异常」，前者才降级，后者原样上抛。\n· 【缺陷 4｜低】_pf_cache_put 静默吞错（:1451-1452 except Exception: pass）—— 至少 logger.debug。\n· 缓存 × 教训库召回：**不会互相污染** ✓。召回发生在包装层之外、且在 preflight 之前（keyframe_helpers.py:175-179 先 learned_prompt 再 preflight），key 用的是**召回后**文本 → 教训库变化必然换 key；缓存命中也不会跳过教训沉淀（:192-197 照常执行）。\n· FIFO 说明：命中不刷新位置（get 不移动条目），是严格 FIFO 而非 LRU —— 与注释一致，仅提示热条目可能被淘汰。\n\nA6 9e19791 日志措辞 —— 文案与实现一致 ✓\n· 新日志在 comfyui_client.py:4537-4540（「空槽位已删除节点 …不提交执行」）；其描述的 pop 行为见同函数上文 :4519-4527（pop 中间缩放层 + pop load_id）。属零行为变更。\n· 局限：提交说明里的「30 节点→18/16 节点」实测数据本轮未复验（触发需真跑 ComfyUI，超出只读范围）。\n\nA7 3ffc7a6 分段导出 + 单镜返工重拼 —— ⚠️ 2 条阻断级 + 4 条重要缺陷\n· 【P0-1｜能力不可达，代码层可证】两处新增的「多段」分支都依赖 files 长度>1，而两个上游 API 契约恒为单文件：\n   – video_helpers.py:1922 if len(_seg_files) > 1（整集）—— _seg_files 来自 generate_h3_sequence_sequential，该函数仅在 comfyui_client.py:4786 返回 \"files\": [best_file]，而 best_file = files[0]（:4720）。\n   – video_helpers.py:437 if len(_rs_files) > 1（单镜）—— files 来自 generate_h3_sequence（契约见 :4604 docstring）同样单文件。\n   故 seg_0000.mp4 落盘 + seg_map.json + 自拼这条路**在默认路径上根本不会执行**；且默认逐场分支只取 _sf[0]（video_helpers.py:1698-1701）、根本不写 seg_map（写盘代码 :1902-1921 在整集分支内）→ 返工闭环节点在默认配置下 100% 断。\n· 【P0-2｜行为回归，同提交引入】同提交把 export_mode 默认 all→segments（comfyui_client.py:5432-5433）。segments 模式下插件把前序段替换为 1 帧海报、只把最后一段喂 SaveVideo（证据见 docs/segments-export-video-audit-20261012.md:17-27 与 5.6 AST 探针），后端一个场次只拿到**最后一段** → 每场成片被截成 2~5 秒；而逐场路径 :1699 只判 _sf[0] 存在，后半段缺失不会被拦，最终由视频 QC 时长闸门判 fatal 并触发换种子整场重渲（历史同因烧过约 6 小时 GPU）。\n  后端侧「恒为单文件」我已用代码独立复验；插件侧机制引用上述审计文档，本轮未复跑。\n· 【P1-1｜docstring 与实现相反】docstring 写「原其余段位置空（宁可少段也不重复）」（video_helpers.py:105-106），实现只把 min(idx) 段位换成返工段（:147-149），**其余原段位仍指向旧 seg 文件** → 多段镜返工后会出现「新返工段 + 旧残留子段」，画面重复/时间轴错乱。要么真置空，要么改文档。\n· 【P1-2｜HEAD 仍带真 bug，工作区已修但未提交】提交版是 _sm = read_json_strict(_mapf) or {}，而 read_json_strict(path, default) 是**两参必需**（fs_atomic.py:202）→ TypeError → 被 :170-172 宽 except 吞成「[重新合成] 异常（保留旧成片）」→ 自动重拼**从未生效**。工作区现值是 read_json_strict(_mapf, {})（:120，注释署名 t17 实测）。即：HEAD(ffdbe09) 不可用，修复未提交。\n· 【P1-3｜段位映射可错位且无校验】seg_map 的 shot_to_seg 用 enumerate(segs) 下标（:1905-1909），实际段号来自 enumerate(_seg_files)（:1924-1925）；一旦两者不同源（segs 与 files 不等长、某段落盘失败被跳过 :1930-1931 造成跳号），返工会替换到**错误段位**，无任何一致性校验。\n· 【P1-4｜覆盖旧成片存在空窗】:161-166 先 _trash_move(_out) 再 _move_with_retry(_ret, _out)；若 move 抛错，旧片已进回收站、新片未就位，函数返回 \"\" → 磁盘上无成片（下游 probe_video 判 not-ready）。建议改为写临时名 + os.replace 原子替换。\n· 【已核实无问题】concat 返回空串的判空：全库 5 个调用点全部判空 —— video_helpers.py:156-160、:441-451、:1936-1947、pipeline.py:813-817(if not cv or not _playable(cv))、video_postprocess.py:845-850。与 concat_videos 的返回值契约（video_postprocess.py:403-412）一致。\n· 【注释漂移】video_postprocess.py:406-409 列出的调用点行号已过期（写 pipeline.py:791，实际 813；写 video_helpers.py:1918，实际 1936）—— 3ffc7a6 在文件前部插入约 105 行导致。\n· 【代码组织】新函数 _recompose_episode_video/_seg_sort_key 被插在 import 区中间：video_helpers.py:95-199 之后紧接着 :200 import contextvars。建议下移到函数区。\n· 【前端缺口】返回体新增 recomposed/recomposed_file（video_helpers.py:499-500），但 frontend/src 中 0 处引用（grep recomposed）→ 用户点「重跑本镜」后 UI 无法知道成片是否已自动重拼。符合 captain 补充的「后端改动必须有对应前端改动」缺口。\n\nA8 ffdbe09 排序键修复 —— 正确 ✓\n· os.path.splitext 去掉扩展名后再抽最后一段数字（video_helpers.py:192），根治「mp4 里的 4」；无数字文件回落 (1,0) 排末尾（:194-195）。docs 审计 5.6 已用真实文件名复跑（a_00010_->(0,10)、seg_0000.mp4->(0,0)）。\n· 残留边界（低）：「取文件名最后一组数字」依赖 SaveVideo 计数器命名；若前缀自带更大数字（如项目名含年份）仍会取错。\n\n══════ B. 全库质量 / 安全 / 并发 ══════\n\nB1 安全性（AST 扫描 app/**.py，130 个模块）\n1) 命令注入：subprocess/os.system 调用 37 处，**shell=True 0 处**（均为列表参数）→ 无命令注入面。风险：无。\n2) project 名 → 低风险 ✓：统一入口 _project_or_400（shared_project.py:60-111）已拒绝 ..、路径分隔符、绝对路径、控制字符、无有效字符，并在收敛后做 abspath 前缀二次校验；_safe_project→project_store.safe_key(:85-90) 把非法字符收敛为 _（中文保留）。修视频重跑也走该入口（video_helpers.py:237）。\n3) shot_id → 低风险 ✓：进入文件名前经 qc_client.safe_token（artifact_helpers.py:219-220）与 _shot_seq 数字提取（video_helpers.py:250、431）。\n4) filename_prefix → **中风险**（唯一需要加固的点）：project 片段已净化，但另有片段未净化就进 ComfyUI 输出路径：\n   – scene_grid.py:132 f\"comic_drama_scenegrid/{project}_{scene_name}_{angle['key']}\"（scene_name 由调用方传入，未见净化）；\n   – comfyui_client.py:3444 f\"comic_drama_shotgrid/{project}_{shot_key}\"（shot_key 来源需调用方确认）。\n   若片段含 ../ 或分隔符，可让 ComfyUI 的 SaveImage 写到 output 目录之外（同机写文件）。建议在 comfyui_client 侧对 prefix 做**单一收口**校验（拒绝 .. / 分隔符 / 绝对路径），一处覆盖全部调用点。\n5) 文件服务接口 → 低风险 ✓：16 处 send_file/send_from_directory 全部有防护 —— _serve_safe（shared_web.py:76-96，abspath+base 前缀）、_serve_attachment（export.py:20-33）、qc.py:827-836、scenes.py:116-121、tts.py:300-304（自建前缀校验）、autopilot.py:438-442（走交付物索引 pipeline.deliverable_path:2889-2911，仅按 basename 命中索引）、app.py 的 send_from_directory（Flask 内置防护）。\n6) 错误信息泄露 → 中低风险：routes/ 内 str(e) 直回 61 处命中（示例 routes/ai.py:223、routes/continuity.py:27、routes/final.py:311、routes/export.py:66）。与 t8 结论一致，建议统一走 shared_web._friendly_error 收口，避免暴露绝对路径与原始异常。\n\nB2 并发安全（AST 锁覆盖扫描）\n· 全部为「0 处无锁访问」：autopilot._STATE 30 处访问全在 _LOCK 内；comfyui_client._ENGINE_STATE 19 处在 _ENGINE_LOCK 内；generation_state（video_helpers 28 / storyboard_helpers 16 / asset_worker 7）全部 with lock 内；预取态 _pf_cache/_pf_threads/_pf_scheduled（storyboard_helpers.py:808-811）全部 _pf_lock 内；本次新增 _PF_CACHE/_PF_HIT/_PF_MISS 全在 _PF_LOCK 内。→ 任务点名的「预取线程 / 托管守护 / 心跳线程」均未发现「读写不加锁」。\n· 预取线程纪律（storyboard_helpers.py:800-811、1082-1094、1111、1171）：写侧只写 _pf_cache、读侧 pop 加锁、同镜至多一线程（_pf_scheduled 幂等）—— 设计正确。\n· 残留风险（低）：_pf_cache/_pf_threads/_pf_scheduled 只增不减、无容量上限；若某镜写入后主循环未 pop（镜头被跳过/批次中止）会长期驻留。建议加清理。\n· 心跳线程（comfyui_client.py:6038-6066）：启动幂等由 _ENGINE_LOCK 保护，循环异常 logger.debug（:6058-6059）。\n· 死锁：抽查 pipeline._EP_LOCKS_GUARD→lk（pipeline.py:73/100）、storyboard_helpers._TE3D_RENDER_LOCK(:124)、task_lease(:247) 未发现反向锁序；但**未做全库锁序图分析**，此项不能宣称「已穷尽」。\n· 语义竞态（低）：generation_state 的「读-改-写」若跨两次加锁仍可能丢更新；抽查未发现跨锁复合写。\n\nB3 异常处理（AST 严格匹配 except→单 pass）\n· 全库 73 处：Exception 43、OSError 19、其它元组 11。\n· 本次改动引入的 2 处建议升级日志：prompt_qc.py:1451（缓存回填吞错→debug）、video_helpers.py:164（旧成片入回收站失败→warning，直接关系「新片是否就位/旧片是否消失」）。\n· 已读上下文、判定**低危可留**的示例：asset_worker.py:681（资产提示词预热单条失败）、comfyui_client.py:5999（忙判定降级）、serve.py:63（utf8 重入失败）、serve.py:89（stdio reconfigure）、storyboard_helpers.py:1671（进度上报）、storyboard_helpers.py:1809（meta 旁路写）、task_lease.py:119/143（临时文件清理）、video_helpers.py:577（voice_bank 查询）—— 建议统一补 logger.debug，但不阻断。\n· 未逐条读上下文的候选（建议下一个任务补日志）：video_helpers.py:1201/1671、comfyui_client.py:5999 之外的同文件其它项、routes/qc.py:641/669、routes/characters.py:110、routes/assets_api.py:422、quality_stage.py:285、canon.py:777/1037、project_helpers.py:58、workers/episodes.py:148。\n\nB4 死代码 / 重复代码\n· 不可达代码：video_helpers.py:1922-1951 与 :437-451 的多段 concat 分支（见 A7 P0-1）—— 建议与 P0-1 一起修。\n· 死参数：concat_videos 的 audio_paths（video_postprocess.py:421-426 自己注明「全库无调用方」）→ 可删。\n· 死函数：prompt_qc.prompt_qc_cache_stats（prompt_qc.py:1393-1397）全库无调用方（grep 仅定义处命中）→ 要么接 diagnostics 接口，要么删。\n· 已跟踪的备份文件：app/prompts/storyboard_grid_main.txt.bak-20261012（.gitignore 的 *.bak-* 对已跟踪文件无效）→ git rm --cached。\n· 重复实现：_serve_safe（shared_web.py:76-96）与 _serve_attachment（export.py:20-33）是同一逻辑两份，前者支持 **send_kw 透传，可直接复用。\n· 已确认死代码已清：app/templates/build_v2.py、app/templates/index.html 工作区已删除（与 t14/t15 结论一致）。\n\n══════ 生产面状态（与审核直接相关，需 captain 决策）══════\n· HEAD(ffdbe09) 的 comfyui_client.py:5432-5433 默认值是 segments；而**工作区当前是 all**（未提交，git diff 显示 \"- or \\\"segments\\\"\" → \"+ or \\\"all\\\"\"），且 backend(C:\\mjscxt_p139\\resources\\backend) 与 resource-mirror(%APPDATA%\\mjscxt-desktop\\resource-mirror\\app) 两处副本与工作区一致（均为 all）。\n· tools/check_app_sync.py 只读校验：本次 8 提交触及的 6 个 .py 在两处副本中**已同步** ✓；但 config_doctor.py、h3_prompt_kit.py 两处仍与工作区不一致（未提交改动未同步）→ 「app/*.py 必须同步两处」不变式当前被破坏。\n· 结论：代码审核面（HEAD）与实际运行面（工作区/线上）在 export_mode 上相反。若按 HEAD 上线分段导出，将命中 A7 P0-2；当前线上 all 是止损态。\n\n══════ 局限（未覆盖）══════\n1) 只读审查，未运行 tests/（264 passed 是各提交自述，未复验）；2) 插件侧行为引用 docs/segments-export-video-audit-20261012.md，未独立复跑 ComfyUI；3) 锁序未做全库图分析；4) B3 中列出的未读上下文项属候选清单。\n\n证据命令（均为只读）：git show -U5 <sha>；python tools/check_app_sync.py；AST 脚本扫描（except→pass / subprocess shell / 锁覆盖 / 词表比对）。"
     },
     {
       "id": "t14",
@@ -1854,16 +1855,90 @@
       "id": "t22",
       "subject": "软件测试体系：盘点现有测试覆盖，设计缺口测试与可自动化回归",
       "description": "定位：**测试层**。项目已有 tests/ 与多个 verify_*.py 守卫，但覆盖度未知、\n且本轮审计暴露的多个缺陷（concat 音轨半截、shot_NN 劫持、stale 不闭环、\nrecompose read_json_strict 少传 default、软放行漏判手指畸变）**都没有被测试拦住**。\n\n**产出**：\n1) 现状盘点：tests/ 与仓库根 verify_*.py 的全部用例清单，按「覆盖哪个模块 / 断言什么」归类；\n   给出**实测**总数与通过情况（可运行：python -m unittest discover -s tests -p \"test_*.py\"）；\n2) **缺口分析**：把本轮已发现的真缺陷逐条映射到「本该由哪一层测试拦住」：\n   · concat_videos 音轨一致性（B/C/E 三场景）\n   · read_json_strict 缺 default 导致 recompose 静默失败\n   · _seg_sort_key 取到扩展名里的数字（本会话已修的 bug）\n   · 软放行漏判（手指畸变类词表不同步）\n   · 交付物 stale 后仍可验收\n   对每条给出：缺失的测试类型（单元/集成/契约/回归）、应放置位置、可执行的断言；\n3) **测试策略**：明确分层（哪些走单元、哪些必须真 ffmpeg/真文件系统、哪些只能人工目检），\n   并给出「不允许进入主分支」的门禁清单（可直接接 CI）；\n4) 挑 2-3 条最高价值缺口，**写出实际可运行的测试骨架**（放在 tests/ 下，命名 test_*.py），\n   并实际执行证明它们真的能跑（若测试因环境缺失无法跑，必须说明而不是假装通过）。\n\n**约束**：可以**新增** tests/ 下的测试文件（inScope），**不得修改** app/ 下任何生产代码；\n不得重启或中断生产（视频阶段进行中）。\n证据：附实际执行命令与输出摘要。",
-      "status": "in_progress",
+      "status": "completed",
       "assignee": "test-engineer",
       "dependencies": [],
       "attempt": 1,
       "createdAt": 1791782732067,
-      "updatedAt": 1791782795289,
+      "updatedAt": 1791783565742,
       "kind": "work",
       "attemptId": "542abe98-50d0-4919-9d2a-2ce0d231f944",
       "reassigning": false,
-      "output": "开始盘点 tests/ 与 verify_*.py 覆盖。"
+      "output": "t22 完成：测试体系盘点 + 5 条缺陷缺口映射 + 分层策略与 12 条 CI 门禁 + 6 个可运行的新测试文件（57 用例，全绿）。\n\n【实测基线】tests/ 共 40 个 test_*.py；t22 之前基线 29 文件/264 用例；全量 discover = 461 用例 / 13.6s / 5 errors / 1 skipped / 0 failures。\n5 个 error 全部来自 tests/test_prune_mirror_backups.py，根因是 tools/prune_mirror_backups.py:98 的 argparse help 含未转义的 %APPDATA%（Python 3.14 起 % 必须转义），**不是测试自身问题**，t22 未修改生产代码。\n另发现：tests/test_config.py::TestDoctor 是间歇红灯（拿工作区真实配置当断言，同伴改 config 就红）。\n仓库根无 verify_*.py；守卫脚本实为 .workbuddy/test/verify_*.py 共 122 个、约 4379 条 check()，其中 22 个缺 sys.exit → 恒返回 0，无法做 CI 闸门。\n\n【缺口映射】5 条真缺陷逐条给出「缺失测试类型 / 位置 / 可执行断言」，并全部落地为测试：\nR-1 concat 音轨混搭(B/C/E) → 单元(分流)+真 ffmpeg 集成；R-2 read_json_strict 缺 default → AST 契约 + 重拼闭环集成；\nR-3 _seg_sort_key 取扩展名数字 → 纯单元；R-4 软放行词表不同步 → 表间契约 + 判据单元；R-5 stale 仍可验收 → 状态机集成。\n\n【新增测试（inScope）】tests/ 下 6 个新文件、57 用例，全部离线临时目录、不读 output/、不碰生产：\ntest_video_concat_audio.py(19)、test_concat_audio_mutation.py(2)、test_recompose_closure.py(12)、\ntest_stale_deliverable.py(8)、test_sb_soft_gate_sync.py(12)、test_mutation_guards.py(4)。\n其中 5 个用例为真 ffmpeg 集成（ffmpeg 9.0.1 实测存在，**未 skip**），其余为单元/契约/假外部集成。\n\n【测试自证】不只跑绿：用运行时变异证明新测试真能拦老缺陷（不改 app/ 落盘代码）——\n旧 _seg_sort_key → 排序测试变红；AST 改写 pipeline 调用点为单参数 → 契约测试变红；删掉 sb 手指畸变词族 → 软放行测试变红；\n旧 concat 分流判定 → 真 ffmpeg 实测音轨 2.06s（当前实现 4.02s）。\n\n【诚实声明（未盖住，不假装通过）】\nN1 默认按场次模式(MJSCXT_VIDEO_PER_SCENE=1)下重拼闭环仍不可达（无 seg_map.json），TestRecomposeClosure 只覆盖有 map 的路径 —— 属 t20/架构范围，建议单开任务；\nN2 上述 5 个 error 需先修 1 行（%APPDATA% → %%APPDATA%%）才能真正开启 CI 门禁 1；N4 仓库无 .github/workflows，门禁清单暂无 CI 载体；\nN5 app/*.py 双副本同步未验证（非 inScope）。\n\n【交付文档】docs/测试体系盘点_覆盖缺口与门禁_T22_20261012.md（含 40 文件覆盖归类、R-1..R-5 缺口表、L1~L5 分层、12 条门禁、可复核命令与输出摘要）。\ncaptain 的冻结提交 5e5a4ae 已包含这 6 个测试文件与本报告（逐个 git cat-file -e 核验 OK）。",
+      "changedPaths": [
+        "tests/test_video_concat_audio.py",
+        "tests/test_concat_audio_mutation.py",
+        "tests/test_recompose_closure.py",
+        "tests/test_stale_deliverable.py",
+        "tests/test_sb_soft_gate_sync.py",
+        "tests/test_mutation_guards.py",
+        "docs/测试体系盘点_覆盖缺口与门禁_T22_20261012.md"
+      ],
+      "acceptanceResults": [
+        {
+          "criterion": "现状盘点：tests/ 与 verify_*.py 全部用例清单，按覆盖模块/断言归类，并给出实测总数与通过情况",
+          "status": "passed",
+          "evidence": "报告 §1：40 个 test_*.py 按 10 个模块族归类（含逐个文件用例数）；122 个 .workbuddy/test/verify_*.py 按主题分布（qc10/asset7/h3 7/...）与约 4379 条 check()。实测：全量 discover 461 用例/13.6s/5 errors/1 skipped/0 failures；基线 29 文件 264 用例。仓库根无 verify_*.py（实测 Get-ChildItem -Recurse -Filter）。"
+        },
+        {
+          "criterion": "缺口分析：5 条真缺陷逐条映射到「本该由哪一层拦住」，含测试类型/位置/可执行断言",
+          "status": "passed",
+          "evidence": "报告 §2 的 R-1..R-5 五行表，每条给出缺失测试类型（单元/集成/契约）、应放置位置与实际断言；全部断言已在新增测试中落地（R-1 单元+真ffmpeg集成、R-2 AST契约+集成、R-3 单元、R-4 表间契约+单元、R-5 状态机集成）。"
+        },
+        {
+          "criterion": "测试策略：明确分层（单元/真 ffmpeg/人工目检）并给出不允许进主分支的门禁清单（可直接接 CI）",
+          "status": "passed",
+          "evidence": "报告 §3.1 定义 L1 单元 / L2 契约(静态) / L3 集成(假外部) / L4 集成(真 ffmpeg) / L5 人工目检 五层与时长预算；§3.3 给出 12 条门禁清单（命令 + 失败判定 + 现状），并标出 skip 不算通过、禁止拿工作区状态当断言等纪律。"
+        },
+        {
+          "criterion": "挑 2-3 条最高价值缺口写出可运行测试骨架（tests/ 下 test_*.py）并实际执行证明能跑",
+          "status": "passed",
+          "evidence": "实际写了 4 条缺口（R-1/R-2/R-3/R-4）+ R-5，共 6 个文件 57 用例；python -m unittest <6 文件> → Ran 57 tests in 5.948s / OK / exit=0。真 ffmpeg 用例未被 skip（ffmpeg version 9.0.1-full_build 实测存在）。另用变异验证证明测试能变红。"
+        },
+        {
+          "criterion": "约束遵守：只新增 tests/ 下文件，未修改 app/ 生产代码，未中断生产",
+          "status": "passed",
+          "evidence": "changedPaths 仅 6 个 tests/ 新文件 + 1 个 docs/ 新文档；未执行任何 app/ 写入。新增测试全部用 tempfile 造数据、不读 output/；AST 契约测试只读源码文本不执行。未重启/未调用任何生产接口。"
+        }
+      ],
+      "commandsRun": [
+        {
+          "command": "python -m unittest discover -s tests -p \"test_*.py\"",
+          "status": "failed",
+          "exitCode": 1,
+          "evidence": "Ran 461 tests in 13.573s — FAILED (errors=5, skipped=1)。5 个 error 全在 tests/test_prune_mirror_backups.py，根因 tools/prune_mirror_backups.py:98 的 argparse help 含未转义 %APPDATA%（Python 3.14）。t22 新增测试 0 failure/0 error；该红灯为既有、非本任务引入，已在报告 §0.1 登记。"
+        },
+        {
+          "command": "python -m unittest tests.test_video_concat_audio tests.test_concat_audio_mutation tests.test_recompose_closure tests.test_stale_deliverable tests.test_sb_soft_gate_sync tests.test_mutation_guards",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "Ran 57 tests in 5.948s — OK（0 failure / 0 error / 0 skipped）。含 5 个真 ffmpeg 集成用例与 4 个变异自证用例。"
+        },
+        {
+          "command": "python -c \"import shutil;print(shutil.which('ffmpeg'), shutil.which('ffprobe'))\"; ffmpeg -version",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "ffmpeg.exe / ffprobe.exe 均在 WinGet Links 下；ffmpeg version 9.0.1-full_build（说明 L4 集成层真的执行了，没有以 skip 冒充通过）。"
+        },
+        {
+          "command": "python .local/_t22_baseline.py（逐模块 TestLoader 对照基线 vs 新增）",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "committed baseline (29 files, HEAD=ffdbe09): tests=264 failures=0 errors=5 skipped=1；t22 新增 (6 files): tests=57 failures=0 errors=0 skipped=0。"
+        },
+        {
+          "command": "python .local/_t22_inv3.py 与 .local/_t22_inv4.py（守卫脚本体检 + tests 归类统计）",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "verify_*.py 共 122 个，check() 约 4379 条，含 sys.exit 的 100 个 → 22 个恒返回 0（报告 §3.4 列名）；tests/ 40 个文件、461 个 test 方法。"
+        },
+        {
+          "command": "git cat-file -e HEAD:tests/<新文件> 逐个核验",
+          "status": "passed",
+          "exitCode": 0,
+          "evidence": "6 个新测试文件与 docs/测试体系盘点_覆盖缺口与门禁_T22_20261012.md 均已在 captain 的冻结提交 5e5a4ae 中（OK×6）。"
+        }
+      ]
     },
     {
       "id": "t23",
@@ -1896,15 +1971,16 @@
       "id": "t25",
       "subject": "前端 UI/UX 设计：信息架构、交互流程、组件与状态规范（输出可实施的设计契约）",
       "description": "定位：**UI/UX 设计层**。当前前端有实现（frontend/ React+TS+Vite，118 源文件）但**没有设计契约**，\n导致 t8/t14 审计发现的系统性问题：23 处 EmptyState 仅 3 处带 action、\n40+ 处路由暴露绝对路径、4 处裸渲染 {error}、错误/空/加载三态无统一规范。\n\n**设计输入（必读，均为本会话实测结论）**：\n  · t14：唯一现役源码 frontend/src/**；产物 app/static；app/templates/build_v2.py 是死代码；\n        type-check 实测通过；vite build 的 emptyOutDir 会清空生产目录；\n        实测四套产物分属四个日期（桌面版用户看的是两周前 UI）；\n  · t8：现有组件库 frontend/src/components/ui/index.tsx（EmptyState:61-72 已预留 action 位、\n        ErrorState:89 已有 12 处在用）；23 处 EmptyState 仅 3 处带 action；\n        具体缺口：质检无记录、分镜无数据(ProjectWorkbenchPage:3104/3937)、\n        deliver.noDeliverables(OutputReviewTab:232)、QualityPanel:127；\n  · t15：前端交付链路已收敛（唯一路径 frontend → app/static → _backend → 安装包）；\n        文案单源 locales/*.json，走 /api/i18n/<lang>。\n\n**产出（要能直接指导实施，不是泛泛而谈）**：\n1) **信息架构**：完整页面层级与导航结构（对照实际路由与 App.tsx / Sidebar.tsx / Navbar.tsx），\n   标出每个页面归属哪个开发角色（pipeline-dev / media-dev / video-pipeline-dev / audio-dev）；\n2) **核心交互流程**：至少覆盖——新建项目到出片的主路径、单镜返工路径、\n   质检不通过的处理路径、验收/过期路径、失败重试路径；每步标注「用户看到什么 + 能做什么」；\n3) **状态规范（重点）**：空 / 加载 / 错误 / 部分成功 / 过期 五态的统一定义与展示规则，\n   明确每种状态**必须**给出的下一步动作（对齐 t8 的 23 处缺口）；\n4) **组件规范**：基于现有 ui/index.tsx 扩展的最小集合（列出需要新增的组件、props 契约、\n   使用场景），并给出「禁止裸渲染 error、禁止暴露绝对路径」的落地方式；\n5) **错误信息规范**：面向用户的可读文案规则（什么该说、什么该隐藏、如何给恢复动作），\n   对接后端 routes 层 `str(e)` 直出的问题；\n6) **交付与验证方式**：设计如何被验证（截图比对？组件 story？），\n   以及在生产运行期间安全构建前端的流程（避开 emptyOutDir 清空生产目录）。\n\n**约束**：本任务**只出设计**（可以新增文档，不改生产前端代码）；\n不得运行会清空 app/static 的默认构建；不得重启或中断生产（视频阶段进行中）。\n证据：设计中的每个现状判断都要附路径:行号或实测输出。",
-      "status": "claimed",
+      "status": "in_progress",
       "assignee": "architect",
       "dependencies": [],
       "attempt": 1,
       "createdAt": 1791783055611,
-      "updatedAt": 1791783423244,
+      "updatedAt": 1791783483642,
       "kind": "work",
       "attemptId": "1270eea5-7c08-4c5b-909d-71a07474578f",
-      "reassigning": false
+      "reassigning": false,
+      "output": "开始：读取 frontend/src 现状（App.tsx/Sidebar/Navbar/ui 组件库）与 t8/t14/t15 指出的缺口，产出前端设计契约"
     },
     {
       "id": "t26",

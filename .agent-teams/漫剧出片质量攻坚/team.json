@@ -932,7 +932,7 @@
       ],
       "attempt": 1,
       "createdAt": 1791782983292,
-      "updatedAt": 1791783009881,
+      "updatedAt": 1791783558498,
       "kind": "implementation",
       "round": 1,
       "objective": "修复 T10 引入的确定性回归：新增可配置常量 H3_CANON_MAX_CHARS 未在 app/config_doctor.py 的 REGISTRY 登记，\n导致全量测试失败（不是并发干扰，可稳定复现）。\n\n## 失败证据（Captain 独立复现，与 audio-eng 上报一致）\n  FAIL: test_doctor_ok_and_no_orphans (test_config.TestDoctor)\n  AssertionError: 存在未登记的可配置常量: [('h3_prompt_kit', 'H3_CANON_MAX_CHARS')]\n  Ran 364 tests / FAILED (failures=1, skipped=1)\n  config_doctor.orphan_candidates() → {'count':1, 'items':[{'module':'h3_prompt_kit','name':'H3_CANON_MAX_CHARS','type':'int','value':'400'}]}\n\n## 根因\napp/h3_prompt_kit.py:1590 新增 H3_CANON_MAX_CHARS = 400（git show HEAD 核对为 0 处，确认是 T10 新增），\n但 app/config_doctor.py 的 REGISTRY 未登记 → 孤儿常量检查失败。\n登记写法参照同模块既有条目：config_doctor.py:113/118/284/294/300（owner 形如 'h3_prompt_kit.MAX_PROMPT_CHARS'）。\n\n## 这个约定我此前没写进任务约束，属于 Captain 疏漏\n项目约定：凡新增【可配置常量】，必须在 config_doctor.REGISTRY 登记 owner，否则 test_doctor_ok_and_no_orphans 必失败。\n本任务同时要求把该约定写进 h3_prompt_kit.py 相应位置的注释，避免后续开发者重犯。\n\n## 顺带核实（不一定要你改）\ntools/check_app_sync.py 仍 exit 1，missing=['continuity_helpers.py'] —— 这是队友新增模块未同步，\n若不属于你的交付，只需在报告里指出并交回 Captain，不要越界代改他人文件。",
@@ -949,16 +949,19 @@
         "app/pipeline.py"
       ],
       "acceptance": [
-        "H3_CANON_MAX_CHARS 已在 config_doctor.REGISTRY 登记，字段齐全（owner / default / desc 等按既有条目口径）",
-        "config_doctor.orphan_candidates() 返回 count=0（贴出实际输出）",
-        "test_doctor_ok_and_no_orphans 通过；全量测试回到全绿（贴出 Ran/OK 行与退出码）",
+        "h3_canon_max_chars 已在 config_doctor.REGISTRY 登记，字段齐全（owner / default / range / group / desc 按既有条目口径）",
+        "orphan_candidates() 返回 count=0（贴出实际输出；须说明在真实数据根与两份运行时镜像下的结果）",
+        "test_config.py 全绿（贴出 Ran/OK 行与退出码），其中必须包含 test_doctor_ok_and_no_orphans 与 test_owners_resolvable",
+        "T10 的既有 22 例仍全绿（证明去下划线改公开名未破坏其行为）",
         "四副本同步完成，给出 4 份 SHA256（注意 ③ 是 C:\\mjscxt_p139\\resources\\backend 平铺结构）",
-        "在 h3_prompt_kit.py 相应位置补注释，写明『新增可配置常量必须同步登记 REGISTRY』这一约定",
-        "不改动 H3_CANON_MAX_CHARS 的值（400）与其在 T10 中的使用语义",
-        "报告里明确 continuity_helpers.py 的同步问题归属（若确非你的文件则交回 Captain，不要代改）"
+        "在 h3_prompt_kit.py 相应位置补注释，写明『新增可配置常量必须同步登记 REGISTRY』与『REGISTRY.default 会经 apply_to_runtime() 回写本行』",
+        "不改动 H3_CANON_MAX_CHARS 的值（400）与其使用语义",
+        "若全量 verify 仍因外部阻塞为红，须在报告中：① 指明红点集合；② 用隔离跑给出排除后的结果与退出码；③ 明确该红点不属于本任务文件。最终全量以 t7 在全部写入者停止后的干净跑为准，不因本条的隔离结论而豁免"
       ],
       "verify": [
-        "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\""
+        "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\"",
+        "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_config.py\"",
+        "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_canon*.py\""
       ],
       "deliverables": [
         "app/config_doctor.py",
@@ -970,16 +973,41 @@
         "不代改他人的 continuity_helpers.py"
       ],
       "attemptId": "f0c17f64-c9c9-4d09-849f-ccfc4f6f3c80",
-      "reassigning": false
+      "reassigning": false,
+      "revisions": [
+        {
+          "at": 1791783558498,
+          "by": "captain",
+          "reason": "T12 的实现与自验已完成（orphan count=0、test_config.py 单跑 11 例 OK、四副本 SHA256 一致），\n但契约里的 verify 命令（全量 discover）在当前时点客观无法通过：\n唯一红点 tests/test_mutation_guards.py::test_good_seg_sort_key_passes 属【他人文件】，\n其缺陷已定位到具体行（:57/:82 用点号名 loadTestsFromName 加载，但 tests/ 非包布局且 sys.flags.safe_path=True），\n已单独立项为 t13 负责修复。\n按协议『verify 命令本身不可通过时应修正契约而非让执行者卡死』，这里把 T12 的 verify 口径明确为\n『允许对已定位的外部阻塞做隔离验证，并附排除项与证据』，最终全量仍由 t7 在全部写入者停止后统一执行。",
+          "fields": [
+            "acceptance",
+            "verify"
+          ],
+          "previous": {
+            "acceptance": [
+              "H3_CANON_MAX_CHARS 已在 config_doctor.REGISTRY 登记，字段齐全（owner / default / desc 等按既有条目口径）",
+              "config_doctor.orphan_candidates() 返回 count=0（贴出实际输出）",
+              "test_doctor_ok_and_no_orphans 通过；全量测试回到全绿（贴出 Ran/OK 行与退出码）",
+              "四副本同步完成，给出 4 份 SHA256（注意 ③ 是 C:\\mjscxt_p139\\resources\\backend 平铺结构）",
+              "在 h3_prompt_kit.py 相应位置补注释，写明『新增可配置常量必须同步登记 REGISTRY』这一约定",
+              "不改动 H3_CANON_MAX_CHARS 的值（400）与其在 T10 中的使用语义",
+              "报告里明确 continuity_helpers.py 的同步问题归属（若确非你的文件则交回 Captain，不要代改）"
+            ],
+            "verify": [
+              "& \"C:\\mjscxt_p139\\resources\\python\\python.exe\" -W ignore::ResourceWarning -m unittest discover -s tests -p \"test_*.py\""
+            ]
+          }
+        }
+      ]
     },
     {
       "id": "t13",
       "subject": "修复 tests/test_mutation_guards.py 的测试加载方式（导致全量随机变红）",
-      "status": "claimed",
+      "status": "in_progress",
       "dependencies": [],
       "attempt": 1,
       "createdAt": 1791783377414,
-      "updatedAt": 1791783377428,
+      "updatedAt": 1791783444727,
       "kind": "implementation",
       "round": 1,
       "objective": "修复「全量测试随机变红」的基础设施缺陷，让所有人的干净全量跑结果可信。\n\n## 失败现象（Captain 与两名成员独立复现）\n  FAIL: test_good_seg_sort_key_passes (test_mutation_guards.TestMutationsAreCaught)\n  AssertionError: False is not true : 真实用例应全绿，\n    [(<unittest.loader._FailedTest testMethod=tests>, 'ImportError: Failed to import test module: tests')]\n全量结果：Ran 461 tests / 1 FAIL；而 content-eng 在更早时点观测到同一命令 Ran 454 tests / OK (skipped=1) / exit 0。\n\n## 根因（已定位到具体行）\ntests/test_mutation_guards.py:57 与 :82 用\n    _ut.TestLoader().loadTestsFromName(\"tests.test_video_concat_audio.TestSegSortKey\")\n把 tests 当作包来加载。但本项目 tests/ 是非包布局 —— 实测 `python -m unittest tests.<任何>` 直接报\n    ModuleNotFoundError: No module named 'tests'\n该文件只把 _APP 与 _HERE(=tests/ 目录) 插进了 sys.path（L27-31），\n因此正确写法应是【不带 tests. 前缀】的模块名，例如 test_video_concat_audio.TestSegSortKey。\n\n## 为什么它会『有时绿有时红』\nloadTestsFromName 的解析结果依赖当时 sys.path 与已 import 的模块状态，\n所以它随『哪个测试文件先跑、谁先往 sys.path 放了什么』而变 —— 属顺序敏感。\n这也是多名成员在同一时段得到不同全量结论的原因。\n\n## 这个文件的来历（诚实说明）\n文件头注释自述是『t22 的诚实性要求』，为早前某轮工作所加，不在本团队任何任务的 inScope 内。\n它一直是个定时炸弹，本轮多线并行把它暴露了出来。",
@@ -1012,7 +1040,8 @@
       ],
       "assignee": "verifier",
       "attemptId": "c8ebee28-15f1-47a8-9ad4-45644077ba4d",
-      "reassigning": false
+      "reassigning": false,
+      "output": "开始验证：先读取 tests/test_mutation_guards.py 现状与 git 状态"
     }
   ],
   "taskSeq": 13,

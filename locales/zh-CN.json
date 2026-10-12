@@ -1376,6 +1376,18 @@
     "keyframeCount": "尾帧 {n}",
     "noData": "暂无分镜数据",
     "noDataHint": "请先进行剧本生成",
+    "order": {
+      "hint": "拖动镜头卡右上角的手柄，或用 ↑/↓ 调整镜头顺序；顺序决定分镜图/视频的生成与成片顺序。",
+      "moveUp": "上移一位",
+      "moveDown": "下移一位",
+      "dragHandle": "拖拽调整该镜头顺序",
+      "saving": "正在保存顺序…",
+      "saved": "镜头顺序已保存",
+      "saveFailed": "镜头顺序保存失败",
+      "saveFailedRollback": "镜头顺序保存失败，已恢复原顺序：{error}",
+      "staleList": "镜头列表已变化，已重新加载，请再试一次",
+      "generatingWarn": "有 {n} 个镜头正在生成，此时调整顺序可能与本轮生成交错，建议等本轮结束后再调。"
+    },
     "imageAlt": "镜头 {seq} 分镜图",
     "noImage": "无分镜图",
     "generating": "生成中",

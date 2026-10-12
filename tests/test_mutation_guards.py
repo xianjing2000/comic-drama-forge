@@ -30,6 +30,11 @@ for _p in (_APP, _HERE):          # tests/ 也要进 path，才能 import 兄弟
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# ⚠️ tests/ 是【非包布局】（没有 __init__.py），因此 loadTestsFromName 只能用
+#    不带目录前缀的模块名，例如 "test_video_concat_audio.TestSegSortKey"。
+#    写成带前缀的名字会随 sys.path/已 import 状态时而成功时而失败（顺序敏感），
+#    导致同一命令时而 454 时而 461 的测试数漂移。
+
 
 # --------------------------------------------------------------------------- #
 # ① _seg_sort_key：修复前的实现（直接 findall 取最后一个数字）
@@ -73,14 +78,14 @@ class TestMutationsAreCaught(unittest.TestCase):
         import video_helpers
         self._assert_test_fails_under_mutation(
             video_helpers, "_seg_sort_key", _old_seg_sort_key,
-            "tests.test_video_concat_audio.TestSegSortKey")
+            "test_video_concat_audio.TestSegSortKey")
 
     def test_good_seg_sort_key_passes(self):
         """对照：真实现下同一批测试全绿（证明上一条的红是变异引起的）。"""
         import unittest as _ut
         import video_helpers  # noqa: F401
         suite = _ut.TestLoader().loadTestsFromName(
-            "tests.test_video_concat_audio.TestSegSortKey")
+            "test_video_concat_audio.TestSegSortKey")
         r = _ut.TestResult()
         suite.run(r)
         self.assertTrue(r.wasSuccessful(),

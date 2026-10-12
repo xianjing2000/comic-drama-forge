@@ -1350,8 +1350,18 @@ CONFLICT_NEGATIVE_TOKENS = ("3D渲染", "二次元动漫", "3D动漫", "3D渲染
 PROMPT_ENHANCE_ENABLED = _env_bool("MJSCXT_PROMPT_ENHANCE", True)
 #: 增强后用「质检模型」对提示词做语义复审；复审不通过且给出改进版、改进版复检不降分才采纳
 PROMPT_MODEL_REVIEW_ENABLED = _env_bool("MJSCXT_PROMPT_MODEL_REVIEW", True)
-#: 单次增强/复审调用的超时（秒）。预检在生成链路里同步执行，超时给得保守，失败即回落原文
-PROMPT_ENHANCE_TIMEOUT_SEC = _env_int("PROMPT_ENHANCE_TIMEOUT_SEC", 90)
+#: 单次增强/复审调用的超时（秒）。预检在生成链路里同步执行，失败即回落原文。
+#
+# ⭐ 2026-10-12 性能实测后从 90 降到 25（T3 性能画像）：
+#   实测 preflight 的 median 56.1s / max 359.7s，其中绝大部分耗在这个内嵌的 LLM 调用上，
+#   且日志出现 `Read timed out` 436 条、瞬时失败 340 条 —— 但**大量请求的结果是「本次不增强」**，
+#   即付了 56 秒却没有改动一个字。46 镜合计约 **43 分钟/集** 净浪费，还把预取机制反噬
+#   （前置段耗时超过 GPU 段，预取包准备好时主循环还在等）。
+#   25 秒的取舍：正常增强请求实测通常 2-3 秒内返回（本机 LLM 网关并发实测 4 路仍 2.1s），
+#   给到 25s 已有近 10 倍余量；超时即回落到原文继续生成（fail-open，不阻断管线），
+#   最坏情况是「这一镜没增强」，而不是「整集白等 90 秒」。
+#   需要退回旧行为：设 PROMPT_ENHANCE_TIMEOUT_SEC=90 环境变量即可，无需改代码。
+PROMPT_ENHANCE_TIMEOUT_SEC = _env_int("PROMPT_ENHANCE_TIMEOUT_SEC", 25)
 #: 增强/复审结果的进程内缓存条数（同一条提示词的生成重试/质检重试不再重复打模型）
 PROMPT_ENHANCE_CACHE_SIZE = max(0, _env_int("PROMPT_ENHANCE_CACHE_SIZE", 256))
 

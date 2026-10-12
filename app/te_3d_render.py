@@ -104,8 +104,17 @@ _ASSET_FILES = (
 )
 
 CAPTURE_PATH = "/__te3d_capture"
-_FIRST_RENDER_TIMEOUT = 120.0     # 首次渲染（要下 3MB GLB + 编译着色器）
-_RENDER_TIMEOUT = 60.0            # 后续渲染
+# ⭐ 2026-10-12 性能实测后收紧（T3 性能画像）：原来 120/60 且失败还会重试一次，
+#   实测「3D站位 mean 108.2s、p90 427.8s」，单镜最坏 240s → 46 镜最坏约 3h/集，
+#   是本链路第三大瓶颈。收紧到 45/20：
+#   · 首次 45s 仍覆盖「下 3MB GLB + 编译着色器」的冷启动（实测命中时通常 20-40s）；
+#   · 后续 20s 对应已热身的渲染（实测 p50 在 10s 级）。
+#   fail-open 保证安全：超时只是 `return None` → 本镜没有 COMPOSITION BASELINE 基准图，
+#   build prompt 与预检会按「无基准图」分支继续，**不阻断生成**；
+#   即最坏情况是「这一镜少一张构图基准图」，而不是「整集白等几分钟」。
+#   需要退回旧值：改回 120.0 / 60.0 即可。
+_FIRST_RENDER_TIMEOUT = 45.0      # 首次渲染（要下 3MB GLB + 编译着色器）
+_RENDER_TIMEOUT = 20.0            # 后续渲染
 _MIN_INK_RATIO = 0.004            # 非背景像素占比下限：低于此值判「空白渲染」
 
 _lock = threading.Lock()

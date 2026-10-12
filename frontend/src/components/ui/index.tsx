@@ -85,6 +85,94 @@ export function EmptyState({
   );
 }
 
+/**
+ * 排序控件（分镜拖拽排序的前端入口，2026-10-12）。
+ *
+ * 背景：后端 `POST /api/storyboard/shot/reorder` 与前端 `storyboardApi.reorder`
+ * 都已存在，但**全站零调用点** —— 用户没有任何调整镜头顺序的手段。
+ * 本组件只负责「手柄拖拽 + ↑/↓ 两个按钮」的交互与可用性判定：
+ *   · 拖拽适合大跨度移动（分镜动辄 20+ 镜，一格一格点太慢）；
+ *   · ↑/↓ 适合触屏与键盘用户 —— HTML5 拖拽在触屏上不可靠，无障碍场景更需要按钮，
+ *     所以两套都提供，而不是只做拖拽。
+ * 落盘（乐观更新 + 失败回滚）留在页面侧统一处理，组件不持有业务状态。
+ * 文案走 i18n（本文件禁止硬编码中文文案），调用方需要时可用 labels 覆盖。
+ */
+export function ReorderControls({
+  index,
+  total,
+  busy = false,
+  dragActive = false,
+  onMoveUp,
+  onMoveDown,
+  onDragStart,
+  onDragEnd,
+  labels,
+  className = '',
+}: {
+  /** 当前项在列表中的下标（0 基） */
+  index: number;
+  /** 列表总长度：用于首/尾禁用 */
+  total: number;
+  /** 有排序请求在途：整体禁用，防重复提交 */
+  busy?: boolean;
+  /** 本项正在被拖拽（高亮手柄） */
+  dragActive?: boolean;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  /** 传了才渲染拖拽手柄 */
+  onDragStart?: (e: React.DragEvent) => void;
+  onDragEnd?: (e: React.DragEvent) => void;
+  labels?: { up?: string; down?: string; drag?: string };
+  className?: string;
+}) {
+  const upLabel = labels?.up ?? t('sb.order.moveUp');
+  const downLabel = labels?.down ?? t('sb.order.moveDown');
+  const dragLabel = labels?.drag ?? t('sb.order.dragHandle');
+  const canUp = index > 0 && !busy;
+  const canDown = index >= 0 && index < total - 1 && !busy;
+  const btn = `inline-flex h-6 w-6 items-center justify-center rounded-sm border border-line text-ink-2 transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-40 ${FOCUS_RING}`;
+  return (
+    <span className={`inline-flex items-center gap-1 ${className}`}>
+      <button type="button" className={btn} onClick={onMoveUp} disabled={!canUp} title={upLabel} aria-label={upLabel}>
+        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+             strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M6 15l6-6 6 6" />
+        </svg>
+      </button>
+      <button type="button" className={btn} onClick={onMoveDown} disabled={!canDown} title={downLabel} aria-label={downLabel}>
+        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+             strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M6 9l6 6 6-6" />
+        </svg>
+      </button>
+      {onDragStart && (
+        <span
+          role="button"
+          tabIndex={-1}
+          draggable={!busy}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          title={dragLabel}
+          aria-label={dragLabel}
+          className={`inline-flex h-6 w-6 select-none items-center justify-center text-ink-3 hover:text-ink-1 ${
+            dragActive ? 'text-brand' : ''
+          } ${busy ? 'cursor-not-allowed opacity-40' : 'cursor-grab'}`}
+        >
+          {/* 六点手柄（Lucide grip-vertical 等价形）：本文件无图标依赖，内联 SVG 最省事 */}
+          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <circle cx="9" cy="6" r="1.4" />
+            <circle cx="15" cy="6" r="1.4" />
+            <circle cx="9" cy="12" r="1.4" />
+            <circle cx="15" cy="12" r="1.4" />
+            <circle cx="9" cy="18" r="1.4" />
+            <circle cx="15" cy="18" r="1.4" />
+          </svg>
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** 错误态：给出错误码 + 原因 + 重试，而不是一句「加载失败」 */
 export function ErrorState({
   title = t('common.loadFailed'),

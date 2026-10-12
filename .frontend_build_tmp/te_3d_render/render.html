@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>TE 3D blocking render</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #060608; overflow: hidden; }
+  canvas { display: block; }
+  #diag { display: none; }
+</style>
+</head>
+<body>
+<script type="module">
+/*
+ * TE MAN 3D导演台 · 服务端站位图渲染页
+ * ------------------------------------------------------------------
+ * 输入：同目录下 payload.json（由 app/te_3d_render.py 生成）
+ *   {
+ *     "width": 768, "height": 1365, "fov": 40.0,
+ *     "camera": { "position": [x,y,z], "target": [x,y,z] },   // 缺省回落 lookAt(角色中心)
+ *     "grid": false,
+ *     "scene": { ...TE_3D_Director scene_json（version=4）... }
+ *   }
+ *
+ * 四个必须记住的坑（都是实测踩出来的，别改回去）：
+ *  1) Mixamo 的 Beta 模型有**两层重叠网格**（Beta_Joints_MAT 可见身体 +
+ *     Beta_HighLimbsGeoSG2 高模外壳），同时渲染会互相穿插出「迷彩」杂纹
+ *     → 必须按材质名丢弃 HighLimbs 层。
+ *  2) `SkinnedMesh.clone()` 会**共享骨架** → 多个人偶全部塌到同一位置。
+ *     手工把蒙皮网格逐顶点烘焙成静态几何体也不可靠（applyBoneTransform 在部分骨骼上
+ *     会产出野值顶点，实测 y 最大到 158m → 整只人偶被裁掉、画面全黑）。
+ *     最终方案：**同一个 GLB 按角色各自 `loader.parse()` 一次**，每个实例天然拥有
+ *     独立骨架，零克隆陷阱。
+ *  3) Xbot.glb 是 T-pose 绑定姿势。T-pose 当构图参考会误导生图模型
+ *     → 每个实例播 idle 动画到固定时刻，拿到自然站姿。
+ *  4) 尺寸归一化不能用 `Box3.setFromObject`（SkinnedMesh 返回的是**绑定姿势**包围盒，
+ *     与摆姿后的世界空间不同量级）→ 用**骨骼世界坐标**的包围盒，稳定且便宜。
+ */
+import * as THREE from './three/build/three.module.js';
+import { GLTFLoader } from './three/loaders/GLTFLoader.js';
+
+const params = new URLSearchParams(location.search);
+const payloadPath = params.get('p') || 'payload.json';
+const DEBUG = params.get('debug') === '1';
+
+const DEFAULT_BG = '#060608';
+const DEFAULT_CHAR_COLOR = '#2f80ff';
+const TARGET_HEIGHT = 1.72;          // 骨骼包围盒高度目标（≈1.7m 身高，头顶点略高）
+const POSE_TIME = 0.45;              // idle 动画取样时刻（秒）：避开起始帧的生硬姿态
+
+// 骨骼包围盒（摆姿后、世界空间）：SkinnedMesh 的 geometry.boundingBox 是绑定姿势，
+// 与摆姿后的世界空间不同量级，只能靠骨骼世界坐标来量。
+function boneWorldBox(root) {
+  const box = new THREE.Box3();
+  const v = new THREE.Vector3();
+  let n = 0;
+  root.updateMatrixWorld(true);
+  root.traverse((o) => {
+    if (!o.isBone) return;
+    o.getWorldPosition(v);
+    box.expandByPoint(v);
+    n += 1;
+  });
+  return n ? box : null;
+}
+
+function inferFacing(root) {
+  let lh = null;
+  let rh = null;
+  root.updateMatrixWorld(true);
+  root.traverse((o) => {
+    const n = String(o.name || '');
+    if (/LeftUpLeg$/i.test(n)) lh = lh || o;
+    if (/RightUpLeg$/i.test(n)) rh = rh || o;
+  });
+  if (!lh || !rh) return null;
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  lh.getWorldPosition(a);
+  rh.getWorldPosition(b);
+  const dx = a.x - b.x;
+  const dz = a.z - b.z;
+  if (Math.hypot(dx, dz) < 1e-6) return null;
+  // 面朝 +Z 时 (leftHip - rightHip) 指向 +X → 与 +X 轴夹角应≈0°
+  return {
+    leftMinusRight: [+dx.toFixed(4), +dz.toFixed(4)],
+    angleDegToPlusX: +(Math.atan2(dz, dx) * 180 / Math.PI).toFixed(1),
+  };
+}
+
+function buildCharacterInstance(gltf, sceneDef) {
+  const root = gltf.scene;
+  // 坑①：Mixamo Beta 模型带两层网格 —— `Beta_Joints_MAT` 是**关节点球**（不是身体！），
+  //      `...HighLimbs...` 才是可见身体。只留身体层，否则渲染出来是一堆漂浮的小球。
+  //      用「材质名命中 joints」判定，并且只在确实还有别的网格时才丢弃（防止模型换代后
+  //      把唯一网格删光 → 整只人偶消失）。
+  const drop = [];
+  const keep = [];
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    const matName = String((o.material && o.material.name) || '');
+    if (/joint/i.test(matName)) drop.push(o); else keep.push(o);
+  });
+  if (keep.length) {
+    for (const o of drop) o.parent && o.parent.remove(o);
+  }
+  return root;
+}
+
+function poseInstance(root, animations) {
+  const clips = animations || [];
+  const clip = clips.find((a) => /idle/i.test(a.name)) || clips[0] || null;
+  if (!clip) return;
+  const mixer = new THREE.AnimationMixer(root);
+  mixer.clipAction(clip).play();
+  mixer.update(Math.min(POSE_TIME, Math.max(0.05, clip.duration * 0.35)));
+}
+
+/* 中性灰盒（greybox）天空：竖直渐变，刻意**不是平坦纯色**。
+   深色平坦区会被生图模型读成「信箱黑边」照抄（见文件顶部坑⑤）。 */
+function makeSkyTexture() {
+  const cv = document.createElement('canvas');
+  cv.width = 2; cv.height = 256;
+  const g = cv.getContext('2d');
+  const grad = g.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0.00, '#6b747f');
+  grad.addColorStop(0.55, '#b6bec6');
+  grad.addColorStop(1.00, '#98a0a8');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 2, 256);
+  const tex = new THREE.CanvasTexture(cv);
+  if (THREE.SRGBColorSpace) tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+async function run() {
+  const resp = await fetch('./' + payloadPath + '?t=' + Date.now());
+  const payload = await resp.json();
+  const sceneDef = payload.scene || {};
+  const W = Math.max(64, Math.round(payload.width || 768));
+  const H = Math.max(64, Math.round(payload.height || 1365));
+  const bg = (sceneDef.scene && sceneDef.scene.background) || DEFAULT_BG;
+  document.body.style.background = bg;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(1);
+  renderer.setSize(W, H, false);
+  renderer.setClearColor(new THREE.Color(bg), 1);
+  document.body.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  // 坑⑤（2026-09-27 实测）：背景 + 地面必须避免**大面积平坦深色区**。
+  // 原来只画一张 40×40 网格、没有地面、背景 #060608（近黑）→ 远景时画面上下一大片
+  // 平坦近黑区；生图模型把它当**信箱黑边**照抄，成图 53% 的高度是黑带。
+  // 两处一起修：① 天空用竖直渐变，不像画框；② 补一块大地板（scene_json 里的
+  //            groundVisible 之前是被本页忽略的）。
+  const bgLum = (() => {
+    const c = new THREE.Color(bg);
+    return ((c.r + c.g + c.b) / 3) * 255;
+  })();
+  scene.background = bgLum < 60 ? makeSkyTexture() : new THREE.Color(bg);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x4a4a4a, 1.30));
+  if (!(sceneDef.scene && sceneDef.scene.groundVisible === false)) {
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(4000, 4000),
+      new THREE.MeshStandardMaterial({ color: 0x8d949b, roughness: 0.92, metalness: 0.0 }),
+    );
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+  }
+  const key = new THREE.DirectionalLight(0xffffff, 1.55);
+  key.position.set(3.5, 6.5, 5); scene.add(key);
+  const fill = new THREE.DirectionalLight(0xffffff, 0.80);
+  fill.position.set(-4, 3, -4); scene.add(fill);
+  const rim = new THREE.DirectionalLight(0xffffff, 0.45);
+  rim.position.set(0, 4, -6); scene.add(rim);
+
+  if (payload.grid) {
+    const grid = new THREE.GridHelper(400, 80, 0x2f3644, 0x1c2129);
+    grid.material.opacity = 0.5;
+    grid.material.transparent = true;
+    grid.position.y = 0.002;   // 抬起一点，避免与地面共面打架（z-fighting）
+    scene.add(grid);
+  }
+
+  const loader = new GLTFLoader();
+  const glbBuf = await (await fetch('./assets/Xbot.glb')).arrayBuffer();
+  const parse = (buf) => new Promise((resolve, reject) => {
+    loader.parse(buf, '', resolve, reject);
+  });
+
+  const entities = sceneDef.entities || [];
+  const charEnts = entities.filter((e) => e && e.type === 'character');
+  const camEnt = entities.find((e) => e && e.type === 'camera') || null;
+
+  const diag = { chars: 0, meshesPerChar: [], boneBox: [] };
+  const focus = [];
+  const facingFixY = Number(payload.facingFixY || 0);
+
+  for (const ent of charEnts) {
+    // 坑②：每个角色独立解析一次 GLB → 独立骨架
+    const gltf = await parse(glbBuf.slice(0));
+    const root = buildCharacterInstance(gltf, sceneDef);
+    poseInstance(root, gltf.animations);
+
+    const box = boneWorldBox(root);
+    const boxH = box ? (box.max.y - box.min.y) : 0;
+    const k = boxH > 1e-4 ? TARGET_HEIGHT / boxH : 1;
+    const hs = k * (Number(ent.heightScale) || 1.0) * (Number(ent.uniformScale) || 1.0)
+             * ((Number(ent.height) || 1.7) / 1.7);
+    const tf = ent.transform || {};
+    const pos = tf.position || [0, 0, 0];
+    const rot = tf.rotation || [0, 0, 0];
+
+    const inst = new THREE.Group();
+    inst.add(root);
+    root.scale.setScalar(hs);
+    root.rotation.y = facingFixY;
+    if (box) {
+      // 骨骼盒居中到 x=0/z=0、脚底（骨骼最低点）落到 y=0
+      root.position.set(
+        -((box.min.x + box.max.x) / 2) * hs,
+        -box.min.y * hs,
+        -((box.min.z + box.max.z) / 2) * hs,
+      );
+    }
+    inst.position.set(pos[0], pos[1], pos[2]);
+    inst.rotation.y += Number(rot[1]) || 0;
+
+    const col = new THREE.Color(ent.color || DEFAULT_CHAR_COLOR);
+    let meshes = 0;
+    inst.traverse((o) => {
+      if (!o.isMesh) return;
+      o.material = new THREE.MeshStandardMaterial({
+        color: col, roughness: 0.52, metalness: 0.0,
+      });
+      meshes += 1;
+    });
+    scene.add(inst);
+    diag.chars += 1;
+    diag.meshesPerChar.push(meshes);
+    diag.boneBox.push(box ? [+boxH.toFixed(3), +k.toFixed(4)] : null);
+    if (!diag.facing) diag.facing = inferFacing(root);
+    focus.push(new THREE.Vector3(pos[0], pos[1] + 1.72 * hs * 0.55, pos[2]));
+  }
+
+  const fov = Number(payload.fov) || 45;
+  const camera = new THREE.PerspectiveCamera(fov, W / H, 0.05, 500);
+  const pc = payload.camera || {};
+  let camPos = null;
+  let target = null;
+  if (Array.isArray(pc.position) && pc.position.length === 3) {
+    camPos = pc.position;
+    target = (Array.isArray(pc.target) && pc.target.length === 3) ? pc.target : [0, 0.95, 0];
+  } else {
+    camPos = (camEnt && camEnt.transform && Array.isArray(camEnt.transform.position))
+      ? camEnt.transform.position : [0, 1.5, 4.2];
+    if (focus.length) {
+      const f = new THREE.Vector3();
+      for (const p of focus) f.add(p);
+      f.multiplyScalar(1 / focus.length);
+      target = [f.x, f.y, f.z];
+    } else {
+      target = [0, 0.95, 0];
+    }
+  }
+  camera.position.set(camPos[0], camPos[1], camPos[2]);
+  camera.lookAt(target[0], target[1], target[2]);
+  camera.updateMatrixWorld(true);
+  diag.camPos = camPos;
+  diag.target = target;
+  diag.fov = fov;
+
+  renderer.render(scene, camera);
+  diag.tris = renderer.info.render.triangles;
+  diag.calls = renderer.info.render.calls;
+
+  window.__te_3d_render__ = () => renderer.domElement.toDataURL('image/png');
+  window.__TE_3D_READY__ = true;
+  if (DEBUG) {
+    const pre = document.createElement('pre');
+    pre.id = 'diag';
+    pre.textContent = JSON.stringify(diag);
+    document.body.appendChild(pre);
+  }
+  document.title = 'RENDER_OK';
+
+  // ---- 回传：把渲染结果 POST 回本地服务（app/te_3d_render.py）----
+  // ⚠️ 不用 `--screenshot` 截图：无头浏览器截图与 WebGL 合成存在**时序竞态**，
+  //    实测五张里有若干张截到空白。改为「页面渲染完主动回传」，服务端等
+  //    POST 到达即可，时序确定、也不会被视口尺寸/滚动条干扰。
+  const postUrl = payload.postUrl || '/__te3d_capture';
+  await fetch(postUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ png: window.__te_3d_render__(), diag }),
+  });
+  document.title = 'POSTED';
+}
+
+run().catch(async (err) => {
+  window.__TE_3D_ERROR__ = String((err && err.stack) || err);
+  document.title = 'RENDER_FAIL: ' + (err && err.message ? err.message : err);
+  if (DEBUG) {
+    const pre = document.createElement('pre');
+    pre.id = 'diag';
+    pre.style.display = 'block';
+    pre.style.color = '#fff';
+    pre.textContent = JSON.stringify({ error: String((err && err.message) || err) });
+    document.body.appendChild(pre);
+  }
+  try {
+    await fetch('/__te3d_capture', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: window.__TE_3D_ERROR__ }),
+    });
+  } catch (e) { /* 回传失败无所谓：服务端会超时兜底 */ }
+});
+</script>
+</body>
+</html>

@@ -1376,6 +1376,18 @@
     "keyframeCount": "End frames {n}",
     "noData": "No storyboard data yet",
     "noDataHint": "Generate the script first",
+    "order": {
+      "hint": "Drag the handle at a shot card's top-right, or use ↑/↓ to reorder. The order drives storyboard/video generation and the final-cut sequence.",
+      "moveUp": "Move up one",
+      "moveDown": "Move down one",
+      "dragHandle": "Drag to reorder this shot",
+      "saving": "Saving order…",
+      "saved": "Shot order saved",
+      "saveFailed": "Failed to save the shot order",
+      "saveFailedRollback": "Failed to save the shot order; the original order was restored: {error}",
+      "staleList": "The shot list has changed; it was reloaded — please try again",
+      "generatingWarn": "{n} shot(s) are generating; reordering now may interleave with this run — waiting for it to finish is safer."
+    },
     "imageAlt": "Shot {seq} storyboard",
     "noImage": "No storyboard image",
     "generating": "Generating",

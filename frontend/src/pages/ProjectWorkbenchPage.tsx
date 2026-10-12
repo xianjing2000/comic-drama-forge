@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '@/context/AppContext';
 import { t } from '@/i18n';
 import { projectsApi, keyframesApi, storyboardApi, videoApi, qcApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi, novelsSplitPlanApi, preflightApi, screenplayApi, characterOutfits, characterSheetUpload, assetPrecipitation, generationApi, type VideoMode, type EpisodeScenesResponse, type ChapterPreflightResult, type AssetPrecipitationResponse, type PrecipitationStatus } from '@/api/client';
-import { Button, ConfirmDialog, Input, EmptyState, ErrorState, Loading, Skeleton, Modal, Select } from '@/components/ui';
+import { Button, ConfirmDialog, Input, EmptyState, ErrorState, Loading, Skeleton, Modal, Select, ReorderControls } from '@/components/ui';
 // tab 图标統一走线性 SVG（方案 P2-10）：此前是 emoji，字号受系统字体影响且观感与全站割裂
 import {
   AlertTriangle, BarChart3, Box, Check, CheckCircle2, Clapperboard, ClipboardCheck, ClipboardList, FileText,
@@ -3535,6 +3535,26 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
     generating: 0, total: 0, stepActive: false,
   });
 
+  // ---- 镜头排序（POST /api/storyboard/shot/reorder）----
+  /** 排序请求在途：期间禁止再次拖拽/移动 */
+  const [reorderBusy, setReorderBusy] = useState(false);
+  /** 上一条的 ref 快照：静默轮询要读它，但不该进 useEffect 依赖（否则每次排序都重建定时器） */
+  const reorderBusyRef = useRef(false);
+  /** 正在被拖拽的镜头 id（null=无拖拽） */
+  const [dragSid, setDragSid] = useState<string | null>(null);
+  /** 拖拽悬停到的镜头 id：只用来高亮落点 */
+  const [dragOverSid, setDragOverSid] = useState<string | null>(null);
+
+  /**
+   * 分镜域统一错误脱敏：后端异常原文可能带本机绝对路径（AppData / 项目目录 / 暂存目录），
+   * 一律先过 sanitizeErrorMessage 再进界面 —— 用户不需要知道自己的文件系统长什么样。
+   * （与工作台其它区块的 sanitizeError 同口径，但这里额外剥掉路径）
+   */
+  const sbError = (e: unknown, fallback: string) => {
+    const raw = e instanceof Error ? e.message : (typeof e === 'string' ? e : '');
+    return sanitizeErrorMessage(raw || fallback) || fallback;
+  };
+
   const stopCanvasPoll = () => {
     if (canvasPollRef.current) { clearInterval(canvasPollRef.current); canvasPollRef.current = null; }
   };
@@ -3542,6 +3562,9 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
   const fetchCanvas = async (opts?: { silent?: boolean }) => {
     if (!projectKey) return;
     const silent = !!opts?.silent;
+    // 排序请求在途时不让静默轮询回灌：后端还没落盘的新顺序会在这里被旧顺序覆盖，
+    // 用户会看到「刚拖完又弹回去」。排序成功后由本地顺序兜底，下一轮轮询自然对齐。
+    if (silent && reorderBusyRef.current) return;
     // 静默轮询不翻转 loading：否则每 3 秒整页闪一次骨架屏
     if (!silent) setLoading(true);
     if (!silent) setError('');
@@ -3563,11 +3586,13 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
       };
     } catch (err) {
       if (silent) return; // 静默轮询失败：留给下一轮，不打断用户
-      const msg = err instanceof Error ? err.message : t('sb.fetchFailed');
-      if (msg.includes('404')) {
+      // 404 判定看**原始**文案（脱敏会折叠空白，判定要在脱敏之前做）；
+      // 展示一律走脱敏后的文案（不把后端绝对路径甩给用户）
+      const rawMsg = err instanceof Error ? err.message : '';
+      if (rawMsg.includes('404')) {
         setError('no-data');
       } else {
-        setError(msg);
+        setError(sbError(err, t('sb.fetchFailed')));
       }
     } finally {
       if (!silent) setLoading(false);
@@ -3615,7 +3640,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
       setNotice(t('sb.imageRedone', { seq: card.seq }));
       await fetchCanvas();
     } catch (e) {
-      setShotError(e instanceof Error ? e.message : t('sb.imageRedoFailed'));
+      setShotError(sbError(e, t('sb.imageRedoFailed')));
     } finally {
       setBusy(null);
     }
@@ -3648,7 +3673,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
       );
       await fetchCanvas();
     } catch (e) {
-      setShotError(e instanceof Error ? e.message : t('sb.videoRedoFailed'));
+      setShotError(sbError(e, t('sb.videoRedoFailed')));
     } finally {
       setBusy(null);
     }
@@ -3667,7 +3692,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
     } catch (e) {
       // 保存失败必须回滚 UI，否则界面显示的模式与实际生成方式不一致（最难查的一类漂移）
       setProjectVideoMode(prev);
-      toast.error(e instanceof Error ? e.message : t('sb.videoModeSaveFailed'));
+      toast.error(sbError(e, t('sb.videoModeSaveFailed')));
     }
   };
 
@@ -3686,7 +3711,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
       setEpisodeTaskId(r.task_id);
       toast.success(t('sb.episodeGenerateStarted', { total: r.total }));
     } catch (e) {
-      setShotError(e instanceof Error ? e.message : t('sb.videoRedoFailed'));
+      setShotError(sbError(e, t('sb.videoRedoFailed')));
     } finally {
       setEpisodeGenerating(false);
     }
@@ -3720,7 +3745,9 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
         : results.filter((x) => x.success).length;
       const failures = results
         .filter((x) => !x.success)
-        .map((x) => ({ shot_id: String(x.shot_id), error: x.error || t('video.batchRetry.unknownError') }));
+        // 失败原因是后端逐镜回传的原文 → 同样脱敏（可能含本机路径），再进结果条
+        .map((x) => ({ shot_id: String(x.shot_id),
+                       error: sanitizeErrorMessage(x.error || '') || t('video.batchRetry.unknownError') }));
       const total = results.length || selectedShots.length;
       setBatchResult({ total, ok, failures });
       if (failures.length === 0) {
@@ -3804,7 +3831,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
       pollGridTask(r.task_id);
     } catch (e) {
       // 发起失败（镜号不存在 / 无可用参考图等 4xx）：留在弹窗内展示原因，可关闭或重试
-      setGridError(e instanceof Error ? e.message : t('sb.grid.generateFailed'));
+      setGridError(sbError(e, t('sb.grid.generateFailed')));
       setGridPhase('ready');
     }
   };
@@ -3819,10 +3846,81 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
       closeGridModal();
       await fetchCanvas();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : t('sb.grid.applyFailed'));
+      toast.error(sbError(e, t('sb.grid.applyFailed')));
       setGridPhase('ready');
     }
   };
+
+  // ---- 镜头排序：乐观更新 + 失败回滚（后端 POST /api/storyboard/shot/reorder）----
+  /**
+   * 落盘顺序的两条通路：手柄拖拽（大跨度）与 ↑/↓（精确挪一格）。
+   * 两者都先本地重排（用户立刻看到结果），再请求后端；失败**整表回滚**并给可读原因。
+   * 成功不重拉画布 —— 本地顺序就是权威，5s 轮询会在下一拍自然对齐后端。
+   * 注意：这里的顺序是「生成与成片顺序」，生产跑着时调整可能与本轮生成交错，
+   * 界面在生成中会给出提醒（不硬禁用：用户可能就是想立刻纠正顺序）。
+   */
+  const applyShotOrder = async (nextOrder: string[]) => {
+    if (!projectKey || reorderBusyRef.current) return;
+    const prevCards = cards;
+    const bySid = new Map(prevCards.map((c: any) => [String(c.shot_id), c]));
+    const nextCards = nextOrder.map((sid) => bySid.get(sid)).filter(Boolean) as any[];
+    // 与本地卡片对不上（数量不符 / 出现未知 id）：不动本地顺序，直接把后端真相拉回来，
+    // 否则界面显示的排序与落盘内容会分叉，而用户无从察觉。
+    if (nextCards.length !== prevCards.length) {
+      setShotError(t('sb.order.staleList'));
+      await fetchCanvas();
+      return;
+    }
+    reorderBusyRef.current = true;
+    setReorderBusy(true);
+    setShotError('');
+    setCards(nextCards); // 乐观更新
+    try {
+      await storyboardApi.reorder({
+        project_name: projectKey,
+        episode_no: episodeNo ?? undefined,
+        order: nextOrder,
+      });
+      toast.success(t('sb.order.saved'));
+    } catch (e) {
+      setCards(prevCards); // 失败回滚：UI 绝不与落盘内容不一致
+      setShotError(t('sb.order.saveFailedRollback', { error: sbError(e, t('sb.order.saveFailed')) }));
+      toast.error(t('sb.order.saveFailed'));
+    } finally {
+      reorderBusyRef.current = false;
+      setReorderBusy(false);
+    }
+  };
+
+  /** ↑/↓：与相邻镜头交换一格（越界直接忽略，按钮本身也已禁用） */
+  const moveShot = (sid: string, delta: -1 | 1) => {
+    const ids = cards.map((c: any) => String(c.shot_id));
+    const i = ids.indexOf(sid);
+    const j = i + delta;
+    if (i < 0 || j < 0 || j >= ids.length) return;
+    const next = ids.slice();
+    [next[i], next[j]] = [next[j], next[i]];
+    void applyShotOrder(next);
+  };
+
+  /** 拖拽落点：把被拖的镜头插到目标位置（其余顺延） */
+  const dropShotOn = (targetSid: string) => {
+    const from = dragSid;
+    setDragSid(null);
+    setDragOverSid(null);
+    if (!from || from === targetSid) return;
+    const ids = cards.map((c: any) => String(c.shot_id));
+    const fi = ids.indexOf(from);
+    const ti = ids.indexOf(targetSid);
+    if (fi < 0 || ti < 0) return;
+    const next = ids.slice();
+    next.splice(fi, 1);
+    next.splice(ti, 0, from);
+    void applyShotOrder(next);
+  };
+
+  /** 正在生成的镜数：排序提醒用（生成中调序可能与本轮交错） */
+  const generatingShots = Number(summary?.storyboard_generating ?? 0);
 
   return (
     <div className="space-y-6">
@@ -3938,6 +4036,9 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
           icon={<Clapperboard className="h-10 w-10" />}
           title={t('sb.noData')}
           description={t('sb.noDataHint')}
+          // 空状态必须给出下一步：分镜产物是「整步落盘」，用户常误以为卡死，
+          // 这里至少给一个手动重拉入口（自动轮询 5s 仍在跑）
+          action={<Button size="sm" onClick={() => fetchCanvas()}>{t('common.refresh')}</Button>}
         />
       )}
 
@@ -3954,15 +4055,47 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
         <div className="p-4 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong">{error}</div>
       )}
 
+      {/* 排序入口说明：拖拽手柄 / ↑↓ 两种方式（触屏与键盘场景拖拽不可靠，故两套都给）。
+          ≤1 镜时没有可排序的东西，整条不显示，避免噪音。 */}
+      {cards.length > 1 && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-3">
+          <span>{t('sb.order.hint')}</span>
+          {reorderBusy && <span className="text-brand">{t('sb.order.saving')}</span>}
+          {generatingShots > 0 && (
+            <span className="text-warning-strong">
+              {t('sb.order.generatingWarn', { n: generatingShots })}
+            </span>
+          )}
+        </div>
+      )}
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {cards.map((card: any) => {
+        {cards.map((card: any, cardIndex: number) => {
           const sid = String(card.shot_id);
           const imgBusy = busy === `${card.shot_id}:image`;
           const vidBusy = busy === `${card.shot_id}:video`;
           const mode = videoMode[sid] || 'reference';
           const isSelected = selectedShots.includes(sid);
           return (
-            <div key={card.seq} className="bg-surface rounded-lg border border-line p-4 flex flex-col">
+            <div
+              key={card.seq}
+              // 拖拽落点：只有「有拖拽在途」时才接管，避免把其它点击/选择行为搅乱
+              onDragOver={(e) => {
+                if (dragSid && dragSid !== sid && !reorderBusy) {
+                  e.preventDefault();
+                  setDragOverSid(sid);
+                }
+              }}
+              onDrop={(e) => {
+                if (!dragSid) return;
+                e.preventDefault();
+                dropShotOn(sid);
+              }}
+              onDragLeave={() => setDragOverSid((prev) => (prev === sid ? null : prev))}
+              className={`bg-surface rounded-lg border p-4 flex flex-col transition-colors ${
+                dragOverSid === sid && dragSid && dragSid !== sid ? 'border-brand bg-surface-2' : 'border-line'
+              } ${dragSid === sid ? 'opacity-60' : ''}`}
+            >
               <div className="flex items-center justify-between mb-2">
                 <label className="flex items-center gap-1.5 cursor-pointer">
                   {/* 批量重生成勾选：已达上限时未勾选的复选框禁用（原生 checkbox，与 QcTab 一致） */}
@@ -3976,7 +4109,25 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
                   />
                   <span className="font-mono text-sm text-ink-2">#{card.seq}</span>
                 </label>
-                <span className="text-xs text-ink-2">{card.camera}</span>
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-xs text-ink-2">{card.camera}</span>
+                  {/* 排序控件：手柄拖拽 + ↑/↓ 精确挪一格（文案在组件内走 i18n，不硬编码） */}
+                  <ReorderControls
+                    index={cardIndex}
+                    total={cards.length}
+                    busy={reorderBusy || batchRunning}
+                    dragActive={dragSid === sid}
+                    onMoveUp={() => moveShot(sid, -1)}
+                    onMoveDown={() => moveShot(sid, 1)}
+                    onDragStart={(e) => {
+                      // Firefox 不设 dataTransfer 就不触发拖拽事件链
+                      e.dataTransfer.effectAllowed = 'move';
+                      e.dataTransfer.setData('text/plain', sid);
+                      setDragSid(sid);
+                    }}
+                    onDragEnd={() => { setDragSid(null); setDragOverSid(null); }}
+                  />
+                </span>
               </div>
 
               <div className="flex gap-3 mb-2">
