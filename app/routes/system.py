@@ -97,7 +97,13 @@ def _validate_base_url(base_url: str) -> tuple:
     host = (p.hostname or "").strip().lower()
     if not host:
         return False, "base_url 缺主机名"
-    port = str(p.port or (443 if scheme == "https" else 80))
+    # ⭐ P2-1（t83）：urlparse 的 .port 对非法端口（如 http://127.0.0.1:7863.evil.com/、
+    #   http://127.0.0.1:7863:9999/）会抛 ValueError；必须包住，否则 /api/ai/models 裸 500
+    #   （违反「任何异常都降级为结构化错误、绝不裸 500」的承诺）。
+    try:
+        port = str(p.port or (443 if scheme == "https" else 80))
+    except ValueError:
+        return False, "base_url 端口非法（无法解析为整数端口）"
 
     # 显式白名单（精确 host 或 host:port）—— 生产本地网关在此放行
     allowed = _models_allow_hosts()
