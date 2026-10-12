@@ -38,7 +38,11 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:5000',
+        // ⚠️ 2026-10-12（t15，修复 t14-R8）：代理目标此前硬编码 5000，而桌面版后端实际端口是
+        //   electron-app/main.js:81 的 DEFAULT_PORT = 5211（且被占用时会向后找空闲端口，
+        //   见 main.js:267-269）。开发态若后端由 Electron 拉起，直连 5000 会拿不到 /api。
+        //   允许用 MJSCXT_API_PORT 覆盖；**默认仍是 5000**，浏览器开发态行为零变化。
+        target: `http://127.0.0.1:${process.env.MJSCXT_API_PORT || '5000'}`,
         changeOrigin: true
       }
     }

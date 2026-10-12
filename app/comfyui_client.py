@@ -5430,7 +5430,7 @@ class ComfyUIClient:
         # 覆盖优先级：函数参数 > 环境变量 MJSCXT_H3_EXPORT_MODE > 默认。
         # 需要退回旧行为时设 MJSCXT_H3_EXPORT_MODE=all 即可，无需改代码。
         export_mode = (export_mode or os.environ.get("MJSCXT_H3_EXPORT_MODE")
-                       or "segments").strip().lower()
+                       or "all").strip().lower()
         if export_mode not in ("all", "segments"):
             logger.warning(f"[H3-Director] 未知 exportMode={export_mode}，回落 all")
             export_mode = "all"

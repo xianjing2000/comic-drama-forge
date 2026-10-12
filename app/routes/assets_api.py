@@ -208,8 +208,11 @@ def api_character_upload_sheet():
                 _w, _h = _im.size
                 _im.convert("RGB")
         except Exception as _ie:  # noqa: BLE001 不可解码的图绝不能入库
+            # 异常原文（PIL 的 UnidentifiedImageError 等）会带上 tmp 暂存目录的**绝对路径**
+            # → 只落服务端日志，响应体只留异常类名（可读、可排障，不含本机路径）
+            logger.warning("上传形象图：图片不可解码（tmp=%s）：%s", tmp_path, _ie, exc_info=True)
             return jsonify({"success": False,
-                            "error": f"图片无法读取或已损坏：{type(_ie).__name__} {_ie}"}), 400
+                            "error": f"图片无法读取或已损坏：{type(_ie).__name__}"}), 400
 
         os.makedirs(asset_dir, exist_ok=True)
         # overwrite 时先把旧 base 挪走做回滚点：切分失败要能把旧状复原
@@ -321,6 +324,14 @@ def api_character_outfit_generate():
 
     # 服装档案：先落 outfit.json（查询端点回显 desc 用；写失败不影响生成 ——
     # ready 判据看 base.png，desc 还有 meta sidecar 兜底）
+    #
+    # ⚠️ 2026-10-12：本文件顶部是 `import datetime`（**模块**导入，见 :19），这里曾写
+    #    `datetime.now()` → AttributeError 被下面的 except 吞成一行 warning：
+    #    outfit.json **永远写不出来**，/api/assets/character/outfits 的 desc 回显长期失效
+    #    且无人察觉。修法：①走 datetime.datetime.now()；②失败不再静默 —— 日志给全量、
+    #    响应体带 warning 字段让前端能提示（生成本身仍不受影响）。
+    record_written = False
+    record_error = ""
     try:
         os.makedirs(outfit_dir, exist_ok=True)
         atomic_write_json(os.path.join(outfit_dir, _OUTFIT_RECORD_FILE), {
@@ -328,10 +339,14 @@ def api_character_outfit_generate():
             "desc": outfit_desc,
             "character": character,
             "project": project_name,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         })
+        record_written = True
     except Exception as _oe:  # noqa: BLE001
-        logger.warning("服装变体档案写入失败（不影响生成）：%s", _oe)
+        # 不影响生成（ready 判据看 base.png），但必须响亮：异常原文只进日志（可能含路径）
+        record_error = "服装档案（outfit.json）写入失败：desc 回显将回落到提示词兜底"
+        logger.error("服装变体档案写入失败：项目=%s 角色=%s 服装=%s outfit_dir=%s ：%s",
+                     project_name, character, outfit_key, outfit_dir, _oe, exc_info=True)
 
     task_id = f"outfit_{project_name}_{uuid.uuid4().hex[:12]}"
     with lock:
@@ -356,7 +371,9 @@ def api_character_outfit_generate():
     logger.info("[服装变体] 项目=%s 角色=%s 服装=%s（overwrite=%s）任务=%s 已启动",
                     project_name, character, outfit_key, overwrite, task_id)
     return jsonify({"task_id": task_id, "status": "started",
-                    "outfit_key": outfit_key, "character": character})
+                    "outfit_key": outfit_key, "character": character,
+                    "record_written": record_written,
+                    **({"warning": record_error} if record_error else {})})
 
 
 @assets_api_bp.route('/api/assets/character/outfits', methods=['GET'])

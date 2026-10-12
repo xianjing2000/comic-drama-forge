@@ -105,7 +105,101 @@ def _resolve_audio_qc_target(project: str, source: str = ''):
             return p, 'line', ''
         if source == 'line':
             return '', 'line', f"项目 '{project}' 下没有逐句配音文件"
+    # ⭐ 2026-10-12 P0：参考音色档。现行 7 步流水线的 tts_pre 只产
+    #    output/dub/<项目>/voice_bank/<角色>/ref.wav，**不产 _lines/** —— 不给
+    #    这一档，面板「音频质检」在现役链路上根本点不到任何产物（t10 审计）。
+    #    ⚠️ 必须放在 'line' 之后：默认链（mix > merged > line > voice_bank）的
+    #    既有优先级不得改变（.workbuddy/test/verify_r5b_audio_target_qa.py 锁了
+    #    「默认档解析为 mix」）。
+    if source in ('', 'voice_bank'):
+        vb_dir = os.path.join(merged_dir, 'voice_bank')
+        cands = []
+        if os.path.isdir(vb_dir):
+            for _ch in sorted(os.listdir(vb_dir)):
+                _d = os.path.join(vb_dir, _ch)
+                if os.path.isdir(_d):
+                    cands.extend(_media(_d, _AUDIO_QC_AUDIO_EXT))
+        p = _newest(cands)
+        if p:
+            return p, 'voice_bank', ''
+        if source == 'voice_bank':
+            return '', 'voice_bank', f"项目 '{project}' 下没有参考音色（配音先行未跑或未生成）"
     return '', source or 'mix', f"项目 '{project}' 下没有可质检的音频产物（先做配音/合成）"
+def _audio_qc_candidates(project: str) -> list:
+    """体检要扫的音频产物清单（每项 {key, history_key, path, kind, whole_track, label}）。
+
+    为什么不能只扫 <dub>/<项目>/*_lines/：现行 7 步流水线的 tts_pre 只产 voice_bank
+    （每角色参考音色），**不产 _lines/** → 旧实现 audio_checked 恒为 0，面板永远显示
+    「配音无问题」，而成片音轨（H3 原生，直接 copy2 交付）根本没人扫过（t10 审计）。
+
+    覆盖五类：
+      · line       逐句配音（旧布局 *_lines/，保留兼容）
+      · voice_bank 参考音色（现行链路唯一的 TTS 产物）
+      · merged     整集配音合并轨
+      · mix        带配音成片（final_dub/，旧链路保留）
+      · final      成片（FINAL_DIR/，现役交付物本体）
+    整轨类一律走**整轨口径**（不设有声占比下限）：参考音色是声音样本、成片天然有
+    大段无台词留白，拿单句 50% 标准卡它们必然误报「漏句」。
+    """
+    out: list = []
+    seen: set = set()
+
+    def _add(key, history_key, path, kind, whole_track, label):
+        ap = os.path.abspath(path)
+        try:
+            if ap in seen or not os.path.isfile(ap) or os.path.getsize(ap) <= 0:
+                return
+        except OSError:
+            return
+        seen.add(ap)
+        out.append({"key": key, "history_key": history_key, "path": ap,
+                    "kind": kind, "whole_track": bool(whole_track), "label": label})
+
+    dub_dir = os.path.join(DUB_DIR, project)
+    if os.path.isdir(dub_dir):
+        for scene in sorted(os.listdir(dub_dir)):
+            if not scene.endswith("_lines"):
+                continue
+            sd = os.path.join(dub_dir, scene)
+            if not os.path.isdir(sd):
+                continue
+            for wav in sorted(os.listdir(sd)):
+                if wav.lower().endswith(_AUDIO_QC_AUDIO_EXT):
+                    # 历史键沿用 basename（与 dub worker 落盘一致，别与旧记录脱钩）
+                    _add(f"{scene}/{wav}", wav, os.path.join(sd, wav), "line", False,
+                         f"逐句配音 {wav}")
+        vb = os.path.join(dub_dir, "voice_bank")
+        if os.path.isdir(vb):
+            for ch in sorted(os.listdir(vb)):
+                d = os.path.join(vb, ch)
+                if not os.path.isdir(d):
+                    continue
+                for fn in sorted(os.listdir(d)):
+                    if fn.lower().endswith(_AUDIO_QC_AUDIO_EXT):
+                        _add(f"voice_bank/{ch}/{fn}", f"voice_bank_{ch}_{fn}",
+                             os.path.join(d, fn), "voice_bank", True, f"参考音色 {ch}")
+        for fn in sorted(os.listdir(dub_dir)):
+            if fn.lower().endswith(_AUDIO_QC_AUDIO_EXT):
+                _add(fn, fn, os.path.join(dub_dir, fn), "merged", True, f"整集配音轨 {fn}")
+    md = mix_out_dir(project)
+    if os.path.isdir(md):
+        for fn in sorted(os.listdir(md)):
+            if fn.lower().endswith(_AUDIO_QC_MEDIA_EXT):
+                _add(f"mix/{fn}", f"mix_{fn}", os.path.join(md, fn), "mix", True,
+                     f"带配音成片 {fn}")
+    try:
+        fin_dirs = project_store.project_dirs(FINAL_DIR, project)
+    except Exception:                                        # noqa: BLE001
+        fin_dirs = [os.path.join(FINAL_DIR, project)]
+    for d in fin_dirs:
+        if not os.path.isdir(d):
+            continue
+        for fn in sorted(os.listdir(d)):
+            if fn.lower().endswith(_AUDIO_QC_MEDIA_EXT):
+                _add(f"final/{fn}", f"final_{fn}", os.path.join(d, fn), "final", True,
+                     f"成片 {fn}")
+    return out
+
 @qc_bp.route('/api/qc/config', methods=['GET'])
 def api_qc_config_get():
     # 质检存量迁移触发点之二（之一在启动段）：前端打开质检页即保证老配置被补成默认开启。
@@ -375,7 +469,11 @@ def api_qc_audio():
     #    成片天然有大段无台词留白，拿单句的 50% 标准卡它必然误报「漏句」。
     #    判据是「整轨口径」而不是「调用方有没有传 source」—— 前端直接拖一个 mp4 过来
     #    检查（source 会是 path）时同样必须关掉，否则一进来就是满屏「静音过多」。
-    is_whole_track = source in ('final', 'mix', 'merged') or target.lower().endswith(('.mp4', '.mkv', '.mov'))
+    # ⭐ 2026-10-12：voice_bank 也走整轨口径 —— 参考音色是「声音样本」，首尾静音多、
+    #    字数少，拿单句 50% 下限卡它必然误报（t10 实测 12 个 ref 中有 2 个
+    #    有声占比 0.34 / 0.49，会被判「静音过多」）。
+    is_whole_track = (source in ('final', 'mix', 'merged', 'voice_bank')
+                      or target.lower().endswith(('.mp4', '.mkv', '.mov')))
     default_ratio = not is_whole_track
     check_ratio = data.get('check_speech_ratio')
     check_ratio = default_ratio if not isinstance(check_ratio, bool) else check_ratio
@@ -483,41 +581,55 @@ def api_qc_triage():
                     "issues": (last.get('issues') or [])[:3],
                 })
 
-    # ---- ② 配音：逐句 ----
+    # ---- ② 配音/音轨：逐句 + 参考音色 + 整轨（成片）----
+    # ⚠️ 2026-10-12 P0（t10 审计）：旧实现只扫 <dub>/<项目>/*_lines/，而现行流水线的
+    #    tts_pre 产的是 voice_bank（**不产 _lines/**）→ audio_checked 恒为 0，面板永远
+    #    显示「配音无问题」，而成片音轨（H3 原生、直接交付）从没被体检过。
+    #    现在按 _audio_qc_candidates 扫五类产物；整轨类走整轨口径（不设有声占比下限）。
     audio_failed: list = []
     audio_checked = 0
-    dub_dir = os.path.join(DUB_DIR, project)
-    if os.path.isdir(dub_dir):
-        for scene in sorted(os.listdir(dub_dir)):
-            if not scene.endswith('_lines'):
-                continue
-            sd = os.path.join(dub_dir, scene)
-            if not os.path.isdir(sd):
-                continue
-            for wav in sorted(os.listdir(sd)):
-                if not wav.lower().endswith(_AUDIO_QC_AUDIO_EXT):
-                    continue
-                key = f"{scene}/{wav}"
-                audio_checked += 1
-                if not deep:
-                    # 只读历史（快）—— 历史键用 basename，与 dub 落盘一致
-                    try:
-                        h = qc_client.read_history(QC_DIR, project, 'audio', wav) or {}
-                    except Exception:  # noqa: BLE001
-                        h = {}
-                    recs = h.get('records') or []
-                    if recs and isinstance(recs[-1], dict) and not recs[-1].get('passed'):
-                        audio_failed.append({"line": key, "reason": (recs[-1].get('issues') or ['历史记录判失败'])[:2],
-                                             "source": "history"})
-                    continue
-                # deep：实跑（慢，逐句 ffmpeg + 可能送多模态）
-                try:
-                    r = qc_client.check_audio(os.path.join(sd, wav), line_text='') or {}
-                    if not r.get('passed'):
-                        audio_failed.append({"line": key, "reason": (r.get('issues') or [])[:2],
-                                             "source": "live"})
-                except Exception as e:  # noqa: BLE001
-                    audio_failed.append({"line": key, "reason": [f"检查异常：{e}"], "source": "error"})
+    audio_scanned: dict = {}
+    for _c in _audio_qc_candidates(project):
+        _kind = _c["kind"]
+        audio_checked += 1
+        audio_scanned[_kind] = int(audio_scanned.get(_kind) or 0) + 1
+        if not deep:
+            # 只读历史（快）；新类目用带类目前缀的历史键，避免跨目录同名互相覆盖
+            try:
+                h = qc_client.read_history(QC_DIR, project, 'audio', _c["history_key"]) or {}
+            except Exception:  # noqa: BLE001
+                h = {}
+            recs = h.get('records') or []
+            if recs and isinstance(recs[-1], dict) and not recs[-1].get('passed'):
+                audio_failed.append({"line": _c["key"], "kind": _kind,
+                                     "whole_track": _c["whole_track"],
+                                     "reason": (recs[-1].get('issues') or ['历史记录判失败'])[:2],
+                                     "source": "history"})
+            continue
+        # deep：实跑（慢，ffmpeg 客观层 + 可选 AI 层）
+        try:
+            # ⚠️ 旧实现没传 cfg → check_audio 走 _empty_config 后直接返回
+            #    {"skipped": True}，而 skipped 没有 passed 字段 → 每一项都被记成
+            #    「失败」（deep 模式满屏假失败）。这里传真实配置，并显式跳过 skipped。
+            _cfg = _qc_load_cfg()
+            r = qc_client.check_audio(_c["path"], line_text='', cfg=_cfg,
+                                      check_speech_ratio=not _c["whole_track"]) or {}
+        except Exception as e:  # noqa: BLE001
+            audio_failed.append({"line": _c["key"], "kind": _kind,
+                                 "whole_track": _c["whole_track"],
+                                 "reason": [f"检查异常：{e}"], "source": "error"})
+            continue
+        if r.get('skipped'):
+            continue          # 质检开关未开/接口未配 → 不算「失败」，不冒充问题
+        if not r.get('passed'):
+            _m = r.get('metrics') or {}
+            audio_failed.append({
+                "line": _c["key"], "kind": _kind, "whole_track": _c["whole_track"],
+                "reason": (r.get('issues') or [])[:2],
+                "critical": (r.get('critical_issues') or [])[:2],
+                "metrics": {k: _m.get(k) for k in ("duration", "mean_db", "max_db",
+                                                   "silence_sec", "speech_ratio")},
+                "source": "live"})
 
     # ---- ③ 字幕校对 ----
     caption = {"available": False, "ok": None, "missing": [], "extra": [], "similarity": None,
@@ -615,7 +727,13 @@ def api_qc_triage():
         "success": True, "project": project, "episode_no": episode_no, "deep": deep,
         "visual": {"ok": visual_ok, "failed_count": len(visual_failed), "failed": visual_failed[:20]},
         "audio": {"ok": audio_ok, "checked": audio_checked, "failed_count": len(audio_failed),
-                  "failed": audio_failed[:20], "mode": 'live' if deep else 'history'},
+                  "failed": audio_failed[:20], "mode": 'live' if deep else 'history',
+                  # 2026-10-12 P0：按类目报扫描数，面板据此证明「真的扫到了产物」
+                  # （旧实现只扫 *_lines/，现役链路恒 0）。
+                  "scanned": audio_scanned,
+                  "legend": {"line": "逐句配音", "voice_bank": "参考音色",
+                             "merged": "整集配音轨", "mix": "带配音成片",
+                             "final": "成片"}},
         "caption": caption,
         "verdict": verdict, "remedy": remedy, "reason": reason,
         "actions": actions,

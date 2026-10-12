@@ -114,7 +114,10 @@ def _recompose_episode_video(videos_dir: str, episode_tag: str) -> str:
         if not os.path.isfile(_mapf):
             logger.warning("[重新合成] 无 seg_map.json，跳过（退回旧成片）")
             return ""
-        _sm = read_json_strict(_mapf) or {}
+        # ⚠️ 2026-10-12（t17 实测）：read_json_strict 的签名是 (path, default)，少传 default
+        #    会 TypeError → 被本函数的宽 except 吞成「[重新合成] 异常（保留旧成片）」→
+        #    整个「返工后自动重拼」**从来没生效过**（成片永远停留在返工前）。
+        _sm = read_json_strict(_mapf, {}) or {}
         # ⚠️ 集 tag 以 seg_map.json 为准：调用方推导的名字未必与生成时一致
         #    （ep01 / episode 等历史命名兼容），写错会覆盖到错误的成片。
         _tag_from_map = str(_sm.get("episode_tag") or "").strip()
@@ -475,13 +478,28 @@ def _video_retry_shot_impl():
             vid_dir, (f"ep{int(_rs_ep):02d}" if _rs_ep else "episode"))
     except Exception as _rc_e:  # noqa: BLE001
         logger.warning(f"[单镜重跑] 自动重新合成失败（保留旧成片）：{_rc_e}")
+    # ⭐ 2026-10-12（t17）：让 final / 超分产物**失效** —— 这是返工闭环的关键一步。
+    #   不标记的话：① step_final 优先 copy 超分产物（pipeline 里 src = upscale_path(ctx)），
+    #   而 probe_final 只看「文件可播」→ 幂等短路跳过 → 用户**永远**看到返工前的画面；
+    #   ② 交付物里的「已验收」会静默延续到返工前那版。标记后 probe_final / probe_upscale
+    #   判未完成 → 托管轮转或手动「生成成片」会从**已重拼**的整集原片重新合成（含返工段）。
+    #   全程 fail-open：打标失败只影响「成片是否自动更新」，不影响重跑本身。
+    _invalidated = {}
+    try:
+        _invalidated = pipeline.mark_episode_outputs_stale(
+            project, _rs_ep or 1, "镜头重做后成片/超分需重新生成",
+            {"shot_id": shot_id, "seq": seq, "recomposed": bool(_recomposed)})
+    except Exception as _iv_e:  # noqa: BLE001 - 打标失败不影响重做本身
+        logger.warning(f"[单镜重跑] 标记成片/超分失效失败：{_iv_e}")
     return jsonify({"success": True, "project": project, "shot_id": shot_id, "seq": seq,
                     "mode": mode, "path": dst,
                     "url": f"/api/videos/{project}/{_rs_sub}{os.path.basename(dst)}",
                     "ref_count": len(seg["reference_images"]), "duration": seg["duration"],
                     "deliverable_marked_stale": bool(stale),
                     "recomposed": bool(_recomposed),
-                    "recomposed_file": os.path.basename(_recomposed) if _recomposed else ""})
+                    "recomposed_file": os.path.basename(_recomposed) if _recomposed else "",
+                    # t17：本次被标记失效的产物（final / upscale）——前端/排障据此提示
+                    "outputs_invalidated": list((_invalidated or {}).get("marked") or [])})
 
 
 def _ensure_voice_bank_refs(common: list, project_name: str, all_characters=None) -> None:

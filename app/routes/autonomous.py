@@ -12,8 +12,9 @@ from flask import Flask, render_template, request, jsonify, send_file, abort, re
 from routes._shared import (  # noqa: F401  再导出：既有装饰器/调用零改动
     _autopilot_guard, _friendly_error, _prompt_memory_dead_count,
     _prompt_memory_used_total, _prompt_memory_view)
-from routes._shared import _ai_gate_or_400, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
+from routes._shared import _ai_gate_or_400, _app_logger, _project_or_400, _safe_project, _shot_seq, _trash_move  # noqa: F401  再导出
 from style_helpers import _style_aspect_confirmed, _style_aspect_guard  # noqa: F401, E402
+import autopilot
 import autonomous
 import os
 
@@ -29,25 +30,21 @@ def api_autonomous_start():
     if err is not None:
         return err
     novel_id = str(data.get('novel_id') or '').strip()
-    plan_overrides = {k: v for k, v in data.items()
-                      if k in ('style', 'target_shots', 'video_mode', 'enable_assets',
-                               'enable_keyframe', 'enable_video', 'enable_final',
-                               'enable_tts', 'enable_tts_pre', 'enable_mix',
-                               'step_max_retries',
-                               # ⭐ 2026-10-10：集间流水线开关（界面可勾选，默认开）
-                               #    True = 本集烧 GPU 时后台预热下一集剧本（纯 LLM，不抢卡）
-                               'prewarm_next_script',
-                               # ⭐ 2026-10-10：资产提示词预热（界面可勾选，默认开）。
-                               #    True = 本批资产生成期间后台预热**本批全部**资产的增强
-                               #    提示词（只填缓存，零 GPU、不落产物）。
-                               'prewarm_asset_prompt',
-                               # 文学剧本自动生成（界面可勾选，默认开）
-                               'auto_screenplay')}
+    # ⭐ 2026-10-12 T11：入参白名单**不再另写一份** —— 唯一权威是
+    #    autopilot.PLAN_DEFAULTS（set_plan 实际接受的集合）。此前这里是一张手写清单，
+    #    里面还留着 enable_keyframe / prewarm_asset_prompt / video_mode 这些**计划不接受**
+    #    的键：请求过了这一关、却在 set_plan 被静默丢弃 —— 典型的「假通道」。
+    #    现在：不在 PLAN_DEFAULTS 的键一律进 rejected，随响应显式回给调用方并记日志。
+    _owned = {'project_name', 'novel_id'}
+    _split = autopilot.split_plan_patch(
+        {k: v for k, v in (data or {}).items() if k not in _owned})
+    plan_overrides = _split["accepted"]
+    rejected = _split["rejected"]
+    _reasons = _split["reasons"]
 
     if not novel_id and project_name:
         # 尝试从现有计划获取 novel_id
-        import autopilot as _ap
-        plan = _ap.get_plan(project_name)
+        plan = autopilot.get_plan(project_name)
         novel_id = plan.get('novel_id', '')
 
     if not novel_id:
@@ -61,6 +58,18 @@ def api_autonomous_start():
     # D5：返回给前端的错误统一脱敏，避免把异常栈/模块名直接显示在错误框里
     if isinstance(result, dict) and result.get('error'):
         result['error'] = _friendly_error(result['error'])
+    # ⭐ 2026-10-12 T11：不支持的入参**不再静默丢弃** —— 逐键给原因，写进响应
+    #    （ignored/reasons）并拼一句人话进 warning；同时记一条后端日志便于排查。
+    if rejected and isinstance(result, dict):
+        _tip = "以下入参未生效：" + "；".join(
+            "%s（%s）" % (k, _reasons.get(k) or "不是托管计划字段，写它不会生效")
+            for k in sorted(rejected))
+        _app_logger().warning("一键启动：%d 个入参不受支持，已显式回给调用方：%s",
+                              len(_reasons), _tip)
+        result["ignored"] = _reasons
+        result["rejected"] = sorted(_reasons)
+        result["warning"] = (_tip if not str(result.get("warning") or "").strip()
+                             else str(result.get("warning")).strip() + "；" + _tip)
     status_code = 200 if result.get('success') else 400
     return jsonify(result), status_code
 

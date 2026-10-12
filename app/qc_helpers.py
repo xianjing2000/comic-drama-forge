@@ -55,6 +55,7 @@ from shared_base import _trash_move  # noqa: F401  再导出
 from shared_project import _project_or_400, _safe_project, _shot_seq  # noqa: F401  再导出
 import asset_name_match
 import autopilot
+import canon                      # 硬事实一致性基线（2026-10-12），只用标准库的叶子模块
 import novel_to_script
 import os
 import project_store
@@ -853,3 +854,66 @@ def _qc_summary(attempts: list, enabled: bool, ready: bool, max_retries: int) ->
         "history_file": last.get("history_file") or "",
     }
 
+# ======================================================================
+# canon（硬事实一致性基线）—— 质检侧入口（2026-10-12）
+#
+# 用户 2026-10-12 成片质检报告里的两条硬事实缺陷（同集「47层 vs 7层」、
+# 工牌「天合科技」而配音「天河科技」）暴露的是同一个缺口：**质检侧没有任何「事实基准」**，
+# 只能靠人眼在成片里比对。这里把 app/canon.py 的设定表校验挂到质检域：
+#   · _qc_canon_conflicts     —— 剧本 / 镜头列表 / 纯文本，通用入口
+#   · _qc_canon_scan_shots    —— 分镜 / 视频侧拿到的就是 shots 列表，专用入口
+#   · _qc_canon_prompt_block  —— 需要往提示词里塞设定基准的调用方复用同一份渲染
+#
+# ⚠️ 三个函数一律 fail-open：设定表缺失 / 入参异常 → 返回「通过」+ error 描述。
+#    质检链路本身烧 GPU，绝不因为一张设定表读不到就把质检挂掉。
+# ======================================================================
+
+def _qc_canon_conflicts(target, novel=None) -> dict:
+    """用 canon 设定表校验「剧本 / 单镜列表 / 文本」有无互斥表述。
+
+    与 canon.validate_script / validate_text 同构的返回值::
+
+        {"novel": 命中的设定表条目, "ok": bool, "conflicts": [明细...], "error": ""}
+
+    明细每条含 key / category / value / form / kind / count / contexts / where / source，
+    可直接进质检报告与前端。kind 两种取值：contradiction（规范值与错形同时出现）
+    / forbidden_form（只出现错形）。
+
+    用法::
+
+        _qc_canon_conflicts(script_dict, novel="进境_整本小说")
+        _qc_canon_conflicts("本栋楼共47层……这是7层", novel="进境")
+    """
+    try:
+        if target is None:
+            return {"novel": "", "ok": True, "conflicts": [], "error": ""}
+        if isinstance(target, str):
+            return canon.validate_text(target, novel)
+        return canon.validate_script(target, novel)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("canon 质检校验失败（忽略，按通过处理）：%s", e)
+        return {"novel": "", "ok": True, "conflicts": [],
+                "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def _qc_canon_scan_shots(shots, novel=None) -> dict:
+    """质检侧：只扫一组镜头（分镜 / 视频链路的入参就是 shots 列表）。
+
+    扫的字段与落盘同口径（description / 台词 / 字幕 / surface_text / audio_cues），
+    见 canon.iter_script_texts。
+    """
+    if isinstance(shots, dict):
+        shots = shots.get("shots")
+    return _qc_canon_conflicts({"shots": list(shots or [])}, novel)
+
+
+def _qc_canon_prompt_block(novel) -> str:
+    """取本剧的「设定基准」提示词片段（复用 canon 的渲染，不另起一套口径）。
+
+    未登记的小说返回空串 —— 调用方据此保持「无设定表 → 行为零变化」。
+    """
+    try:
+        return canon.render_canon_block(canon.resolve_book(novel))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("canon 提示词片段生成失败（忽略）：%s", e)
+        return ""

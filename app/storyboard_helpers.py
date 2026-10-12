@@ -1097,8 +1097,14 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
 
     def _pf_fill(cur_p):
         """滚动预取调度：主循环消费完 _pf_pending 下标 cur_p 后，派出后面最多 2 个未预取镜。"""
+        _pf_filled = []
         for _j in range(cur_p + 1, min(cur_p + 3, len(_pf_pending))):
-            _pf_schedule(_pf_pending[_j][0])
+            _pf_sq = _pf_pending[_j][0]
+            if _pf_schedule(_pf_sq):
+                _pf_filled.append(_pf_sq)
+        if _pf_filled:
+            logger.info("[预取诊断] 派出预取 seq=%s（待处理共 %d 镜）",
+                        _pf_filled, len(_pf_pending))
 
     def _pf_take(seq_p):
         """取走 seq_p 的预取包（有则弹出）；没有返回 None（主循环转内联）。"""
@@ -1154,7 +1160,13 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 # 滚动预取（2026-10-06）：上一镜消费后已派出本镜的预取线程；这里优先
                 # 取现成包，LLM 预检不再阻塞 GPU。未就绪 / 线程失败 → 内联执行同一段
                 # _prep_shot（两条路径共用同一实现，绝无逻辑分叉）。
+                # ⭐ 2026-10-12 预取命中诊断（只加日志，不改行为）：
+                # 实测前置段恒 84~93s（= 预检耗时），与「预取命中应为 ~0s」矛盾，
+                # 故在此显式记录「命中 / 等线程 / 内联」三条路径与各自耗时，
+                # 用真实数据判定预取到底有没有生效，而不是继续猜。
+                _pf_t0 = time.perf_counter()
                 pack = _pf_take(seq)
+                _pf_path = "命中预取包"
                 if pack is None:
                     with _pf_lock:
                         _pf_t = _pf_threads.get(seq)
@@ -1162,10 +1174,22 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         # 预取线程还在跑同一段逻辑：等它收尾（与内联重跑等价但零重复 ——
                         # 同镜双跑会双打 LLM，且并发写同一张身份网格/基准图文件）。
                         # 线程内所有阻塞调用自带超时；daemon 线程不阻塞进程退出。
+                        _pf_w0 = time.perf_counter()
                         _pf_t.join()
+                        _pf_wait = time.perf_counter() - _pf_w0
+                        _pf_path = "等预取线程(%.1fs)" % _pf_wait
                         pack = _pf_take(seq)
+                        if pack is not None:
+                            _pf_path += "→获包"
+                    elif _pf_t is not None:
+                        _pf_path = "线程已结束但无包"
+                    else:
+                        _pf_path = "未派出预取"
                 if pack is None:
+                    _pf_path += "→内联"
                     pack = _prep_shot(seq, shot)   # 预取未派出（重复镜号等）→ 内联
+                logger.info("[预取诊断] shot=%s seq=%s 路径=%s 前置段总 %.1fs",
+                            shot_id, seq, _pf_path, time.perf_counter() - _pf_t0)
                 _p_idx = _pf_pending_idx.get(seq)
                 if _p_idx is not None:
                     _pf_fill(_p_idx)   # 消费完本镜 → 滚动派出后面 ≤2 镜的预取
@@ -1535,6 +1559,36 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                 logger.warning(
                                     "分镜软放行入库失败（回落硬阻断）：镜头 %s｜%s",
                                     shot_id, _se)
+                            # ⭐ 2026-10-12（T18 P0）：软放行会**终结本镜的重试循环**，
+                            #    而教训库召回只发生在 attempt>0 的重试轮（见上方 _retry_base
+                            #    分支的 prompt_memory.suggest/learned_prompt）—— 于是软放行
+                            #    镜头「沉淀了教训却从不召回它」：T6 实测 storyboard 教训 84 条
+                            #    仅 7 条被采纳、本集新增 32 条仅 1 条，闭环断裂即源于此。
+                            #    这里补一次**定向召回**：用与 _record_qc_lesson 相同的稳定键
+                            #    （orig_prompt）召回本镜缺陷对应的教训（分镜层高频缺陷就是
+                            #    「面板雷同 / 景别」两类），使 use_count 计数闭环。
+                            #    ⚠️ 纯记账 + 可观测字段：**不改本镜产物、不改放行结论**，
+                            #    任何异常都被吞掉（召回失败绝不影响已完成的放行）。
+                            if _soft_ok:
+                                try:
+                                    _soft_hints = prompt_memory.suggest(
+                                        kind="storyboard", prompt=orig_prompt,
+                                        project=project_name,
+                                        root_dir=PROJECT_OUTPUT_DIR,
+                                        style=_qc_style_of(project_name))
+                                    if _soft_hints:
+                                        item["soft_release_recall"] = _soft_hints[:3]
+                                        logger.info(
+                                            "镜头 %s 软放行后定向召回教训 %d 条：%s",
+                                            shot_id, len(_soft_hints), _soft_hints[:2])
+                                    else:
+                                        logger.info(
+                                            "镜头 %s 软放行后定向召回：暂无可用教训",
+                                            shot_id)
+                                except Exception as _re:  # noqa: BLE001
+                                    logger.warning(
+                                        "镜头 %s 软放行后教训召回失败（忽略，不影响放行）：%s",
+                                        shot_id, _re)
                             if not _soft_ok:
                                 logger.warning(
                                     "分镜软放行未生效（无可入库暂存图）→ 保持硬阻断：镜头 %s",

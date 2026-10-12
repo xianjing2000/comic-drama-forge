@@ -258,11 +258,18 @@ def api_storyboard_shot_reorder():
     script["shots"] = new_shots
     ep_no = script.get("episode_no") or episode_no or 1
     script.setdefault("metadata", {})["shot_order"] = [str(x) for x in order]
-    script["metadata"]["shot_order_updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # ⚠️ 2026-10-12：本文件顶部是 `import datetime`（**模块**导入，见 :18）。这里曾写
+    #    `datetime.now()` → AttributeError → 该接口**恒 500**；且抛错点在下面的
+    #    save_episode_script 之前，shots 顺序与 shot_order 双双不落盘（排序 0 生效）。
+    #    必须走 datetime.datetime.now()（同仓 artifact_helpers.py / keyframe.py 同写法）。
+    script["metadata"]["shot_order_updated_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         novel_to_script.save_episode_script(script, SCRIPT_DIR, key, ep_no)
-    except Exception as e:  # noqa: BLE001
-        return jsonify({"success": False, "error": f"剧本落盘失败：{e}"}), 500
+    except Exception:  # noqa: BLE001
+        # 异常原文可能带本机绝对路径 → 只进服务端日志，响应体给稳定可读文案
+        logger.error("分镜排序落盘失败：项目=%s 集=%s", project, ep_no, exc_info=True)
+        return jsonify({"success": False,
+                        "error": "剧本落盘失败，镜头顺序未保存（详见服务端日志）"}), 500
     return jsonify({"success": True, "project": project, "episode_no": ep_no,
                     "shot_order": [str(x) for x in order]})
 
@@ -382,7 +389,10 @@ def api_storyboard_grid_candidates():
         except Exception as e:  # noqa: BLE001
             logger.error("分镜九宫格候选构图失败：%s", e, exc_info=True)
             with lock:
-                generation_state[task_id].update({"status": "failed", "error": str(e)})
+                # 任务状态会被前端轮询后**直接展示** → 不透传异常原文（可能含绝对路径）
+                generation_state[task_id].update({
+                    "status": "failed",
+                    "error": "九宫格候选构图生成失败（详见服务端日志）"})
 
     threading.Thread(target=_grid_worker, daemon=True, name=task_id).start()
     return jsonify({"success": True, "task_id": task_id, "status": "started"})
@@ -419,8 +429,10 @@ def api_storyboard_grid_apply():
     _sub = os.path.basename(_sb_dir) if _sb_dir != _flat else ""
     grid_png = os.path.join(_sb_dir, f"shot_{seq:02d}_grid.png")
     if not os.path.isfile(grid_png):
+        # 绝对路径不进响应体：错误提示只给用户可读语义 + 下一步（路径进服务端日志）
+        logger.info("[shot-grid-apply] 候选图缺失（绝对路径只落日志）：%s", grid_png)
         return jsonify({"success": False,
-                        "error": f"九宫格候选图不存在：{grid_png}（请先生成候选构图）"}), 404
+                        "error": "九宫格候选图不存在（请先生成候选构图）"}), 404
     stamp = time.strftime("%Y%m%d_%H%M%S")
     trash_root = os.path.join(PROJECT_TRASH_DIR, "shot_grid",
                               f"{stamp}_{project_name}")

@@ -537,10 +537,46 @@ def _pick_scene_view(scene_payload: dict, shot) -> str:
     return _first_existing(*cands) or ""
 
 
+# ⭐ 2026-10-12（T10 设定一致性）：资产索引里天然带**项目指纹** ——
+#   _build_asset_index 给每个条目写了
+#     url  = /api/assets/<kind>s/<项目名>/<名称>/front.png
+#     _dir = <数据根>/output/assets/<kind>s/<项目名>/<名称>
+#   而 H3 视频层（video_helpers._video_generate_worker_body:905）调用本模块时**不传 project_name**
+#   （该调用点被标注「本轮不可改动」）。没有项目名就取不到 canon 设定表 → 视频层永远拿不到
+#   「本剧硬事实基准」——这正是「画面守则写四十七层、配音却说七层楼」的成因之一。
+#   故这里从任一索引条目**反解**项目名，让两条调用路径都能拿到，不动 worker 代码。
+_H3_ASSET_KINDS = ("characters", "items", "scenes")
+
+
+def _h3_project_hint(*indexes) -> str:
+    """从资产索引反解项目名（反解不到返回空串 → 调用方按「无设定表」处理）。
+
+    识别两种写法（都是本仓库自己生成的，故**不做 URL 解码** —— 生成时也没编码，
+    见 _build_asset_index 的 f"/api/assets/{kind}s/{project_name}/..."）：
+      · <...>/assets/<characters|items|scenes>/<项目名>/...  （本地路径 / _dir / image）
+      · /api/assets/<characters|items|scenes>/<项目名>/...   （前端 URL）
+    """
+    for idx in indexes:
+        if not isinstance(idx, dict):
+            continue
+        for entry in idx.values():
+            if not isinstance(entry, dict):
+                continue
+            for key in ("url", "_dir", "image"):
+                parts = str(entry.get(key) or "").replace("\\", "/").split("/")
+                for i in range(len(parts) - 2):
+                    if parts[i] == "assets" and parts[i + 1] in _H3_ASSET_KINDS:
+                        _name = parts[i + 2].strip()
+                        if _name:
+                            return _name
+    return ""
+
+
 def _h3_shot_ref_components(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
                             character_refs: list = None,
                             main_char_img: list = None,
-                            outfit_map: dict = None) -> list:
+                            outfit_map: dict = None,
+                            project_name: str = "") -> list:
     """把一个分镜解析成**有序参考图组件**（不构建提示词、不决定槽位）。
 
     返回 ``[{"kind": "character"|"item"|"scene", "name": str,
@@ -610,6 +646,15 @@ def _h3_shot_ref_components(shot: dict, char_idx: dict, item_idx: dict, scene_id
                     or _entry.get("description") or ""})
     if _canon:
         shot["_canon_facts"] = _canon
+
+    # ⭐ 2026-10-12（T10）：把**项目名**挂到 shot 上，供 h3_prompt_kit.canon_facts_block
+    #   解析 canon 设定表、按镜注入项目级硬事实（楼层数 / 公司名 / 地址 / 关键数字）。
+    #   · project_name 显式传入时以它为准（本模块内部调用者从项目配置里拿得到，最准）；
+    #   · 没传（video worker 那条不可改动的路径）→ 从资产索引反解项目名。
+    #   赋值语义：重复调用不会增长（与 shot["_ref_warnings"] 的追加语义刻意不同）。
+    _proj_hint = str(project_name or "").strip() or _h3_project_hint(char_idx, item_idx, scene_idx)
+    if _proj_hint:
+        shot["_canon_project"] = _proj_hint
 
     # ---- 本镜场景（按机位取档）----
     _loc, _scene_entry = _resolve_scene_entry(shot, scene_idx, "H3视频段")
@@ -689,7 +734,8 @@ def _h3_plan_common_refs(shots: list, char_idx: dict, item_idx: dict, scene_idx:
     for _s in _shots:
         _sid = str(_s.get("shot_id") or "")
         _comps = _h3_shot_ref_components(_s, char_idx, item_idx, scene_idx,
-                                         character_refs, main_char_img)
+                                         character_refs, main_char_img,
+                                         project_name=project_name)
         comps_map[_sid] = _comps
         per_shot_assets.append(_comps)
     common = h3_common_refs.plan_common_refs(

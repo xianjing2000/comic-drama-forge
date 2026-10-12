@@ -231,4 +231,9 @@ comfyui_dir.json
 # 编辑器/脚本产生的备份（2026-10-12 误提交后补）
 *.bak2-*
 *.bak-*
+# ⚠️ 2026-10-12（t15 前端清理）：上面两条用的是「连字符」，匹配不到下划线形态。
+#   实测全仓有 121 个 *.bak_<tag>_<date> 文件（frontend/src 内曾有 17 个 → 已归档，
+#   .workbuddy/test 71 个、electron-app/_backend/app 34 个…），而 git 跟踪数 = 0
+#   —— 即它们全靠「没人手滑 add」侥幸没进仓库。此处补齐下划线形态防复发。
+*.bak_*
 *.orig

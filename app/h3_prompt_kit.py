@@ -46,6 +46,7 @@
 """
 from __future__ import annotations
 
+import canon                       # 设定一致性基线（2026-10-12）：只用标准库，无循环依赖
 import logging
 import math
 import re
@@ -1545,6 +1546,12 @@ def build_ref2va(shot: dict, picture_defs: Sequence[Tuple[str, str]],
     n_beats = len(_beats(shot, dur_f))
     shots = ", ".join(f"[Shot {i}]" for i in range(1, n_beats + 1))
 
+    # ⭐ 2026-10-12（T10）：把本剧设定基准也拼进 detailed_description 段。
+    #    ⚠️ 这正是本任务要修的盲区：canon_facts_block 此前**只挂在 build_base**
+    #    （无参考图的 T2VA 分支），而带参考图的正常出片路径走的是本函数 ——
+    #    comfyui_client.resolve_h3_prompt:5859-5863 / _build_h3_prompt:5898-5901 都归到这里。
+    #    即：2026-10-11 那次修只覆盖了少数无参考图镜头，主路径一直是「零事实基准」。
+    _canon_cf = canon_facts_block(shot)
     sections = [
         ("subject_definitions", _subject_definitions(
             list(picture_defs), list(subjects), style,
@@ -1569,41 +1576,166 @@ def build_ref2va(shot: dict, picture_defs: Sequence[Tuple[str, str]],
             voice_descs=_voice_descs,
             slots_override={str(_d.get("name") or "").strip():
                             str(_d.get("speaker") or "").strip()
-                            for _d in _audio_defs if _d.get("speaker")})),
+                            for _d in _audio_defs if _d.get("speaker")}) + _canon_cf),
         ("overall_soundscape", build_soundscape(shot)),
         ("non_diegetic_music", build_music(shot, style)),
     ]
     return "\n\n".join(f"{name}:\n{body}" for name, body in sections)
 
 
+#: 项目级设定基准的字符上限（只约束**项目级**那部分；本镜 surface_text 那部分沿用旧口径、
+#: 不设上限，避免改变既有行为）。取 400 的依据：进境设定表 9 条全中约 300 字符，
+#: 上限留一档余量；将来设定表变大时由它兜住，不让人把 H3 提示词越塞越长
+#: （MAX_PROMPT_CHARS=32000 是硬闸门，但那是"截断"，这里要的是"一开始就别塞那么多"）。
+#: ⚠️⚠️ 项目约定（2026-10-12 T12 明确，Captain 口径）：**新增「可配置常量」必须同时在
+#: app/config_doctor.py 的 REGISTRY 里登记 owner**，否则
+#: tests/test_config.py::test_doctor_ok_and_no_orphans 必失败 ——
+#: config_doctor.orphan_candidates() 会把「命名/取值看起来可配置、却没登记」的常量报成孤儿
+#: （实测：T10 新增本常量时未登记，全量测试即红：orphans=[('h3_prompt_kit','H3_CANON_MAX_CHARS')]）。
+#: 本常量的登记：key='h3_canon_max_chars'、owner='h3_prompt_kit.H3_CANON_MAX_CHARS'。
+#: ⚠️ 另注意 REGISTRY.default 会在启动时经 config_center.apply_to_runtime() **回写**到这一行
+#: （与 H3_SEGMENT_MAX_SEC 同因：改默认值要改 REGISTRY，只改代码会被回写成 REGISTRY 的值）。
+H3_CANON_MAX_CHARS = 400
+_H3_CANON_LOG_TAG = "[canon注入·H3]"
+
+#: 「本镜涉不涉及设定」的判定字段 —— 会进成片、也会进提示词的文本
+_H3_CANON_FIELDS = ("description", "visual_detail", "action", "motion", "location",
+                    "surface_text", "caption_text", "audio_cues", "edit_reason")
+
+
+def _h3_canon_texts(shot: dict) -> list:
+    """(字段名, 文本) —— 本镜所有可能提到数字/名称的文本，供逐条命中判定与日志定位。"""
+    out = []
+    if not isinstance(shot, dict):
+        return out
+    for k in _H3_CANON_FIELDS:
+        if shot.get(k):
+            out.append((k, str(shot[k])))
+    _cap = shot.get("caption")
+    if isinstance(_cap, dict) and _cap.get("text"):
+        out.append(("caption.text", str(_cap["text"])))
+    for _i, _ln in enumerate(shot.get("dialogue") or []):
+        if isinstance(_ln, dict) and _ln.get("text"):
+            out.append((f"dialogue[{_i}].text", str(_ln["text"])))
+        elif isinstance(_ln, str) and _ln.strip():
+            out.append((f"dialogue[{_i}]", _ln))
+    for _k in ("items_in_shot", "characters_in_shot"):
+        for _i, _n in enumerate(shot.get(_k) or []):
+            if str(_n or "").strip():
+                out.append((f"{_k}[{_i}]", str(_n)))
+    return out
+
+
+def _h3_project_fact_lines(shot: dict, surface_text_blob: str = "") -> tuple:
+    """项目级设定基准：按镜**选择性**挑出「本镜确实涉及」的条目（+ 幂等去重 + 字符上限）。
+
+    返回 (lines, notes, skipped, dropped, book_key, skip_notes)：
+
+      · 命中判据（任一成立即算「涉及」）：
+          ① 本镜文本出现该 fact 的**禁写错形**（如台词写「七层楼」）→ 必注入（纠正型）；
+          ② 本镜文本出现规范值 / 别名（如「四十七层」「天合科技」）→ 注入以钉死写法；
+          ③ 都不出现 → **不注入**（本镜不涉及设定，不占提示词）。
+      · 幂等去重：规范值已逐字写在 surface_text_blob（本镜文字道具的原始文字，本来就会
+        进提示词）里 → 跳过该条，同一条事实只保留 surface_text 那份。
+        ⚠️ 例外：出现禁写错形时**仍然注入**（那是纠正，不是重复堆叠）。
+      · 字符上限：项目级累计超过 H3_CANON_MAX_CHARS 的条目不注入并计入 dropped。
+
+    任何异常都返回空结果（fail-open）：视频层拿不到设定表也照常出片。
+    """
+    lines, notes, skip_notes = [], [], []
+    skipped = dropped = 0
+    book_key = ""
+    try:
+        if not isinstance(shot, dict):
+            return lines, notes, skipped, dropped, book_key, skip_notes
+        hint = str(shot.get("_canon_project") or "").strip() \
+            or str(shot.get("project_name") or "").strip()
+        if not hint:
+            return lines, notes, skipped, dropped, book_key, skip_notes
+        book = canon.resolve_book(hint)
+        if not book:
+            return lines, notes, skipped, dropped, book_key, skip_notes
+        book_key = str(book.get("key") or "")
+        texts = _h3_canon_texts(shot)
+        blob = str(surface_text_blob or "")
+        total = 0
+        for _f in canon.facts_of(book):
+            c_trig = x_trig = ""
+            for _fname, _t in texts:
+                _h = canon.fact_hits(_t, _f)
+                for _form in (_h.get("conflicts") or []):
+                    if not x_trig:
+                        x_trig = f"{_form}@{_fname}"
+                for _form in (_h.get("canonical") or []):
+                    if not c_trig:
+                        c_trig = f"{_form}@{_fname}"
+            if not c_trig and not x_trig:
+                continue                      # ③ 本镜不涉及这条设定 → 不注入
+            _val = str(_f.get("value") or "")
+            _cat = _f.get("category") or _f.get("key")
+            if not x_trig and _val and _val in blob:
+                skipped += 1                  # 幂等：surface_text 已逐字写了同一规范值
+                skip_notes.append(f"{_cat}={_val}（surface_text 已含）")
+                continue
+            _line = f"设定｜{_cat}={_val}"
+            _bans = [str(_b) for _b in (_f.get("conflicts") or []) if str(_b).strip()]
+            if _bans and x_trig:
+                _line += "（禁写 " + "/".join(_bans[:6]) + "）"
+            if x_trig:
+                _line += f"｜⚠本镜出现「{x_trig.split('@')[0]}」，必须写成「{_val}」"
+            if total + len(_line) > H3_CANON_MAX_CHARS:
+                dropped += 1
+                continue
+            total += len(_line) + 1
+            lines.append(_line)
+            notes.append(f"{_cat}={_val}←{x_trig or c_trig}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("H3 项目级设定注入失败（忽略，按无基准处理）：%s", e)
+    return lines, notes, skipped, dropped, book_key, skip_notes
+
+
 def canon_facts_block(shot: dict) -> str:
     """把本剧「权威设定」拼成一段提示词（供 H3 约束画面文字与配音内容）。
 
-    ⭐⭐ 2026-10-11 用户实测反馈：画面里守则纸写「共四十七层」（来自小说原文，正确），
-    但**配音却说「七层楼」** —— 视觉与听觉自相矛盾。
+    ⭐⭐ 2026-10-11 第一版：画面里守则纸写「共四十七层」（来自小说原文，正确），
+    但**配音却说「七层楼」** —— 视觉与听觉自相矛盾。根因是 H3 提示词里从来没有
+    「本剧事实基准」，模型只能凭上下文猜数字/公司名。第一版的数据来源是**已经正确的**
+    items[].surface_text（实证：守则八条 + 员工卡文字在物品资产图里逐字准确），
+    由 asset_refs._h3_shot_ref_components 挂到 shot["_canon_facts"]。
 
-    根因：H3 提示词里从来没有「本剧事实基准」，模型只能凭上下文猜数字/公司名，
-    于是配音里冒出了「七层」「天河科技」这类与画面冲突的内容。
+    ⭐⭐ 2026-10-12（T10）第二版：第一版有**盲区** —— 只有本镜**摆了带 surface_text 的
+    文字道具**才有基准；「配音说七层楼、画面里却没有守则」的那些镜头仍是零基准，
+    而硬事实本该按**项目**生效。现在由 asset_refs 把项目名挂到 shot["_canon_project"]，
+    本函数据此取 canon 设定表（app/canon_data.json），再按镜**选择性**注入
+    （只注入本镜确实涉及的数字/名称，见 _h3_project_fact_lines），并做幂等去重与字符上限。
 
-    数据来源就用**已经正确的** items[].surface_text（实证：守则八条 + 员工卡文字
-    在物品资产图里逐字准确），所以不需要额外提炼环节，也不会引入新的不一致。
-
-    调用方（asset_refs._h3_shot_ref_components）把该镜出场物品的 surface_text
-    挂到 ``shot["_canon_facts"]``，本函数只负责排版；无该字段时返回空串，
-    对既有行为零影响。
+    无 _canon_facts 且项目级无命中 → 返回空串（与改动前逐字一致：未登记小说 /
+    没有资产索引的场景行为零变化）。
     """
     facts = shot.get("_canon_facts") if isinstance(shot, dict) else None
-    if not facts:
-        return ""
     if isinstance(facts, dict):
         facts = [f"{k}：{v}" for k, v in facts.items() if str(v).strip()]
     facts = [str(f).strip() for f in (facts or []) if str(f).strip()]
-    if not facts:
+    _sep = " | "
+    _proj, _notes, _skipped, _dropped, _book, _skip_notes = \
+        _h3_project_fact_lines(shot, _sep.join(facts))
+    # 有注入、有幂等跳过、或有超限丢弃时都记一笔：这三件事都是「为什么提示词长这样」的答案，
+    # 出问题时（例如"这镜怎么又冒出七层楼"）只翻日志就能定位，不必复现整条流水线。
+    if _proj or _skipped or _dropped:
+        logger.info(
+            "%s shot=%s 设定表《%s》项目级注入 %d 条（%s）；本镜 surface_text %d 条；"
+            "幂等跳过 %d 条（%s）；超上限丢弃 %d 条；项目级占比 %d 字符（上限 %d）",
+            _H3_CANON_LOG_TAG, (shot or {}).get("shot_id") or "-", _book or "-",
+            len(_proj), "；".join(_notes) or "无", len(facts), _skipped,
+            "；".join(_skip_notes) or "无", _dropped,
+            sum(len(x) for x in _proj), H3_CANON_MAX_CHARS)
+    all_facts = facts + _proj
+    if not all_facts:
         return ""
     return (". This episode\u0027s authoritative on-screen facts (the numbers, names and "
             "wording below are the only correct ones; keep spoken references consistent "
             "with them and never invent alternative figures or company names): "
-            + " | ".join(facts) + ".")
+            + _sep.join(all_facts) + ".")
 
 
 def build_base(shot: dict, mode: str = "T2VA", duration: Any = None, style: str = "") -> str:

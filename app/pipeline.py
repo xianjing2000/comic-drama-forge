@@ -308,8 +308,17 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
             cfg[k] = int(cfg.get(k))
         except (TypeError, ValueError):
             cfg[k] = DEFAULT_CONFIG[k]
-    # 布尔开关：前端可能传字符串/0/1（JSON 类型不可信）→ 统一收敛为 bool
-    for k in ("prewarm_next_script", "prewarm_asset_prompt", "auto_screenplay"):
+    # 布尔开关：前端可能传字符串/0/1（JSON 类型不可信）→ 统一收敛为 bool。
+    # ⚠️ 2026-10-12 修复（音频链路 T4）：原先只有 prewarm_*/auto_screenplay 走
+    #    「字符串真值解析」，enable_* 等开关另有一个 bool(v) 循环 —— 于是前端传
+    #    "false"/"0" 会被 bool("false") 静默当成**开启**（实测 enable_tts_pre="false"
+    #    归一化后仍为 True：用户以为关掉了参考音色，实际照跑一遍 TTS）。
+    #    所有布尔开关现在一律走同一套解析，不再有第二条真相。
+    for k in ("prewarm_next_script", "prewarm_asset_prompt", "auto_screenplay",
+              "enable_assets", "enable_video", "enable_final",
+              "enable_tts", "enable_mix", "enable_tts_pre",
+              "enable_upscale", "require_consistency",
+              "auto_repair", "overwrite_script", "upscale_per_scene"):
         v = cfg.get(k)
         if isinstance(v, str):
             cfg[k] = v.strip().lower() not in ("0", "false", "off", "no", "")
@@ -326,12 +335,6 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
         cfg["coverage_min_percent"] = float(cfg.get("coverage_min_percent"))
     except (TypeError, ValueError):
         cfg["coverage_min_percent"] = DEFAULT_CONFIG["coverage_min_percent"]
-    for k in ("enable_assets", "enable_video", "enable_final",
-              "enable_tts", "enable_mix", "enable_tts_pre",
-              "enable_upscale", "require_consistency",
-              "auto_repair", "overwrite_script",
-               "upscale_per_scene"):
-        cfg[k] = bool(cfg.get(k))
     # 2026-10-01：只保留整集一次生成（per_shot / keyframe 废弃，2026-10-05 起
     # keyframe 步骤也已移出 STEP_SEQUENCE）
     cfg["video_mode"] = "episode"
@@ -623,8 +626,27 @@ def probe_final(ctx) -> dict:
     review = _deliverable_review(ctx).get("review")
     if done and review == "rejected":
         done = False
+    # ⭐ 2026-10-12（t17）：返工一个镜头后成片被打了失效标记（见 mark_artifact_stale）→ 必须
+    # 让 step_final 真正重做，否则幂等短路会让用户**永远**看到返工前的画面（t11 实测）。
+    # ⚠️ 这里内联读写标记文件、不调用模块级 artifact_stale_info()：守卫脚本
+    #   .workbuddy/test/verify_step_final_episode.py 用 AST 抽取本函数并在**受限命名空间**
+    #   exec（只注入 os/shutil/json/logger/read_json_strict…），引用新的模块级名会
+    #   NameError 假红。同理，标记后缀在这里写字面量。
+    _stale = {}
+    _stale_marker = p + ".stale.json"
+    if os.path.isfile(_stale_marker):
+        try:
+            _stale = read_json_strict(_stale_marker, {}) or {}
+        except (ValueError, OSError) as _se:
+            logger.warning("成片失效标记不可读（按未失效处理）：%s：%s", _stale_marker, _se)
+            _stale = {}
+    if done and _stale:
+        done = False
+        logger.warning("成片已标记失效（项目 %s 第 %s 集）：%s → 判为未完成，将重新合成",
+                       ctx["project_name"], int(ctx["episode_no"]),
+                       (_stale or {}).get("reason") or "未注明原因")
     return {"total": 1, "ready": 1 if done else 0, "done": done, "file": p,
-            "review": review}
+            "review": review, "stale": _stale}
 
 
 def _reset_deliverable_review(ctx, review: str, note: str = "") -> None:
@@ -849,7 +871,16 @@ def upscale_path(ctx) -> str:
 
 def probe_upscale(ctx) -> dict:
     p = upscale_path(ctx)
-    return {"total": 1, "ready": 1 if _playable(p) else 0, "done": _playable(p), "file": p}
+    ok = _playable(p)
+    # ⭐ 2026-10-12（t17）：返工后超分产物同样要失效 —— step_final 优先消费超分产物，
+    # 不重做超分就等于交付返工前的画面（t11 实测）。
+    stale = artifact_stale_info(p)
+    if ok and stale:
+        ok = False
+        logger.warning("超分产物已标记失效（项目 %s 第 %s 集）：%s → 判为未完成，将重新超分",
+                       ctx["project_name"], int(ctx["episode_no"]),
+                       stale.get("reason") or "未注明原因")
+    return {"total": 1, "ready": 1 if ok else 0, "done": ok, "file": p, "stale": stale}
 
 
 PROBES = {
@@ -1412,6 +1443,13 @@ def step_final(ctx) -> dict:
     # 优先采用**超分产物**（upscale 步在 video 之后、final 之前）：超分成功则成片
     # 即超分版；超分被跳过 / fail-open 落空时回退整集原片。
     src = upscale_path(ctx)
+    # ⭐ 2026-10-12（t17）：超分产物若被标记失效（返工后），**不能**再拿它做成片 —— 否则
+    # 重跑 final 也只是把「返工前」的画面再 copy 一次（t11 实测的根因：交付物恒为旧内容）。
+    # ⚠️ 内联读写标记、不调模块级 helper：守卫脚本 verify_step_final_episode.py 用 AST 抽取
+    #   本函数并在受限命名空间（os/shutil/json/logger/read_json_strict…）exec，见 probe_final。
+    if src and os.path.isfile(src + ".stale.json"):
+        logger.warning("超分产物已标记失效，成片回退整集原片（避免交付返工前画面）：%s", src)
+        src = ""
     if not _playable(src):
         src = vd.get("file") or ""
     if not _nonempty(src):
@@ -1484,6 +1522,87 @@ def step_final(ctx) -> dict:
             logger.debug("清理临时文件失败（忽略）：%s", e)
     if not _nonempty(out):
         raise PipelineError("成片合成失败（目标文件为空）")
+    # ---- 成片音频客观层（2026-10-12 P0：静音被静音轨掩盖）----
+    # 现行 7 步流水线的成片是 H3 原生音轨**直接 copy2**，全程没有任何音频门禁：
+    # 整段静音 / 补出来的 anullsrc 静音轨 / 逐镜无声，都要等用户验收才发现（t10 审计）。
+    # 这里挂「整轨口径」（不设有声占比下限）的客观层，结论三处可见：
+    #   ① 本函数返回的 detail  ② 质量状态 A 层  ③ output/qc/<项目>/<集>/final_audio_qc.json
+    #   → record_deliverable 会把结论（含**无声镜号**）挂进交付清单 meta。
+    # ⚠️ 本段必须**自包含**：.workbuddy/test/verify_step_final_episode.py 用 AST 抽取本函数
+    #    并在受限命名空间 exec（只注入 os/shutil/json/logger/PipelineError/read_json_strict…），
+    #    引用新的**模块级**名字会 NameError 假红 → 故用函数内 import + 局部名，
+    #    且全部逻辑包在 try 里（音频质检绝不能把成片拖失败）。
+    # ⚠️ 默认只「记录 + 登记」，**不阻断**（生产正在跑第 1 集，不得中断）；需要硬拦时设
+    #    MJSCXT_FINAL_AUDIO_GATE=block；=off 可整体关闭。
+    _audio_gate = str(os.environ.get("MJSCXT_FINAL_AUDIO_GATE") or "").strip().lower()
+    _audio_report: dict = {}
+    if _audio_gate in ("0", "off", "false", "no"):
+        _audio_report = {"enabled": False, "note": "MJSCXT_FINAL_AUDIO_GATE 已关闭"}
+    else:
+        try:
+            import quality_stage as _qs_audio       # 函数内 import：exec 受限命名空间里没有模块级名
+            _shots = list(((ctx.get("script") or {}).get("shots") or []))
+            _audio_report = _qs_audio.audio_quality_verdict(out, shots=_shots)
+            _mets = _audio_report.get("metrics") or {}
+            _silent = _audio_report.get("silent_shots") or []
+            _silent_ids = "、".join(str(s.get("shot_id")) for s in _silent[:12])
+            if _audio_report.get("available"):
+                # 只有「拿到电平」的结论才落盘（未判定没有结论可落，也免去无谓 IO）
+                _rep = _qs_audio.save_final_audio_qc(
+                    ctx["project_name"], ctx["episode_no"], _audio_report,
+                    root=(getattr(A, "PROJECT_OUTPUT_DIR", "") or None))
+                if _rep:
+                    _audio_report["report_path"] = _rep
+            if not _audio_report.get("available"):
+                logger.warning("成片音频客观层**未判定**（fail-open，不判缺陷）：项目 %s 第 %s 集：%s",
+                               ctx["project_name"], int(ctx["episode_no"]),
+                               _audio_report.get("error") or "音频探针不可用")
+            elif _audio_report.get("blocked") or _silent:
+                logger.warning("成片音频客观层判定不合格：项目 %s 第 %s 集 mean=%s dB / 有声占比 %s%s%s",
+                               ctx["project_name"], int(ctx["episode_no"]), _mets.get("mean_db"),
+                               _mets.get("speech_ratio"),
+                               ("；无声镜号 " + _silent_ids) if _silent_ids else "",
+                               ("；" + str(_audio_report.get("reason") or "")[:120])
+                               if _audio_report.get("blocked") else "")
+            else:
+                logger.info("成片音频客观层通过：项目 %s 第 %s 集 mean=%s dB / 有声占比 %s / 静音 %.2fs",
+                            ctx["project_name"], int(ctx["episode_no"]), _mets.get("mean_db"),
+                            _mets.get("speech_ratio"), float(_mets.get("silence_sec") or 0))
+            # A 层（技术渲染）同步登记：音轨近乎无声 / 无音轨 → failed，发布门禁据此拦截
+            try:
+                _qs_audio.record_stage(
+                    ctx["project_name"], ctx["episode_no"], "A",
+                    "failed" if _audio_report.get("blocked")
+                    else ("passed" if _audio_report.get("available") else "skipped"),
+                    evidence={"final_audio_qc": True,
+                              "mean_db": _mets.get("mean_db"),
+                              "speech_ratio": _mets.get("speech_ratio"),
+                              "silent_shots": [s.get("shot_id") for s in _silent[:20]],
+                              "check_speech_ratio": False},
+                    note=("成片音轨客观层不合格：%s" % str(_audio_report.get("reason") or "")[:160])
+                         if _audio_report.get("blocked") else "",
+                    # root 必须由宿主模块派生（pipeline 内所有路径都是 A.* 口径）；
+                    # 不传会落到 config 的默认 output，与 A.PROJECT_OUTPUT_DIR 分裂。
+                    root=(getattr(A, "PROJECT_OUTPUT_DIR", "") or None))
+            except Exception as _qse:                        # noqa: BLE001
+                logger.warning("成片音频结论登记质量状态失败（忽略）：%s", _qse)
+            if _audio_gate in ("block", "1", "true", "on", "yes") and _audio_report.get("blocked"):
+                raise PipelineError("成片音轨客观层判定不合格（整段近乎无声/无音轨）：%s"
+                                    % str(_audio_report.get("reason") or "")[:200])
+        except PipelineError:
+            raise
+        except Exception as _aqe:                            # noqa: BLE001  音频质检绝不影响成片落盘
+            logger.warning("成片音频客观层异常（已跳过，不影响成片）：%s", _aqe)
+            _audio_report = {"enabled": True, "available": False,
+                             "error": "%s: %s" % (type(_aqe).__name__, _aqe)}
+    # ⭐ 2026-10-12（t17）：成片重新合成成功 → 清掉「已失效」标记（否则每轮轮转都会重做一次）。
+    _stale_marker = out + ".stale.json"
+    try:
+        if os.path.isfile(_stale_marker):
+            os.remove(_stale_marker)
+            logger.info("成片已重新合成，清除失效标记：%s", out)
+    except OSError as _re:
+        logger.warning("清除成片失效标记失败（%s）：%s", _stale_marker, _re)
     # B-03 P0-4：成片重做后，把 deliverables.json 里该集的 review 复位到 pending，
     # 避免「打回 → 重跑 → 仍判 rejected → 又短路」的循环。
     old_review = _deliverable_review(ctx).get("review")
@@ -1502,7 +1621,9 @@ def step_final(ctx) -> dict:
     except Exception as e:  # noqa: BLE001  可观测性优化，绝不能阻断成片
         logger.debug("ComfyUI 任务历史清理跳过：%s: %s", type(e).__name__, e)
     return {"ok": True, "artifact": out,
-            "detail": {"mode": "episode", "subtitles": bool(subbed), "size": os.path.getsize(out)}}
+            "detail": {"mode": "episode", "subtitles": bool(subbed), "size": os.path.getsize(out),
+                       # 成片音频客观层结论（整轨口径，含 silent_shots 镜号定位）
+                       "audio_qc": _audio_report}}
 
 
 def step_tts(ctx) -> dict:
@@ -1613,6 +1734,8 @@ def step_upscale(ctx) -> dict:
     if len(per_scene_srcs) >= 2:
         out = upscale_path(ctx)
         if _try_per_scene_upscale(ctx, per_scene_srcs, out):
+            # t17：超分重做成功 → 清掉失效标记（否则成片会被无谓地反复重做）
+            clear_artifact_stale(out, "逐场超分已重做")
             return {"ok": True, "artifact": out,
                     "detail": {"mode": "per_scene", "scenes": len(per_scene_srcs),
                                "size": os.path.getsize(out)}}
@@ -1702,6 +1825,8 @@ def step_upscale(ctx) -> dict:
         return {"ok": True, "skipped": True,
                 "detail": {"note": "超分产物归档后为空，已跳过", "produced": produced}}
 
+    # t17：超分重做成功 → 清掉失效标记
+    clear_artifact_stale(out, "整集超分已重做")
     return {"ok": True, "artifact": out,
             "detail": {"source": src, "engine": (res or {}).get("engine"),
                        "scale": scale, "before": (res or {}).get("before"),
@@ -2393,7 +2518,137 @@ def list_dead_letters(project_name: str) -> list:
     return items
 
 
+# ===================== 产物失效标记（2026-10-12 t17：返工后成片/超分必须重做） =====================
+#
+# 为什么需要它（t11 审计实测的两个坑）：
+#   ① step_final **优先 copy 超分产物**（见 step_final 里 src = upscale_path(ctx)）。返工一个
+#      镜头后，超分产物仍是「返工前」的旧片 → 即便重跑 final，交付物也还是旧画面；
+#   ② probe_final / probe_upscale 只看「文件可播 / 存在」→ step_final 被幂等短路跳过，
+#      用户点多少次「生成成片」都不会重做。
+# 做法：不删产物（成片是用户正在验收的东西，删了会让验收页显示「文件不存在」，比显示旧片更糟），
+# 改为在旁边写一个 **<产物>.stale.json 旁路标记**：probe_* 见标记即判「未完成」→ 托管轮转
+# / 手动成片会自动重做；重做成功后由 step_final / step_upscale 清除标记。
+_STALE_SUFFIX = ".stale.json"
+
+
+def stale_marker_path(artifact_path: str) -> str:
+    """失效标记路径（<产物全名>.stale.json；刻意不带 .mp4，避免被 *.mp4 glob 当成分片/成片）"""
+    return (artifact_path or "") + _STALE_SUFFIX
+
+
+def artifact_stale_info(artifact_path: str) -> dict:
+    """读取某产物的失效标记；无标记 → {}（未失效），损坏 → {} 但记 warning（宁可漏一次重做）"""
+    if not artifact_path:
+        return {}
+    p = stale_marker_path(artifact_path)
+    if not os.path.isfile(p):
+        return {}
+    try:
+        return read_json_strict(p, {}) or {}
+    except (ValueError, OSError) as e:
+        logger.warning("失效标记不可读（按未失效处理，可能漏一次重做）：%s：%s", p, e)
+        return {}
+
+
+def mark_artifact_stale(artifact_path: str, reason: str, detail: dict = None) -> dict:
+    """把某产物标记为「已失效（需重新生成）」；返回写入的标记内容（路径为空/写失败 → {}）。
+
+    打标失败**不抛异常**：它总是挂在「返工/重跑」这种主流程收尾上，打标失败不该让返工本身失败。
+    """
+    if not artifact_path:
+        return {}
+    info = {"reason": str(reason or ""), "detail": detail or {},
+            "marked_at": _now(), "artifact": os.path.basename(artifact_path)}
+    try:
+        atomic_write_json(stale_marker_path(artifact_path), info)
+    except Exception as e:  # noqa: BLE001  打标失败不能让返工本身失败
+        logger.warning("写产物失效标记失败（%s）：%s", artifact_path, e)
+        return {}
+    logger.warning("[产物失效] %s —— %s（probe 将判未完成，随后重新生成）",
+                   os.path.basename(artifact_path), info["reason"] or "未注明原因")
+    return info
+
+
+def clear_artifact_stale(artifact_path: str, why: str = "") -> bool:
+    """产物重新生成成功后清掉失效标记（返回是否真的清了）"""
+    if not artifact_path:
+        return False
+    p = stale_marker_path(artifact_path)
+    try:
+        if os.path.isfile(p):
+            os.remove(p)
+            logger.info("[产物失效] 已清除标记（%s）：%s",
+                        why or "重新生成成功", os.path.basename(artifact_path))
+            return True
+    except OSError as e:
+        logger.warning("清产物失效标记失败（%s）：%s", p, e)
+    return False
+
+
+def mark_episode_outputs_stale(project_name: str, episode_no, reason: str,
+                               detail: dict = None) -> dict:
+    """把该集的**成片 + 超分**产物一起标记为失效（返工/重跑视频后调用）。
+
+    调用方（video_helpers.retry_shot / routes.final）不需要知道产物路径口径；
+    返回 {"marked": ["final","upscale"], "final": <path>, "upscale": <path>, "reason": ...}。
+    """
+    A = _A()
+    ep = int(episode_no or 1)
+    out = {"marked": [], "final": "", "upscale": "", "reason": str(reason or "")}
+    pairs = (("final", os.path.join(A.FINAL_DIR, project_name, f"ep{ep:02d}_final.mp4")),
+             ("upscale", os.path.join(A.UPSCALE_DIR, project_name, f"ep{ep:02d}_upscaled.mp4")))
+    for kind, path in pairs:
+        out[kind] = path
+        if mark_artifact_stale(path, reason, detail):
+            out["marked"].append(kind)
+    return out
+
+
 # ===================== 交付物登记 =====================
+
+
+def _final_audio_qc_meta(project_name: str, episode_no, meta: dict = None,
+                         root: str = None) -> dict:
+    """把成片音频客观层结论挂进交付登记 meta（**含无声镜号**，fail-open）。
+
+    为什么必须进交付清单：结论只写日志/质检目录时，用户验收时看不到「哪一镜整段无声」，
+    只能一个个点开听。这里把 silent_shots（shot_id + 时间槽 + 有声占比）直接挂到
+    deliverables.json 的该集条目上，验收页据此就能定位到镜号（t10 验收口径）。
+
+    任何异常都只记 debug 并原样返回 meta：交付登记是主流程，音频结论是附加信息。
+    """
+    out = dict(meta or {})
+    try:
+        data = quality_stage.load_final_audio_qc(project_name, episode_no, root=root)
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug("成片音频结论读取失败（忽略）：%s", e)
+        return out
+    if not data:
+        return out
+    shots = data.get("silent_shots") or []
+    metrics = data.get("metrics") or {}
+    out["audio_qc"] = {
+        "available": bool(data.get("available")),
+        "passed": data.get("passed"),
+        "blocked": bool(data.get("blocked")),
+        "score": data.get("score"),
+        "reason": str(data.get("reason") or "")[:200],
+        # 整轨口径（成片天然有大段无台词留白，不得按单句卡有声占比）
+        "check_speech_ratio": False,
+        "generated_at": data.get("generated_at"),
+        "silent_shot_count": len(shots),
+        "metrics": {k: metrics.get(k) for k in
+                    ("duration", "mean_db", "max_db", "silence_sec", "speech_ratio")},
+    }
+    if shots:
+        out["audio_qc_silent_shots"] = [
+            {"shot_id": s.get("shot_id"), "start": s.get("start"), "end": s.get("end"),
+             "speech_ratio": s.get("speech_ratio"), "silence_sec": s.get("silence_sec")}
+            for s in shots[:50]]
+    _rep = str(data.get("report_path") or "")
+    if _rep:
+        out["audio_qc_report"] = _rep
+    return out
 
 
 def record_deliverable(project_name: str, episode_no: int, path: str,
@@ -2431,6 +2686,9 @@ def record_deliverable(project_name: str, episode_no: int, path: str,
         # 不制造无谓的「验收反复失效」抖动（宁可保守沿用原行为）。
         same_content = same_path
     review_keep = bool(same_path and same_content)
+    # 成片音频客观层结论（含无声镜号）随交付物一起登记：验收页可直接定位到镜号。
+    meta = _final_audio_qc_meta(project_name, episode_no, meta,
+                               root=getattr(A, "PROJECT_OUTPUT_DIR", "") or None)
     items[key] = {
         "episode_no": int(episode_no),
         "project": project_name,
@@ -2512,6 +2770,18 @@ def set_deliverable_review(project_name: str, episode_no: int, review: str,
     item = items.get(str(int(episode_no)))
     if not item:
         return {}
+    # ⭐ 2026-10-12（t17）：**过期成片不允许验收**。t11 实测「过期」此前只影响界面提示，
+    # 旧结论照样能点「通过」= 给返工前的画面盖章交付。这里在写状态前硬拦：
+    # 重新合成后由 record_deliverable 重新登记（meta 被替换、stale 消失），即可正常验收。
+    if review == "accepted":
+        _st = ((item.get("meta") or {}).get("stale") or {})
+        if _st:
+            _why = _st.get("reason") or "镜头重做后成片需重新合成"
+            logger.error("[成片过期] 拒绝验收：项目 %s 第 %s 集成片已标记过期（%s）",
+                         project_name, int(episode_no), _why)
+            raise PipelineError(
+                f"该集成片已过期（{_why}）：请先重新合成成片再验收"
+                "（托管轮转会按失效标记自动重做，也可用「生成成片」手动重做）")
     item.update({"review": review, "review_note": note, "reviewed_at": _now()})
     if review == "accepted":
         binding = quality_stage.make_binding(
@@ -2596,6 +2866,22 @@ def mark_deliverable_stale(project_name: str, episode_no: int, reason: str,
     stale = meta.setdefault("stale", {})
     stale.update({"reason": reason, "detail": detail or {}, "marked_at": _now()})
     item["updated_at"] = _now()
+    # ⭐ 2026-10-12（t17）：只写 meta.stale **不够** —— t11 实测「过期」此前只是界面上的黄色
+    # 提示，deliverables.json 里的 review 仍是 accepted，旧结论会被静默延续到新成片上
+    # （用户以为批的是当前这版、其实是返工前那版）。这里把 review 降回 pending 并摘掉
+    # approval 绑定，让「过期」在状态机里真实生效（同时保留 meta.stale 供界面显示原因）。
+    old_review = item.get("review")
+    if old_review in ("accepted", "rejected"):
+        item["review"] = "pending"
+        item["review_note"] = f"镜头有更新，成片需重新合成后再验收（原结论 {old_review} 已失效）：{reason}"
+        item["reviewed_at"] = _now()
+        if item.pop("approval", None) is not None:
+            item["approval_invalidated_at"] = _now()
+            item["approval_invalid_reason"] = reason
+    logger.warning("[成片过期] 项目 %s 第 %s 集：%s（镜头=%s）；review %s → %s，需重新合成后再验收",
+                   project_name, int(episode_no), reason,
+                   (detail or {}).get("shot_id"),
+                   old_review or "无", item.get("review"))
     atomic_write_json(idx_path, data)
     return item
 

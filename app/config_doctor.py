@@ -117,6 +117,16 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'desc': '画面细节字段字符上限（原 800）',
         'owner': 'h3_prompt_kit.MAX_DETAIL_CHARS',
     },
+    'h3_canon_max_chars': {
+        # ⭐ 2026-10-12（T12）：H3 视频提示词里「项目级设定基准」（canon 注入）的字符上限。
+        #   由 app/h3_prompt_kit.py 的 canon_facts_block 使用：只约束项目级那部分，
+        #   本镜文字道具的 surface_text 那部分沿用旧口径、不设上限。
+        #   ⚠️ REGISTRY.default 会在启动时经 config_center.apply_to_runtime() 回写到
+        #   h3_prompt_kit.H3_CANON_MAX_CHARS（与 H3_SEGMENT_MAX_SEC 同因），两处必须同值。
+        'default': 400, 'type': 'int', 'range': (0, 20000), 'group': '提示词长度',
+        'desc': 'H3 提示词中「项目级设定基准」注入的字符上限（0~20000）；越小越省提示词',
+        'owner': 'h3_prompt_kit.H3_CANON_MAX_CHARS',
+    },
     'caption_max_chars': {
         'default': 200, 'type': 'int', 'range': (10, 5000), 'group': '提示词长度',
         'desc': '字幕「偏长」告警阈值（仅告警不截断；原 24 且会硬截断）',
@@ -179,6 +189,18 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': 0.15, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
         'desc': ': 有声占比低于此值 → 视为整段无声（硬闸）',
         'owner': 'audio_qc.HARD_SILENT_RATIO',
+    },
+    'audio_hard_silent_ratio': {
+        # ⭐ 2026-10-12（T12 canon-eng 代登记）：app/quality_stage.py:187 新增
+        #   AUDIO_HARD_SILENT_RATIO = 0.15（其原注释：「与 audio_qc.HARD_SILENT_RATIO 同口径」），
+        #   但未登记 REGISTRY → doctor 的 orphan_candidates() 报孤儿、test_config 整组变红。
+        #   ⚠️ 本条只做「登记」这一件事：值 0.15 与语义均取自 quality_stage.py 现文件，未改动它。
+        #   该常量的语义归口属于**音频/质检线**（与上面 audio_qc.HARD_SILENT_RATIO 同口径）；
+        #   若确认二者必须恒等，建议由该线负责人补上
+        #   must_match: ['audio_qc.HARD_SILENT_RATIO']（本任务不替他人声明跨模块等值不变式）。
+        'default': 0.15, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
+        'desc': 'quality_stage 判「整段硬性静音」的有声占比阈值（与 audio_qc 同口径，0~1）',
+        'owner': 'quality_stage.AUDIO_HARD_SILENT_RATIO',
     },
     'probe_timeout': {
         'default': 300, 'type': 'int', 'range': (0, 100000), 'group': '音频',

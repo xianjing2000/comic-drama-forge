@@ -50,6 +50,10 @@ from common_util import as_dict as _as_dict
 import asset_name_match
 import chapter_preflight  # 前置解析（人物档案防 OOC）
 
+# 跨集台词重复检测的纯函数层（T2，2026-10-12）：判定口径/阈值/相似度唯一实现放这里，
+# 本模块只负责「读台账 → 判重 → 出 issue / 标记 → 写台账」的 IO 与编排。
+import continuity_helpers as dlg_dedup
+
 # 原文覆盖率校验（④⑤：逐句核对是否被镜头承载 + 低于阈值自动补生成；只增不改，不删原文）
 import coverage as coverage_mod
 
@@ -737,15 +741,12 @@ def merge_dedup_issues(validation: dict, script: dict, episode_no: int) -> dict:
 
 
 def _similar_text(a: str, b: str) -> float:
-    """字符 2-gram Jaccard 相似度（用于台词去重，确定性可复现）"""
-    a, b = _plain(a), _plain(b)
-    if not a or not b:
-        return 0.0
-    if a == b:
-        return 1.0
-    ga = {a[i:i + 2] for i in range(len(a) - 1)} or {a}
-    gb = {b[i:i + 2] for i in range(len(b) - 1)} or {b}
-    return len(ga & gb) / max(1, len(ga | gb))
+    """字符 2-gram Jaccard 相似度（用于台词去重，确定性可复现）。
+
+    T2 起唯一实现下沉到 continuity_helpers.similar_text（跨集判重与集内判重必须同口径），
+    此处仅保留旧名做再导出。
+    """
+    return dlg_dedup.similar_text(a, b)
 
 
 def _colors(text: str) -> set:
@@ -1080,11 +1081,23 @@ def load_quotes(continuity_dir: str, project_key: str) -> dict:
     return data
 
 
+def _quote_rows(store: dict) -> list:
+    """quotes.json 里的**原文金句**行（排除 T2 写入的 script_dialogue 台词台账行）。
+
+    ⚠️ 2026-10-12（T2）：quotes.json 现在一个文件里放两类行 —— 原文金句（source=novel_chapter）
+    与本任务新增的「成片台词台账」（source=script_dialogue）。金句相关的读写（抽取、落位校验、
+    注入提示词）**只认前者**：否则重跑本集时会把上一次生成的台词当成"原文金句"喂进抽取提示词
+    （污染），再要求它们"必须逐字出现在台词中"（自证循环）。
+    """
+    return [q for q in (store.get("quotes") or [])
+            if isinstance(q, dict) and str(q.get("source") or "") != dlg_dedup.SOURCE_SCRIPT]
+
+
 def ensure_quotes_for_episode(client, continuity_dir: str, project_key: str, chapter_text: str,
                               episode_no: int, events: list = None) -> list:
     """⑦ 从本章原文抽取原文金句（必须是原文原句），要求出现在对应集台词中"""
     store = load_quotes(continuity_dir, project_key)
-    exist = [q for q in store["quotes"] if int(q.get("episode_no") or 0) == int(episode_no)]
+    exist = [q for q in _quote_rows(store) if int(q.get("episode_no") or 0) == int(episode_no)]
     if exist:
         return exist
 
@@ -1116,21 +1129,28 @@ def ensure_quotes_for_episode(client, continuity_dir: str, project_key: str, cha
                      "source": "novel_chapter",
                      "in_script": False})
     rows = rows[:5]
-    store["quotes"] = [q for q in store["quotes"] if int(q.get("episode_no") or 0) != int(episode_no)] + rows
+    # 只替换「本集金句」行；本集/它集的 script_dialogue 台词台账行原样保留
+    # （台账由 record_script_dialogue 在落盘前统一改写，两个写方不交叉）。
+    store["quotes"] = [q for q in store["quotes"]
+                       if not (isinstance(q, dict)
+                               and str(q.get("source") or "") != dlg_dedup.SOURCE_SCRIPT
+                               and int(q.get("episode_no") or 0) == int(episode_no))] + rows
     store["updated_at"] = _now()
     save_json(quotes_path(continuity_dir, project_key), store)
     return rows
 
 
 def _plain(text: str) -> str:
-    return re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(text or ""))
+    """去标点 / 空白，只留中英数字（T2 起唯一实现下沉到 continuity_helpers.plain_text，
+    此处保留旧名供既有调用点零改动复用；两处口径必须逐字相同）。"""
+    return dlg_dedup.plain_text(text)
 
 
 def check_quotes_in_script(continuity_dir: str, project_key: str, script: dict,
                            episode_no: int) -> dict:
     """校验金句是否落进本集台词（允许标点/空白差异）"""
     store = load_quotes(continuity_dir, project_key)
-    rows = [q for q in store["quotes"] if int(q.get("episode_no") or 0) == int(episode_no)]
+    rows = [q for q in _quote_rows(store) if int(q.get("episode_no") or 0) == int(episode_no)]
     if not rows:
         return {"required": 0, "hit": [], "missed": [], "hit_rate": 1.0}
     script_text = _plain(json.dumps(script.get("shots") or [], ensure_ascii=False))
@@ -1141,11 +1161,233 @@ def check_quotes_in_script(continuity_dir: str, project_key: str, script: dict,
         q["in_script"] = ok
         (hit if ok else missed).append(q.get("text"))
     store["updated_at"] = _now()
-    store["last_checked_episode"] = int(episode_no)
+    # ⚠️ 单调递增而非覆盖（T2 验收口径）：重跑旧集、或质检域回看某一集时，水位线不得
+    #    被拨回去 —— 它表达的是「这本台账已经核对到第几集」。
+    store["last_checked_episode"] = max(int(store.get("last_checked_episode") or 0),
+                                        int(episode_no))
     save_json(quotes_path(continuity_dir, project_key), store)
     total = len(rows)
     return {"required": total, "hit": hit, "missed": missed,
             "hit_rate": round(len(hit) / total, 3) if total else 1.0}
+
+
+# ---- 2026-10-12（T2 跨集台词重复）：成片台词台账 + 跨集判重 -------------------
+#
+# 用户反馈「台词跨集重复」：第 N 集念过的台词，第 N+1 集又念一遍。
+# 旧实现只有 rule_dialogue_dedup（**只看本集内部**），跨集重复一直没有拦截点。
+# 本节的台账与判重构成写读闭环：
+#   ① record_script_dialogue：本集生成完（所有重写/补生成都跑完）把**最终**台词写进
+#      quotes.json（source=script_dialogue）—— 台账与成片逐字同源，不靠"应该一致"；
+#   ② check_dialogue_duplicate：可调用接口，输入候选台词 → 是否与历史集重复 + 来源（哪一集哪一句）；
+#   ③ merge_cross_episode_dedup_issues：生成链路自动调用，命中出 issue（精确重复按 high 级
+#      触发既有局部重写链路，近似重复按 medium 级标记）+ 在命中镜头上打 dialogue_dedup 标记。
+# 全链路 fail-open：台账读写异常一律只告警，绝不阻断整集落盘。
+
+def _as_shot_id(value):
+    """镜号归一成 int（老剧本里偶有字符串写法）；不可解析返回 None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def dialogue_ledger_rows(continuity_dir: str, project_key: str, *,
+                         exclude_episode_no=None, source: str = None,
+                         spoken_only: bool = True) -> list:
+    """读 quotes.json 里的台词台账行（默认**全部**行；source 给定时只取该类）。
+
+    exclude_episode_no：排除本集自己的行 —— 判重只针对「历史集」（本集内部的近重复由
+    rule_dialogue_dedup 管），同时保证重跑同一集不会自己和自己重复。
+
+    spoken_only（默认开）：判重只认「**真的被念出来过**」的台词 ——
+      · source=script_dialogue 的台账行本身就是从成片剧本里抽的，天然满足；
+      · 老数据（本功能上线前生成的集）只有金句行，此时用 in_script 字段判定：
+        金句落位校验（check_quotes_in_script）为 False 的金句**没进过台词**，
+        把它当"念过的台词"会让新集的一句普通台词被判成"重复"（误报）。
+      这也是为什么本功能能直接吃存量项目：老集的金句行就是它的台词取样。
+    """
+    store = load_quotes(continuity_dir, project_key)
+    out = []
+    for q in (store.get("quotes") or []):
+        if not isinstance(q, dict):
+            continue
+        if source is not None and str(q.get("source") or "") != source:
+            continue
+        if spoken_only and str(q.get("source") or "") != dlg_dedup.SOURCE_SCRIPT \
+                and not q.get("in_script"):
+            continue
+        if exclude_episode_no is not None and int(q.get("episode_no") or 0) == int(exclude_episode_no):
+            continue
+        out.append(q)
+    return out
+
+
+def check_dialogue_duplicate(continuity_dir: str, project_key: str, text: str,
+                             episode_no=None, **kw) -> dict:
+    """**可调用接口**：输入一条候选台词 → 是否与历史集重复 + 重复来源（哪一集哪一句）。
+
+    返回 {"text", "duplicate", "kind"(exact/near/""), "score", "match": {"episode_no","text",
+    "speaker_hint","shot_id","source"}|None, "reason", "compared", "history_size", "ledger"}。
+    判定阈值与相似度口径在 continuity_helpers（与生成链路共用同一份实现）。
+    fail-open：台账读不出来时返回 duplicate=False 并带 error 字段（不抛）。
+    """
+    ep = None
+    if episode_no is not None:
+        try:
+            ep = int(episode_no)
+        except (TypeError, ValueError):
+            ep = None
+    out = {"text": str(text or "").strip(), "duplicate": False, "kind": "", "score": 0.0,
+           "match": None, "compared": 0, "history_size": 0,
+           "ledger": os.path.abspath(quotes_path(continuity_dir, project_key))}
+    try:
+        history = dialogue_ledger_rows(continuity_dir, project_key, exclude_episode_no=ep)
+        out.update(dlg_dedup.find_duplicate(text, history, exclude_episode_no=ep, **kw))
+        out["history_size"] = len(history)
+    except Exception as e:  # noqa: BLE001
+        out["error"] = "%s: %s" % (type(e).__name__, str(e)[:200])
+        logger.warning("第%s集：跨集台词判重失败（按不重复处理）：%s", episode_no, e)
+    return out
+
+
+def record_script_dialogue(continuity_dir: str, project_key: str, script: dict,
+                           episode_no) -> dict:
+    """把本集**最终**台词写进 quotes.json 台账（幂等：同集重跑=替换，不追加重复行）。
+
+    - episode_no 写真实集号，shot_id 保留（便于「哪一集哪一句」的排查与前端定位）；
+    - last_checked_episode 取 max(旧值, 本集) —— 单调递增，回跑旧集不会把水位线拨回去；
+    - 只增改 script_dialogue 行，原文金句行（novel_chapter）一字不动。
+    """
+    ep = int(episode_no)
+    store = load_quotes(continuity_dir, project_key)
+    rows = dlg_dedup.dialogue_rows_of_script(script)
+    new, seen = [], set()
+    for r in rows:
+        key = dlg_dedup.plain_text(r["text"])
+        if len(key) < dlg_dedup.THRESHOLDS["ledger_min_chars"] or key in seen:
+            continue
+        seen.add(key)
+        new.append({"episode_no": ep, "text": r["text"],
+                    "speaker_hint": r.get("speaker") or "", "shot_id": r.get("shot_id"),
+                    "why": "本集成片台词（跨集去重台账）",
+                    "source": dlg_dedup.SOURCE_SCRIPT, "in_script": True,
+                    "recorded_at": _now()})
+    old_rows = [q for q in (store.get("quotes") or []) if isinstance(q, dict)]
+    kept = [q for q in old_rows
+            if not (str(q.get("source") or "") == dlg_dedup.SOURCE_SCRIPT
+                    and int(q.get("episode_no") or 0) == ep)]
+    replaced = len(old_rows) - len(kept)
+    store["quotes"] = kept + new
+    store["last_checked_episode"] = max(int(store.get("last_checked_episode") or 0), ep)
+    store["updated_at"] = _now()
+    path = quotes_path(continuity_dir, project_key)
+    save_json(path, store)
+    return {"episode_no": ep, "recorded": len(new), "replaced": replaced,
+            "last_checked_episode": int(store["last_checked_episode"]),
+            "ledger": os.path.abspath(path)}
+
+
+def merge_cross_episode_dedup_issues(validation: dict, script: dict, episode_no: int,
+                                     continuity_dir: str, project_key: str, *,
+                                     rewrite_exact: bool = True) -> dict:
+    """生成链路自动调用：跨集台词判重 → issue + 镜头标记 + 命中精确重复时触发局部重写。
+
+    重写闸门口径（成本可控 + 真能治）：
+      · **精确重复**（去标点后逐字相同）按 high 级并入 rewrite_needed / rewrite_shot_ids →
+        走既有 step-8 局部重写链路真的改掉它；
+      · **近似重复**按 medium 级只记录 + 在命中镜头上打 dialogue_dedup 标记，**不单独**
+        拉起整集重写（近似判定本身有概率性，不该为了它烧一轮整集重写）。
+    幂等：同一份 validation 上重复调用时，先撤回上一轮由本规则追加的 issue（按 issue["rule"]
+    识别）+ 回退 issue_stats 计数，再重新追加 —— issues 不会越加越多。
+    fail-open：台账读失败只写 error 字段并返回，不动 validation 的闸门。
+    """
+    ep = int(episode_no)
+    info = {"episode_no": ep, "history_size": 0, "count": 0, "exact": 0, "near": 0,
+            "shot_ids": [], "sources": [], "rewrite_triggered": False}
+    try:
+        history = dialogue_ledger_rows(continuity_dir, project_key, exclude_episode_no=ep)
+        dups = dlg_dedup.find_script_duplicates(script, history, exclude_episode_no=ep)
+    except Exception as e:  # noqa: BLE001
+        info["error"] = "%s: %s" % (type(e).__name__, str(e)[:200])
+        logger.warning("第%s集：跨集台词判重失败（跳过，不影响落盘）：%s", ep, e)
+        script.setdefault("metadata", {})["dialogue_dedup"] = info
+        return info
+
+    # ---- 撤回上一轮本规则追加的 issue（重写后复检幂等）----
+    all_issues = [i for i in (validation.get("issues") or []) if isinstance(i, dict)]
+    old = [i for i in all_issues if i.get("rule") == dlg_dedup.RULE]
+    if old:
+        validation["issues"] = [i for i in (validation.get("issues") or [])
+                                if not (isinstance(i, dict) and i.get("rule") == dlg_dedup.RULE)]
+        stats = dict(validation.get("issue_stats") or {})
+        for i in old:
+            sev = str(i.get("severity") or "low")
+            stats[sev] = max(0, int(stats.get(sev) or 0) - 1)
+        validation["issue_stats"] = stats
+        stale = {int(x) for i in old for x in (i.get("shot_ids") or [])
+                 if str(x).strip().lstrip("-").isdigit()}
+        validation["rewrite_shot_ids"] = [x for x in (validation.get("rewrite_shot_ids") or [])
+                                          if x not in stale]
+
+    # ---- 重新追加本规则的 issue ----
+    if dups:
+        validation.setdefault("issues", [])
+        stats = dict(validation.get("issue_stats") or {"high": 0, "medium": 0, "low": 0})
+        for dup in dups:
+            issue = dlg_dedup.duplicate_issue(dup, ep)
+            validation["issues"].append(issue)
+            sev = issue["severity"]
+            stats[sev] = int(stats.get(sev) or 0) + 1
+        validation["issue_stats"] = stats
+
+    # ---- 镜头标记（标记口径：命中镜头上挂 dialogue_dedup；未命中则清掉旧标记）----
+    # 镜号比较走 int 归一：老剧本里 shot_id 偶有字符串写法（"12"），直接相等比较会静默不挂标记。
+    marks = {}
+    for dup in dups:
+        sid = _as_shot_id(dup.get("shot_id"))
+        if sid is not None:
+            marks.setdefault(sid, dup)
+    for shot in (script.get("shots") or []):
+        if not isinstance(shot, dict):
+            continue
+        d = marks.get(_as_shot_id(shot.get("shot_id")))
+        if not d:
+            shot.pop("dialogue_dedup", None)
+            continue
+        m = d.get("match") or {}
+        shot["dialogue_dedup"] = {"rule": dlg_dedup.RULE, "kind": d.get("kind"),
+                                  "score": round(float(d.get("score") or 0), 3),
+                                  "match_episode_no": m.get("episode_no"),
+                                  "match_shot_id": m.get("shot_id"),
+                                  "match_text": str(m.get("text") or "")[:80]}
+
+    # ---- 精确重复 → 走既有局部重写链路 ----
+    exact = [d for d in dups if d.get("kind") == "exact"]
+    if exact and rewrite_exact:
+        validation["rewrite_needed"] = True
+        ids = [x for x in (validation.get("rewrite_shot_ids") or [])]
+        for d in exact:
+            if d.get("shot_id") is not None and d["shot_id"] not in ids:
+                ids.append(d["shot_id"])
+        validation["rewrite_shot_ids"] = ids
+        info["rewrite_triggered"] = True
+
+    info.update(dlg_dedup.summarize_duplicates(dups))
+    info["history_size"] = len(history)
+    if dups:
+        for d in dups:
+            m = d.get("match") or {}
+            logger.warning("第%s集：台词跨集重复（%s）#%s「%s」 ↔ 第%s集#%s「%s」",
+                           ep, d.get("kind"), d.get("shot_id"), str(d.get("text"))[:40],
+                           m.get("episode_no"), m.get("shot_id"), str(m.get("text"))[:40])
+    else:
+        logger.info("第%s集：跨集台词判重通过（比对 %d 条历史台词，无重复）", ep, len(history))
+    script.setdefault("metadata", {})["dialogue_dedup"] = info
+    return info
 
 
 # ===================== C⑧ 人物口吻词典 + 运镜术语表 =====================
@@ -2109,6 +2351,13 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
     # ---- 6.5) 集内台词近似重复检测（C⑥/D⑨ 确定性规则，命中按 high 级触发局部重写）
     merge_dedup_issues(validation, script, int(episode_no))
 
+    # ---- 6.55) T2 跨集台词重复检测（读 quotes.json 台词台账；确定性、无 LLM）
+    #     集内重复（上一步）与跨集重复是两件事：这里比的是「本集台词 vs 其它集已念过的台词」。
+    #     精确重复按 high 级并入 rewrite_needed → 复用既有 step-8 局部重写真的改掉；
+    #     近似重复按 medium 级标记（不单独拉起整集重写，见 merge_cross_episode_dedup_issues）。
+    dedup_info = merge_cross_episode_dedup_issues(validation, script, int(episode_no),
+                                                  continuity_dir, project_key)
+
     # ---- 6.6) P0-2 全局一致性契约 + 跨镜头校验（借鉴 penshot；纯确定性软告警）
     # ⚠️ 只把 low 级 issue 追加进 validation 桶 + 更新 issue_stats["low"]，**不动**
     #    rewrite_needed / rewrite_shot_ids —— 角色 gap / 场景跳切不是改单镜能修的，
@@ -2170,6 +2419,10 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
                                              episode_no, events=events, rule_issues=rule_issues)
             validation["quotes"] = check_quotes_in_script(continuity_dir, project_key, script, episode_no)
             merge_dedup_issues(validation, script, int(episode_no))
+            # T2：重写后复检跨集台词重复（本函数幂等：先撤回上一轮本规则的 issue 再重判），
+            # 让「命中 → 重写 → 复检」形成闭环；仍未改掉的会按剩余轮次继续。
+            dedup_info = merge_cross_episode_dedup_issues(validation, script, int(episode_no),
+                                                          continuity_dir, project_key)
             # P0-2 契约软告警随重写后的新 shots 重新扫一遍（同样只追加 low、不动重写闸门）。
             cc_contract.merge_contract_issues(validation, script, bible, int(episode_no))
         rewrite_info["rounds"] = rounds
@@ -2253,6 +2506,19 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
         if isinstance(meta_warn, list):
             meta_warn.append(note)
 
+    # ---- 8.7) T2：本集**最终**台词落台账（所有重写 / 覆盖率补生成 / 一致性修复都跑完之后）
+    #     写读闭环的写侧：下一集生成时读的就是这份台账。幂等（同集重跑=替换），
+    #     last_checked_episode 单调递增。失败只告警，绝不阻断整集落盘。
+    dedup_record = {"episode_no": int(episode_no), "recorded": 0, "replaced": 0}
+    try:
+        dedup_record = record_script_dialogue(continuity_dir, project_key, script, int(episode_no))
+        logger.info("第%s集：跨集台词台账已更新（写入 %d 条、替换 %d 条，last_checked_episode=%s，%s）",
+                    episode_no, dedup_record.get("recorded"), dedup_record.get("replaced"),
+                    dedup_record.get("last_checked_episode"), dedup_record.get("ledger"))
+    except Exception as _de:  # noqa: BLE001
+        dedup_record["error"] = "%s: %s" % (type(_de).__name__, str(_de)[:200])
+        logger.warning("第%s集：跨集台词台账写入失败（已忽略，不影响落盘）：%s", episode_no, _de)
+
     # ---- 9) 落盘：剧本 + state + 摘要卡 + 校验
     meta = script.setdefault("metadata", {})
     meta["continuity"] = {
@@ -2271,6 +2537,12 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
         "validation_score": validation.get("score"),
         "issue_stats": validation.get("issue_stats"),
         "rewrite": rewrite_info,
+        # T2 跨集台词去重：本集判重口径 + 命中 + 台账写入结果（只读可查，不必翻 serve 日志）
+        "dialogue_dedup": {**dedup_info, "recorded": dedup_record.get("recorded"),
+                           "replaced": dedup_record.get("replaced"),
+                           "ledger": dedup_record.get("ledger"),
+                           "last_checked_episode": dedup_record.get("last_checked_episode"),
+                           "record_error": dedup_record.get("error")},
         "coverage": coverage_mod.summary_for_meta(coverage_report, coverage_report.get("report_path")),
         "consistency": consistency_summary,
         "truncation_events": events,
@@ -2355,7 +2627,11 @@ def continuity_overview(continuity_dir: str, project_key: str) -> dict:
             "characters": len(bible.get("characters") or []),
             "items": len(bible.get("items") or []),
             "scenes": len(bible.get("scenes") or []),
-            "quotes": len(quotes.get("quotes") or []),
+            # 金句数与台账台词数分开统计：金句面板的语义不能因为新增台词台账而变
+            "quotes": len(_quote_rows(quotes)),
+            "dialogue_lines": len([q for q in (quotes.get("quotes") or [])
+                                   if isinstance(q, dict)
+                                   and str(q.get("source") or "") == dlg_dedup.SOURCE_SCRIPT]),
             "voices": len(voice_dict.get("characters") or []),
             "episodes": len({e["episode_no"] for e in eps}),
             "coverage_reports": len([e for e in eps if e["kind"] == "覆盖率"]),

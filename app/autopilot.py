@@ -200,9 +200,17 @@ PLAN_DEFAULTS = {
     "enable_final": True,
     # 「每角色参考音色」生成开关（tts_pre 步）：True = 剧本后为每个角色补一段参考音色，
     # 供 H3 以 audioMode=generate 锁定角色音色并自生成对白。
-    # （enable_tts / enable_mix / enable_keyframe 已随 tts/mix/keyframe 步骤下线移除：
-    #   计划里再设置这些键会被接口静默忽略。）
     "enable_tts_pre": True,
+    # ⭐ 2026-10-12 T11 补回这两个键（此前**不在**本表，而 routes/autonomous.py 的入参
+    #    白名单却放行它们 → 过了校验、最终被 set_plan 静默丢弃：用户以为关掉了参考音色
+    #    合成，实际照跑一遍 TTS，且没有任何提示）。三处通道现统一以本表为唯一权威。
+    #   · enable_tts：参考音色是否**真的合成**（pipeline.step_tts_pre 内生效）。
+    #     用户要停掉参考音就关它 —— 这个开关必须真正可控。
+    "enable_tts": True,
+    #   · enable_mix：混音步骤总开关。本轮口径（2026-10-12）下**保持关闭**：mix 不在
+    #     STEP_SEQUENCE、成片音轨取 H3 原生轨，打开混音会与它冲突（双人声/剔人声）。
+    #     补进本表只为「写进去能生效、能读回」，默认值仍是 False。
+    "enable_mix": False,
     # 超分（FlashVSR）：默认开启。必须列进 PLAN_DEFAULTS ——
     # api_autopilot_plan_set 会按 `k in PLAN_DEFAULTS` 过滤入参，
     # 不在此处的字段无法通过接口关闭，等于没有关掉的入口。
@@ -232,6 +240,44 @@ PLAN_DEFAULTS = {
     #   「第1集分镜图缺10镜 → 直接跳第2集 → 用户点开才发现」就是这个坑。
     "stop_on_failure": True,
 }
+
+#: 「写了但不会生效」的键 → 一句人话原因（2026-10-12 T11）
+#:
+#: 背景：PLAN_DEFAULTS 是「计划接口能接受哪些键」的**唯一权威**（set_plan /
+#: routes/autopilot.py / routes/autonomous.py 三者都按它判定）。不在其中的键此前被
+#: **静默丢弃**：接口 200 OK，用户却什么都没改到（前端 AutonomousPanel 的
+#: enable_tts 复选框就是这条假通道）。
+#:
+#: 现在：不在 PLAN_DEFAULTS 的键一律由 split_plan_patch 归入 rejected，由调用方
+#: 显式回给用户 —— routes/autopilot.py 直接 400（整笔拒绝，不做部分生效）；
+#: routes/autonomous.py 进响应的 ignored/warning 并记日志。
+#: 本表只给这些「已下线 / 已固定 / 不属于计划」的键补一句原因，**不参与接受判定**。
+PLAN_RETIRED_KEYS = {
+    "enable_keyframe": "尾帧（keyframe）步骤已于 2026-10-05 移出 STEP_SEQUENCE，没有执行点了",
+    "prewarm_asset_prompt": "本集资产提示词预热已于 2026-10-11 固定开启（用户口径「不管什么情况都开」），不再可关",
+    "video_mode": "视频生成方式是项目级设定（project_store，2026-10-01 起只保留 episode），不由托管计划控制",
+    "enable_storyboard": "分镜图是视频的必要输入，恒开（pipeline.step_enabled），没有关闭入口",
+}
+
+
+def split_plan_patch(patch: dict) -> dict:
+    """把计划入参拆成「可接受 / 被拒」两部分（T11：不再静默丢弃）
+
+    返回 {"accepted": {...}, "rejected": {...}, "reasons": {key: 原因}}：
+
+    · accepted —— 键在 PLAN_DEFAULTS 里（唯一权威＝计划接口能接受的集合）；
+    · rejected —— 其余键，**原样带值**返回（调用方据此显式报错或警告）；
+    · reasons  —— 该键的人话原因（未登记的用兜底文案）。
+    """
+    accepted, rejected, reasons = {}, {}, {}
+    for k, v in (patch or {}).items():
+        if k in PLAN_DEFAULTS:
+            accepted[k] = v
+        else:
+            rejected[k] = v
+            reasons[k] = PLAN_RETIRED_KEYS.get(k) or (
+                "不是托管计划字段（可用字段见 PLAN_DEFAULTS 的键），写它不会生效")
+    return {"accepted": accepted, "rejected": rejected, "reasons": reasons}
 
 
 def _A():
@@ -347,26 +393,50 @@ def get_plan(project_name: str) -> dict:
 
 
 def set_plan(project_name: str, patch: dict, novel_id: str = "") -> dict:
-    """写入托管计划（只接受已知字段，避免脏数据污染）"""
+    """写入托管计划（只接受 PLAN_DEFAULTS 里的字段，避免脏数据污染）
+
+    ⚠️ 2026-10-12 T11：不在 PLAN_DEFAULTS 的键**不再静默丢弃** —— 本函数记一条
+    warning 列出被拒键与原因；需要把这份反馈交给用户的路由请改用
+    set_plan_report（它额外返回 accepted/rejected/reasons）。
+
+    （旧实现另有一段「video_mode 同步写回项目配置」的分支：video_mode 并不在接受集合里，
+    写回用的又是 plan 里的**旧值**（等于空转），而项目级设定真正的入口是
+    routes/projects.py 的创建/配置接口 + project_store。故 2026-10-12 T11 一并删除，
+    改由 PLAN_RETIRED_KEYS 给出明确原因。）
+    """
+    return set_plan_report(project_name, patch, novel_id=novel_id)["plan"]
+
+
+def set_plan_report(project_name: str, patch: dict, novel_id: str = "",
+                    strict: bool = False) -> dict:
+    """set_plan 的带反馈版本：返回 {ok, plan, accepted, rejected, reasons[, error]}
+
+    · strict=False（默认，兼容既有调用方 set_plan/enable/disable）：
+      可接受键照写；被拒键记 warning 并随返回值上浮。
+    · strict=True：只要出现被拒键就**整笔不写**、ok=False（给「精确写计划」的接口用，
+      让它能明确报错，而不是「部分生效 + 200 OK」）。
+    """
+    split = split_plan_patch(patch)
+    accepted, rejected, reasons = split["accepted"], split["rejected"], split["reasons"]
     plan = get_plan(project_name)
-    for k, v in (patch or {}).items():
-        if k in PLAN_DEFAULTS:
-            plan[k] = v
-    # ⭐ video_mode 是**项目级**设定：显式改动时同步写回项目配置（单一事实来源）。
-    #    不写回的话，下一次 get_plan 会按项目配置把这次修改顶掉 —— 「设置不生效」
-    #    且没有任何报错，是最难查的一类漂移。
-    if "video_mode" in (patch or {}):
-        try:
-            import project_store as _ps
-            _ps.update_config(project_name, {"video_mode": plan.get("video_mode")})
-        except Exception as e:                 # noqa: BLE001 - 写回失败不影响计划本身
-            logger.warning("写回项目视频生成方式失败（计划内仍生效）：%s", e)
+    if rejected:
+        logger.warning("项目 %s 托管计划：%d 个字段不被支持，已显式拒绝（不再静默丢弃）：%s",
+                       project_name, len(rejected),
+                       "；".join("%s（%s）" % (k, reasons[k]) for k in sorted(rejected)))
+        if strict:
+            return {"ok": False, "plan": plan, "accepted": sorted(accepted),
+                    "rejected": rejected, "reasons": reasons,
+                    "error": "计划未写入：包含不受支持的字段 "
+                             + "、".join(sorted(rejected))}
+    for k, v in accepted.items():
+        plan[k] = v
     if novel_id:
         plan["novel_id"] = novel_id
     plan["updated_at"] = _now()
     _write_json(plan_path(project_name), plan)
     wake()
-    return plan
+    return {"ok": True, "plan": plan, "accepted": sorted(accepted),
+            "rejected": rejected, "reasons": reasons}
 
 
 def list_plans() -> list:

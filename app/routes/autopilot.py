@@ -275,14 +275,31 @@ def api_autopilot_plan_get(project_name):
 def api_autopilot_plan_set(project_name):
     """设置某项目的自动生产计划（目标集数、镜头数、风格、质量阈值、重试上限…）"""
     project = _safe_project(project_name)
-    data = request.json or {}
+    data = dict(request.json or {})
     novel_id = str(data.pop('novel_id', '') or '').strip()
-    patch = {k: v for k, v in (data or {}).items() if k in autopilot.PLAN_DEFAULTS}
+    # GET 会把计划整份返回（含 updated_at 等只读回显键）；客户端「读回来再写回去」
+    # 不该被判成非法写入 —— 这几个键按只读回显忽略（有注释也有测试）。
+    for _echo in ('updated_at', 'project', 'success', 'error'):
+        data.pop(_echo, None)
+    # ⭐ 2026-10-12 T11：以前这里按 k in PLAN_DEFAULTS **静默过滤** —— 未知键被悄悄
+    #    丢掉，用户拿到 200 OK 却什么都没变（enable_tts 就是这么被吞的）。
+    #    现在：出现不支持的键就**整笔拒绝**（不做部分生效）+ 逐键给出原因。
+    _split = autopilot.split_plan_patch(data)
+    patch = _split["accepted"]
+    if _split["rejected"]:
+        return jsonify({
+            "success": False,
+            "error": "不支持的字段（未写入任何内容）：" + "、".join(sorted(_split["rejected"])),
+            "rejected": _split["rejected"],
+            "reasons": _split["reasons"],
+            "accepted_keys": sorted(autopilot.PLAN_DEFAULTS),
+        }), 400
     if not patch and not novel_id:
         return jsonify({"success": False,
                         "error": f"没有可更新字段；可用字段：{sorted(autopilot.PLAN_DEFAULTS)}"}), 400
     plan = autopilot.set_plan(project, patch, novel_id=novel_id)
-    return jsonify({"success": True, "project": project, "plan": plan})
+    return jsonify({"success": True, "project": project, "plan": plan,
+                    "accepted": sorted(patch)})
 @autopilot_bp.route('/api/autopilot/enable', methods=['POST'])
 @_autopilot_guard
 def api_autopilot_enable():
@@ -313,8 +330,21 @@ def api_autopilot_enable():
                     break
         except Exception:  # noqa: BLE001
             novel_id = ''
-    patch = {k: v for k, v in (data or {}).items()
-             if k in autopilot.PLAN_DEFAULTS and k != 'enabled'}
+    # ⭐ 2026-10-12 T11：与 /plan 同一套判定（不再静默丢弃）——'project' / 'project_name' /
+    #    'novel_id' 是寻址参数；其余不在 PLAN_DEFAULTS 的键**整笔 400 并逐键给原因**。
+    #    （'enabled' 是这个接口自己的语义，恒置 True，不当作入参。）
+    _split = autopilot.split_plan_patch(
+        {k: v for k, v in (data or {}).items()
+         if k not in ('project', 'project_name', 'novel_id')})
+    if _split["rejected"]:
+        return jsonify({
+            "success": False,
+            "error": "不支持的字段（未开启托管）：" + "、".join(sorted(_split["rejected"])),
+            "rejected": _split["rejected"],
+            "reasons": _split["reasons"],
+            "accepted_keys": sorted(autopilot.PLAN_DEFAULTS),
+        }), 400
+    patch = {k: v for k, v in _split["accepted"].items() if k != 'enabled'}
     plan = autopilot.enable(project, patch)
     if novel_id:
         plan = autopilot.set_plan(project, {}, novel_id=novel_id)

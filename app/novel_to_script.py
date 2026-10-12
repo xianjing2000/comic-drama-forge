@@ -27,6 +27,10 @@ from dialogue_utils import dialogue_text as _dlg_text, normalize_lines as _dlg_l
 import fs_atomic
 import style_kit
 import h3_prompt_kit
+# ⭐ 2026-10-12（硬事实一致性基线 canon）：楼层数 / 公司名 / 地址 / 关键数字的**唯一权威表**
+#   —— 生成期注入分镜提示词、落盘前校验输出。只用标准库、零项目依赖（叶子模块），
+#   放在顶部 import 区不会与 continuity / pipeline / app 形成任何循环导入。
+import canon
 
 
 class ScriptTemplateError(RuntimeError):
@@ -1059,7 +1063,8 @@ def _fallback_bible(outlines: list, novel_title: str, style: str) -> dict:
 
 def _heal_over_split(client, bible: dict, outline: dict, chunk: dict, shots: list, label: str,
                      events: list = None, depth: int = 0, continuity_ctx: dict = None,
-                     cache_dir: str = "", shots_hard_cap: int = 0) -> list:
+                     cache_dir: str = "", shots_hard_cap: int = 0,
+                     canon_book: dict = None) -> list:
     """切分粒度自愈：镜数密度明显过碎时，带反馈重切一次。
 
     采纳条件（保守 —— 宁可保留原结果，也不冒「重切把内容丢光」的风险）：
@@ -1089,7 +1094,10 @@ def _heal_over_split(client, bible: dict, outline: dict, chunk: dict, shots: lis
         retry = build_shots_for_chunk(
             client, bible, outline, chunk, 0, events=events, depth=depth,
             continuity_ctx=continuity_ctx, cache_dir=cache_dir,
-            shots_hard_cap=shots_hard_cap, extra_hint=hint, _no_heal=True)
+            shots_hard_cap=shots_hard_cap, extra_hint=hint, _no_heal=True,
+            # ⭐ 2026-10-12：自愈重切是**一次全新的模型调用**，它的产出会替换掉原镜头 ——
+            #    这里漏传 canon_book 会让「重切后的分镜」丢掉硬事实约束（静默回退）。
+            canon_book=canon_book)
         if not retry:
             logger.warning("%s 自愈重切无产出，保留原 %d 镜", label, len(shots))
             return shots
@@ -1114,7 +1122,8 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                           events: list = None, depth: int = 0,
                           continuity_ctx: dict = None, cache_dir: str = "",
                           shots_hard_cap: int = 0, prev_tail: str = "",
-                          extra_hint: str = "", _no_heal: bool = False) -> list:
+                          extra_hint: str = "", _no_heal: bool = False,
+                          canon_book: dict = None) -> list:
     """③ 单块写分镜（截断时自动提高 max_tokens；仍截断则把该块再二分后合并）
 
     prev_tail（P1-2 接缝重叠）：上一块的「结尾上下文」预渲染文本（由调用方经
@@ -1124,6 +1133,10 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     continuity_ctx 非空时（跨集连贯性方案 A②③ / C⑦⑧）：注入上集摘要卡、衔接契约、
     项目级风格指南、人物口吻词典、金句保留清单与运镜术语表。
     cache_dir 非空时启用断点缓存：命中即跳过模型调用（见文件上方缓存说明）。
+
+    canon_book（2026-10-12 硬事实一致性基线）非空时，渲染完提示词、**调用模型之前**把
+    本剧硬事实（楼层数 / 公司名 / 地址 / 关键数字 + 禁写错形）追加进提示词，并写 INFO
+    日志「注入了哪几条」；为 None 时按 bible.title 自动解析（未登记小说 → 不注入，零变化）。
     shots_hard_cap > 0 时收紧本块镜头数上限（**显式额度**，只压上限、不动下限，
     避免与 SHOTS_PER_CHUNK_MIN 打架）。2026-10-09 起主流程**不再传单集上限**
     （按场次生产后单集镜数不设上限），该参数仅用于调用方显式收紧。
@@ -1163,7 +1176,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                     client, bible, _sub_outline, _s, _target_i,
                     events=events, depth=depth + 1,
                     continuity_ctx=continuity_ctx, cache_dir=cache_dir,
-                    shots_hard_cap=shots_hard_cap))
+                    shots_hard_cap=shots_hard_cap, canon_book=canon_book))
             return _out
 
     # 2026-09-29 资产不设上限：可用资产清单不再 [:6]/[:3] 截断 —— 清单里没有的名字
@@ -1299,6 +1312,14 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     #    现直接删除，并改为明确报错 —— 模板不可用时宁可让该集停下来，
     #    也不要静默用一份可能与外部模板不一致的旧文本继续生产。
     label = f"shots#{chunk.get('index')}"
+    # ⭐ 2026-10-12（硬事实一致性基线 canon）：注入点必须在**缓存查询之前** ——
+    #    这样「注入进去的文本」就是「缓存键」本身：改了设定表 → prompt 变 → 缓存自然失效，
+    #    不会出现「表改了却还在用旧提示词缓存出来的分镜」。调用模型则在其后，属生成前注入。
+    #    修的真实缺陷：同集「47层 vs 7层」、工牌「天合科技」而配音「天河科技」。
+    #    fail-open：未登记小说 / 设定表异常 → prompt 原样下发，行为与改动前逐字一致。
+    _canon_book = canon_book if isinstance(canon_book, dict) else \
+        canon.resolve_book(bible.get('title') or '')
+    prompt = canon.inject_canon_into_prompt(prompt, _canon_book, label=label, events=events)
     hit = _cache_get(cache_dir, "shots", prompt, events, label)
     if hit is not None and isinstance(hit.get("shots"), list) and hit["shots"]:
         return [s for s in hit["shots"] if isinstance(s, dict)]
@@ -1352,7 +1373,8 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                                                 events=events, depth=depth + 1,
                                                 continuity_ctx=continuity_ctx,
                                                 cache_dir=cache_dir,
-                                                shots_hard_cap=shots_hard_cap))
+                                                shots_hard_cap=shots_hard_cap,
+                                                canon_book=canon_book))
         return merged
     if isinstance(data, dict):
         shots = data.get("shots")
@@ -1386,7 +1408,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         out = _heal_over_split(client, bible, outline, chunk, out, label,
                                events=events, depth=depth,
                                continuity_ctx=continuity_ctx, cache_dir=cache_dir,
-                               shots_hard_cap=shots_hard_cap)
+                               shots_hard_cap=shots_hard_cap, canon_book=canon_book)
         # ⭐ 2026-10-10 用户口径 C：**内容撑不满单镜下限的镜头确定性合并到相邻同场景镜**。
         #    与上面的密度自愈互补 —— 自愈按「字数」判过碎（依赖模型重切），
         #    本步按「可演时长」判过空（纯确定性，不依赖模型，必然生效）。
@@ -3838,6 +3860,24 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     t0 = time.time()
     novel_title = novel_meta.get("title") or novel_meta.get("name") or "未命名小说"
     chapter_title = (chapter.get("title") or f"第{chapter.get('index')}章").strip()
+    # ⭐ 2026-10-12（硬事实一致性基线 canon）：本集开跑前先把设定表条目定下来 ——
+    #    ③ 逐块写分镜的提示词注入与落盘前的输出校验用的是**同一份**，避免两处口径漂移。
+    #    解析依据是小说名（novel_title），不是模型给的剧名：模型给 bible.title 起别名时
+    #    注入会静默失效，这类失效最难查（表现只是"这集又出矛盾了"）。
+    #    fail-open：没有设定表条目（未登记小说）→ 本集不注入、不校验，行为与改动前一致。
+    _canon_data = None
+    try:
+        _canon_data = canon.resolve_book(novel_title) or canon.resolve_book(novel_meta.get("name"))
+        if _canon_data:
+            logger.info(
+                "[canon注入] 第%s集《%s》：本集分镜提示词将注入设定表《%s》的 %d 条硬事实 —— %s",
+                episode_no, chapter_title, _canon_data.get("key"),
+                len(canon.facts_of(_canon_data)), "；".join(canon.facts_summary(_canon_data)))
+        else:
+            logger.info("[canon注入] 第%s集《%s》：小说「%s」不在设定表内 → 本集不注入硬事实（不做猜测）",
+                        episode_no, chapter_title, novel_title)
+    except Exception as _ce:  # noqa: BLE001
+        logger.warning("第%s集：canon 设定表加载失败（本集不注入、不校验）：%s", episode_no, _ce)
     seg = (novel_text or "")[int(chapter.get("start") or 0):int(chapter.get("end") or 0)]
     if not seg.strip():
         raise LLMError(f"章节正文为空：{chapter_title}")
@@ -3974,7 +4014,8 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
                                                    continuity_ctx=continuity_ctx,
                                                    cache_dir=cache_dir,
                                                    shots_hard_cap=per_chunk_cap,
-                                                   prev_tail=_prev_tail))
+                                                   prev_tail=_prev_tail,
+                                                   canon_book=_canon_data))
         except LLMTruncatedError as e:
             fb = _fallback_shots_for_chunk(chunk, per_chunk, bible)
             all_shots.extend(fb)
@@ -4010,6 +4051,39 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     clean_shot_meta_words(shots)
     # 2026-10-11: asset side, same word list (hit: rule sheet reference_prompt_zh "八条小字")
     clean_asset_meta_words(bible)
+
+    # ⭐ 2026-10-12（canon 输出校验）：落盘前用设定表扫一遍**会进成片**的文本
+    #    （画面描述 / 台词 / 字幕 / 画面文字 / 音效提示 / 人物身份），把「47层 vs 7层」
+    #    「天合科技 vs 天河科技」这类互斥表述在进后期之前变成一条响亮的 WARNING。
+    #    只告警、不阻断（与全链路其它质检口径一致）：剧本层还能改，成片发布就改不动了。
+    canon_meta = {"novel": "", "ok": True, "conflicts": [], "injected_facts": []}
+    try:
+        if _canon_data:
+            canon_meta["injected_facts"] = canon.facts_summary(_canon_data)
+            _check = canon.validate_script(
+                {"title": bible.get("title"), "characters": characters, "items": items,
+                 "scenes": scenes, "shots": shots},
+                novel=novel_title)
+            canon_meta["novel"] = _check.get("novel") or ""
+            canon_meta["ok"] = bool(_check.get("ok"))
+            _cf = _check.get("conflicts") or []
+            canon_meta["conflicts"] = [
+                {"key": c.get("key"), "category": c.get("category"), "form": c.get("form"),
+                 "value": c.get("value"), "kind": c.get("kind"), "count": c.get("count"),
+                 "where": c.get("where"), "source": c.get("source")} for c in _cf]
+            canon_meta["scanned_fields"] = len(list(canon.iter_script_texts({"shots": shots})))
+            if _cf:
+                for _line in canon.format_conflicts(_cf):
+                    logger.warning("第%s集：%s", episode_no, _line)
+                warnings.append(
+                    "canon 硬事实冲突 %d 处（见日志 [canon冲突]）：%s"
+                    % (len(_cf), "、".join([str(c.get("form")) for c in _cf][:8])))
+            else:
+                logger.info("第%s集：canon 硬事实校验通过（设定表《%s》，扫描 %d 个可取文本字段）",
+                            episode_no, canon_meta["novel"], canon_meta["scanned_fields"])
+    except Exception as _ce:  # noqa: BLE001
+        canon_meta["error"] = "%s: %s" % (type(_ce).__name__, _ce)
+        logger.warning("第%s集：canon 校验失败（忽略，不影响落盘）：%s", episode_no, _ce)
 
     # ---- 单集镜头数：不再截断（2026-10-09 用户口径）----
     # 曾经这里会把超过 MAX_SHOTS_PER_EPISODE(78) 的镜头**硬截断**（丢尾部情节）。
@@ -4104,6 +4178,9 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
             "base_url": client.base_url,
             "elapsed_sec": round(time.time() - t0, 1),
             "warnings": warnings,
+            # ⭐ 2026-10-12（canon）：本集「注入了哪几条硬事实 + 输出冲突校验结果」的落盘记录。
+            #    只读可查：排查「这集为什么又出现 7层/天河科技」时不必翻整个 serve 日志。
+            "canon": canon_meta,
             "truncation_events": trunc_events,
             "truncation_retries": len([e for e in trunc_events if e.get("attempt")]),
             "auto_sub_splits": len([e for e in trunc_events if e.get("event") == "sub_split"]),

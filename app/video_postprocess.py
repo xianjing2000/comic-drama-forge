@@ -330,7 +330,38 @@ class VideoPostProcessor:
     def __init__(self, comfyui_url: str = COMFYUI_URL):
         self.comfyui_url = comfyui_url
 
-    def _concat_fail(self, caller: str, reason: str) -> str:
+    @staticmethod
+    def _output_usable(path: str) -> bool:
+        """产物是否**可用**（存在且 >0 字节）。
+
+        2026-10-12（t11 审计 P0）：demuxer 快路径原先只看 ``returncode == 0`` 就返回
+        ``output_path`` —— ffmpeg 返回码 0 但输出被吞（磁盘写满 / 进程被回收）或留下
+        0 字节空壳时，调用方会拿到一个「像成功」的路径。两条路径（demuxer / 重编码）
+        统一用本判据，避免口径不一致。
+        """
+        try:
+            return bool(path) and os.path.isfile(path) and os.path.getsize(path) > 0
+        except OSError:
+            return False
+
+    @staticmethod
+    def _drop_empty_output(output_path: str) -> None:
+        """失败路径清理 **0 字节** 残留输出（2026-10-12，t11 审计 P0）。
+
+        为什么只删 0 字节：调用方（``video_helpers._recompose_episode_video` /
+        ``video_helpers.episode`）依赖「拼接失败时**旧成片仍在**」的 fail-open 语义，
+        删掉一个已存在的有效成片比留残件严重得多。ffmpeg 以 ``-y`` 打开输出时会先把
+        目标截成 0 字节，所以「目标此刻是 0 字节」等价于「没有可用产物」，删掉它不会
+        造成额外损失（等价于不留残件）；非 0 字节一律不碰。
+        """
+        try:
+            if output_path and os.path.isfile(output_path) and os.path.getsize(output_path) == 0:
+                os.remove(output_path)
+                logger.warning("清理拼接失败留下的 0 字节残件：%s", output_path)
+        except OSError as e:
+            logger.debug("清理 0 字节残件失败（忽略）：%s", e)
+
+    def _concat_fail(self, caller: str, reason: str, output_path: str = "") -> str:
         """拼接失败的**唯一出口**：按契约返回 ``""``，但必须先把原因留痕。
 
         D-10（P2，契约脆弱）：``concat_videos`` 用空串同时表达「失败」与「无输出」，
@@ -340,7 +371,11 @@ class VideoPostProcessor:
         保持返回契约不变（改动风险大于收益），改为在返回前把「谁调的 + 为什么失败」
         写进 error 日志：``reason`` 必须带上 ffmpeg 的真实输出（stderr / 返回码 / 异常类型），
         而不是「合并失败」这种无信息量的套话。
+
+        ``output_path``（2026-10-12 新增，可选）：失败时顺手清掉该路径上的 **0 字节**
+        残件（见 :meth:`_drop_empty_output`）；不传则行为与改动前完全一致。
         """
+        self._drop_empty_output(output_path)
         logger.error("concat_videos 失败[调用方=%s]：%s"
                      "（按契约返回空串，调用方必须判空后才能继续）",
                      (caller or "未标注"), reason)
@@ -352,26 +387,49 @@ class VideoPostProcessor:
         """使用 FFmpeg 合并视频
 
         S-01 修复：拼接前探测每个片段的音轨参数（codec/sample_rate/channels）。
-        - 全部一致 → 走 concat demuxer + -c copy（快，不重编码）
-        - 不一致（或部分有音轨/部分无）→ 走 concat filter 重编码（统一采样率/声道/编码器）
+        - **全部片段都有音轨且参数一致** → 走 concat demuxer + -c copy（快，不重编码）
+        - 其余一律走 concat filter 重编码（统一采样率/声道/编码器；缺失音轨的片段会被补上
+          一条等长静音轨，见 :meth:`_concat_reencode`）——覆盖「参数不一致」、「部分有音轨 /
+          部分无」，以及「全部无音轨」（走纯视频图）。
+
+        ⚠️ 2026-10-12 修复（t11 审计 P0，实测）：原判据 `has_any_audio and len(audio_params) > 1`
+        只能识别「参数不一致」，**识别不了「部分片段有音轨、部分没有」**：
+          · [有音轨, 无音轨] → 走 -c copy「成功」但音轨只覆盖第一段（实测成片视频 4.000s /
+            音轨 2.021s，后 2 秒全无声，零告警）；
+          · [无音轨, 有音轨] → 第二段音轨被**整条丢弃**（实测输出无音频流）。
+        根因：`audio_params` 只统计「有音轨」的片段，混合有无时它恒为 1 种 → 被判成「一致」。
+        现在改为：只要**存在无音轨片段**或**音轨参数不一致**，一律走重编码分支。
 
         返回值契约（M3/A-23）：成功返回 output_path；**任何失败/异常/空输入一律返回 ""**
         （不抛异常，保持既有调用方语义）。⚠️ 所有调用点必须对返回值判空（`if not ret` /
-        `_nonempty(path)`）；已核实全库仅 pipeline.py:876（concat 后 `_nonempty(tmp)`）与
-        本类（`if not self.concat_videos(...)`）两处，均判空。外部新增调用务必照此判空，
-        并在 `verify_project_audit.py` 的守卫里登记（脚本会断言「所有调用点都判空」）。
+        `_nonempty(path)`）。2026-10-12 复核（t11 审计）：全库共 5 处调用点，均已判空且都传了
+        `caller` —— `pipeline.py:791`（逐场超分拼接，`if not cv or not _playable(cv)`）、
+        `video_helpers.py:153`（`_recompose_episode_video`）、`video_helpers.py:438`
+        （`retry_shot` 子段合并）、`video_helpers.py:1918`（`episode` 整集分段合并）、
+        本类 `generate_final_video`（`if not self.concat_videos(...)`）。
+        ⚠️ 此前注释声称「已在 verify_project_audit.py 登记守卫，脚本会断言所有调用点都判空」
+        —— 经核实**该守卫并不存在**（脚本里没有任何 concat 相关断言），故新增调用点请自行判空，
+        不要依赖脚本兜底。
 
         D-10：因为返回值带不了失败理由，特新增 `caller` 参数（调用方自报标识）—— 每条
         返回 `""` 的路径都会经 :meth:`_concat_fail` 打一条带调用方标识 + ffmpeg 真实原因的
         error 日志。**新调用点请务必传 `caller`**（如 `caller="pipeline.step_final"`）。
         """
         if not video_paths:
-            return self._concat_fail(caller, "输入片段为空（video_paths 为空列表）")
+            return self._concat_fail(caller, "输入片段为空（video_paths 为空列表）",
+                                     output_path=output_path)
+        # 历史遗留形参：全库无调用方传入，实现也从未消费它（t11 审计认定的死参数）。
+        # 这里显式告警而不是静默忽略，避免后来者以为「传了就会被用上」。
+        if audio_paths:
+            logger.warning("concat_videos 的 audio_paths 参数不参与拼接（历史遗留死参数，"
+                           "全库无调用方）：本次仅按 %d 个视频片段自身的音轨拼接 → %s",
+                           len(video_paths), output_path)
 
         # 探测音轨参数一致性（probe_media 自身不抛异常，任何异常落到 info.error）
         probes = [probe_media(p) for p in video_paths]
         audio_params = set()
         has_any_audio = False
+        n_missing_audio = 0
         for p in probes:
             if p.get("has_audio"):
                 has_any_audio = True
@@ -379,10 +437,18 @@ class VideoPostProcessor:
                     p.get("audio_codec"), p.get("sample_rate"),
                     p.get("channels"),
                 ))
-        need_reencode = has_any_audio and len(audio_params) > 1
+            else:
+                n_missing_audio += 1
+        # 判定（2026-10-12，见上方 ⚠️）：
+        #   · 有片段没有音轨 → 重编码（重编码里逐段补等长静音轨，保证每个输入都有音轨）
+        #   · 有音轨但参数不一致 → 重编码（统一采样率/声道/编码器）
+        #   · 全部片段都有音轨且参数一致 → 才走 demuxer + -c copy 快路径
+        need_reencode = bool(n_missing_audio) or (has_any_audio and len(audio_params) > 1)
 
         if need_reencode:
-            logger.info(f"音轨参数不一致（{len(audio_params)} 种），走 concat filter 重编码路径")
+            logger.info("走 concat filter 重编码路径（无音轨片段 %d/%d 个，音轨参数 %d 种，"
+                        "has_any_audio=%s）", n_missing_audio, len(video_paths),
+                        len(audio_params), has_any_audio)
             return self._concat_reencode(video_paths, output_path, probes, caller=caller)
 
         # 参数一致 → 走 concat demuxer（快，不重编码）
@@ -411,13 +477,22 @@ class VideoPostProcessor:
             ]
 
             result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
-            if result.returncode == 0:
+            # 2026-10-12（t11 审计 P0）：原实现只判 returncode —— 返回码 0 但输出被吞
+            # （磁盘写满 / 进程被回收）或留下 0 字节空壳时，会返回一个「像成功」的路径。
+            # 现在改成「返回码 0 **且** 产物存在且非空」才算成功。
+            if result.returncode == 0 and self._output_usable(output_path):
                 logger.info(f"视频合并成功（demuxer -c copy）: {output_path}")
                 os.remove(list_file)
                 return output_path
-            # -c copy 失败（常见原因：音视频参数实际不一致但探测未捕获，
-            # 如 H265 vs H264 混拼、关键帧对齐失败）→ 降级重编码兜底
-            logger.warning(f"demuxer 拼接失败，降级 concat filter 重编码：{(result.stderr or '')[-300:]}")
+            # 两类失败都降级重编码兜底：
+            #   ① -c copy 失败（常见：音视频参数实际不一致但探测未捕获，如 H265 vs H264
+            #      混拼、关键帧对齐失败）；
+            #   ② 返回码 0 但输出不存在 / 0 字节。
+            if result.returncode == 0:
+                logger.warning("demuxer 返回码 0 但产物不存在或为 0 字节，降级重编码：%s",
+                               output_path)
+            else:
+                logger.warning(f"demuxer 拼接失败，降级 concat filter 重编码：{(result.stderr or '')[-300:]}")
             if os.path.exists(list_file):
                 os.remove(list_file)
             return self._concat_reencode(video_paths, output_path, probes, caller=caller)
@@ -429,7 +504,8 @@ class VideoPostProcessor:
             except OSError as _ce:
                 logger.debug("清理 concat 清单文件失败（忽略）：%s", _ce)
             return self._concat_fail(
-                caller, f"concat demuxer 执行异常：{type(e).__name__}: {e}")
+                caller, f"concat demuxer 执行异常：{type(e).__name__}: {e}",
+                output_path=output_path)
 
     def _concat_reencode(self, video_paths: List[str], output_path: str,
                          probes: List[Dict], caller: str = "") -> str:
@@ -439,92 +515,181 @@ class VideoPostProcessor:
         改成横屏加黑边且不可逆。改为以「分辨率/帧率出现最多的片段」为基准，
         竖屏保持竖屏、帧率与源片一致。
 
+        2026-10-12 音轨一致性修复（t11 审计 P0，实测依据）：
+          · **缺失音轨的片段**不再用 `[i:a?]` 硬塞进 `concat=n:N:v=0:a=1` 的图 ——
+            实测（混合有/无音轨 + 参数不一致）该写法直接整图报 `matches no streams`，
+            拼接必然失败。改为**先给该片段 remux 一份带等长静音 AAC 轨的临时副本**
+            （不动源文件），让每个输入都有音轨后再统一重编码。
+          · **全部片段都没有音轨**时走**纯视频图**（不 map 音频、显式 -an）：既不给
+            「本来就没有音频」的工程凭空造音轨，也不会因空音频图失败。
+          · 静音轨用 `-shortest` + `-c:v copy` 生成：音频被裁到该片段视频的精确长度，
+            **不依赖 ffprobe 时长精度**，逐段严格对齐，避免累进 A/V 漂移。
+          · 临时副本用**非 .mp4 后缀**（G8 约定：避免被 *.mp4 glob 当成分片/成片），
+            finally 里无条件清理（成功/失败/异常都不留残片）。
+
         filter_complex 结构：
           [i:v:0]scale/fps/format → [vi]
-          [i:a?]aresample/aformat → [ai]
-          [v0][v1]...concat=n:1:0 → [outv]
-          [a0][a1]...concat=n:0:1 → [outa]
+          [i:a:0]aresample/aformat → [ai]      （纯视频图时无此行）
+          [v0][v1]...concat=n:N:v=1:a=0 → [outv]
+          [a0][a1]...concat=n:N:v=0:a=1 → [outa]   （纯视频图时无此行）
 
-        D-10：失败同样经 `_concat_fail` 出口，`caller` 由 `concat_videos` 透传。
+        D-10：失败同样经 `_concat_fail` 出口（并顺带清掉 0 字节残件），`caller` 由
+        `concat_videos` 透传。
         """
         if not video_paths:
-            return self._concat_fail(caller, "重编码路径输入片段为空（video_paths 为空列表）")
+            return self._concat_fail(caller, "重编码路径输入片段为空（video_paths 为空列表）",
+                                     output_path=output_path)
         n = len(video_paths)
 
-        # B-05：从源片实测推导目标分辨率/帧率（以出现最多的宽/高/帧率为准）
-        target_w, target_h = 1280, 720  # 兜底值；B-05 已改为源片实测投票，仅 ffprobe 全失败时触达
-        target_fps = 30  # 兜底值；B-05 已改为源片实测投票，仅 ffprobe 全失败时触达
-        w_votes: Dict[int, int] = {}
-        h_votes: Dict[int, int] = {}
-        fps_votes: Dict[int, int] = {}
-        for i, p in enumerate(video_paths):
-            pro = probes[i] if i < len(probes) else {}
-            w = int(pro.get("width") or 0)
-            h = int(pro.get("height") or 0)
-            fps = int(round(float(pro.get("fps") or 0)))
-            if w and h:
-                w_votes[w] = w_votes.get(w, 0) + 1
-                h_votes[h] = h_votes.get(h, 0) + 1
-            if fps:
-                fps_votes[fps] = fps_votes.get(fps, 0) + 1
-        if w_votes:
-            target_w = max(w_votes, key=w_votes.get)
-        if h_votes:
-            target_h = max(h_votes, key=h_votes.get)
-        if fps_votes:
-            target_fps = max(fps_votes, key=fps_votes.get)
-        # 宽高对齐到偶数（libx264 要求），防止 721 之类奇数
-        target_w = target_w // 2 * 2 or 1280
-        target_h = target_h // 2 * 2 or 720
-        logger.info(f"降级重编码基准：{target_w}x{target_h}@{target_fps}fps（源片实测）")
-
-        inputs: List[str] = []
-        for p in video_paths:
-            inputs += ["-i", os.path.abspath(p)]
-
-        # 逐片段：视频归一化（scale 到源片基准 + fps + pix_fmt + sar）→ [vi]；音频归一化 → [ai]
-        per_stream: List[str] = []
-        for i in range(n):
-            per_stream.append(
-                f"[{i}:v:0]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
-                f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
-                f"fps={target_fps},format=yuv420p,setsar=1[v{i}]"
-            )
-            per_stream.append(
-                f"[{i}:a?]aresample=24000,aformat=sample_fmts=fltp:channel_layouts=mono[a{i}]"
-            )
-        # 拼接
-        v_concat_in = "".join(f"[v{i}]" for i in range(n))
-        a_concat_in = "".join(f"[a{i}]" for i in range(n))
-        per_stream.append(f"{v_concat_in}concat=n={n}:v=1:a=0[outv]")
-        per_stream.append(f"{a_concat_in}concat=n={n}:v=0:a=1[outa]")
-        filter_complex = ";".join(per_stream)
-
-        cmd = ["ffmpeg", "-y", "-v", "error"] + inputs + [
-            "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            output_path,
-        ]
-        logger.info(f"concat filter 重编码拼接 {n} 个片段 → {output_path}")
+        # 目标目录先建好：既要写 output_path，也要写「补音轨」的临时副本。原实现没建目录，
+        # 从「音轨不一致」分支直接进来时目录不存在会直接失败。
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
-            if result.returncode == 0 and os.path.exists(output_path):
-                logger.info(f"视频合并成功（filter 重编码）: {output_path}")
-                return output_path
-            if result.returncode == 0:
-                # 返回码 0 却没产出文件：不是 ffmpeg 报错，而是输出被吞（磁盘满/被杀）
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+        except OSError as e:
+            return self._concat_fail(caller, f"输出目录不可用：{type(e).__name__}: {e}",
+                                     output_path=output_path)
+
+        def _pro(i: int) -> Dict:
+            return probes[i] if i < len(probes) else {}
+
+        has_any_audio = any(_pro(i).get("has_audio") for i in range(n))
+        pad_temps: List[str] = []
+        try:
+            # ---- A) 逐片段补齐缺失音轨（仅当本批至少有一段有音轨时才需要）----
+            inputs_paths: List[str] = []
+            for i in range(n):
+                if has_any_audio and not _pro(i).get("has_audio"):
+                    tmp_pad = output_path + f".padaudio{i}.work"
+                    _dur = float(_pro(i).get("duration") or 0)
+                    # -t 只用来**界定**静音长度上限；精确对齐由 -shortest + -c:v copy 保证
+                    # （探不到时长时给一个足够大的上限，-shortest 会在该片段视频结束处截断）
+                    _lim = f"{_dur:.3f}" if _dur > 0 else "36000"
+                    if _dur <= 0:
+                        logger.warning("第 %d/%d 段探不到时长，静音轨将由 -shortest 按视频长度截断：%s",
+                                       i + 1, n, video_paths[i])
+                    pad_cmd = ["ffmpeg", "-y", "-v", "error",
+                               "-i", os.path.abspath(video_paths[i]),
+                               "-f", "lavfi", "-t", _lim, "-i", "anullsrc=r=24000:cl=mono",
+                               "-map", "0:v:0", "-map", "1:a:0",
+                               "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
+                               "-shortest", "-f", "mp4", "-movflags", "+faststart",
+                               tmp_pad]
+                    try:
+                        pr = subprocess.run(pad_cmd, capture_output=True, text=True,
+                                            encoding="utf-8", errors="replace", timeout=1800)
+                    except Exception as e:  # noqa: BLE001
+                        return self._concat_fail(
+                            caller, f"补静音轨调用异常（第 {i + 1}/{n} 段）："
+                                    f"{type(e).__name__}: {e}", output_path=output_path)
+                    if (pr.returncode != 0 or not self._output_usable(tmp_pad)
+                            or not probe_media(tmp_pad).get("has_audio")):
+                        return self._concat_fail(
+                            caller, f"补静音轨失败（第 {i + 1}/{n} 段）：rc={pr.returncode} "
+                                    f"stderr={(pr.stderr or '')[-300:]!r}",
+                            output_path=output_path)
+                    pad_temps.append(tmp_pad)
+                    logger.info("第 %d/%d 段无音轨，已补等长静音轨：%s",
+                                i + 1, n, os.path.basename(video_paths[i]))
+                    inputs_paths.append(tmp_pad)
+                else:
+                    inputs_paths.append(video_paths[i])
+
+            # ---- B) 从源片实测推导目标分辨率/帧率（以出现最多的宽/高/帧率为准）----
+            target_w, target_h = 1280, 720  # 兜底值；源码片实测投票，仅 ffprobe 全失败时触达
+            target_fps = 30  # 兜底值；源码片实测投票，仅 ffprobe 全失败时触达
+            w_votes: Dict[int, int] = {}
+            h_votes: Dict[int, int] = {}
+            fps_votes: Dict[int, int] = {}
+            for i in range(n):
+                pro = _pro(i)
+                w = int(pro.get("width") or 0)
+                h = int(pro.get("height") or 0)
+                fps = int(round(float(pro.get("fps") or 0)))
+                if w and h:
+                    w_votes[w] = w_votes.get(w, 0) + 1
+                    h_votes[h] = h_votes.get(h, 0) + 1
+                if fps:
+                    fps_votes[fps] = fps_votes.get(fps, 0) + 1
+            if w_votes:
+                target_w = max(w_votes, key=w_votes.get)
+            if h_votes:
+                target_h = max(h_votes, key=h_votes.get)
+            if fps_votes:
+                target_fps = max(fps_votes, key=fps_votes.get)
+            # 宽高对齐到偶数（libx264 要求），防止 721 之类奇数
+            target_w = target_w // 2 * 2 or 1280
+            target_h = target_h // 2 * 2 or 720
+            logger.info(f"降级重编码基准：{target_w}x{target_h}@{target_fps}fps（源片实测）")
+
+            inputs: List[str] = []
+            for p in inputs_paths:
+                inputs += ["-i", os.path.abspath(p)]
+
+            # ---- C) 逐片段：视频归一化 → [vi]；音频归一化 → [ai]（仅在有用音轨时）----
+            # 注意一律用 `[i:a:0]`（非可选）：缺音轨的片段已在 A) 补过静音轨，若这里仍用
+            # `[i:a?]`，混合场景下 [ai] 标签不存在 → 整图 `matches no streams`（实测）。
+            per_stream: List[str] = []
+            for i in range(n):
+                per_stream.append(
+                    f"[{i}:v:0]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+                    f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2,"
+                    f"fps={target_fps},format=yuv420p,setsar=1[v{i}]"
+                )
+                if has_any_audio:
+                    per_stream.append(
+                        f"[{i}:a:0]aresample=24000,aformat=sample_fmts=fltp:channel_layouts=mono[a{i}]"
+                    )
+            # 拼接
+            v_concat_in = "".join(f"[v{i}]" for i in range(n))
+            per_stream.append(f"{v_concat_in}concat=n={n}:v=1:a=0[outv]")
+            if has_any_audio:
+                a_concat_in = "".join(f"[a{i}]" for i in range(n))
+                per_stream.append(f"{a_concat_in}concat=n={n}:v=0:a=1[outa]")
+            filter_complex = ";".join(per_stream)
+
+            cmd = ["ffmpeg", "-y", "-v", "error"] + inputs + [
+                "-filter_complex", filter_complex,
+                "-map", "[outv]",
+            ]
+            if has_any_audio:
+                cmd += ["-map", "[outa]", "-c:a", "aac", "-b:a", "128k"]
+            else:
+                # 全部片段都无音轨：纯视频图 + 显式 -an（不留空音频轨）
+                cmd += ["-an"]
+            cmd += [
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-movflags", "+faststart",
+                output_path,
+            ]
+            logger.info("concat filter 重编码拼接 %d 个片段（has_any_audio=%s，补音轨 %d 段）→ %s",
+                        n, has_any_audio, len(pad_temps), output_path)
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3600)
+                if result.returncode == 0 and self._output_usable(output_path):
+                    logger.info(f"视频合并成功（filter 重编码）: {output_path}")
+                    return output_path
+                if result.returncode == 0:
+                    # 返回码 0 却没产出可用文件：不是 ffmpeg 报错，而是输出被吞（磁盘满/被杀）
+                    return self._concat_fail(
+                        caller, f"ffmpeg 返回码 0 但输出不存在或为 0 字节：{output_path}"
+                                f"（疑磁盘写满或进程被回收；stderr={(result.stderr or '')[-300:]!r}）",
+                        output_path=output_path)
                 return self._concat_fail(
-                    caller, f"ffmpeg 返回码 0 但输出文件不存在：{output_path}"
-                            f"（疑磁盘写满或进程被回收；stderr={(result.stderr or '')[-300:]!r}）")
-            return self._concat_fail(
-                caller, f"ffmpeg 重编码返回码 {result.returncode}，"
-                        f"stderr={(result.stderr or '')[-500:]!r}")
-        except Exception as e:
-            return self._concat_fail(
-                caller, f"ffmpeg 重编码调用异常：{type(e).__name__}: {e}")
+                    caller, f"ffmpeg 重编码返回码 {result.returncode}，"
+                            f"stderr={(result.stderr or '')[-500:]!r}",
+                    output_path=output_path)
+            except Exception as e:
+                return self._concat_fail(
+                    caller, f"ffmpeg 重编码调用异常：{type(e).__name__}: {e}",
+                    output_path=output_path)
+        finally:
+            # G8：补音轨临时副本一律清理（成功 / 失败 / 异常路径都不留残片）
+            for _t in pad_temps:
+                try:
+                    if os.path.exists(_t):
+                        os.remove(_t)
+                except OSError as _ce:
+                    logger.debug("清理补音轨临时文件失败（忽略）：%s", _ce)
 
     def add_subtitles(self, video_path: str, subtitles: List[dict],
                      output_path: str) -> str:

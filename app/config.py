@@ -809,7 +809,22 @@ H3_SFX_DIR = os.path.join(PROJECT_OUTPUT_DIR, "sfx")   # 分离产物：output/s
 #   True  = 把逐镜 QwenTTS 配音写进 segment.refAudios，H3 用音频驱动口型/节奏。
 #           需要该集配音已先行合成（enable_tts_pre），否则自动回退 generate/mute。
 #   False = 维持旧行为（H3 不出人声，配音统一后期 dub_mix 混音）。
+#
+# ⚠️ 2026-10-12 T11 结论：**保留字段（当前零消费者），刻意不接线**。
+#   全仓只有本行定义、没有任何读取点 —— 也就是「设了不会生效」。
+#   为什么不接：本项目 2026-10-04 起走「公共参考音色 + audioMode=generate」
+#   （H3 锁定角色音色、对白由 H3 自生成；实际决策点在
+#   comfyui_client.py:5460-5475 的 _eff_audio_mode，设计口径见 docs/system_design.md 的 R1/R4）。
+#   而 source 是「参考音频**原样 mux**」：会把同一句参考音频灌进每一段、对话/口型全错，
+#   与 generate 互斥不可混用（官方 ref-en.txt、docs/r2v-source-audio.md）。
+#   接线反而会把现行「统一音色 + 模型按段生成台词」的链路顶掉，所以保留为保留字段。
+#   显式打开它时打一条 warning：让「写了不生效」至少**有声**，而不是一个无声的假开关。
 H3_AUDIO_SOURCE = _env_bool("H3_AUDIO_SOURCE", False)
+if H3_AUDIO_SOURCE:
+    logger.warning("H3_AUDIO_SOURCE=True 当前没有消费者（保留字段，不会改变视频生成的音轨走法）："
+                   "实际 audioMode 由 comfyui_client.py:5460-5475 按「有无公共参考音色」决定"
+                   "（有 → generate）。要停参考音色合成请用 enable_tts / enable_tts_pre，"
+                   "要剥离 H3 原生音轨请用 H3_STRIP_AUDIO。")
 
 # H3 视频二采（MiniMaxH3DirectorRefine）开关（2026-09-28 用户拍板：默认关）：
 #   False = 构建时裁掉二采专属模型链 + 断开 Director.refine 输入，Director.images
