@@ -83,6 +83,20 @@ def api_generate_script():
             logger.info("剧本质检：passed=%s score=%s reason=%s",
                             qc_result.get("passed"), qc_result.get("score"),
                             qc_result.get("reason"))
+            # P0 返工（t68）：质检明确「未通过」→ 不交付剧本。此前 passed=False 时仍返回
+            # success=True + 完整剧本，质检形同虚设。现返回明确失败状态 + 可追溯 qc_result，
+            # 绝不静默成功。用 `is False` 精确判定：skipped/error（无 passed 字段）不阻断。
+            if qc_result.get("passed") is False:
+                logger.warning("剧本质检未通过，阻止交付剧本：score=%s", qc_result.get("score"))
+                return jsonify({
+                    "success": False,
+                    "error": "剧本质检未通过，已阻止交付剧本（见 qc_result 详情）",
+                    "script_path": script_path,
+                    "project_name": project_name,
+                    "script_qc_active": True,
+                    "qc_passed": False,
+                    "qc_result": qc_result,
+                }), 200
 
         return jsonify({
             "success": True,
