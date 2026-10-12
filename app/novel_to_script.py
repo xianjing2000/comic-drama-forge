@@ -270,6 +270,13 @@ SYSTEM_BIBLE = ("你是资深漫剧编剧与 AI 绘画提示词工程师，精�
 CHARS_PER_SHOT = _env_pos_int("MJSCXT_CHARS_PER_SHOT", 240, floor=30)
 SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这么多镜）
 
+# t81（2026-10-12 回归防护）：剧本正文（description+visual_detail+dialogue_text）相对
+# 原文的最短压缩比。低于此值视为「超短剧本」（疑似分镜生成不足 / LLM 输出被截断 /
+# 内容丢失），落盘前打 warning 让问题可见，而不是静默交付。
+# 依据：正常样本 3383 字原文 → 2448 字正文（约 0.72）；历史 bug（固定 8 镜）
+# 3297 字原文 → 279 字正文（约 0.085，静默变短、内容大量丢失）。
+SCRIPT_BODY_MIN_RATIO = 0.25
+
 # ---- 切分粒度自愈（2026-10-10）----
 # 背景：CHARS_PER_SHOT 只是**下给模型的引导口径**，此前没有任何事后校验 ——
 #   模型切多细都照单全收。实测《进境》第2集引导约 15 镜，经「模型超产 + 补局部插入镜
@@ -4127,6 +4134,26 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     if not shots:
         raise LLMError("模型未返回有效分镜（每块均已自动提高 max_tokens，必要时二次切分）："
                        + ("；".join(warnings) or "未知错误"))
+
+    # t81（2026-10-12 回归防护）：落盘前检查「剧本正文 vs 原文」的压缩比。
+    # 历史 bug：早期固定 8 镜，3297 字原文只产出 279 字正文（压缩比 0.085），
+    # 内容大量丢失却静默交付。现在把「超短剧本」变成可见 warning，不再静默变短。
+    _src_chars = len(seg) or 1
+    _body_chars = sum(
+        len(str(sh.get("description") or ""))
+        + len(str(sh.get("visual_detail") or ""))
+        + len(str(sh.get("dialogue_text") or ""))
+        for sh in shots
+    )
+    if _src_chars >= CHAPTER_MIN_CHARS and _body_chars < _src_chars * SCRIPT_BODY_MIN_RATIO:
+        _ratio_pct = round(_body_chars * 100.0 / _src_chars, 1)
+        logger.warning(
+            "第%s集：剧本正文 %d 字仅为原文 %d 字的 %.1f%%，低于 %.0f%% 下限 —— "
+            "疑似分镜生成不足 / 输出被截断 / 内容丢失，请检查该集（不是静默变短）",
+            episode_no, _body_chars, _src_chars, _ratio_pct, SCRIPT_BODY_MIN_RATIO * 100)
+        warnings.append(
+            "剧本正文 %d 字仅为原文 %d 字的 %.1f%%（低于 %.0f%% 下限），疑似内容丢失"
+            % (_body_chars, _src_chars, _ratio_pct, SCRIPT_BODY_MIN_RATIO * 100))
 
     # 外形一致性收敛（2026-09-24）：资产**出图依据**是 reference_prompt_zh，而分镜
     # 提示词 / 质检口径取 appearance —— 两者漂移会让「文字说黑寸头、参考图却是黑发高冠」
