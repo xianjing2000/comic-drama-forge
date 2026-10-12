@@ -5,15 +5,15 @@ import { projectsApi, keyframesApi, storyboardApi, videoApi, qcApi, autopilotApi
 import { Button, ConfirmDialog, Input, EmptyState, ErrorState, Loading, Skeleton, Modal, Select, ReorderControls } from '@/components/ui';
 // tab 图标統一走线性 SVG（方案 P2-10）：此前是 emoji，字号受系统字体影响且观感与全站割裂
 import {
-  AlertTriangle, BarChart3, Box, Check, CheckCircle2, Clapperboard, ClipboardCheck, ClipboardList, FileText,
-  FolderOpen, ImageIcon, MessageSquare, Mountain, Music, Pause, Play, Share2, Upload, User, X, ZoomIn,
+  AlertTriangle, BarChart3, Box, Check, CheckCircle2, Clapperboard, ClipboardCheck, ClipboardList, FileText, Film,
+  FolderOpen, ImageIcon, MessageSquare, Mountain, Music, Pause, Play, RefreshCw, Share2, Upload, User, X, ZoomIn,
 } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
 import { useComfyProgress } from '@/hooks/useComfyProgress';
 import { getAgentSession, type ChatMsg } from '@/agentSession';
 import { OutputReviewTab } from '@/components/OutputReviewTab';
 import { AudioTab } from '@/components/AudioTab';
-import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact, AgentStep, AutopilotCurrent, CharacterOutfit, ShotGridStatusResponse, ShotGridTaskState } from '@/types';
+import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, UpscaleArtifact, AgentStep, AutopilotCurrent, AutopilotStatus, CharacterOutfit, ShotGridStatusResponse, ShotGridTaskState } from '@/types';
 
 // 焦点环：与 components/ui/index.tsx 里的 FOCUS_RING 逐字一致。
 // index.css 有全局 :focus-visible outline 兜底，这里显式加 focus:outline-none 把它压掉，
@@ -21,26 +21,9 @@ import type { Project, Deliverable, UpscaleEnv, UpscaleSource, UpscaleTask, Upsc
 const FOCUS_RING =
   'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas';
 
-/**
- * 后端异常消息脱敏（2026-10-12）。
- *
- * 用户反馈工作台的失败态「太丑」—— 实测截图里整屏都是一行内部绝对路径，例如
- *   「第1集尚未生成：C:\Users\liujianghua\AppData\Roaming\mjscxt-desktop\
- *     mjscxt-data\output\scripts\逆天系统_全书\第1集.json」
- * 这类路径对用户零价值（他不需要知道自己的 AppData 在哪），还挤爆版面。
- * 这里统一把 Windows / POSIX 绝对路径替换成占位符，只保留可读的语义部分。
- */
-function sanitizeErrorMessage(msg: string): string {
-  if (!msg) return '';
-  return String(msg)
-    // Windows 绝对路径（含盘符），保留到空白或中文标点为止
-    .replace(/[A-Za-z]:\\[^\s：:，,；;）)]+/g, '[本地文件路径]')
-    // POSIX 绝对路径
-    .replace(/\/(?:[^\s：:，,；;）)\/]+\/)+[^\s：:，,；;）)]*/g, '[本地文件路径]')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 300);
-}
+// t27：sanitizeErrorMessage 的实现已收敛到 @/utils/errorText —— 交付页、质检面板、
+// 执行流都需要同一份脱敏逻辑，留在页面内部无法复用（复制多份必然漂移）。
+import { describeError, sanitizeErrorMessage } from '@/utils/errorText';
 
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
@@ -255,7 +238,8 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
               />
             )}
             {activeTab === 'storyboard' && (
-              <StoryboardHubTab projectKey={projectKey} novelId={project.novel_id} />
+              <StoryboardHubTab projectKey={projectKey} novelId={project.novel_id}
+                                onGotoOutput={() => setActiveTab('output')} />
             )}
             {activeTab === 'qc' && (
               <>
@@ -324,26 +308,10 @@ function assetSrc(url?: string | null, version?: number | string | null): string
   return out;
 }
 
-// ========== 错误脱敏（缺陷 D5） ==========
-// 前端错误框只展示人话：丢掉 traceback / 模块名 / 文件路径等实现细节
-function sanitizeError(err: unknown, fallback = t('wb.actionFailed')): string {
-  const raw = typeof err === 'string' ? err : (err as any)?.message || '';
-  let text = String(raw || '').trim();
-  if (!text) return fallback;
-  const tb = text.indexOf('Traceback (most recent call last)');
-  if (tb !== -1) text = text.slice(0, tb).trim();
-  const lines = text.split(/\r?\n/).filter(Boolean);
-  text = (lines[lines.length - 1] || '').trim();
-  text = text
-    .replace(/File\s+"[^"]*",\s*line\s*\d+/g, '')
-    .replace(/\s*from\s+'[^']*'/g, '')
-    .replace(/\s*\([^()]*\.py[^()]*\)/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (/\.py\b|\bimport\b|\bmodule\b|site-packages|[\\/]/.test(text)) return fallback;
-  return text.length > 160 ? `${text.slice(0, 160)}…` : text;
-}
-
+// t27：前端错误脱敏统一收敛到 @/utils/errorText。
+// 页内曾有两份实现各管一半（sanitizeError 剥 traceback 与 .py 模块名、
+// sanitizeErrorMessage 替换绝对路径），同一类错误走不同入口会得到不同文案；
+// 现在合成 describeError（剥离 + 路径替换 + 带出后端错误码），页面只 import。
 // ========== Overview Tab ==========
 
 // 生产流水线步骤序列：与后端 pipeline.STEP_SEQUENCE 对齐（技术标识符 → i18n 键）。
@@ -573,6 +541,342 @@ function ProductionModeCard({ projectKey }: { projectKey: string }) {
   );
 }
 
+// ============================================
+// 「开始生产」入口（主路径 CTA，t4）
+// ============================================
+//
+// 背景（t25 评审 N2）：`autopilotApi.runOnce` 此前是**全前端零调用点** —— 生产控制面
+// 只有「暂停/恢复托管」与托管计划，新用户想开跑唯一的路是去右侧「AI 总控」用自然语言
+// 说话。主路径上缺一个显式 CTA，这是「有实现、无入口」的典型断点。
+//
+// 本组件把这一步补成**可判定、可解释、防重复**的入口：
+//   ① 可见的主按钮直接调用 runOnce(project, episode)（见 `start()`）；
+//   ② 前置条件（未选项目 / 未选集 / 已在跑 / 状态未知）一律**禁用 + 写明原因**，
+//      不做静默 disable —— 用户必须知道「为什么点不动、要先去做什么」；
+//   ③ 点击后原地给出「已启动 + 当前步骤 + 进度」，进度复用 /api/autopilot/status
+//      轮询（与 ProductionProgress 同源，不另造一套状态口径）；
+//   ④ 五态：首次加载 Skeleton、状态取不到 ErrorState（带重试）、无剧集 EmptyState、
+//      「在跑」软提示、正常操作区。错误文案一律经 describeError 脱敏，
+//      绝不把后端异常里的本机绝对路径渲染给用户。
+//
+// 文案全部走 i18n（wb.start*），组件内不硬编码任何用户可见中文。
+
+/** 生产步骤标识符 → i18n 键（与工作台 PRODUCTION_STEPS / 后端 pipeline.STEP_SEQUENCE 同名）。
+ *  未知子阶段（如 `script:outline`）取冒号前的环节；再取不到就回落原始标识符。 */
+const STEP_LABEL_KEY: Record<string, string> = {
+  script: 'wb.stepScript',
+  tts_pre: 'wb.stepTtsPre',
+  assets: 'wb.stepAssets',
+  storyboard: 'wb.stepStoryboard',
+  video: 'wb.stepVideo',
+  upscale: 'wb.stepUpscale',
+  final: 'wb.stepFinal',
+};
+
+/** 状态轮询间隔：与 ProductionProgress 的 3s 同量级，足够反映「当前步骤」变化又不打扰后端 */
+const STATUS_POLL_MS = 4000;
+
+interface StartProductionCardProps {
+  /** 当前项目 key（工作台路由 `?p=`）；空串 = 尚未选择项目 → 禁用并说明 */
+  projectKey: string;
+  /** 可生产的集号（升序）。空数组 = 还没有剧集 → 空态 + 说明「先生成剧本」 */
+  episodes: number[];
+  /** 剧集列表首次加载中（父组件 `scriptLoading`） */
+  episodesLoading?: boolean;
+  /** 剧集列表加载失败（父组件已脱敏的文案） */
+  episodesError?: string;
+  /** 空态/失败态「重新读取剧集列表」的动作（父组件 `fetchEpisodes`） */
+  onRefreshEpisodes?: () => void;
+}
+
+function StartProductionCard({
+  projectKey,
+  episodes,
+  episodesLoading = false,
+  episodesError = '',
+  onRefreshEpisodes,
+}: StartProductionCardProps) {
+  const { t } = useApp();
+  const toast = useToast();
+
+  const [status, setStatus] = useState<AutopilotStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(true);
+  const [statusError, setStatusError] = useState('');
+  const [selectedEp, setSelectedEp] = useState('');
+  const [starting, setStarting] = useState(false);
+  /** 本次会话内「已启动」的集号：点击后立刻可见，不必等下一次轮询 */
+  const [started, setStarted] = useState<number | null>(null);
+  const [actionError, setActionError] = useState('');
+
+  const project = (projectKey || '').trim();
+
+  const refreshStatus = React.useCallback(async () => {
+    if (!project) {
+      setStatus(null);
+      setStatusLoading(false);
+      return;
+    }
+    try {
+      const st = await autopilotApi.status(project);
+      setStatus(st);
+      setStatusError('');
+    } catch (e) {
+      // 轮询失败不静默：本组件要据此决定「能不能开跑」，状态不明就不给点
+      setStatusError(describeError(e, t('wb.startStatusFailed')).message);
+    } finally {
+      setStatusLoading(false);
+    }
+  }, [project, t]);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => { if (alive) await refreshStatus(); };
+    void tick();
+    const timer = setInterval(() => { void tick(); }, STATUS_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [refreshStatus]);
+
+  // 剧本重新生成后旧集号可能消失：清掉选择，避免把不存在的集号提交给后端
+  useEffect(() => {
+    if (selectedEp === '') return;
+    if (!episodes.some((n) => String(n) === selectedEp)) setSelectedEp('');
+  }, [episodes, selectedEp]);
+
+  const cur: AutopilotCurrent | null = (status?.current as AutopilotCurrent) || null;
+  const otherProjectRunning = Boolean(
+    (status as unknown as { other_project_running?: boolean } | null)?.other_project_running,
+  );
+  const running = Boolean(cur) || otherProjectRunning;
+  const selected = selectedEp === '' ? null : Number(selectedEp);
+  const statusKnown = status !== null;
+  const noEpisodes = episodes.length === 0;
+
+  const stepLabel = (step?: string) => {
+    const base = String(step || '').split(':')[0];
+    const key = STEP_LABEL_KEY[base];
+    if (!key) return base;
+    const label = t(key);
+    // 语言包缺键时 t() 原样返回 key —— 别把 key 当文案显示出去
+    return label === key ? base : label;
+  };
+
+  /** 前置条件 → 可读原因（空串 = 可以开始）。顺序即优先级：越靠前越先满足。 */
+  const disabledReason = !project
+    ? t('wb.startDisabledNoProject')
+    : running
+      ? (cur
+        ? t('wb.startDisabledRunning', {
+          n: cur.episode ?? '-',
+          step: stepLabel(cur.step) || t('wb.startStepUnknown'),
+        })
+        : t('wb.startDisabledOtherProject'))
+      : (episodesLoading && noEpisodes)
+        ? t('wb.startEpisodesLoading')
+        : (episodesError && noEpisodes)
+          ? t('wb.startEpisodesFailed')
+          : noEpisodes
+            ? t('wb.startDisabledNoEpisodes')
+            : selected === null
+              ? t('wb.startDisabledNoEpisode')
+              : !statusKnown
+                ? (statusLoading ? t('wb.startDisabledStatusLoading') : t('wb.startDisabledStatusUnknown'))
+                : '';
+  const canStart = disabledReason === '' && !starting;
+
+  const start = async () => {
+    if (selected === null || starting) return;
+    setStarting(true);
+    setActionError('');
+    try {
+      // ⭐ 主路径唯一调用点：立即生产这一集（后端异步，返回 task_id 后置 current 供轮询）
+      await autopilotApi.runOnce({ project_name: project, episode_no: selected });
+      setStarted(selected);
+      toast.success(t('wb.startStarted', { n: selected }));
+      await refreshStatus();
+    } catch (e) {
+      // 后端的 400/409（未关联小说 / 该集不存在 / 该集已在生产 / 需人工介入）都带可读原因
+      const { message } = describeError(e, t('wb.startFailed'));
+      setActionError(message);
+      toast.error(message);
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const percent = Math.max(0, Math.min(100, Number(cur?.percent) || 0));
+
+  return (
+    <section
+      className="rounded-lg border border-line bg-surface p-4"
+      aria-labelledby="start-production-title"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3
+            id="start-production-title"
+            className="flex items-center gap-2 text-sm font-semibold text-ink-1"
+          >
+            <Film className="h-4 w-4" />
+            {t('wb.startProduction')}
+          </h3>
+          <p className="mt-0.5 max-w-2xl text-xs text-ink-2">{t('wb.startProductionHint')}</p>
+        </div>
+        <span
+          className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${
+            running ? 'bg-state-running-subtle text-state-running-strong' : 'bg-state-pending-subtle text-state-pending-strong'
+          }`}
+        >
+          {running && <span className="h-1.5 w-1.5 animate-pulse-dot rounded-full bg-state-running" aria-hidden="true" />}
+          {running ? t('state.running') : t('state.pending')}
+        </span>
+      </div>
+
+      {/* ── 加载态：状态没拿到之前不给按钮（状态不明时点击 = 盲提交，可能重复起任务） ── */}
+      {!statusKnown && !statusError && (
+        <div
+          className="mt-3 space-y-2"
+          role="status"
+          aria-live="polite"
+          aria-label={t('wb.startStatusLoading')}
+        >
+          <Skeleton className="h-9 w-full" />
+          <Skeleton className="h-9 w-40" />
+        </div>
+      )}
+
+      {/* ── 错误态（硬）：拿不到生产状态 → 区块级 ErrorState + 重试，文案已脱敏 ── */}
+      {!statusKnown && statusError && (
+        <div className="mt-3">
+          <ErrorState
+            title={t('wb.startStatusFailed')}
+            description={t('wb.startStatusFailedHint')}
+            code={statusError}
+            onRetry={() => { void refreshStatus(); }}
+          />
+        </div>
+      )}
+
+      {statusKnown && (
+        <div className="mt-3 space-y-3">
+          {/* 软失败：状态读到了，但这次轮询失败（保留操作区，只提示） */}
+          {statusError && (
+            <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning-subtle px-2.5 py-1.5 text-xs text-warning-strong">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span className="break-words">{statusError}</span>
+              <button
+                type="button"
+                className="ml-auto shrink-0 underline underline-offset-2"
+                onClick={() => { void refreshStatus(); }}
+              >
+                {t('common.retry')}
+              </button>
+            </div>
+          )}
+
+          {/* 空态：还没有可生产的集 —— 说明「为什么是空的、下一步做什么」 */}
+          {noEpisodes && !episodesLoading && (
+            <EmptyState
+              icon={<Film className="h-10 w-10" />}
+              title={t('wb.startEmptyTitle')}
+              // 父组件带下来的是原始 err.message（可能含本机绝对路径）→ 展示前必须脱敏
+              description={episodesError
+                ? `${t('wb.startEpisodesFailed')} ${sanitizeErrorMessage(episodesError)}`
+                : t('wb.startEmptyHint')}
+              action={onRefreshEpisodes ? (
+                <Button size="sm" variant="secondary" onClick={onRefreshEpisodes}>
+                  <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                  {t('wb.startEmptyAction')}
+                </Button>
+              ) : undefined}
+            />
+          )}
+
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="w-56">
+              <Select
+                label={t('wb.startEpisodeLabel')}
+                value={selectedEp}
+                onChange={setSelectedEp}
+                disabled={starting || noEpisodes || running}
+                options={[
+                  {
+                    value: '',
+                    label: episodesLoading && noEpisodes
+                      ? t('wb.startEpisodesLoading')
+                      : (noEpisodes ? t('wb.startDisabledNoEpisodes') : t('wb.startEpisodePlaceholder')),
+                  },
+                  ...episodes.map((n) => ({ value: String(n), label: t('wb.startEpisodeOption', { n }) })),
+                ]}
+              />
+            </div>
+            <Button
+              variant="brand"
+              size="lg"
+              loading={starting}
+              disabled={!canStart}
+              onClick={() => { void start(); }}
+              title={disabledReason || t('wb.startProductionHint')}
+            >
+              <Play className="h-4 w-4" />
+              {starting ? t('wb.startStarting') : t('wb.startProduction')}
+            </Button>
+          </div>
+
+          {/* 前置条件原因：禁用时必须让用户看到「为什么 + 下一步」 */}
+          {disabledReason && (
+            <p className="text-xs text-ink-2" role="note">{disabledReason}</p>
+          )}
+          {!disabledReason && (
+            <p className="text-xs text-ink-3">{t('wb.startBusyHint')}</p>
+          )}
+
+          {/* 启动失败（后端已给可读原因；文案经脱敏，不含本机绝对路径） */}
+          {actionError && (
+            <div
+              className="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-xs text-danger-strong"
+              role="alert"
+            >
+              <span className="font-medium">{t('wb.startFailed')}</span>
+              <span className="ml-2 break-words">{actionError}</span>
+              <p className="mt-0.5 text-ink-2">{t('wb.startFailedHint')}</p>
+            </div>
+          )}
+
+          {/* 已启动 + 当前步骤：点击后原地可见（不依赖用户自己去看别处） */}
+          {started !== null && (
+            <div
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-success/30 bg-success-subtle px-3 py-2 text-xs text-success-strong"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="flex items-center gap-1.5 font-medium">
+                <CheckCircle2 className="h-4 w-4" />
+                {t('wb.startStarted', { n: started })}
+              </span>
+              <span>
+                {cur
+                  ? t('wb.startCurrentStep', { step: stepLabel(cur.step) || t('wb.startStepUnknown') })
+                  : t('wb.startQueued')}
+              </span>
+              {cur && (
+                <span className="tabular-nums">{t('wb.startProgress', { percent })}</span>
+              )}
+              {cur?.message && (
+                // 后端进度消息是运行时数据：走脱敏，避免异常消息里夹带本机路径
+                <span className="text-ink-2">{sanitizeErrorMessage(String(cur.message))}</span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ========== Overview Tab ==========
 function OverviewTab({
   assets,
   projectKey,
@@ -804,6 +1108,16 @@ function OverviewTab({
   }, [novelId, t]);
 
   useEffect(() => { fetchEpisodes(); }, [fetchEpisodes]);
+
+  // t4：「开始生产」的可选集号 —— 与剧集列表同源；useMemo 保证引用稳定，
+  // 否则每次渲染都会给 StartProductionCard 一个新数组、触发其内部 effect 抖动。
+  const startEpisodes = React.useMemo(
+    () => (episodes || [])
+      .map((ep: any) => Number(ep?.episode_no))
+      .filter((n: number) => Number.isFinite(n) && n > 0)
+      .sort((a: number, b: number) => a - b),
+    [episodes],
+  );
 
   // ⭐ 2026-10-10（用户实测：「剧本生产完成后不实时加载出来」）：
   //    剧本是 autopilot 在**后台**异步生成的 —— 页面挂载时往往还没产出，而
@@ -1148,22 +1462,42 @@ function OverviewTab({
   }
 
   if (total === 0 && episodes.length === 0) {
+    // t4：空项目（无资产、无剧集）恰恰是最需要「开始生产」入口的场景 ——
+    // 旧实现在这里整块 return，把生产 CTA 一并挡掉了，新用户只能去 AI 总控说话。
     return (
-      <EmptyState
-        icon={<FolderOpen className="h-10 w-10" />}
-        title={t('wb.noAssets')}
-        description={t('wb.noAssetsHint')}
-        action={
-          <p className="text-sm text-brand">
-            {t('wb.noAssetsAction')}
-          </p>
-        }
-      />
+      <div className="space-y-6">
+        <StartProductionCard
+          projectKey={projectKey}
+          episodes={startEpisodes}
+          episodesLoading={scriptLoading}
+          episodesError={scriptError}
+          onRefreshEpisodes={() => fetchEpisodes()}
+        />
+        <EmptyState
+          icon={<FolderOpen className="h-10 w-10" />}
+          title={t('wb.noAssets')}
+          description={t('wb.noAssetsHint')}
+          action={
+            <p className="text-sm text-brand">
+              {t('wb.noAssetsAction')}
+            </p>
+          }
+        />
+      </div>
     );
   }
 
   return (
     <div className="space-y-8">
+      {/* t4：主路径 CTA —— 「开始生产」（runOnce 的唯一入口，默认标签页首屏可见） */}
+      <StartProductionCard
+        projectKey={projectKey}
+        episodes={startEpisodes}
+        episodesLoading={scriptLoading}
+        episodesError={scriptError}
+        onRefreshEpisodes={() => fetchEpisodes()}
+      />
+
       {/* 生产模式（托管 / 自主 二选一，见 ProductionModeCard）*/}
       <ProductionModeCard projectKey={projectKey} />
 
@@ -1774,6 +2108,10 @@ function ScreenplayPanel({ novelId, episodeNo }: { novelId?: string; episodeNo: 
   const [markdown, setMarkdown] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // t27（F6）：这个错误态此前是裸渲染的一行文字，没有重试入口 —— 而 useEffect
+  // 只依赖 open/novelId/episodeNo，用户除了折叠再展开没有别的办法。加一个自增计数
+  // 当重试信号。
+  const [reloadTick, setReloadTick] = useState(0);
 
   // 换集重置：上一集的剧本绝不能带进下一集
   useEffect(() => {
@@ -1796,9 +2134,9 @@ function ScreenplayPanel({ novelId, episodeNo }: { novelId?: string; episodeNo: 
       .catch(() => { if (alive) setError(t('wb.screenplayLoadFailed')); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-    // t 是 i18n 稳定引用；按 open/novelId/episodeNo 触发即可
+    // t 是 i18n 稳定引用；按 open/novelId/episodeNo/reloadTick 触发即可
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, novelId, episodeNo]);
+  }, [open, novelId, episodeNo, reloadTick]);
 
   if (!novelId || episodeNo == null) return null;
 
@@ -1822,7 +2160,13 @@ function ScreenplayPanel({ novelId, episodeNo }: { novelId?: string; episodeNo: 
           {loading ? (
             <div className="text-sm text-ink-3">{t('common.loading')}</div>
           ) : error ? (
-            <div className="text-sm text-ink-2">{error}</div>
+            /* t27（F6）：裸渲染 {error} → 换成 ErrorState（可重试 + 统一脱敏）。
+               这里刻意用 description 承载原因、沿用默认标题，避免「未生成」与
+               「加载失败」两种来源共用一句不准确的标题。 */
+            <ErrorState
+              description={sanitizeErrorMessage(error)}
+              onRetry={() => setReloadTick((v) => v + 1)}
+            />
           ) : (
             <pre className="max-h-[50vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-surface-2 p-4 text-sm leading-6 text-ink-1">
               {markdown}
@@ -2662,19 +3006,31 @@ function QcTab({ projectKey }: { projectKey: string }) {
   const [cfgSaving, setCfgSaving] = useState(false);
   const [cfgBusy, setCfgBusy] = useState('');
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+  // t27（F6）：错误条此前只有一句文案 —— 既没有后端错误码，也没有重试入口。
+  // 这里把 code 一起记下来（用于展示与报障），失败路径统一走下面的 failWith。
+  const [errCode, setErrCode] = useState('');
+
+  /** 记录一次失败：文案（已脱敏）+ 后端错误码，并返回文案供 toast 复用 */
+  const failWith = (e: unknown, fallback: string): string => {
+    const info = describeError(e, fallback);
+    setError(info.message);
+    setErrCode(info.code);
+    return info.message;
+  };
 
   // refreshDraft=true：用服务端配置重建草稿（首次加载 / 手动刷新 / 保存与端点动作之后）
   const load = async (refreshDraft = false) => {
     if (!projectKey) return;
     setLoading(true);
     setError('');
+    setErrCode('');
     try {
       const resp: any = await qcApi.history(projectKey);
       setData(resp);
       const next = resp?.config ? { ...resp.config } : null;
       setCfgDraft((prev: any) => (refreshDraft || !prev ? next : prev));
     } catch (e) {
-      setError(sanitizeError(e, t('qc.loadFailed')));
+      failWith(e, t('qc.loadFailed'));
     } finally {
       setLoading(false);
     }
@@ -2693,7 +3049,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
       setNotice(`${t('qc.retestDone', { verdict })}${typeof r.score === 'number' ? t('qc.retestScore', { n: Math.round(r.score * 100) }) : ''}`);
       await load();
     } catch (e) {
-      setError(sanitizeError(e, t('qc.retestFailed')));
+      failWith(e, t('qc.retestFailed'));
     } finally {
       setTesting(null);
     }
@@ -2728,7 +3084,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
       toast.success(t('qc.cfgSaved'));
       await load(true);
     } catch (e) {
-      const msg = sanitizeError(e, t('qc.cfgSaveFailed'));
+      const msg = failWith(e, t('qc.cfgSaveFailed'));
       setError(msg);
       toast.error(msg);
     } finally {
@@ -2746,7 +3102,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
       toast.success(t('qc.syncDoneToast'));
       await load(true);
     } catch (e) {
-      const msg = sanitizeError(e, t('qc.syncFailed'));
+      const msg = failWith(e, t('qc.syncFailed'));
       setError(msg);
       toast.error(msg);
     } finally {
@@ -2764,7 +3120,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
       toast.success(t('qc.resetDoneToast'));
       await load(true);
     } catch (e) {
-      const msg = sanitizeError(e, t('qc.resetFailed'));
+      const msg = failWith(e, t('qc.resetFailed'));
       setError(msg);
       toast.error(msg);
     } finally {
@@ -2783,7 +3139,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
       toast.success(t('qc.cleared'));
       await load(true);
     } catch (e) {
-      const msg = sanitizeError(e, t('qc.clearFailed'));
+      const msg = failWith(e, t('qc.clearFailed'));
       setError(msg);
       toast.error(msg);
     } finally {
@@ -2848,7 +3204,17 @@ function QcTab({ projectKey }: { projectKey: string }) {
         </div>
       )}
       {error && (
-        <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">{error}</div>
+        /* t27（F6）：软失败（页面已有数据，只是刷新/动作失败）→ 保留行内条形态，
+           但补上后端错误码与「重试」入口，并统一脱敏（后端异常原文可能带本机路径）。 */
+        <div className="flex items-start gap-3 p-3 bg-danger-subtle border border-danger/30 rounded-lg text-sm text-danger-strong">
+          <div className="min-w-0 flex-1">
+            <span>{sanitizeErrorMessage(error)}</span>
+            {errCode && (
+              <code className="ml-2 rounded-sm bg-surface-2 px-1.5 py-0.5 text-xs text-ink-3">{errCode}</code>
+            )}
+          </div>
+          <Button size="sm" variant="secondary" onClick={() => void load()}>{t('common.retry')}</Button>
+        </div>
       )}
 
       {/* 质检引擎状态 */}
@@ -3407,7 +3773,11 @@ function ShotPromptEditor({ shot, novelId, episodeNo, onSaved }: {
   );
 }
 
-function StoryboardHubTab({ projectKey, novelId }: { projectKey: string; novelId?: string }) {
+function StoryboardHubTab({ projectKey, novelId, onGotoOutput }: {
+  projectKey: string;
+  novelId?: string;
+  onGotoOutput?: () => void;
+}) {
   const { t } = useApp();
   // 2026-10-06：子标签收敛——九宫格草案（后端已删）与「关键帧」尾帧入口都下线。
   // 尾帧已由 H3 导演台在视频生成时逐镜产出（keyframe 步骤 2026-10-05 移出 7 步流水线），
@@ -3438,7 +3808,7 @@ function StoryboardHubTab({ projectKey, novelId }: { projectKey: string; novelId
         onChange={setSelectedEpisode}
       />
 
-      <StoryboardTab projectKey={projectKey} episodeNo={selectedEpisode} />
+      <StoryboardTab projectKey={projectKey} episodeNo={selectedEpisode} onGotoOutput={onGotoOutput} />
     </div>
   );
 }
@@ -3461,7 +3831,12 @@ const PROJECT_VIDEO_MODE_OPTIONS: { value: VideoMode; labelKey: string }[] = [
 // 批量重生成单次上限：与后端 /api/video/retry-shots-batch 的硬上限（≤12）一致
 const BATCH_RETRY_LIMIT = 12;
 
-function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeNo?: number | null }) {
+function StoryboardTab({ projectKey, episodeNo, onGotoOutput }: {
+  projectKey: string;
+  episodeNo?: number | null;
+  /** t27（F5）：返工使成片/超分失效时，「去成品验收重新合成」的一键跳转出口 */
+  onGotoOutput?: () => void;
+}) {
   const { t } = useApp();
   const toast = useToast();
   const [cards, setCards] = useState<any[]>([]);
@@ -3476,6 +3851,9 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
   const [playingVideo, setPlayingVideo] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
   const [shotError, setShotError] = useState('');
+  // t27（F5）：本次返工是否让「成片/超分」失效。为真时 notice 里额外给一个
+  // 「去成品验收」按钮 —— 只给文案用户还得自己找入口，闭环少了最后一步。
+  const [outputsInvalidated, setOutputsInvalidated] = useState(false);
   /** 整集一次提交（mode=episode）：触发中标记 + 返回的 task_id */
   const [episodeGenerating, setEpisodeGenerating] = useState(false);
   const [episodeTaskId, setEpisodeTaskId] = useState<string | null>(null);
@@ -3656,6 +4034,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
     setBusy(key);
     setShotError('');
     setNotice('');
+    setOutputsInvalidated(false);
     try {
       const r = await videoApi.retryShot({
         project_name: projectKey,
@@ -3663,13 +4042,20 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
         mode,
         episode_no: episodeNo ?? undefined,
       });
+      // t27（F5）：t17 起后端回传 outputs_invalidated（本次**实际**失效的产物清单，
+      // 如 ["final","upscale"]）。旧字段 deliverable_marked_stale 只说「成片被标记」，
+      // 分不出成片还是超分；新字段才能给出准确后果与下一步。
+      const invalidated = Array.isArray(r.outputs_invalidated) ? r.outputs_invalidated : [];
+      setOutputsInvalidated(invalidated.length > 0 || Boolean(r.deliverable_marked_stale));
       setNotice(
         t('sb.videoRedone', {
           seq: card.seq,
           mode: r.mode === 'keyframe' ? t('sb.modeKeyframe') : t('sb.modeReference'),
           refCount: r.ref_count,
           duration: r.duration,
-        }) + (r.deliverable_marked_stale ? t('sb.videoRedoneStale') : '')
+        }) + (invalidated.length > 0
+          ? t('sb.videoOutputsInvalidated')
+          : (r.deliverable_marked_stale ? t('sb.videoRedoneStale') : ''))
       );
       await fetchCanvas();
     } catch (e) {
@@ -3737,6 +4123,7 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
     setBatchRunning(true);
     setShotError('');
     setNotice('');
+    setOutputsInvalidated(false);
     try {
       const r = await videoApi.retryShotsBatch(projectKey, episodeNo ?? undefined, selectedShots);
       const results = Array.isArray(r.results) ? r.results : [];
@@ -3749,6 +4136,10 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
         .map((x) => ({ shot_id: String(x.shot_id),
                        error: sanitizeErrorMessage(x.error || '') || t('video.batchRetry.unknownError') }));
       const total = results.length || selectedShots.length;
+      // t27（F5）：批量端点把单镜 payload 展开进 results，逐条读失效清单即可
+      setOutputsInvalidated(results.some(
+        (x) => Array.isArray(x.outputs_invalidated) && x.outputs_invalidated.length > 0
+      ));
       setBatchResult({ total, ok, failures });
       if (failures.length === 0) {
         toast.success(t('video.batchRetry.done', { ok, total }));
@@ -3986,8 +4377,14 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
       )}
 
       {notice && (
-        <div className="p-3 bg-success-subtle border border-success/30 rounded-lg text-success-strong text-sm">
-          {notice}
+        <div className="flex items-start gap-3 p-3 bg-success-subtle border border-success/30 rounded-lg text-success-strong text-sm">
+          <span className="min-w-0 flex-1">{notice}</span>
+          {/* t27（F5）：失效提示必须带出口 —— 否则用户知道「要重新合成」却找不到入口 */}
+          {outputsInvalidated && onGotoOutput && (
+            <Button size="sm" variant="secondary" onClick={onGotoOutput}>
+              {t('sb.gotoOutputReview')}
+            </Button>
+          )}
         </div>
       )}
       {/* 软失败：重做单镜失败时卡片仍在展示，只能用紧凑行内条，不能顶掉内容 */}
@@ -4052,7 +4449,12 @@ function StoryboardTab({ projectKey, episodeNo }: { projectKey: string; episodeN
         />
       )}
       {error && error !== 'no-data' && cards.length > 0 && (
-        <div className="p-4 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong">{error}</div>
+        /* t27（F6）：这是**刻意**的软失败设计（见上方注释：已有卡片时的刷新失败走行内条，
+           不吃掉已展示内容）—— 保留形态，只补「重试」动作与脱敏，不改整块 ErrorState。 */
+        <div className="flex items-start gap-3 p-4 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong">
+          <span className="min-w-0 flex-1">{sanitizeErrorMessage(error)}</span>
+          <Button size="sm" variant="secondary" onClick={() => void fetchCanvas()}>{t('common.retry')}</Button>
+        </div>
       )}
 
       {/* 排序入口说明：拖拽手柄 / ↑↓ 两种方式（触屏与键盘场景拖拽不可靠，故两套都给）。
