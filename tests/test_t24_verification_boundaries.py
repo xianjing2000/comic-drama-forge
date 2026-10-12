@@ -318,10 +318,10 @@ class S2_SilentSwallowScan(unittest.TestCase):
                     if fake:
                         suspicious.append("%s:%d" % (os.path.relpath(path, _ROOT), sub.lineno))
         #: 2026-10-12 已逐个人工核对的**有意 fallback**（都返回字面量真值、都不打日志）：
-        #:   agent_core.py:91        取不到 chat 字段清单 → 回硬编码清单（设计如此）
+        #:   agent_core.py:97        取不到 chat 字段清单 → 回硬编码清单（设计如此）
         #:   config_center.py:151    范围校验解析失败 → 判「在范围内」（宽松兜底）
         #:   degradation.py:101      统计格式化失败 → 返回占位文案（展示用）
-        #:   schema.py:142           读 units 失败 → 描述为「表不存在」（**迁移状态描述**，
+        #:   schema.py:146           读 units 失败 → 描述为「表不存在」（**迁移状态描述**，
         #:                           不是成功标志，属误读风险最低的一类）
         #:   task_lease.py:178       判不出进程存活 → 判「活着」，避免误抢别人的活（安全侧）
         #:   tts_client.py:423       读不到默认参数 → 按「开启」处理（与模块默认一致）
@@ -331,10 +331,10 @@ class S2_SilentSwallowScan(unittest.TestCase):
         #:                           若哪天 warning 被删掉，本断言会把它重新判红（回归护栏）。
         #: 只允许这 6 处；新增任何一处都会让本断言变红。
         known_silent = {
-            "app/agent_core.py:91",
+            "app/agent_core.py:97",
             "app/config_center.py:151",
             "app/degradation.py:101",
-            "app/schema.py:142",
+            "app/schema.py:146",
             "app/task_lease.py:178",
             "app/tts_client.py:423",
         }
