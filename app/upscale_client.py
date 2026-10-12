@@ -39,6 +39,19 @@ from comfyui_client import ComfyUIClient
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _env_int(name: str, default: int) -> int:
+    """整数环境变量（非法/空 → default，绝不抛）。
+
+    ⭐ t22：与 comfyui_client._env_int（t18）**同语义**；这里本地实现，避免跨模块依赖
+    对方的私有名（两个模块都要能在没有对方的情况下独立导入）。
+    """
+    try:
+        raw = str(os.environ.get(name) or "").strip()
+        return int(float(raw)) if raw else int(default)
+    except (TypeError, ValueError):
+        return int(default)
+
 # ===== 引擎 A：TE-Speed-flashVSR 加速链路（默认）=====
 # 节点与模板 JSON 一一对应（模板：TE-Speed-flashVSR 视频超分放大加速工作流.json）
 TE_SPEED_NODES = (
@@ -702,8 +715,50 @@ class VideoUpscaler:
 
     # ---------- 轮询 ----------
 
+    def _recheck_after_timeout(self, prompt_id: str) -> tuple:
+        """t22：到点复查远端 —— 返回 ("done"|"error"|"running"|"gone", entry)。
+
+        优先复用 comfyui_client.ComfyUIClient._recheck_after_timeout（H3 那套：同一个
+        ComfyUI 后端、同一套 status 语义 → 行为与日志口径天然一致）；注入的是自定义
+        client（测试替身）时退回本模块自己的实现。
+        """
+        _rc = getattr(self.client, "_recheck_after_timeout", None)
+        if callable(_rc):
+            try:
+                return _rc(prompt_id)
+            except Exception as _e0:  # noqa: BLE001
+                logger.debug("超分到点复查（复用 H3 实现）失败，改用本地实现：%s", _e0)
+        try:
+            hist = self.client.get_history(prompt_id) or {}
+            entry = hist.get(prompt_id) if isinstance(hist, dict) else None
+        except Exception as _e1:  # noqa: BLE001
+            logger.debug("超分到点复查 history 失败（按仍在跑处理）：%s", _e1)
+            return "running", {}
+        if isinstance(entry, dict):
+            st = entry.get("status") or {}
+            if st.get("completed") or st.get("status_str") == "success":
+                return "done", entry
+            if st.get("status_str") == "error":
+                return "error", entry
+        try:
+            q = requests.get(f"{self.base_url}/queue", timeout=15).json()
+            qids = [x[1] for x in (q.get("queue_running") or [])
+                    if isinstance(x, (list, tuple)) and len(x) > 1]
+            qids += [x[1] for x in (q.get("queue_pending") or [])
+                     if isinstance(x, (list, tuple)) and len(x) > 1]
+        except Exception as _e2:  # noqa: BLE001
+            logger.debug("超分到点复查 /queue 失败（按仍在跑处理）：%s", _e2)
+            return "running", {}
+        return ("running" if prompt_id in qids else "gone"), {}
+
     def _wait(self, prompt_id: str, timeout: int, step, t0: float) -> dict:
         deadline = t0 + timeout
+        # ⭐ t22：软超时续等（与 H3 那套**完全同名同语义**，见 comfyui_client.wait_for_completion）：
+        #   到点先复查远端 —— 已完成 → 取回结果；仍在执行 → 续等；续等用尽才 interrupt + 报超时。
+        #   env：MJSCXT_WAIT_EXTENSIONS（默认 3）、MJSCXT_WAIT_EXTEND_SECONDS（默认 1800）。
+        _ext_left = _env_int("MJSCXT_WAIT_EXTENSIONS", 3)
+        _ext_total = _ext_left
+        _ext_sec = max(1, _env_int("MJSCXT_WAIT_EXTEND_SECONDS", 1800))
         last_note = 0.0
         while time.time() < deadline:
             # S9：中止信号检查（cancellation.should_stop 无注册时恒 False，不影响普通路径）
@@ -751,12 +806,30 @@ class VideoUpscaler:
                 step(note, pct)
             # S9：可被打断的短休眠（3s 轮询间隔），暂停时最多 0.25s 即有反应
             cancellation.sleep(3)
-        # S9：超时（非中止）也清理远端队列，避免本地判超时而远端白跑
+            # ---- ⭐ t22：到点复查（软超时续等）----
+            #   旧实现到点后**无条件** interrupt + 抛 UpscaleError：慢机器上 FlashVSR 逐帧
+            #   处理常「刚好超过 3600s」，于是逐场超分整体失败、退化为整集超分（更慢更耗内存）。
+            #   现在先复查：已完成 → 直接取回；仍在跑 → 续等（默认 3 × 1800s）。
+            if _ext_left > 0 and time.time() >= deadline:
+                _st22, _e22 = self._recheck_after_timeout(prompt_id)
+                if _st22 == "done" and isinstance(_e22, dict):
+                    logger.info("[超分续等] %s 在到点时刻已完成 → 取回结果（远端未取消）",
+                                prompt_id)
+                    return _e22
+                if _st22 == "running":
+                    _ext_left -= 1
+                    deadline = time.time() + _ext_sec
+                    logger.warning(
+                        "[超分续等] %s 已等 %ds 仍未完成，但远端**仍在执行** → 续等 %ds"
+                        "（剩余 %d 次）—— 绝不取消「刚好差一点」的任务（那是白烧一次超分）",
+                        prompt_id, int(time.time() - t0), _ext_sec, _ext_left)
+        # ③ 真超时（非中止）：仍清理远端，避免本地判超时而远端白跑
         logger.warning("超分等待超时，清理远端队列: %s", prompt_id)
         self.client.interrupt(prompt_id)
         raise UpscaleError(
-            f"超分等待超时（>{timeout}s，prompt_id={prompt_id}）。"
-            f"可在 ComfyUI 队列查看该任务，或降低倍率/改用 tiny-long 模式后重试"
+            f"超分等待超时（>{timeout}s，已续等 {_ext_total - _ext_left} 次，prompt_id={prompt_id}）。"
+            f"可调大 MJSCXT_UPSCALE_TIMEOUT / MJSCXT_WAIT_EXTENSIONS / MJSCXT_WAIT_EXTEND_SECONDS；"
+            f"或在 ComfyUI 队列查看该任务；也可降低倍率/改用 tiny-long 模式后重试"
         )
 
     # ---------- 供旧接口复用 ----------

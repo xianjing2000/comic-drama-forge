@@ -592,7 +592,10 @@ UPSCALE_DEFAULT_PARAMS = {
     "attention_mode": "sparse_sage_attention",
     "force_offload": True,
     "seed": 0,
-    "timeout": 3600,                # 单次超分等待上限（秒）
+    # ⭐ t22：单次超分等待上限（秒）——**可 env 覆盖**，默认 3600（不低于现状）。
+    #   慢机器上逐场超分会被「>3600s」卡死并回落整集超分（更慢更耗内存）；
+    #   设 MJSCXT_UPSCALE_TIMEOUT=7200 即可，无需改代码。
+    "timeout": _env_int("MJSCXT_UPSCALE_TIMEOUT", 3600),
 }
 
 # ===================== 模型常驻（生成完成后不卸载） =====================
@@ -704,7 +707,9 @@ TE_UPSCALE_DEFAULT_PARAMS = {
     "skip_first_frames": 0,
     "free_vram": not KEEP_MODEL_LOADED,   # 提交前请求 ComfyUI /free（默认关：见 KEEP_MODEL_LOADED）
     "seed": 0,
-    "timeout": 3600,                # 单次超分等待上限（秒）
+    # ⭐ t22：单次超分等待上限（秒）——**可 env 覆盖**，默认 3600（不低于现状）。
+    #   与 UPSCALE_DEFAULT_PARAMS 同一开关 MJSCXT_UPSCALE_TIMEOUT（TE 链路同样受益）。
+    "timeout": _env_int("MJSCXT_UPSCALE_TIMEOUT", 3600),
 }
 
 # 8G 显存低显存档（前端一键切换；显存吃紧时用）
