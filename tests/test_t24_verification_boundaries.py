@@ -427,6 +427,11 @@ class S3_PanelDupNegation(unittest.TestCase):
         self.assertEqual(actual, self.KNOWN_FALSE_POSITIVE_PHRASES,
                          "误判集合与登记基线不一致（新增误判或已修复，需同步基线）")
 
+    def test_false_cases_are_all_false(self):
+        """⭐ t20 验收口径：「FALSE_CASES 实测全部 False」——逐条断言（不靠集合比较）。"""
+        wrong = [t for t in self.FALSE_CASES if self.sb._panel_dup_hit(t)]
+        self.assertEqual(wrong, [], "这些达标判语仍被判成缺陷：%s" % wrong)
+
     def test_same_clause_negation_overrun_is_currently_missed(self):
         """台账：同子句弱否定越界仍会吞掉真缺陷（t5 复核 E 项同根）。"""
         self.assertFalse(

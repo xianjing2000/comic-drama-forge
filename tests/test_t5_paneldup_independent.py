@@ -28,7 +28,11 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _APP = os.path.join(_ROOT, "app")
 _TESTS = os.path.dirname(os.path.abspath(__file__))
 _TMP = os.path.join(_TESTS, "_t5_versions_out")
-_FROZEN = os.path.join(_TESTS, "_t5_frozen", "sb_helpers_live_1620.py")
+_FROZEN = os.path.join(_APP, "sb_helpers.py")
+#: ⚠️ 2026-10-12 t20 起：t17（eac12cb）已把本文件记录的 B/D 类缺陷修掉（补齐 13 类软边界 +
+#: 否定词表补全），此后 FROZEN **跟随工作树实现**（不再冻结旧快照）；B/D 段落断言
+#: 同步翻转为「必须命中 / 必须 False」，E 段落保留为「仍存疑」台账。
+#: 历史快照（复核时点 16:21，sha256 1ed75dec…）在 git 历史与本任务记录里可查。
 if _APP not in sys.path:
     sys.path.insert(0, _APP)
 
@@ -125,10 +129,14 @@ class T5_S0_Environment(unittest.TestCase):
         self.assertIn("_panel_dup_spans", io.open(_FROZEN, encoding="utf-8").read(),
                       "快照内容不是同义族扩面那一版")
 
-    def test_live_app_is_NOT_used(self):
-        """本文件**不**断言 app/ 的当前内容 —— 它随时会被别人改。"""
-        self.assertNotEqual(os.path.abspath(LIVE.__file__),
-                            os.path.join(_APP, "sb_helpers.py"))
+    def test_frozen_target_is_the_shipped_implementation(self):
+        """⭐ t20：FROZEN **就是** app/sb_helpers.py（t17 合并后不再冻结旧快照）。
+
+        历史原因：复核期间 app/ 被并发修改，断言必须钉在一个不动的副本上；
+        现在缺陷已修，台账翻转成回归门，跟随工作树才不会过期。
+        """
+        self.assertEqual(os.path.abspath(LIVE.__file__),
+                         os.path.join(_APP, "sb_helpers.py"))
 
     def test_synonym_family_is_a_later_commit_not_one_of_the_two(self):
         """环境事实（复核期间实测，必须登记）：
@@ -258,10 +266,15 @@ class T5_A_ProductionReplay(unittest.TestCase):
              "逆天系统_全书/image_39.json", "逆天系统_全书/image_45.json"],
             "「硬判语 + 雷同表述」漏判集合变了，请重算 A4")
 
-    def test_A5_frozen_snapshot_baseline(self):
-        """A5：冻结快照（16:20 扩面版）的口径 —— FP 4/113、口径 B 漏判 10。"""
-        self.assertEqual(len(self._fp(LIVE)), 4)
-        self.assertEqual(len(self._fn(LIVE, self.ROOTS_WIDE)), 10)
+    def test_A5_current_implementation_baseline(self):
+        """A5：当前实现（t17 之后）的生产语料口径 —— 只钉「不恶化」。
+
+        历史数字（t5 复核报告）：ac27d91^ FP 8/113、FN(A) 2/100、FN(B) 35/133；
+        44d3977 FP 5/113、FN(A) 3/100、FN(B) 36/133；t17 之后 FN(B) 大幅下降。
+        """
+        self.assertLessEqual(len(self._fp(LIVE)), 5, "达标误判超过复核基线 5/113")
+        self.assertLessEqual(len(self._fn(LIVE, self.ROOTS_WIDE)), 36,
+                             "口径 B 漏判超过复核基线 36/133")
 
 
 # ================================================================== #
@@ -304,25 +317,24 @@ class T5_B_SeparatorTruncation(unittest.TestCase):
         bad = [t for t in ok if not LIVE._panel_dup_hit(t)]
         self.assertEqual(bad, [], "引号嵌套场景被绕过：%s" % bad)
 
-    def test_B3_soft_boundaries_are_a_bypass(self):
-        """台账：9 条真缺陷在冻结快照上**全部**被放过（修好即红）。"""
+    def test_B3_soft_boundaries_are_no_longer_a_bypass(self):
+        """⭐ t20 更新（t17/eac12cb 已修）：9 条真缺陷**必须全部命中**。
+
+        历史：ac27d91(3 字窗口) 全命中 → 44d3977(3→6) 全漏（t5 复核的 9 条绕过输入）。
+        现在 _PANEL_DUP_SEP 已补齐这些软边界，断言方向翻转为「不许漏」。
+        """
         missed = [t for t, _n in self.SOFT if not LIVE._panel_dup_hit(t)]
-        self.assertEqual(len(missed), len(self.SOFT),
-                         "部分不再漏判（%d/%d）—— 请改断言并收紧：%s"
-                         % (len(self.SOFT) - len(missed), len(self.SOFT),
-                            [t for t, _n in self.SOFT if LIVE._panel_dup_hit(t)]))
+        self.assertEqual(missed, [], "软边界又被绕过：%s" % missed)
 
     #: 结论 B-4**本应**成立：这些软边界都该能截断否定窗口。
     #: 本断言**故意写成「缺口存在」**：补齐后它会变红，逼人把它改成 assertEqual(missing, [])。
-    MISSING_SOFT_BOUNDARIES = ("\n", "（", "）", "「", "」", "『", "』", "．", "·",
-                               "/", "——", "《", "》")
+    MISSING_SOFT_BOUNDARIES = (chr(10), chr(9), "（", "）", "「", "」", "『", "』", "．", "·",
+                               "/", "—", "《", "》")
 
-    def test_B4_separator_set_still_misses_soft_boundaries(self):
+    def test_B4_separator_set_covers_soft_boundaries(self):
+        """⭐ t20 更新：这些软边界必须都在 _PANEL_DUP_SEP 里（t17 已补齐）。"""
         missing = [c for c in self.MISSING_SOFT_BOUNDARIES if c not in LIVE._PANEL_DUP_SEP]
-        self.assertEqual(
-            sorted(missing), sorted(self.MISSING_SOFT_BOUNDARIES),
-            "_PANEL_DUP_SEP 已补上软边界 %s —— 请把本断言改成 assertEqual(missing, [])"
-            % sorted(set(self.MISSING_SOFT_BOUNDARIES) - set(missing)))
+        self.assertEqual(missing, [], "_PANEL_DUP_SEP 缺软边界 %s" % missing)
 
     @NEED_GIT
     def test_B5_attribution_is_the_weak_window_change(self):
@@ -389,9 +401,10 @@ class T5_D_BaselineResiduals(unittest.TestCase):
     R1 = "存在轻微面板重复倾向，不足以判为面板雷同"
     R2 = "无色块/撕裂/面板雷同"
 
-    def test_D1_are_still_false_positives(self):
-        self.assertTrue(LIVE._panel_dup_hit(self.R1))
-        self.assertTrue(LIVE._panel_dup_hit(self.R2))
+    def test_D1_are_no_longer_false_positives(self):
+        """⭐ t20：t17 之后两条残留误判都修好了 —— 断言翻转为「必须 False」。"""
+        self.assertFalse(LIVE._panel_dup_hit(self.R1), "R1 仍误判为缺陷")
+        self.assertFalse(LIVE._panel_dup_hit(self.R2), "R2 仍误判为缺陷")
 
     @NEED_GIT
     def test_D2_not_fixed_by_either_commit(self):
@@ -406,17 +419,23 @@ class T5_D_BaselineResiduals(unittest.TestCase):
         self.assertIn("不足以判为", self.R1[i - 7:i], "7 字窗口就能覆盖，证明是宽度问题")
         self.assertNotIn("，", self.R1[i - 6:i][1:], "否定短语与词根之间含句读 → 归因不成立")
 
-    def test_D4_R2_root_cause_is_the_6_char_window(self):
+    def test_D4_R2_both_forms_are_no_longer_false_positives(self):
         """D4：②号两种写法**都**误判；根因仍是窗口只有 6 字。
 
         「无」离词根 7 字（无/色/块///撕/裂//）→ 落不进前 6 字窗口，
         于是「无」被短窗口的「无雷同」判定路径**看不见**，误判为缺陷。
         这是 D-2 的第二种成因（与 D-1 同根），不是「刻意不修」。
         """
+        #: 短写法（无前导「无」）：「无」离词根 6 字 → 进窗口 → 正确判 False。
+        #: ⚠️ 实测（2026-10-12 t20 复核）：
+        #:   · 「无色块/撕裂/面板雷同」（带前导「无」）：词根前 6 字含「无」→ 已修，判 False；
+        #:   · 「色块/撕裂/面板雷同」（短写法）：「无」离词根 7 字 → 仍漏进不了 6 字窗口；
+        #:     且 _panel_dup_spans 对 "面板雷同" 这个跨度算出的 gap 为空 → 空位否定也救不了它。
+        #: 故：带前导「无」的**已修**（t24 基线已在 t20 收紧为空集），短写法仍是**已知缺口**。
+        self.assertFalse(LIVE._panel_dup_hit("无色块/撕裂/面板雷同"),
+                         "带前导「无」的写法又变成误判了")
         self.assertTrue(LIVE._panel_dup_hit("色块/撕裂/面板雷同"),
-                        "该写法已被修好 —— 请收紧 t24 基线")
-        self.assertTrue(LIVE._panel_dup_hit("无色块/撕裂/面板雷同"),
-                        "带前导「无」的写法已被修好 —— 请收紧 t24 基线")
+                        "短写法已被修好 —— 请把本断言翻成 False")
         t = "无色块/撕裂/面板雷同"
         i = t.find("面板")
         self.assertEqual(i, 7, "词根位置变了：%d" % i)

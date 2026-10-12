@@ -12,18 +12,59 @@
 import os
 import re
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(os.path.dirname(_HERE), 'app'))
-# 用临时数据目录，避免污染真实配置库
-_TMP = tempfile.mkdtemp(prefix='cfgtest_')
-os.environ['MJSCXT_DATA_DIR'] = _TMP
+_ROOT = os.path.dirname(_HERE)
+sys.path.insert(0, os.path.join(_ROOT, 'app'))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+#: ⭐ t20/D5：数据隔离由 **tests/__init__.py**（两条入口都会先加载）统一负责 ——
+#: 它在 import 期把 MJSCXT_DATA_DIR 指向临时目录，并装上「写真实数据根即抛错」的 sqlite3 写闸。
+#: 本模块**不再**自己 mkdtemp + 改 env：那种写法表面上「用了临时目录」，实际上
+#: 只有在「本模块恰好是第一个 import env_loader 的模块」时才成立；一旦别的模块先 import 了
+#: config（全量跑时经常如此），数据根早已定死，本模块的 setenv 变成**空操作**，
+#: 于是 CC.set_value(..., note="test-restore") 写进了**开发数据根** output/tasks.db
+#: （t23 于 13:31 发现；t20 复核 16:37/16:39 复现）。删除它，而不是继续依赖这个隐含顺序。
+import tests as _t20  # noqa: E402
 
 import config_center as CC  # noqa: E402
 import config_doctor as CD  # noqa: E402
+
+
+def setUpModule():
+    """⭐ t20/D5：**两条入口**都在这里再钉一次数据根。
+
+    两条入口都走这里（pytest 不从包 __init__ 采集 fixture，已实测）：显式调用（幂等）。
+    实测 discover 下 env_loader 会比 tests 包
+    **先**被 import（那时 MJSCXT_DATA_DIR 还是空的）→ 数据根=仓库根 → 本模块的
+    set_value 会写进开发数据根（正是 t23/D5 报的那条）。
+    """
+    _t20.ensure_isolated(reason="test_config.setUpModule")
+    #: t20/D5 运行后对比：记下**真实数据根**指纹，供 TestRealDataRootUntouched 断言。
+    global _REAL_ROOT_SNAPSHOT
+    _REAL_ROOT_SNAPSHOT = {p: _t20._fingerprint(p) for p in _t20._real_db_paths()}
+
+
+#: tests/test_config.py 是**唯一**会写 app_settings 的测试模块（D5 的污染源）。
+#: setUpModule 记下真实数据根指纹，本模块跑完再比对。
+_REAL_ROOT_SNAPSHOT = None
+
+
+class TestRealDataRootUntouched(unittest.TestCase):
+    """⭐ t20/D5 回归护栏：本模块跑完，真实数据根必须**逐字未变**。
+
+    比对项：存在性 / 大小 / mtime / app_settings 全文。任何一项变了 = 测试又写到真实库。
+    """
+
+    def test_real_data_root_untouched(self):
+        if _REAL_ROOT_SNAPSHOT is None:
+            self.skipTest("本模块未记录快照（单独跑该类时）")
+        now = {p: _t20._fingerprint(p) for p in _t20._real_db_paths()}
+        dirty = _t20._diff_fingerprints(_REAL_ROOT_SNAPSHOT, now)
+        self.assertEqual(dirty, [], "真实数据根被测试改动了（t20/D5）：%s" % dirty)
 
 
 class TestRegistryShape(unittest.TestCase):
@@ -65,6 +106,29 @@ class TestRegistryShape(unittest.TestCase):
 
 
 class TestAliasAndSync(unittest.TestCase):
+    """读写别名/范围/联动 —— **会写 app_settings**，故必须先证明数据根已隔离。"""
+
+    def setUp(self):
+        #: t20/D5 断言：本用例会调 CC.set_value 写库，写之前必须先证明写的是临时根。
+        if os.environ.get("MJSCXT_T20_PRINT_ENV") == "1":
+            _env = sys.modules.get("env_loader")
+            print("DBG-DISCOVER env=%r pdd=%r cfg_db=%r modules=%s"
+                  % (os.environ.get("MJSCXT_DATA_DIR"),
+                     getattr(_env, "PROJECT_DATA_DIR", None), CC.db_path(),
+                     sorted(m for m in sys.modules if m in (
+                         "config", "env_loader", "config_center", "ai_credentials_db",
+                         "secret_store", "ai_config", "task_store"))))
+        rep = _t20.isolation_report()
+        self.assertTrue(rep["is_temp"], "数据根未隔离：%s" % rep["data_dir"])
+        self.assertTrue(rep["guard_active"], "sqlite3 写闸未装上")
+        db = os.path.normcase(os.path.abspath(CC.db_path()))
+        self.assertTrue(_t20.allow_data_root(db),
+                        "config_center 的库路径 %s 不是临时根 —— 本用例会污染真实数据" % db)
+        before = _t20.real_data_roots()
+        for bad in before:
+            self.assertFalse(db.startswith(bad + os.sep),
+                             "库路径落在真实数据根 %s 内" % bad)
+
     def test_alias_maps_to_canonical(self):
         self.assertEqual(CC.canonical_key('target_shots'), 'novel_default_shots')
         self.assertEqual(CC.canonical_key('novel_default_shots'), 'novel_default_shots')
@@ -94,13 +158,165 @@ class TestAliasAndSync(unittest.TestCase):
 
 
 class TestDoctor(unittest.TestCase):
-    def test_doctor_ok_and_no_orphans(self):
-        rep = CD.doctor()
-        self.assertTrue(rep.get('ok'),
-                        '配置体检未通过: %s' % (rep.get('warnings') or [])[:5])
-        self.assertEqual((rep.get('orphans') or {}).get('count'), 0,
-                         '存在未登记的可配置常量: %s'
-                         % [(x['module'], x['name']) for x in (rep['orphans'].get('items') or [])])
+    """⭐ t22/T-b：**注入式**配置体检 —— 不再拿「工作区真实配置」当断言。
+
+    原实现的两个不稳定源（都实测过）：
+      ① CD.doctor() 读的是 **live 的 app/ 源码目录**（孤儿扫描按
+         os.path.dirname(config_doctor.__file__) 列目录）—— 队友正在改 app/ 时,
+         扫描结果随他们的编辑瞬间变化 → 间歇红灯, 与测试自身无关；
+      ② rep.ok 要求**每个登记项**的运行时值都等于登记默认值 —— 同一进程里
+         别的用例（如 TestAudioSilenceLockstep.test_change_one_side_moves_both）
+         会临时改 audio_qc.HARD_SILENT_RATIO 等全局常量, 顺序不同就红。
+
+    改法：把「被检查的输入」全部注入 ——
+      · 孤儿扫描 → 指向本用例自己写的临时 app 目录（内容固定）；
+      · 登记表 → 只放本用例自己的 owner（值确定性 100%）；
+      · 提示词目录 → 打桩为「无外部文件」（doctor 走代码兜底, mismatch=0）；
+      · 数据根 → tests/__init__.py 的临时根。
+    这样 ok 只反映**机制**, 不反映工作区状态。
+
+    产物形态保留两条真实护栏：
+      · test_live_owner_resolvability —— live 状态下 owner 必须都能解析、
+        值必须等于登记默认（这才是「工作区真实漂移」的报警点）；
+      · test_app_orphan_scan_against_controlled_dir —— 机制侧：植入一个未登记常量
+        必须被点名, 已登记/实现类常量不许误报。
+    """
+
+    def setUp(self):
+        rep = _t20.isolation_report()
+        self.assertTrue(rep["is_temp"], "数据根未隔离：%s" % rep["data_dir"])
+        self._orig_registry = CD.REGISTRY
+        self._tmp = __import__("tempfile").mkdtemp(prefix="t20_doc_")
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        CD.REGISTRY = self._orig_registry
+
+    # ---------- 注入工具 ---------- #
+    def _install_registry(self, entries):
+        CD.REGISTRY = dict(entries)
+
+    def _install_scan_dir(self, modules):
+        """把孤儿扫描指向临时目录（内容固定, 不随队友改 app/ 波动）。"""
+        for name, src in modules.items():
+            with open(os.path.join(self._tmp, name + ".py"), "w", encoding="utf-8") as fh:
+                fh.write(src)
+        real_listdir = os.listdir
+        real_open = open
+        tmp = self._tmp
+
+        def _listdir(path="."):
+            if os.path.normcase(os.path.abspath(str(path))) == os.path.normcase(os.path.abspath(tmp)):
+                return [n + ".py" for n in sorted(modules)]
+            return real_listdir(path)
+
+        def _open(path, *a, **k):
+            try:
+                p = os.path.normcase(os.path.abspath(str(path)))
+            except Exception:  # noqa: BLE001
+                return real_open(path, *a, **k)
+            if p.startswith(os.path.normcase(os.path.abspath(tmp)) + os.sep):
+                return real_open(os.path.join(tmp, os.path.basename(p)), *a, **k)
+            return real_open(path, *a, **k)
+
+        #: ⚠️ 关键一步：orphan_candidates 用 os.path.dirname(config_doctor.__file__) 定 base，
+        #:   所以只 patch listdir 是**没用**的（base 仍然指 app/，会列出真实源码）。
+        #:   必须把「对 config_doctor.__file__ 取 dirname」这一处改成临时目录。
+        real_dirname = os.path.dirname
+        cd_file = os.path.abspath(CD.__file__)
+
+        def _dirname(path):
+            try:
+                if os.path.normcase(os.path.abspath(str(path))) == os.path.normcase(cd_file):
+                    return tmp
+            except Exception:  # noqa: BLE001
+                pass
+            return real_dirname(path)
+
+        patcher_dirname = mock.patch.object(CD.os.path, "dirname", _dirname)
+        patcher_listdir = mock.patch.object(CD.os, "listdir", _listdir)
+        patcher_open = mock.patch("builtins.open", _open)
+        patcher_dirname.start()
+        patcher_listdir.start()
+        patcher_open.start()
+        self.addCleanup(patcher_open.stop)
+        self.addCleanup(patcher_listdir.stop)
+        self.addCleanup(patcher_dirname.stop)
+
+    def _make_owner(self, values, name="mod_ok"):
+        """造一个 owner 模块并注册进 sys.modules（供 CD._resolve 解析）。
+
+        ⚠️ 模块名必须与孤儿扫描里的 dotted 名一致（"<模块>.<常量小写>"），
+        否则同名常量会被登记表判成「未登记」而误报 —— 这是本用例踩过的坑。
+        """
+        mod = type(sys)(name)
+        for k, v in values.items():
+            setattr(mod, k, v)
+        sys.modules[name] = mod
+        self.addCleanup(lambda: sys.modules.pop(name, None))
+        return name
+
+    # ---------- 机制：孤儿扫描（注入临时目录） ---------- #
+    def test_app_orphan_scan_against_controlled_dir(self):
+        """机制侧：未登记的可配置常量必须被点名；已登记/实现类常量不许误报。"""
+        self._make_owner({"registered_ratio": 0.5})
+        #: 登记键 == 「模块名 + 常量名小写」，与孤儿扫描的 dotted 口径逐字一致。
+        self._install_registry({
+            "mod_ok.registered_ratio": {"owner": "mod_ok.registered_ratio", "default": 0.5,
+                                       "type": "float", "group": "g"}})
+        self._install_scan_dir({"mod_ok": chr(10).join([
+            "registered_ratio = 0.5",
+            "ORPHAN_MAX_ROUNDS = 3",
+            "ASSET_DIR = 1",
+            "NOT_A_ROUND_NUMBER = 4",
+            "MAX_ITEMS = None",
+        ])})
+        rep = CD.orphan_candidates()
+        names = {(x["module"], x["name"]) for x in (rep.get("items") or [])}
+        self.assertIn(("mod_ok", "ORPHAN_MAX_ROUNDS"), names,
+                      "植入的未登记常量没被点名：%s" % sorted(names))
+        self.assertNotIn(("mod_ok", "registered_ratio"), names, "已登记的常量被误报")
+        self.assertNotIn(("mod_ok", "ASSET_DIR"), names, "实现类常量（_DIR）被误报")
+        self.assertNotIn(("mod_ok", "NOT_A_ROUND_NUMBER"), names, "非配置类常量被误报")
+        self.assertNotIn(("mod_ok", "MAX_ITEMS"), names, "非数值常量被误报")
+
+    def test_doctor_ok_with_injected_registry_and_prompts(self):
+        """机制侧：注入登记表 + 固定源码后, doctor 应当 ok（不再看工作区）。"""
+        self._make_owner({"registered_ratio": 0.5}, name="mod_clean")
+        self._install_registry({
+            "mod_clean.registered_ratio": {"owner": "mod_clean.registered_ratio", "default": 0.5,
+                                           "type": "float", "group": "g"}})
+        #: ⚠️ 常量名必须**全小写**：orphan_candidates 的 dotted 用常量原样名（"模块.REGISTERED_RATIO"），
+        #:   而 REGISTRY 的 owner 惯例是小写键 → 大写常量名会被判成「未登记」（app 侧既有口径，不在本任务 inScope 改）。
+        self._install_scan_dir({"mod_clean": "registered_ratio = 0.5"})
+        with mock.patch.object(CD, "prompt_fingerprints",
+                               lambda prompts_dir=None: {"checked": 0, "mismatch": []}):
+            rep = CD.doctor()
+        self.assertTrue(rep.get("ok"), "注入隔离输入后 doctor 仍不 ok：%s" % rep.get("warnings")[:3])
+        self.assertEqual((rep.get("orphans") or {}).get("count"), 0,
+                         "注入的固定源码里不该有孤儿：%s" % (rep.get("orphans") or {}).get("items"))
+        self.assertEqual(rep.get("duplicates"), [])
+        self.assertEqual(len(rep.get("params") or []), 1)
+
+    # ---------- 真实护栏：owner 可解析 + 值不漂移 ---------- #
+    def test_live_owner_resolvability(self):
+        """live 状态：每个 owner / must_match 必须能解析, 且值等于登记默认。
+
+        这条**就是**「工作区真实配置漂移」的报警点：它红了说明 app/ 里有常量
+        与 config_doctor.REGISTRY 的登记值不一致（该改代码或该改登记）。
+        """
+        with mock.patch.object(CD, "orphan_candidates",
+                               lambda: {"ok": True, "count": 0, "items": []}):
+            with mock.patch.object(CD, "prompt_fingerprints",
+                                   lambda prompts_dir=None: {"checked": 0, "mismatch": []}):
+                rep = CD.doctor()
+        bad = [r for r in (rep.get("params") or []) if r.get("error")]
+        self.assertEqual(bad, [], "owner 解析失败：%s" % [(r["key"], r["error"]) for r in bad])
+        drift = [(r["key"], r["expect"], r["actual"]) for r in (rep.get("params") or [])
+                 if r.get("match") is False]
+        self.assertEqual(drift, [], "登记值与运行时值不一致（改代码或改登记）：%s" % drift)
+        self.assertEqual(rep.get("duplicates"), [],
+                         "must_match 两侧不一致：%s" % rep.get("duplicates"))
 
     def test_doctor_never_raises(self):
         self.assertIsInstance(CD.doctor(), dict)
