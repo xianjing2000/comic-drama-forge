@@ -44,10 +44,14 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-#: 官方 Reference to Video 的参考图槽位上限（``ref_image_0..8``）。
-#: 与 ``h3_director_builder.MAX_REFERENCE_IMAGES`` 同值；此处独立声明以免模块间循环依赖，
-#: 并由 ``.workbuddy/test/_out/probe_h3_common_refs.py`` 断言两者一致。
-LIMIT_REFERENCE_IMAGES = 9
+# 单一来源：官方 Reference to Video 的参考图槽位上限（``ref_image_0..8``）在
+# h3_director_builder.MAX_REFERENCE_IMAGES（=9）。原注释「独立声明以免模块间循环依赖」
+# 经核实不成立（h3_director_builder 只依赖 stdlib + h3_segment_loras，均不 import 本模块），
+# 故直接 import，彻底消除两处各定义一份的漂移风险（t70 收口）。
+from h3_director_builder import MAX_REFERENCE_IMAGES
+
+#: 兼容别名：与 h3_director_builder.MAX_REFERENCE_IMAGES 同义（=9），供 plan_common_refs 默认 limit 用。
+LIMIT_REFERENCE_IMAGES = MAX_REFERENCE_IMAGES
 
 #: 资产种类标记（决定公共项在提示词里的「用途句」与是否进 ``<Subject N>``）。
 KIND_CHARACTER = "character"
