@@ -392,6 +392,303 @@ def _storyboard_retry_shot_impl():
                     "qc": verdict})
 
 
+# ===================== T12（2026-10-12）分镜质量口径：success / soft / blocked =====================
+# 用户实测（逆天系统_全书 46 镜）：**17 镜（37%）是「软放行」** —— 质检判定不达标、
+# 但按 `qc_config.storyboard_soft_qc`（默认 True）仍写入正式目录（见下方 worker 的
+# 软放行分支），其中 shot_28 / shot_44 还带**非空 critical_issues**。
+# 旧实现把这些镜一律写成 `item["success"]=True`，于是 storyboard_manifest.json 报
+# `success_count=46 / qc_blocked_count=0`，前端据此显示**全绿** —— 用户以为整集合格，
+# 实际首轮通过率只有 15/46=33%、最终 29/46=63%。
+#
+# 本节把「软放行」变成一等公民：**单独计数、绝不计入 success**，并把该事实同步到
+# manifest item + item["qc"] + worker 任务状态（manifest / API / UI 三层同源）。
+
+_SB_CRITICAL_KEYS = ("critical_issues", "critical_issue", "critical_defects")
+
+
+def _sb_critical_issues(*sources) -> list:
+    """从若干候选字典里取第一份非空 critical_issues（软放行的「严重问题清单」）。"""
+    for src in sources:
+        if not isinstance(src, dict):
+            continue
+        for k in _SB_CRITICAL_KEYS:
+            v = src.get(k)
+            if isinstance(v, (list, tuple)):
+                out = [str(x).strip() for x in v if str(x or "").strip()]
+            elif v:
+                out = [str(v).strip()]
+            else:
+                out = []
+            if out:
+                return out
+    return []
+
+
+def _sb_soft_accepted(item) -> bool:
+    """该镜是否为**软放行**（质检未达标但仍写入正式目录）。
+
+    证据优先级（兼容三代数据形态）：
+      ① item["qc_soft_accepted"] —— 2026-10-08 起批量 worker 软放行分支直写；
+      ② item["qc_gate"]["soft_accepted"] —— 同轮把 gate 就地改成 accept 的标记；
+      ③ item["qc"]["soft_accepted"] —— 产物 meta 回读后的同步口径（回填/重统计）。
+    """
+    if not isinstance(item, dict):
+        return False
+    if item.get("qc_soft_accepted"):
+        return True
+    _g = item.get("qc_gate")
+    if isinstance(_g, dict) and _g.get("soft_accepted"):
+        return True
+    _q = item.get("qc")
+    if isinstance(_q, dict) and (_q.get("soft_accepted") or _q.get("soft_released")):
+        return True
+    return False
+
+
+def _sb_artifact_meta_soft(dst, seq=None, base_dir: str = "") -> dict:
+    """读产物旁的 `<shot>.meta.json`，取回「软放行 / 严重问题」事实。
+
+    ⭐ 为什么必须读它（T12 验收「对生产数据重新统计得 17」的关键）：
+      manifest 会被**后续重跑**重写（断点续跑只给被跳过的镜头回填上一轮的精简信息），
+      历史软放行标记在 manifest 里会丢。而 `_write_artifact_meta` 把
+      `extra.qc_soft_accepted` 与 `qc.soft_accepted / qc.critical_issues` 随图一起
+      落盘，是**最耐久**的那份证据 —— 实测：逆天系统_全书的 manifest 里只剩 1 条软放行
+      标记，而 meta.json 里有 17 条。
+
+    返回 {"soft": bool, "critical_issues": [...]}；任何异常都返回空结论
+    （fail-open：统计增强绝不能反过来影响主流程）。
+    """
+    out = {"soft": False, "critical_issues": []}
+    cands = []
+    if dst:
+        cands.append(str(dst) + ".meta.json")
+    if seq is not None and base_dir:
+        try:
+            cands.append(os.path.join(base_dir, f"shot_{int(seq):02d}.meta.json"))
+        except (TypeError, ValueError):
+            pass
+    for p in cands:
+        try:
+            if not p or not os.path.isfile(p):
+                continue
+            with open(p, "r", encoding="utf-8") as f:
+                meta = json.load(f) or {}
+            if not isinstance(meta, dict):
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+        extra = meta.get("extra") if isinstance(meta.get("extra"), dict) else {}
+        qc = meta.get("qc") if isinstance(meta.get("qc"), dict) else {}
+        gate = meta.get("qc_gate") if isinstance(meta.get("qc_gate"), dict) else {}
+        soft = bool(extra.get("qc_soft_accepted") or qc.get("soft_accepted")
+                    or gate.get("soft_accepted"))
+        ci = _sb_critical_issues(qc, gate, extra)
+        if soft or ci:
+            return {"soft": soft, "critical_issues": ci}
+    return out
+
+
+def _sb_item_seq(item, fallback=None):
+    """条目 → 镜号（优先显式 seq，其次从 shot_id/file 里抽数字）。"""
+    if isinstance(item, dict):
+        for k in ("seq", "shot_seq", "index"):
+            try:
+                v = int(item.get(k))
+                if v > 0:
+                    return v
+            except (TypeError, ValueError):
+                continue
+        for k in ("shot_id", "file"):
+            s = str(item.get(k) or "")
+            digits = "".join(ch for ch in s.split(".")[0] if ch.isdigit())
+            if digits:
+                try:
+                    return int(digits)
+                except ValueError:
+                    pass
+    return fallback
+
+
+def _sb_quality_tally(items, base_dir: str = "", use_artifact_meta: bool = True) -> dict:
+    """分镜条目 → 三类质量计数（**T12 统一口径**，manifest / API / UI 共用）。
+
+    口径（互斥且完备）：
+      · soft_accepted —— 质检未达标但已放行入库（**不计入 success**）
+      · qc_blocked    —— 质检阻断、未入库
+      · success       —— 真正通过质检并入库
+    另给 critical_issue_count（软放行中带非空 critical_issues 的镜数）与
+    delivered_count（success + soft，即「正式目录里确实有图」的镜数）。
+
+    `use_artifact_meta`：item 自身没有软放行标记时，是否回落到产物旁 meta.json。
+    worker 当轮统计用 False（每条都带标记，免多余 IO）；历史 manifest 重统计用 True。
+    """
+    total = success = soft = blocked = crit = 0
+    soft_ids, crit_ids = [], []
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        total += 1
+        _seq = _sb_item_seq(it)
+        _is_soft = _sb_soft_accepted(it)
+        _ci = _sb_critical_issues(it.get("qc_gate") or {}, it.get("qc") or {},
+                                  it.get("qc_extra") or {})
+        if use_artifact_meta and not _is_soft:
+            _fact = _sb_artifact_meta_soft(it.get("file") or "", _seq, base_dir)
+            _is_soft = bool(_fact.get("soft"))
+            if not _ci:
+                _ci = list(_fact.get("critical_issues") or [])
+        if not _ci:
+            _ci = _sb_critical_issues(it.get("qc") or {})
+        if _is_soft:
+            soft += 1
+            soft_ids.append(it.get("shot_id"))
+            if _ci:
+                crit += 1
+                crit_ids.append(it.get("shot_id"))
+        elif it.get("qc_blocked"):
+            blocked += 1
+        elif it.get("success"):
+            success += 1
+    return {"total": total,
+            "success_count": success,
+            "soft_accepted_count": soft,
+            "qc_blocked_count": blocked,
+            "critical_issue_count": crit,
+            "delivered_count": success + soft,
+            "soft_shot_ids": soft_ids,
+            "critical_shot_ids": crit_ids}
+
+
+def _sb_manifest_quality_fields(tally: dict) -> dict:
+    """把三类计数摊成 manifest / 任务状态的字段（三层同名同值）。"""
+    return {
+        "success_count": tally["success_count"],
+        "soft_accepted_count": tally["soft_accepted_count"],
+        "qc_blocked_count": tally["qc_blocked_count"],
+        "critical_issue_count": tally["critical_issue_count"],
+        "delivered_count": tally["delivered_count"],
+        "soft_accepted_shot_ids": tally["soft_shot_ids"],
+        "critical_issue_shot_ids": tally["critical_shot_ids"],
+    }
+
+
+def _sb_normalize_soft_marks(items) -> int:
+    """兜底规范化：任何「软放行却带 success=True / 缺 delivered」的条目就地纠正。
+
+    为什么需要兜底（T12）：软放行标记可能通过**断点续跑复用旧条目信息**、
+    单镜重跑合并、历史 manifest 回填等多条路径进入同一条目；只要有一处漏掉，
+    界面就会重新把「放行了但有问题的镜」显示成成功。这里按软放行口径统一收口
+    （success=False / delivered=True / 去掉 qc_blocked），返回被纠正的条目数。
+    """
+    fixed = 0
+    for it in (items or []):
+        if not isinstance(it, dict):
+            continue
+        if _sb_soft_accepted(it) and (it.get("success") or not it.get("delivered")):
+            it["success"] = False
+            it["delivered"] = True
+            it.pop("qc_blocked", None)
+            fixed += 1
+    return fixed
+
+
+def _sb_clear_soft_marks(item) -> bool:
+    """把条目上的软放行痕迹清干净（本次已**真通过**时调用）。
+
+    为什么必须清（T12）：单镜重跑走 `target.update(entry)`，只覆盖 entry 里有的键 ——
+    历史 item 上的 `qc_soft_accepted` / `qc_gate.soft_accepted` 会残留，于是
+    「重跑已通过」的镜仍被判成软放行（界面永远带着警示，用户以为没修好）。
+    """
+    if not isinstance(item, dict):
+        return False
+    changed = False
+    for k in ("qc_soft_accepted", "soft_accepted", "soft_reason", "soft_label"):
+        if k in item:
+            item.pop(k, None)
+            changed = True
+    for key in ("qc_gate", "qc"):
+        _d = item.get(key)
+        if isinstance(_d, dict) and (_d.get("soft_accepted") or _d.get("soft_released")):
+            _d = dict(_d)
+            _d.update({"soft_accepted": False, "soft_released": False})
+            if key == "qc":
+                _d.update({"delivered": True})
+            item[key] = _d
+            changed = True
+    if item.get("delivered") and not _sb_soft_accepted(item):
+        item["delivered"] = True
+    return changed
+
+
+def restat_storyboard_manifest(project: str, episode_no=None, write: bool = False) -> dict:
+    """按 T12 口径**重新统计**某集分镜 manifest 的三类质量分（幂等、可重复执行）。
+
+    · write=False（默认）：纯读统计，绝不改盘；
+    · write=True：用统一口径回写 manifest 顶层计数，并把从产物 meta.json 回填到的
+      软放行事实同步进对应 item（`qc_soft_accepted` / `qc.soft_accepted` /
+      `qc.critical_issues`，且 `success` 置 False、`delivered` 置 True）——
+      否则旧数据的软放行在界面/接口上不可见（实测 manifest 只剩 1 条标记、meta 有 17 条）。
+
+    验收用法（生产数据）：
+        set MJSCXT_DATA_DIR=<数据根> && python -c "import sys; sys.path.insert(0,'app');
+        import json, storyboard_helpers as H;
+        print(json.dumps(H.restat_storyboard_manifest('逆天系统_全书'), ensure_ascii=False))"
+    """
+    out = {"ok": False, "project": project, "episode_no": episode_no, "written": False}
+    try:
+        _d = _ep_read_dir(STORYBOARDS_DIR, project, episode_no)
+        mpath = os.path.join(_d, "storyboard_manifest.json")
+        out["episode_dir"] = _d
+        out["manifest_path"] = mpath
+        if not os.path.isfile(mpath):
+            out["error"] = "分镜 manifest 不存在"
+            return out
+        manifest = read_json_strict(mpath, {})
+        if not isinstance(manifest, dict):
+            manifest = {}
+        items = [s for s in (manifest.get("shots") or []) if isinstance(s, dict)]
+        tally = _sb_quality_tally(items, base_dir=os.path.dirname(mpath),
+                                  use_artifact_meta=True)
+        out.update(_sb_manifest_quality_fields(tally))
+        out["total"] = tally["total"]
+        out["ok"] = True
+        if not write:
+            return out
+        # ---- 回填 + 原子回写 ----
+        for it in items:
+            _seq = _sb_item_seq(it)
+            _is_soft = _sb_soft_accepted(it)
+            _fact = ({"soft": False, "critical_issues": []} if _is_soft
+                     else _sb_artifact_meta_soft(it.get("file") or "", _seq,
+                                                 os.path.dirname(mpath)))
+            _ci = _sb_critical_issues(it.get("qc_gate") or {}, it.get("qc") or {})
+            if not _ci:
+                _ci = list(_fact.get("critical_issues") or [])
+            if _is_soft or _fact.get("soft"):
+                it["qc_soft_accepted"] = True
+                it["delivered"] = True
+                it["success"] = False
+                it.pop("qc_blocked", None)
+                _q = it.get("qc") if isinstance(it.get("qc"), dict) else {}
+                _q.update({"soft_accepted": True, "delivered": True,
+                           "accept": True, "blocked": False,
+                           "entry_blocked": False, "asset_written": True})
+                if _ci:
+                    _q["critical_issues"] = _ci
+                it["qc"] = _q
+        manifest["shots"] = items
+        manifest["total"] = tally["total"]
+        manifest.update(_sb_manifest_quality_fields(tally))
+        manifest["quality_restat_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        atomic_write_json(mpath, manifest)
+        out["written"] = True
+    except Exception as e:  # noqa: BLE001
+        out["ok"] = False
+        out["error"] = f"{type(e).__name__}: {e}"
+        logger.warning("分镜 manifest 重统计失败（%s 第%s集）：%s", project, episode_no, e)
+    return out
+
+
 def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
                                      prompt: str, refs: list, verdict=None, gate=None,
                                      episode_no=None):
@@ -415,8 +712,10 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
     items = [s for s in (manifest.get("shots") or []) if isinstance(s, dict)]
     target = next((s for s in items if _shot_num_key(s.get("shot_id")) == _shot_num_key(shot_id)), None)
     _ref_ids, _ref_paths = manifest_ref_maps(refs, project)
+    # ⭐ T12（2026-10-12）：软放行的 gate 带 soft_accepted → 本条**不得**记 success。
+    _entry_soft = bool(isinstance(gate, dict) and gate.get("soft_accepted"))
     entry = {
-        "shot_id": shot_id, "success": True,
+        "shot_id": shot_id, "success": not _entry_soft,
         "file": dst, "url": f"/api/storyboards/file/{_url_prefix}shot_{seq:02d}.png",
         "prompt": prompt, "ref_count": len(refs),
         # T3：与批量 worker 同口径 —— 记**资产身份串**（items/<项目>/<道具>/base.png）而不是
@@ -432,14 +731,36 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
                        "label": (gate or {}).get("label"), "attempts": 1,
                        "score": verdict.get("score"), "verdict": verdict.get("verdict"),
                        "reason": verdict.get("reason")}
+    if _entry_soft:
+        # ⭐ T12：软放行事实同步进 item + item["qc"] —— canvas 直接透出 qc，
+        #    前端据此显示「软放行」徽标并显著提示 critical_issues。
+        entry["delivered"] = True
+        entry["qc_soft_accepted"] = True
+        _entry_qc = entry.get("qc") if isinstance(entry.get("qc"), dict) else {}
+        _entry_qc.update({"soft_accepted": True, "delivered": True, "accept": True,
+                          "blocked": False, "entry_blocked": False,
+                          "asset_written": True,
+                          "critical_issues": _sb_critical_issues(gate or {}, _entry_qc)})
+        entry["qc"] = _entry_qc
     if target is not None:
         target.update(entry)
+        # ⭐ T12：本次是**真通过**（非软放行）→ 清掉历史软放行痕迹，否则 update 只覆盖
+        #   entry 里有的键，旧的 qc_soft_accepted / qc_gate.soft_accepted 会残留，
+        #   重跑已通过的镜仍被判成软放行。
+        if not _entry_soft:
+            _sb_clear_soft_marks(target)
     else:
         items.append(entry)
     manifest.setdefault("project_name", project)
     manifest["shots"] = items
     manifest["total"] = len(items)
-    manifest["success_count"] = sum(1 for s in items if s.get("success"))
+    # ⭐ T12：三类分开统计（软放行不计入 success）。条目自身没有标记时回落到产物旁的
+    #    <shot>.meta.json —— 否则历史软放行会被当成「真通过」，界面重新变全绿。
+    _sb_normalize_soft_marks(items)
+    _tally = _sb_quality_tally(items, base_dir=os.path.dirname(mpath),
+                               use_artifact_meta=True)
+    manifest.update(_sb_manifest_quality_fields(_tally))
+    manifest["quality_schema"] = 2
     manifest["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         os.makedirs(os.path.dirname(mpath), exist_ok=True)
@@ -2123,8 +2444,30 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                     gate.update({"accept": True, "soft_accepted": True,
                                                  "blocked": False})
                                     item["qc_gate"] = gate
-                                    item["success"] = True
+                                    # ⭐ T12（2026-10-12）P0：软放行**绝不置 success**。
+                                    #   旧实现同时写 item["success"]=True → manifest 报
+                                    #   success_count=46/46、前端显示全绿，而实测 17/46 镜
+                                    #   质检不达标（shot_28/44 还带 critical_issues）。
+                                    #   现在拆成两件事：
+                                    #     · delivered=True        —— 产物确已进正式目录
+                                    #       （断点续跑/下游仍按文件存在判定，语义不变）
+                                    #     · qc_soft_accepted=True —— 质量事实：放行了但有问题
+                                    #     · success 保持 False     —— 不再冒充「质检通过」
+                                    item["success"] = False
+                                    item["delivered"] = True
                                     item["qc_soft_accepted"] = True
+                                    # 同步进 item["qc"]：canvas 直接透出该字典，前端据此
+                                    # 显示「软放行」徽标并显著提示 critical_issues。
+                                    _qc_now = (item.get("qc")
+                                               if isinstance(item.get("qc"), dict) else {})
+                                    _qc_now.update({
+                                        "soft_accepted": True, "delivered": True,
+                                        "accept": True, "blocked": False,
+                                        "entry_blocked": False, "asset_written": True,
+                                        "soft_label": _soft_lbl, "soft_reason": _soft_rsn,
+                                        "critical_issues": _sb_critical_issues(gate, _qc_now),
+                                    })
+                                    item["qc"] = _qc_now
                                     item["file"] = dst
                                     item["url"] = f"{_sb_url_base}shot_{seq:02d}.png"
                                     item.pop("qc_blocked", None)
@@ -2244,16 +2587,20 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             # ⭐ 逐镜总墙钟（2026-10-07）：前置段（LLM/3D/归一/预检）+ GPU 出图 + 质检 + 重试
             #    的总和。配合 _prep_shot 的 [分镜计时] 明细，可一眼区分「前置段慢」还是
             #    「GPU/质检/重试慢」。只观测，不改任何分支行为。
-            logger.info("[分镜总计时] shot=%s 成功=%s 墙钟 %.1fs（前置段 %.1fs）",
-                            shot_id, bool(item.get("success")), _shot_elapsed,
-                            float(item.get("phase_secs_total") or 0.0))
+            logger.info("[分镜总计时] shot=%s 质量=%s 墙钟 %.1fs（前置段 %.1fs）",
+                            shot_id,
+                            ("通过" if item.get("success") else
+                             ("软放行" if item.get("qc_soft_accepted")
+                              else ("未交付" if not item.get("delivered") else "已交付"))),
+                            _shot_elapsed, float(item.get("phase_secs_total") or 0.0))
             # 2026-10-08（用户要求）：逐镜上报「正在拍第几镜」，前端显示「分镜 16/41」
             #    而不是干等一个「已运行 N 分钟未推进」；顺带刷新 step_updated_at。
             try:
                 import autopilot as _ap
                 _ap.report_progress(
                     f"分镜 {i + 1}/{len(shots)}"
-                    + ("" if item.get("success") else "（重试中）"))
+                    + ("" if (item.get("success") or item.get("qc_soft_accepted"))
+                       else "（重试中）"))
             except Exception:  # noqa: BLE001
                 pass
             manifest_shots.append(item)
@@ -2265,8 +2612,17 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 if isinstance(_live, dict) and _live.get("shot") == shot_id:
                     _live["done"] = True
 
-        ok = sum(1 for r in manifest_shots if r.get("success"))
-        blocked = sum(1 for r in manifest_shots if r.get("qc_blocked"))
+        # ⭐ T12（2026-10-12）：三类质量**分开统计** —— 软放行不计入 success。
+        #   旧口径 ok=46/blocked=0 让界面全绿，掩盖了 37% 的不合格镜。
+        # T12 收口：任何分支（含断点续跑复用旧条目信息）都不得出现
+        # 「qc_soft_accepted=true 却计入 success」——统一规范化后再统计/落盘。
+        _sb_normalize_soft_marks(manifest_shots)
+        _tally = _sb_quality_tally(manifest_shots, base_dir=out_dir,
+                                   use_artifact_meta=False)
+        ok = _tally["success_count"]
+        soft = _tally["soft_accepted_count"]
+        blocked = _tally["qc_blocked_count"]
+        delivered = _tally["delivered_count"]
         manifest = {
             "project_name": project_name,
             # 从模板表取，避免模型换代后 manifest 里还写着旧工作流名（口径漂移）
@@ -2274,7 +2630,14 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "total": len(manifest_shots),
             "success_count": ok,
+            "soft_accepted_count": soft,
             "qc_blocked_count": blocked,
+            "critical_issue_count": _tally["critical_issue_count"],
+            "delivered_count": delivered,
+            "soft_accepted_shot_ids": _tally["soft_shot_ids"],
+            "critical_issue_shot_ids": _tally["critical_shot_ids"],
+            # 质量口径版本：前端/接口可据此判断该 manifest 是否已按 T12 口径统计
+            "quality_schema": 2,
             # T3：异常物件过渡判定结论（承担过渡的 shot_id + 每个异常首现镜的判定明细）
             "transition_plan": transition_plan,
             "shots": manifest_shots,
@@ -2291,7 +2654,10 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     "status": "failed",
                     "progress": 100,
                     "success_count": ok,
+                    "soft_accepted_count": soft,
                     "qc_blocked_count": blocked,
+                    "critical_issue_count": _tally["critical_issue_count"],
+                    "delivered_count": delivered,
                     "output_dir": out_dir,
                     "error": f"分镜 manifest 落盘失败：{_mp_err}",
                 })
@@ -2299,12 +2665,19 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
 
         with lock:
             generation_state[task_id].update({
-                "status": "completed" if ok else "failed",
+                # ⭐ T12：状态判据用 **delivered**（真通过 + 软放行 = 正式目录里真有图），
+                #   不是 success —— 否则「整集都软放行」会被判 failed，托管流水线在
+                #   图已齐的情况下反复重烧。质量事实由 soft_accepted_count /
+                #   critical_issue_count 如实上报，不再靠 status 掩盖。
+                "status": "completed" if delivered else "failed",
                 "progress": 100,
                 "success_count": ok,
+                "soft_accepted_count": soft,
                 "qc_blocked_count": blocked,
+                "critical_issue_count": _tally["critical_issue_count"],
+                "delivered_count": delivered,
                 "output_dir": out_dir,
-                "error": "" if ok else "所有镜头分镜图均生成失败",
+                "error": "" if delivered else "所有镜头分镜图均生成失败",
             })
     except Exception as e:
         logger.error(f"分镜图任务失败: {e}")

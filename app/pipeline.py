@@ -660,9 +660,41 @@ def _outcome_from_task(final: dict, what: str) -> dict:
     """把既有 worker 的任务状态归一化成流水线可判定的结果"""
     status = (final or {}).get("status") or "failed"
     results = (final or {}).get("results") or []
-    ok_cnt = sum(1 for r in results if isinstance(r, dict) and r.get("success"))
-    # 质检阻断计数：资产/分镜/视频 worker 都会打 qc_blocked
-    blocked = sum(1 for r in results if isinstance(r, dict) and r.get("qc_blocked"))
+
+    def _soft(r):
+        """该条目是否为「软放行」（质检未达标但仍入库）—— T12 统一判据。"""
+        if not isinstance(r, dict):
+            return False
+        if r.get("qc_soft_accepted"):
+            return True
+        _q, _g = r.get("qc"), r.get("qc_gate")
+        return bool((isinstance(_q, dict) and _q.get("soft_accepted"))
+                    or (isinstance(_g, dict) and _g.get("soft_accepted")))
+
+    def _crit(r):
+        """该条目是否带非空 critical_issues（软放行里的「严重问题」）。"""
+        if not isinstance(r, dict):
+            return False
+        for src in (r.get("qc"), r.get("qc_gate")):
+            if not isinstance(src, dict):
+                continue
+            v = src.get("critical_issues")
+            if isinstance(v, (list, tuple)) and any(str(x).strip() for x in v):
+                return True
+            if isinstance(v, str) and v.strip():
+                return True
+        return False
+
+    # ⭐ T12（2026-10-12）：成功计数**只算真通过**；软放行单列，且必须算「已交付」——
+    #   否则「整集全部软放行」会被判失败，托管流水线在图已齐的情况下反复重烧。
+    ok_cnt = sum(1 for r in results
+                 if isinstance(r, dict) and r.get("success") and not _soft(r))
+    soft_cnt = sum(1 for r in results if _soft(r))
+    crit_cnt = sum(1 for r in results if _soft(r) and _crit(r))
+    delivered_cnt = ok_cnt + soft_cnt
+    # 质检阻断计数：资产/分镜/视频 worker 都会打 qc_blocked（软放行条目的 qc_blocked 已被清掉）
+    blocked = sum(1 for r in results
+                  if isinstance(r, dict) and r.get("qc_blocked") and not _soft(r))
     # 「全部被合法跳过」不是失败。
     # 最典型的场景：物品卡里只有临时道具 —— _generate_asset_task 对
     # importance=临时 的物体**有意不生成参考图**，results 里只留 status=skipped，
@@ -672,11 +704,15 @@ def _outcome_from_task(final: dict, what: str) -> dict:
     skipped_cnt = sum(1 for r in results if isinstance(r, dict)
                       and (str(r.get("status") or "") == "skipped" or r.get("skipped")))
     all_skipped = bool(results) and skipped_cnt == len(results)
-    if status == "failed" or (results and not ok_cnt and not all_skipped):
+    if status == "failed" or (results and not delivered_cnt and not all_skipped):
         return {"ok": False, "blocked": bool(blocked), "count": ok_cnt,
+                "soft_accepted": soft_cnt, "critical_issues": crit_cnt,
+                "delivered": delivered_cnt,
                 "error": (final or {}).get("error") or f"{what}失败",
                 "detail": final}
-    return {"ok": True, "blocked": bool(blocked), "count": ok_cnt, "error": "", "detail": final}
+    return {"ok": True, "blocked": bool(blocked), "count": ok_cnt,
+            "soft_accepted": soft_cnt, "critical_issues": crit_cnt,
+            "delivered": delivered_cnt, "error": "", "detail": final}
 
 
 # ===================== 产物探测（幂等 / 断点续跑判据） =====================
@@ -1550,8 +1586,23 @@ def step_storyboard(ctx) -> dict:
             init={"total": len(shots), "phase": "分镜图生成"},
             prefix="pipe_sb")
     out = _outcome_from_task(final, "分镜图生成")
+    # ⭐ T12（2026-10-12）：把「软放行 / 带 critical_issues」如实带进步骤 detail ——
+    #   count/success_count 只算真通过，软放行单列，界面上不再整片全绿。
     detail = {"count": out["count"], "total": len(shots), "blocked": out["blocked"],
-              "qc_blocked": (final or {}).get("qc_blocked_count")}
+              "qc_blocked": (final or {}).get("qc_blocked_count"),
+              "success_count": (final or {}).get("success_count", out["count"]),
+              "soft_accepted_count": (final or {}).get("soft_accepted_count",
+                                                       out["soft_accepted"]),
+              "critical_issue_count": (final or {}).get("critical_issue_count",
+                                                        out["critical_issues"]),
+              "delivered_count": (final or {}).get("delivered_count", out["delivered"])}
+    if detail["soft_accepted_count"]:
+        logger.warning(
+            "第%s集 分镜软放行 %d 镜（其中带非空 critical_issues %d 镜）：产物已入库"
+            "但质检未达标，**不计入 success** —— 真通过 %d/%d 镜",
+            ctx.get("episode_no"), detail["soft_accepted_count"],
+            detail["critical_issue_count"] or 0,
+            detail["success_count"], len(shots))
     if not out["ok"]:
         return {"ok": False, "blocked": out["blocked"], "detail": detail, "error": out["error"]}
     # 复核产物：worker 报成功但文件缺失 / 为空 → 仍然判失败（不能凭状态字段放行）

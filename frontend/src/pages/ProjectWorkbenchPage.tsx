@@ -25,6 +25,10 @@ const FOCUS_RING =
 // 执行流都需要同一份脱敏逻辑，留在页面内部无法复用（复制多份必然漂移）。
 import { describeError, sanitizeErrorMessage } from '@/utils/errorText';
 
+// t12（2026-10-12）：分镜质量三类口径（真通过 / 软放行 / 阻断）—— 与后端
+// storyboard_helpers._sb_quality_tally 同源。软放行必须与成功分开显示，不能再全绿。
+import { summarizeStoryboardQuality, shotQuality, criticalIssuesOf, softReasonOf } from '@/utils/storyboardQuality';
+
 // ========== Workbench Tab Types ==========
 // 注意：'chat' 已移除 —— AI 总控改成了右侧常驻面板，不再是标签页（见 ChatPanel）
 import AutonomousPanel from '@/components/AutonomousPanel';
@@ -3951,6 +3955,10 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput,
   const cardsRef = useRef<HTMLDivElement | null>(null);
   /** 当前高亮的镜号（2.6s 后自动褪去）；null = 无高亮 */
   const [focusHighlight, setFocusHighlight] = useState<string | null>(null);
+  /** t12：软放行镜清单是否展开（质检不达标但已入库的镜，默认收起、徽标常显） */
+  const [softOpen, setSoftOpen] = useState(false);
+  /** t12：本集三类质量计数（真通过 / 软放行 / 阻断）—— 软放行绝不并入成功 */
+  const sbQuality = summarizeStoryboardQuality(cards as any[]);
   useEffect(() => {
     if (!focusShot) return;
     // 目标镜不在本集（跨集跳转刚切集、卡片还没刷新）→ 先不滚，等卡片到位
@@ -4445,6 +4453,67 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput,
         </div>
       )}
 
+      {/* ⭐ t12（2026-10-12）：分镜质量**三类分离** —— 软放行（质检不达标但仍入库）
+          绝不再冒充成功。旧界面只显示「分镜图 46/46」，实测 37% 是「放行了但有问题」
+          的镜（含带 critical_issues 的严重问题镜），用户以为整集合格。 */}
+      {cards.length > 0 && (
+        <div
+          data-testid="sb-quality-bar"
+          className={`rounded-lg border p-3 text-sm ${
+            sbQuality.critical > 0
+              ? 'bg-danger-subtle border-danger/40 text-danger-strong'
+              : sbQuality.hasSoft
+                ? 'bg-warning-subtle border-warning/40 text-warning-strong'
+                : 'bg-success-subtle border-success/30 text-success-strong'
+          }`}
+        >
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="font-medium">{t('sb.quality.title')}</span>
+            <span>{t('sb.quality.success', { n: sbQuality.success })}</span>
+            {sbQuality.hasSoft && (
+              <span className="font-medium">
+                {t('sb.quality.soft', { n: sbQuality.soft, pct: Math.round(sbQuality.softRatio * 100) })}
+              </span>
+            )}
+            {sbQuality.blocked > 0 && <span>{t('sb.quality.blocked', { n: sbQuality.blocked })}</span>}
+            {sbQuality.pending > 0 && <span>{t('sb.quality.pending', { n: sbQuality.pending })}</span>}
+            {sbQuality.critical > 0 && (
+              <span className="font-semibold">
+                {t('sb.quality.criticalNote', { n: sbQuality.critical })}
+              </span>
+            )}
+            {sbQuality.hasSoft && (
+              <button
+                type="button"
+                className={`ml-auto rounded px-2 py-1 text-xs underline ${FOCUS_RING}`}
+                onClick={() => setSoftOpen((v) => !v)}
+                aria-expanded={softOpen}
+              >
+                {softOpen ? t('sb.quality.hideList') : t('sb.quality.showList', { n: sbQuality.soft })}
+              </button>
+            )}
+          </div>
+          {sbQuality.hasSoft && (
+            <p className="mt-1 text-xs opacity-90">{t('sb.quality.softHint')}</p>
+          )}
+          {softOpen && sbQuality.softShots.length > 0 && (
+            <ul className="mt-2 space-y-1 text-xs">
+              {sbQuality.softShots.map((s) => (
+                <li key={`${s.shotId}-${s.seq}`} className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="font-mono">#{s.seq}</span>
+                  <span className="min-w-0 flex-1">{s.reason || t('sb.quality.softNoReason')}</span>
+                  <span className={s.critical.length ? 'font-medium' : 'opacity-80'}>
+                    {s.critical.length
+                      ? t('sb.quality.criticalCount', { n: s.critical.length })
+                      : t('sb.quality.noCritical')}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+
       {notice && (
         <div className="flex items-start gap-3 p-3 bg-success-subtle border border-success/30 rounded-lg text-success-strong text-sm">
           <span className="min-w-0 flex-1">{notice}</span>
@@ -4585,6 +4654,35 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput,
                   <span className="font-mono text-sm text-ink-2">#{card.seq}</span>
                 </label>
                 <span className="flex min-w-0 items-center gap-2">
+                  {/* ⭐ t12：质量徽标 —— 软放行 / 严重问题必须一眼可见（卡片不再"全绿"） */}
+                  {(() => {
+                    const q = shotQuality(card.storyboard);
+                    if (q === 'soft') {
+                      const ci = criticalIssuesOf(card.storyboard);
+                      return (
+                        <span
+                          className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] leading-4 border ${
+                            ci.length
+                              ? 'bg-danger-subtle text-danger-strong border-danger/40'
+                              : 'bg-warning-subtle text-warning-strong border-warning/40'
+                          }`}
+                          title={ci.length ? ci.join('；') : softReasonOf(card.storyboard)}
+                        >
+                          {ci.length
+                            ? t('sb.quality.criticalBadge', { n: ci.length })
+                            : t('sb.quality.softBadge')}
+                        </span>
+                      );
+                    }
+                    if (q === 'blocked') {
+                      return (
+                        <span className="shrink-0 rounded border border-danger/40 bg-danger-subtle px-1.5 py-0.5 text-[11px] leading-4 text-danger-strong">
+                          {t('sb.quality.blockedBadge')}
+                        </span>
+                      );
+                    }
+                    return null;
+                  })()}
                   <span className="truncate text-xs text-ink-2">{card.camera}</span>
                   {/* 排序控件：手柄拖拽 + ↑/↓ 精确挪一格（文案在组件内走 i18n，不硬编码） */}
                   <ReorderControls
@@ -4660,6 +4758,24 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput,
                   <p className="text-ink-1 line-clamp-3">{card.description}</p>
                   {card.dialogue_text && (
                     <p className="text-ink-2 italic line-clamp-2">{card.dialogue_text}</p>
+                  )}
+                  {/* ⭐ t12：软放行必须就地说明「为什么放行 / 有什么严重问题」——
+                      否则用户仍会把这镜当成合格产物。 */}
+                  {shotQuality(card.storyboard) === 'soft' && (
+                    <>
+                      <p className="text-warning-strong line-clamp-2">
+                        {t('sb.quality.softLine', {
+                          reason: softReasonOf(card.storyboard) || t('sb.quality.softNoReason'),
+                        })}
+                      </p>
+                      {criticalIssuesOf(card.storyboard).length > 0 && (
+                        <p className="text-danger-strong line-clamp-2">
+                          {t('sb.quality.criticalLine', {
+                            text: criticalIssuesOf(card.storyboard)[0],
+                          })}
+                        </p>
+                      )}
+                    </>
                   )}
                   <p className={card.video?.exists ? 'text-success-strong' : 'text-warning-strong'}>
                     {t('sb.video')}：{card.video?.exists ? t('sb.generated') : t('sb.notGenerated')}
