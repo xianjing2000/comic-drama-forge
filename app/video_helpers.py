@@ -652,10 +652,15 @@ def _video_retry_shot_impl():
     vid_dir = _ep_dir(os.path.join(VIDEOS_DIR, project), _rs_ep)
     os.makedirs(vid_dir, exist_ok=True)
     dst = os.path.join(vid_dir, f"shot_{seq:02d}.mp4")
-    # ⭐ 2026-10-12：export_mode 默认 segments 后，一个镜头若被切成多个子段，
-    #   files 会有多个（长镜切段见上方 _rs_sub_shots）。必须先按序号排序再 concat，
-    #   绝不能直接取 files[0]（顺序不保证，会取到中间某段 → 该镜只剩半截）。
-    #   单文件时走原路径，行为与改动前完全一致（向后兼容）。
+    # ⭐ 2026-10-12（t13/B6 校正）：**当前默认 export_mode = all** —— 一次提交返回 1 个
+    #   连续文件，正是本镜完整的重跑产物（rework/shot_NN.mp4）。历史注释写的
+    #   历史上曾短暂把默认改为按段导出，该默认**已回退 all**（回退原因见
+    #   comfyui_client._generate_h3_sequence_director 里的说明）。
+    #   但按段导出仍可被显式开启（MJSCXT_H3_EXPORT_MODE=segments 或传函数参数），那时
+    #   一个镜头若被切成多个子段，files 会有多个（长镜切段见上方 _rs_sub_shots）。
+    #   两条路径都必须正确：先按序号排序再 concat，绝不能直接取 files[0]
+    #   （顺序不保证，会取到中间某段 → 该镜只剩半截）。单文件时走原路径，
+    #   行为与改动前完全一致（向后兼容）。
     _rs_files = sorted([f for f in files if f], key=_seg_sort_key)
     if len(_rs_files) > 1:
         _rs_cat = os.path.join(vid_dir, f"shot_{seq:02d}.tmp.mp4")
@@ -2189,8 +2194,16 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
 
             # ⭐ 2026-10-12 分段导出支持（用户需求：只重生成有问题的分镜，再拼回去）。
             #
-            # 背景：export_mode 已改默认 segments，插件按段输出多个 mp4。此前这里写死
-            #   `src = files[0]`，多段时只会取其中一段（顺序还不保证）→ 成片残缺。
+            # ⚠️ t13/B6 校正：**当前默认 export_mode = all**（comfyui_client 里的
+            #   export_mode = (... or "all")；t24 已把它钉为既定边界
+            #   tests/test_t24_verification_boundaries.py::test_default_is_all）。
+            #   该试改状态：曾短暂把默认改为 segments，**现已回退 all**。
+            #   按段导出现在必须**显式开启**
+            #   （环境变量 MJSCXT_H3_EXPORT_MODE=segments，或传函数参数）。
+            #   因此默认配置下本分支只见单文件；多段形态只在显式开启时出现，
+            #   但两条路径都必须处理正确（否则一旦有人开启就静默截断成片）。
+            # 背景：插件按段输出多个 mp4 时，此前这里写死 src = files[0]，
+            #   多段时只会取其中一段（顺序还不保证）→ 成片残缺。
             # 现在的处理：
             #   ① 按文件名序号排序（顺序不保证，必须排）；
             #   ② 全部落盘为 seg_0000.mp4..seg_NNNN.mp4 —— 这是「可返工素材」，

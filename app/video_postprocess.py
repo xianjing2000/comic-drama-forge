@@ -95,7 +95,15 @@ def _caption_burn_enabled_for(project: str) -> bool:
         try:
             from config import PROJECT_DEFAULT_CONFIG
             return bool(PROJECT_DEFAULT_CONFIG.get("caption_burn_enabled", True))
-        except Exception:  # noqa: BLE001
+        except Exception as _de:  # noqa: BLE001
+            # ⭐ t13/B4（t24 全库扫描惟一一处「可能掩盖真错误」的静默兜底）：
+            #   这里此前是「except Exception: return True」—— **零日志**。config.py 被改坏 /
+            #   导入失败时会被静默按「开启字幕」处理，排障时看不到任何线索（同函数下面
+            #   那条 except 一直有 warning，只有这条漏了）。
+            #   ⚠️ fail-open 行为**保持不变**：仍返回 True（字幕是剧情装置，宁可多烧也不漏烧；
+            #      不想要字幕的项目在 config.json 里写 caption_burn_enabled: false）。
+            logger.warning("读取配置中心 PROJECT_DEFAULT_CONFIG.caption_burn_enabled 失败"
+                           "（按默认开启处理）：%s: %s", type(_de).__name__, _de)
             return True
     except Exception as e:  # noqa: BLE001  开关读取失败按「默认开」处理
         logger.warning(f"读取项目 config.caption_burn_enabled 失败（按默认开启处理）：{e}")

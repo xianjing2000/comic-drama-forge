@@ -5457,21 +5457,29 @@ class ComfyUIClient:
             ov_env = str(os.environ.get("MJSCXT_H3_CONTINUITY_OVERLAP") or "").strip()
             continuity_overlap = (int(ov_env) if ov_env.isdigit()
                                   else h3_director_builder.CONTINUITY_OVERLAP_DEFAULT)
-        # ⭐ 2026-10-12 用户需求：「分段导出 + 只重生成有问题的分镜，再拼回去」。
+        # ⭐ 2026-10-12 分段导出（用户需求：「只重生成有问题的分镜，再拼回去」）。
         #
-        # 为什么默认从 all 改为 segments：
-        #   all      -> 插件内部把 N 段拼成 1 个 mp4；某一段坏了只能**整集重跑**
-        #              （实测代价：28 段 / 数小时，且 Retry 会连带换种子重跑全部段）。
-        #   segments -> 插件按段导出 N 个 mp4；调用方（video_helpers）把 N 段落盘为
-        #              seg_0000.mp4..seg_NNNN.mp4 后**自己 concat** 成 <集>_full.mp4。
-        #              这样单段返工只需替换那一段再重新 concat，成本从「整集」降到「一段」。
+        # ⚠️ t13/B6 校正：**当前默认 export_mode = "all"**（见下方那行的 or "all"；t24 已把
+        #    它钉为既定边界：tests/test_t24_verification_boundaries.py::test_default_is_all）。
+        #    曾短暂试过默认 segments，**已回退 all**，回退原因：
+        #      · generate_h3_sequence_sequential 只回传 files[0]：默认 segments 会让
+        #        「多段导出 → 只取第一段」静默截断成片（整片 QC 也只抽到第一段）；
+        #      · all 由插件内部把 N 段拼成 1 个 mp4，判据链（QC 抽帧 / 成片可播 /
+        #        probe_video / final）与历史行为逐位一致，零回归风险。
+        #    历史留档（当时试改的取舍，以免重复踩坑）——曾短暂把默认改为 segments，
+        #    两种模式的差别如下：
+        #      all      -> 插件内部把 N 段拼成 1 个 mp4；某一段坏了只能**整集重跑**
+        #                  （实测代价：28 段 / 数小时，且 Retry 会连带换种子重跑全部段）。
+        #      segments -> 插件按段导出 N 个 mp4；调用方（video_helpers）把 N 段落盘为
+        #                  seg_0000.mp4..seg_NNNN.mp4 后**自己 concat** 成 <集>_full.mp4，
+        #                  单段返工只需替换那一段再重新 concat（成本从「整集」降到「一段」）。
+        #    需要按段导出时**显式开启**（不改默认值）：函数参数 export_mode="segments"
+        #    或环境变量 MJSCXT_H3_EXPORT_MODE=segments。
+        #    覆盖优先级：函数参数 > 环境变量 MJSCXT_H3_EXPORT_MODE > 默认 all。
         #
-        # 向后兼容（务必保持）：video_helpers 仍会产出 <tag>_full.mp4，
+        # 向后兼容（务必保持）：video_helpers 始终产出 <tag>_full.mp4，
         #   probe_video / final / 下游一切按老路径取片，行为不变；
-        #   新增的只有 seg_*.mp4 这一份「可返工素材」。
-        #
-        # 覆盖优先级：函数参数 > 环境变量 MJSCXT_H3_EXPORT_MODE > 默认。
-        # 需要退回旧行为时设 MJSCXT_H3_EXPORT_MODE=all 即可，无需改代码。
+        #   segments 模式下**额外**多出的只有 seg_*.mp4 这一份「可返工素材」。
         export_mode = (export_mode or os.environ.get("MJSCXT_H3_EXPORT_MODE")
                        or "all").strip().lower()
         if export_mode not in ("all", "segments"):
