@@ -487,6 +487,42 @@ def resolve_bible_name(name, name_index: dict):
     return None, False
 
 
+def _rewrite_alias_text(txt: str, aliases: list) -> str:
+    """把文本中的角色别名替换为规范名（单遍最长优先，防二次替换）。
+
+    别名是规范名子串时（「方源」↔「古月方源」），旧实现逐条 re.sub 会把已规范的
+    「古月方源」里的「方源」再替换一次，产出「古月古月方源」。这里把「别名形式 +
+    规范名」合成一个按长度降序的 alternation 做单遍替换：命中规范名保持原样、命中
+    别名替换为规范名 —— 既防二次替换，也覆盖别名/规范名互相包含、多别名互相包含
+    的组合（最长优先保证「古月方源」先于「方源」整体匹配，不拆成子串）。
+    """
+    if not txt or not aliases:
+        return txt
+    form_to_canon = {}
+    canonicals = set()
+    for a in aliases:
+        if not isinstance(a, dict):
+            continue
+        canonical = str(a.get("to") or "").strip()
+        if not canonical:
+            continue
+        canonicals.add(canonical)
+        for form in {str(a.get("from") or "").strip(), _norm_name(a.get("from"))}:
+            form = str(form or "")
+            if form and _norm_name(form) != _norm_name(canonical):
+                form_to_canon[form] = canonical
+    forms = sorted(set(form_to_canon) | canonicals, key=len, reverse=True)
+    if not forms:
+        return txt
+    pattern = re.compile("|".join(re.escape(f) for f in forms))
+
+    def _repl(m):
+        token = m.group(0)
+        return form_to_canon.get(token, token)
+
+    return pattern.sub(_repl, txt)
+
+
 def align_script_assets(script: dict, bible: dict, episode_no: int) -> dict:
     """A① 确定性资产对齐：把本集剧本里的角色别名 / 服装 / 外观强制归一到项目级设定库。
 
@@ -588,10 +624,7 @@ def align_script_assets(script: dict, bible: dict, episode_no: int) -> dict:
                 txt = s.get(field)
                 if not isinstance(txt, str) or not txt:
                     continue
-                for k, canonical in rename_map.items():
-                    for src in list({k} | {a["from"] for a in aliases}):
-                        if src and _norm_name(src) != _norm_name(canonical) and _norm_name(src) in _norm_name(txt):
-                            txt = re.sub(re.escape(src), canonical, txt)
+                txt = _rewrite_alias_text(txt, aliases)
                 s[field] = txt
 
     # 分镜层面：道具 / 场景引用名对齐设定库规范名（含别名归一与 location 归一）
