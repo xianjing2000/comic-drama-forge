@@ -49,6 +49,11 @@ import asset_prompt_kit
 # （只依赖标准库、config 延迟导入，不会形成循环导入）。
 import prompt_templates
 
+# 提示词预检**缓存统计**的口径单一来源（2026-10-12 t11）：字段名 / 命中率 / 诊断行措辞
+# 都在 prompt_protocol（叶子模块，只依赖 typing，无循环导入风险）。本模块只做「消费」：
+# 把 prompt_qc 的统计取出来、按统一措辞落一行日志（这正是此前缺失的调用点）。
+import prompt_protocol
+
 from common_util import mask_key as mask_key
 logger = logging.getLogger(__name__)
 
@@ -2320,6 +2325,16 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
       送检顺序为 [成品图, 基准图, ...设定图]，与 :func:`build_blocking_note` 的编号一致；
       该图**不占**设定图名额（``MAX_REF_IMAGES`` 只约束设定图）。"""
     cfg = cfg or _empty_config()
+    # 提示词预检缓存的可观测出口（2026-10-12 t11）：此前 prompt_qc_cache_stats 零调用点。
+    # 位置在 cfg 定型之后、所有早退之前 —— 连「质检未开启 / 接口未配置」的早退路径也会
+    # 留下这行统计；且传的是**本次真正生效**的 cfg（调用方没传时用默认配置），
+    # 隔离检查才不会拿一个空配置去和快照比较。
+    # 输出按 MJSCXT_PROMPT_QC_CACHE_LOG_SEC（默认 3600s）限流，异常只记 debug，
+    # 绝不影响质检结论；传 cfg 是为了先做**跨模式隔离**（键里没有模式/开关）。
+    try:
+        log_prompt_qc_cache_stats(source="图片质检", cfg=cfg)
+    except Exception as _pf_log_err:      # noqa: BLE001
+        logger.debug("预检缓存统计输出失败（忽略）：%s", _pf_log_err)
     if not cfg.get("enabled"):
         return {"ok": False, "skipped": True, "reason": "质检总开关未开启"}
     if not cfg.get("image_enabled"):
@@ -2458,6 +2473,7 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
     if not _image_verdict_accepted(verdict) and cfg.get("image_qc_recheck", True):
         verdict = _recheck_image_verdict(ep, prompt, image_paths, cfg, verdict,
                                          image_path, style_norm)
+    # 提示词预检缓存的统计出口在函数入口（含 cfg 的跨模式隔离检查），此处不再重复调用。
     return verdict
 
 
@@ -3133,6 +3149,131 @@ def check_video(video_path: str, shot_desc: str = "", cfg: dict = None,
         verdict["passed"] = False
         verdict["objective_fatal"] = True
     return _apply_style_gate(verdict, style_norm)
+
+
+# ============ 提示词预检缓存可观测（2026-10-12 t11） ============
+# 问题（用户可感知）：预检缓存加了，但 prompt_qc.prompt_qc_cache_stats() **零调用点** ——
+#   缓存是否生效、命中率多少、复用的是哪份输入，日志与接口里都查不到。
+#   这与用户关心的「跨集串数据」是同一类风险：看不见的缓存最容易串。
+# 本段是该统计在本模块内的**显式消费点**：
+#   · 频率：默认 3600s 一次 + 1s 去抖；进程内首次调用立即输出一行起点基线；
+#     MJSCXT_PROMPT_QC_CACHE_LOG_SEC=0 可关闭（诊断接口仍可用 force=True 强取）。
+#   · 为什么挂在这里：qc_client 是质检链路里被逐镜高频调用的模块，日志落盘有保证；
+#     探针零模型调用、零额外网络，绝不影响质检语义（异常全吞）。
+#   · 字段口径/命中率/措辞全部来自 prompt_protocol（单一来源），本模块不另立一套。
+# 另外承接**跨模式隔离**：prompt_qc 的缓存键不含 cfg 的模式/开关，切模式会复用旧结论
+#（t7 实测登记）。本模块每次质检前调用 prompt_protocol.isolate_prompt_qc_cache(cfg)，
+# 配置一变就清空预检缓存 —— 宁可重算，也不复用另一套模式下的结论。
+PROMPT_QC_CACHE_LOG_SEC = 3600.0
+_PF_CACHE_LOG = {"ts": 0.0, "lock": threading.Lock()}
+
+
+def _pf_cache_log_interval() -> float:
+    """周期汇总的输出间隔（秒）；非正值 = 关闭（只保留 prompt_qc 侧的逐次留痕）。"""
+    raw = os.environ.get("MJSCXT_PROMPT_QC_CACHE_LOG_SEC")
+    if raw is None or str(raw).strip() == "":
+        return PROMPT_QC_CACHE_LOG_SEC
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return PROMPT_QC_CACHE_LOG_SEC
+
+
+def prompt_qc_cache_stats() -> dict:
+    """取提示词预检缓存的统计（**本模块的显式调用点**，供诊断接口与脚本复用）。
+
+    返回统一口径字典（字段见 prompt_protocol.PROMPT_QC_CACHE_STAT_FIELDS）：
+    ``enabled`` / ``size`` / ``capacity`` / ``hit`` / ``miss`` / ``hit_rate``。
+    prompt_qc 不可用（导入失败/被裁剪）时返回 {}，调用方按「无数据」处理。
+    本函数**只读**、不做隔离、不写日志 —— 要连隔离一起做请用 :func:`log_prompt_qc_cache_stats`。
+    """
+    try:
+        import prompt_qc
+        fn = getattr(prompt_qc, "prompt_qc_cache_stats", None)
+        if not callable(fn):
+            return {}
+        raw = fn()
+        if not isinstance(raw, dict):
+            return {}
+        out = dict(raw)
+        out["enabled"] = bool(_pf_cache_switch_on())
+        out["hit_rate"] = prompt_protocol.prompt_qc_cache_hit_rate(
+            out.get("hit"), out.get("miss"))
+        return out
+    except Exception as e:      # noqa: BLE001 —— 观测绝不影响质检
+        logger.debug("读取提示词预检缓存统计失败（忽略）：%s: %s", type(e).__name__, e)
+        return {}
+
+
+def _pf_cache_switch_on() -> bool:
+    """预检缓存的运维开关状态（与 prompt_qc._pf_cache_enabled 同口径）。"""
+    v = str(os.environ.get("MJSCXT_PROMPT_QC_CACHE") or "1").strip().lower()
+    return v not in ("0", "false", "off", "no")
+
+
+def prompt_qc_cache_isolation_check(cfg: dict = None, force: bool = False) -> dict:
+    """判决配置（prompt_mode / prompt_enabled）变了就清空预检缓存。
+
+    为什么需要：prompt_qc 的缓存键里没有 cfg，切模式会复用旧模式的结论（t7 实测登记）。
+    实现在 prompt_protocol.isolate_prompt_qc_cache（单一来源），本函数只负责在
+    「每次质检前 / 每次取统计时」把它调用起来，并在真的清空时留一行 WARNING。
+    返回 ``{changed, cleared, cfg, resets, reason, first}``；异常一律返回安全值。
+    ``force=True``：无条件失效（诊断接口 / 人工触发）。
+    """
+    try:
+        info = prompt_protocol.isolate_prompt_qc_cache(cfg, force=force)
+    except Exception as e:      # noqa: BLE001
+        logger.debug("预检缓存隔离检查失败（忽略）：%s: %s", type(e).__name__, e)
+        return {"changed": False, "cleared": 0, "cfg": "", "resets": 0,
+                "reason": "", "first": False}
+    if info.get("cleared"):
+        # ⚠️ 占位符数量必须与参数对齐：此处曾多传一个参数，logging 记录创建时报
+        #    「not all arguments converted」→ 日志静默丢失（实测由 t11 探针脚本断言抓到）。
+        logger.warning("提示词预检缓存已失效：%s（清掉 %s 条）—— 缓存键不含模式/开关，"
+                       "旧模式下的结论不得复用",
+                       info.get("reason") or "配置切换", info.get("cleared"))
+    return info
+
+
+def log_prompt_qc_cache_stats(source: str = "", force: bool = False,
+                              cfg: dict = None) -> dict:
+    """隔离检查 + 统计取值 + 按统一措辞输出一行日志（返回本次统计）。
+
+    调用方给出 ``cfg`` 时先做 :func:`prompt_qc_cache_isolation_check`（配置切换 → 清空），
+    再取统计 —— 这样日志里的数字**一定是当前配置下**的数字，不会拿旧模式的命中率。
+    ``force=True`` 忽略周期限制（诊断接口/人工触发用）；默认按
+    MJSCXT_PROMPT_QC_CACHE_LOG_SEC 限流，避免逐镜质检把日志刷爆。
+    """
+    _iso = prompt_qc_cache_isolation_check(cfg) if cfg is not None else {}
+    stats = prompt_qc_cache_stats()
+    if not stats:
+        return {}
+    detail = ""
+    if _iso.get("cleared"):
+        detail = "｜隔离清空=%s 条（%s）" % (_iso.get("cleared"), _iso.get("reason") or "")
+    line = prompt_protocol.format_prompt_qc_cache_diag(stats, source=source) + detail
+    if not line:
+        return stats
+    _now = time.time()
+    _interval = _pf_cache_log_interval()
+    if _interval <= 0 and not force:
+        return stats
+    _lock = _PF_CACHE_LOG["lock"]
+    try:
+        with _lock:
+            _last = _PF_CACHE_LOG["ts"]
+            # 1 秒去抖：同一批质检（预热与主线程并发）只留一行
+            if not force and _last and (_now - _last) < max(1.0, _interval):
+                return stats
+            _PF_CACHE_LOG["ts"] = _now
+    except Exception:           # noqa: BLE001 —— 限流逻辑自身异常时退化为「照打」
+        pass
+    try:
+        logger.info("%s", line)
+        return stats
+    except Exception as e:      # noqa: BLE001
+        logger.debug("输出预检缓存统计行失败（忽略）：%s: %s", type(e).__name__, e)
+        return stats
 
 
 # ===================== 音频质检（客观层 + AI 层） =====================

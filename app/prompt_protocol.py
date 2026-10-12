@@ -122,6 +122,181 @@ def assert_grid_zh_template_markers(template_text: str,
 
 
 # --------------------------------------------------------------------------- #
+# 提示词预检（prompt_qc）缓存：判据键 + 统计口径的**单一来源**（2026-10-12 t11）
+# --------------------------------------------------------------------------- #
+# 背景（用户可感知的后果）：预检缓存此前「看不见」——
+#   · 缓存是否生效、命中率多少，日志与接口里都查不到（stats 函数零调用点）；
+#   · 缓存键里**没有模式/开关**，同一份提示词先按 block 判、后按 repair 判会复用旧结论
+#     （t7 实测：verify_prompt_qc.py 在 MJSCXT_PROMPT_QC_CACHE=0 下有 4 项失败，
+#      开缓存后「消失」—— 不是修好了，是被旧结论顶替了）。
+# 与「跨集串数据」是同一类风险：看不见的缓存最容易串。故这里把两件事单点化：
+#   ① 键里必须包含的「影响判决的 cfg 字段」（prompt_qc 与将来任何缓存实现共用）；
+#   ② 计数/命中率的字段名与诊断行格式（生产端 prompt_qc、消费端 qc_client 共用）。
+# ⚠️ 项目/集/镜/提示词内容**不进键**的理由见 PROMPT_QC_CFG_DECISION_KEYS 上方注释。
+# --------------------------------------------------------------------------- #
+#: 预检判决只取决于这些 cfg 字段（prompt_qc.prompt_qc_ready / prompt_qc_mode）——
+#: 它们是缓存键的一部分。改了这里的字段集合 = 改了缓存语义，必须同步 prompt_qc 的
+#: _pf_cache_key（本常量是唯一来源）。
+PROMPT_QC_CFG_DECISION_KEYS: Tuple[str, ...] = ("prompt_enabled", "prompt_mode")
+
+
+def prompt_qc_cfg_decision_key(cfg) -> str:
+    """把「影响预检判决的 cfg 字段」压成稳定的短串（进缓存键）。
+
+    为什么必须进键：同一份提示词在不同模式下结论**不同**（warn 不改动 / repair 自愈后
+    放行 / block 有任何 issue 就拦），开关还可能整个跳过预检。不把它们并入键，
+    先 block 再 repair 就会直接复用 block 的旧结论，而日志只会说「命中缓存」。
+
+    故意**只取这两个键**、不把整个 cfg 序列化：cfg 里还有 base_url / api_key / 超时 /
+    重试轮数等与判决无关、却会被逐镜改动的字段，全量入键只会让命中率归零。
+    取值口径与 prompt_qc 的读取方式同构（缺失/None 视为空串），保证同 cfg 同串。
+    """
+    _cfg = cfg if isinstance(cfg, dict) else {}
+    parts = []
+    for _k in PROMPT_QC_CFG_DECISION_KEYS:
+        _v = _cfg.get(_k)
+        parts.append("%s=%s" % (_k, "" if _v is None else str(_v)))
+    return "|".join(parts)
+
+
+#: 预检缓存统计的**稳定字段名**（key -> 含义）。消费方（qc_client 的统计/日志/诊断）
+#: 一律按这些名字取值，不要再各自拼字典；数据由 prompt_qc.prompt_qc_cache_stats() 生产
+#: （size/hit/miss/capacity），本模块只负责补 enabled/hit_rate 与统一措辞。
+PROMPT_QC_CACHE_STAT_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("enabled", "缓存开关当前是否生效（MJSCXT_PROMPT_QC_CACHE）"),
+    ("size", "缓存条目数"),
+    ("capacity", "容量上限（FIFO 淘汰）"),
+    ("hit", "命中次数"),
+    ("miss", "未命中次数"),
+    ("hit_rate", "命中率（hit/(hit+miss)，无请求时为 0.0）"),
+    ("last_key", "最近一次缓存查询的键摘要（sha1 前 12 位，便于对账）"),
+    ("last_kind", "最近一次缓存查询的提示词类型"),
+)
+
+#: 与「跨模式串味」有关的两件事实，写在这里以免后人重犯：
+#:   · prompt_qc._pf_cache_key 的当前口径 = sha1(kind|style|ref_count|expect_refs|
+#:     ctx 的 8 个语义字段|prompt 全文) —— 判决输入齐全，但**不含 cfg 的模式/开关**；
+#:   · 于是同一条提示词先按 block 判、再按 repair 判会复用旧结论（t7 已实测登记：
+#:     .workbuddy/test/verify_prompt_qc.py 关缓存时 4 项失败、开缓存「转绿」）。
+#: 本模块提供下面两个函数做**在野的等价保证**（不改 prompt_qc 源码也能不串味）：
+#:   · prompt_qc_cfg_decision_key(cfg) —— 「影响判决的 cfg」的稳定标识；
+#:   · isolate_prompt_qc_cache(cfg) —— 配置变化时立刻清空预检缓存。
+#: ⚠️ 根治方案仍需把 PROMPT_QC_CFG_DECISION_KEYS 并进 _pf_cache_key（补丁见 t11 output）。
+
+
+def prompt_qc_cache_hit_rate(hit, miss) -> float:
+    """命中率（0.0~1.0）；一次请求都没有时返回 0.0（不返回 NaN，避免 JSON 里出现 nan）。"""
+    try:
+        _h = int(hit or 0)
+        _m = int(miss or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    _n = _h + _m
+    return round(_h / float(_n), 4) if _n > 0 else 0.0
+
+
+def format_prompt_qc_cache_diag(stats: dict = None, source: str = "") -> str:
+    """把预检缓存统计渲染成**一行**诊断文本（日志与接口共用同一措辞）。
+
+    ``stats`` 为 None / 非 dict 时返回空串 —— 调用方据此静默跳过，不要写半截日志。
+    """
+    if not isinstance(stats, dict):
+        return ""
+    _src = ("｜来源=%s" % source) if source else ""
+    _recent = ""
+    if stats.get("last_key"):
+        _recent = "｜最近查询=%s[%s]" % (stats.get("last_kind") or "?", stats.get("last_key"))
+    return ("提示词预检缓存｜启用=%s｜命中=%s 未命中=%s 命中率=%.4f｜条目=%s/%s%s%s"
+            % ("是" if stats.get("enabled") else "否",
+               stats.get("hit", 0), stats.get("miss", 0),
+               prompt_qc_cache_hit_rate(stats.get("hit"), stats.get("miss")),
+               stats.get("size", 0), stats.get("capacity", 0), _recent, _src))
+
+
+# --------------------------------------------------------------------------- #
+# 跨模式/跨配置的缓存隔离（2026-10-12 t11）——**范围受限下的等价保证**
+# --------------------------------------------------------------------------- #
+# 为什么需要它：prompt_qc._pf_cache_key 的口径里**没有** cfg 的模式/开关字段，
+# 于是同一条提示词从 block 切到 repair（或反向）会复用上一次的结论。
+# t7 已实测登记：.workbuddy/test/verify_prompt_qc.py 在 MJSCXT_PROMPT_QC_CACHE=0 下
+# 有 4 项失败（warn/block/关闭模式三项 + audio warn 一项），开缓存后「转绿」——
+# 不是判定对了，是被旧结论顶替。这属于「不同集/不同镜复用错误结果」同类风险。
+#
+# 为什么要在这里做（而不是直接改 _pf_cache_key）：t11 的 inScope 是 qc_client.py +
+# prompt_protocol.py（prompt_qc.py 被 t7 占用）。本函数提供**不改 prompt_qc 源码**
+# 的等价保证：只要判决配置变了，立刻清空预检缓存 —— 宁可重算一次，也绝不复用
+# 另一套模式下的结论。根治方案（把配置并进键，命中率不降）的补丁已随 t11 output
+# 交接，落到 prompt_qc 后本函数即可退化为纯防御。
+#
+# 代价与边界：
+#   · 只在**调用方显式调用**时检查（qc_client 的质检入口/统计出口各一处）；
+#     未调用前若已发生配置切换，缓存仍可能短暂串味 —— 故它是「在野保证」，不是根治。
+#   · 清空是整体清空（缓存实例不按配置分桶），切换后会有一轮未命中。
+#   · 全程 fail-open：任何异常都不影响预检本身。
+# --------------------------------------------------------------------------- #
+_PQ_CACHE_ISOLATION = {"cfg": None, "resets": 0, "last_reason": ""}
+
+
+def _prompt_qc_cache_clear() -> int:
+    """清空 prompt_qc 的进程内预检缓存，返回清掉的条数（拿不到就返回 0）。
+
+    只依赖公开/既有属性（_PF_CACHE/_PF_LOCK/_PF_CACHE_SIZE），不做任何猴子补丁、
+    不替换函数 —— prompt_qc 未加载或结构变了就静默跳过。
+    """
+    try:
+        import sys
+        _mod = sys.modules.get("prompt_qc")
+        if _mod is None:
+            return 0
+        _cache = getattr(_mod, "_PF_CACHE", None)
+        if not isinstance(_cache, dict):
+            return 0
+        _lock = getattr(_mod, "_PF_LOCK", None)
+        if _lock is not None:
+            with _lock:
+                _n = len(_cache)
+                _cache.clear()
+            return _n
+        _n = len(_cache)
+        _cache.clear()
+        return _n
+    except Exception:
+        return 0
+
+
+def isolate_prompt_qc_cache(cfg=None, force: bool = False) -> dict:
+    """判决配置变了就清空预检缓存；返回
+    ``{changed, cleared, cfg, resets, reason, first}``。
+
+    ``changed``：本次是否判定为「需要清空」（**首次调用也算** —— 缓存出生时的配置未知，
+                清空一次是唯一安全的起点；这只会发生在每进程第一次检查）。
+    ``cleared``：真正清掉的条目数。
+    ``first``：本次是否为进程内第一次检查。
+    ``force=True``：无条件清空（诊断/手动失效用），仍会更新快照。
+    """
+    _key = prompt_qc_cfg_decision_key(cfg)
+    _st = _PQ_CACHE_ISOLATION
+    _prev = _st["cfg"]
+    _first = _prev is None
+    _changed = _first or (_prev != _key)
+    _cleared = 0
+    if _changed or force:
+        _cleared = _prompt_qc_cache_clear()
+        _st["resets"] = int(_st["resets"]) + 1
+        if _first:
+            _st["last_reason"] = "首次检查（缓存起点未知，清空一次）cfg=%s" % _key
+        elif force and _prev == _key:
+            _st["last_reason"] = "force（手动失效）cfg=%s" % _key
+        else:
+            _st["last_reason"] = "配置切换 %s -> %s" % (_prev, _key)
+    if _prev != _key:
+        _st["cfg"] = _key
+    return {"changed": bool(_changed), "cleared": int(_cleared), "cfg": _key,
+            "resets": int(_st["resets"]), "reason": _st["last_reason"],
+            "first": bool(_first)}
+
+
+# --------------------------------------------------------------------------- #
 # 刻意**不去重**的跨文件重复中文串（2026-10-12 t7 盘点）
 # --------------------------------------------------------------------------- #
 # 盘点口径：``app/*.py`` 里长度 >= 4、单行的中文字符串字面量，出现在 >= 2 个文件的
