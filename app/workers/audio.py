@@ -27,7 +27,7 @@ from shared_tasks import _prune_task_registry
 from shared_qc import _qc_load_cfg
 from shared_project import _safe_project
 from shared_episode import register_final_deliverable
-from routes.tts import _dub_audio_url
+from dub_helpers import _dub_audio_url
 from tts_client import QwenTTSClient
 from tts_client import TTSError
 from tts_client import concat_audio
@@ -178,6 +178,43 @@ def _dub_prompt_preflight(lines: list, project_name: str = "") -> dict:
     except Exception as e:  # noqa: BLE001 - 预检失败绝不影响配音
         logger.warning(f"配音台词预检异常（已跳过，不影响配音）：{e}")
     return stats
+
+
+def _apply_audio_lessons(plan_lines: list, project_name: str) -> int:
+    """配音计划构建后、逐句合成前的音频教训召回（设计 §2.3.2）。
+
+    从 app.py 下沉（2026-10-12 t41）：对每句按 kind="audio" 召回历史教训（键 = 该句 text）：
+      - ln["audio_hints"] 只存审计，绝不进台词；
+      - 调 _apply_audio_hints 做计划级纠偏（说话人回填 / preset→design / 期望时长）。
+    无教训时零行为变更；召回失败静默忽略。返回产生 hints 的句数。
+
+    ⚠️ lesson_helpers._apply_audio_hints 与 prompt_memory 用**函数内局部 import**：
+       lesson_helpers 顶层反向依赖本模块 _audio_line_expect_sec，顶层 import 会成环。
+    """
+    if not project_name or not plan_lines:
+        return 0
+    from config import PROJECT_OUTPUT_DIR
+    from lesson_helpers import _apply_audio_hints
+    import prompt_memory
+    hit_lines = 0
+    for ln in plan_lines:
+        text = str(ln.get("text") or "")
+        # 键用 build_dub_plan 刚构建、尚未被预检自愈过的台词原文（TTS 实际输入），
+        # 保证 _record_audio_qc_lesson 里 phash 稳定、与自愈后的 text 不漂移。
+        ln.setdefault("audio_orig_text", text)
+        if not text:
+            continue
+        try:
+            hints = prompt_memory.suggest(kind="audio", prompt=text, project=project_name,
+                                          root_dir=PROJECT_OUTPUT_DIR)
+        except Exception:  # noqa: BLE001 - 召回失败绝不影响配音
+            hints = []
+        if not hints:
+            continue
+        ln["audio_hints"] = list(hints)
+        _apply_audio_hints(ln, hints, project_name)
+        hit_lines += 1
+    return hit_lines
 
 
 def _audio_qc_lines(project_name: str, lines: list, results: list, cfg: dict,

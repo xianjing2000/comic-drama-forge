@@ -79,3 +79,43 @@ def probe_media(path: str) -> Dict:
 def has_audio_stream(path: str) -> bool:
     """视频是否含音频流（ffprobe 实测，不猜测）"""
     return bool(probe_media(path).get("has_audio"))
+
+
+def probe_audio(path: str) -> Dict:
+    """读取音频流信息（时长/编码/采样率/声道/大小），按 codec_type 选 audio 流。
+
+    与 probe_media 不同，本函数只关心音频流：即使媒体同时含视频流，也按
+    codec_type=="audio" 选流，绝不误取 streams[0]（可能是 video 流）——这正是
+    tts_client.probe_audio 曾踩过的坑（t6 P2：取 streams[0] 把视频流当音频，
+    导致含视频媒体的 codec/sample_rate/channels 全错）。返回结构与 tts_client.probe_audio
+    对齐：{ok, duration, codec, sample_rate, channels, size_bytes, size_mb, error}。
+    任何异常都落到 info.error，不抛出。
+    """
+    info = {"path": os.path.abspath(path) if path else "", "ok": False}
+    if not path or not os.path.exists(path):
+        info["error"] = "文件不存在"
+        return info
+    info["size_bytes"] = os.path.getsize(path)
+    info["size_mb"] = round(info["size_bytes"] / 1048576, 3)
+    cmd = ["ffprobe", "-v", "error", "-show_entries",
+           "format=duration:stream=codec_type,codec_name,sample_rate,channels",
+           "-of", "json", path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        if r.returncode != 0:
+            info["error"] = (r.stderr or "ffprobe 失败").strip()[:200]
+            return info
+        d = json.loads(r.stdout or "{}")
+        fmt = d.get("format") or {}
+        audios = [s for s in (d.get("streams") or []) if s.get("codec_type") == "audio"]
+        st = audios[0] if audios else {}
+        info.update({
+            "ok": True,
+            "duration": round(float(fmt.get("duration") or 0), 3),
+            "codec": st.get("codec_name"),
+            "sample_rate": st.get("sample_rate"),
+            "channels": st.get("channels"),
+        })
+    except Exception as e:  # pragma: no cover - 环境相关
+        info["error"] = f"{type(e).__name__}: {e}"
+    return info

@@ -266,9 +266,9 @@ app.register_blueprint(script_api_bp)
 from routes.assets_api import assets_api_bp  # noqa: E402
 app.register_blueprint(assets_api_bp)
 
-# 2026-10-11 助手下沉：音效隔离（新模块） 已迁至 sfx_helpers.py。
-from sfx_helpers import (  # noqa: F401, E402
-    _isolate_shot_sfx)
+# 2026-10-12（t41）：`_isolate_shot_sfx` 经实测**零调用方**，已作为死代码从
+# sfx_helpers.py 删除（该文件保留 `None` 占位以兼容任何遗留 re-export）。
+# 此处不再转出该名字 —— 保留它只会让「死代码」看起来像活的。
 from routes.assets_api import _OUTFIT_PROMPT_MARK  # noqa: F401, E402
 from routes.assets_api import (
     api_generate_assets, api_character_upload_sheet, api_character_outfit_generate,
@@ -873,35 +873,11 @@ from job_state import dub_lock  # noqa: F401  2026-10-11 归位到 job_state
 # 两者都**不阻断生成**：整集生产不能被单句质检拖死，结论如实记录、逐句可定位即可。
 
 
-def _apply_audio_lessons(plan_lines: list, project_name: str) -> int:
-    """配音计划构建后、逐句合成前的音频教训召回（设计 §2.3.2）。
-
-    对每句按 ``kind="audio"`` 召回历史教训（键 = 该句 text）：
-      - ``ln["audio_hints"]`` 只存审计，**绝不进台词**；
-      - 调 ``_apply_audio_hints`` 做计划级纠偏（说话人回填 / preset→design / 期望时长）。
-    无教训时零行为变更；召回失败静默忽略（保险不影响配音）。返回产生 hints 的句数。
-    """
-    if not project_name or not plan_lines:
-        return 0
-    hit_lines = 0
-    for ln in plan_lines:
-        text = str(ln.get("text") or "")
-        # 键用 build_dub_plan 刚构建、**尚未被预检自愈过**的台词原文（TTS 实际输入），
-        # 保证 _record_audio_qc_lesson 里 phash 稳定、与自愈后的 text 不漂移。
-        ln.setdefault("audio_orig_text", text)
-        if not text:
-            continue
-        try:
-            hints = prompt_memory.suggest(kind="audio", prompt=text, project=project_name,
-                                          root_dir=PROJECT_OUTPUT_DIR)
-        except Exception:  # noqa: BLE001 - 召回失败绝不影响配音
-            hints = []
-        if not hints:
-            continue
-        ln["audio_hints"] = list(hints)
-        _apply_audio_hints(ln, hints, project_name)
-        hit_lines += 1
-    return hit_lines
+# 2026-10-12（t41，架构约定）：本函数**已下沉**至 workers/audio.py ——
+# 这里的实现是 app.py 最后一段残留的实质业务逻辑（t11 架构审查点名项），
+# 现改为**再导出**。调用方 pipeline.py 通过 `A._apply_audio_lessons(...)` 访问，
+# 因此必须保留同名再导出（t32 的教训：删中转名会让调用方 ImportError/AttributeError）。
+from workers.audio import _apply_audio_lessons  # noqa: F401, E402
 
 
 # ===================== 参考音频克隆角色声线（2026-10-06） =====================
