@@ -515,6 +515,8 @@ def load_config(config_path: str, legacy_path: str = None) -> dict:
     for m in MODULES:
         _m = _normalize_module(modules.get(m))
         _m["fallbacks"] = _normalize_fallbacks((modules.get(m) or {}).get("fallbacks") if isinstance(modules.get(m), dict) else [], m)
+        # ⭐ t110：model_fallbacks 归一化（t74 遗漏 → 保存后读回丢失，用户「保存后看不到」的根因③）
+        _m["model_fallbacks"] = _normalize_model_fallbacks((modules.get(m) or {}).get("model_fallbacks") if isinstance(modules.get(m), dict) else [])
         cfg["modules"][m] = _m
     if raw.get("migrated_from"):
         cfg["migrated_from"] = str(raw["migrated_from"])
