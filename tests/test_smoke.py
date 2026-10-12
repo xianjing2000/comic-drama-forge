@@ -9,9 +9,13 @@
 当时的验证只 grep 了这个词"文件里出现过"，没验证"能不能真解析到"。
 这个测试用 ast 遍历所有 raise，逐一确认异常类在模块命名空间里存在 ——
 同类错误以后再犯会立刻被拦下。
+
+⚠️ 2026-10-12（t48）：_MODULES 由手工清单改为**自动收集** app/*.py（排除入口/私有），
+新模块自动纳入冒烟范围，不再手工维护清单。
 运行：python -m unittest discover -s tests -v
 """
 import ast
+import builtins
 import os
 import sys
 import unittest
@@ -19,15 +23,30 @@ import unittest
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _APP = os.path.join(os.path.dirname(_HERE), 'app')
 sys.path.insert(0, _APP)
+os.environ.setdefault("MJSCXT_AUTOPILOT", "0")  # 防止 import autopilot 拉起托管线程
 
-_BUILTIN_OK = {'Exception', 'ValueError', 'RuntimeError', 'TypeError', 'KeyError',
-               'OSError', 'StopIteration', 'IndexError', 'AttributeError',
-               'NotImplementedError', 'AssertionError', 'ImportError', 'IOError'}
+#: 内置异常名（含 PermissionError / FileNotFoundError 等 OSError 子类）。
+#: 用 builtins 动态枚举，避免「新模块 raise 某个标准内置异常」时漏登记而误报。
+_BUILTIN_OK = set(dir(builtins))
 
-#: 需要检查的模块（覆盖本次改动过的全部；可逐步扩大）
-_MODULES = ['common_util', 'paths', 'config_center', 'config_doctor', 'novel_parser',
-            'novel_to_script', 'pipeline', 'autopilot', 'continuity', 'coverage',
-            'qc_client', 'llm_client']
+#: 自动收集 app/ 顶层模块；排除入口/WSGI 服务器（import 会启动服务）与私有（_ 开头）。
+_AUTO_EXCLUDE = {"app", "serve"}
+
+
+def _auto_modules():
+    """返回 app/ 顶层 .py 模块名（排除了入口与私有模块）。"""
+    mods = []
+    for fn in sorted(os.listdir(_APP)):
+        if not fn.endswith(".py") or fn.startswith("_"):
+            continue
+        name = fn[:-3]
+        if name in _AUTO_EXCLUDE:
+            continue
+        mods.append(name)
+    return mods
+
+
+_MODULES = _auto_modules()
 
 
 def _unresolvable_raises(module_name):

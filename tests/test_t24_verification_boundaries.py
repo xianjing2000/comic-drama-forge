@@ -166,6 +166,23 @@ class S2_SilentSwallowScan(unittest.TestCase):
         names = [getattr(h, "id", getattr(h, "attr", "")) for h in handlers]
         return "Exception" in names or "BaseException" in names
 
+    @staticmethod
+    def _enclosing_func(tree, lineno):
+        """返回 lineno 所在的最内层函数名（无则 "<module>"）。
+
+        用于把「宽 except + 零日志 + 字面量真值 return」白名单从脆弱的
+        「文件:行号」改成「文件:函数名」语义键 —— 上游重构移动行号不再误报，
+        真正新增的静默吞异常（新函数）仍会被拦。
+        """
+        best = None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                end = getattr(node, "end_lineno", node.lineno)
+                if node.lineno <= lineno <= end:
+                    if best is None or node.lineno > best.lineno:
+                        best = node
+        return best.name if best else "<module>"
+
     def test_scan_finds_the_codebase(self):
         self.assertGreater(len(list(self._iter_files())), 30, "扫描范围过小")
 
@@ -316,27 +333,30 @@ class S2_SilentSwallowScan(unittest.TestCase):
                     # 交给人工 review，不在这里拦。
                     fake = isinstance(v, ast.Constant) and bool(v.value)
                     if fake:
-                        suspicious.append("%s:%d" % (os.path.relpath(path, _ROOT), sub.lineno))
-        #: 2026-10-12 已逐个人工核对的**有意 fallback**（都返回字面量真值、都不打日志）：
-        #:   agent_core.py:97        取不到 chat 字段清单 → 回硬编码清单（设计如此）
-        #:   config_center.py:151    范围校验解析失败 → 判「在范围内」（宽松兜底）
-        #:   degradation.py:101      统计格式化失败 → 返回占位文案（展示用）
-        #:   schema.py:146           读 units 失败 → 描述为「表不存在」（**迁移状态描述**，
-        #:                           不是成功标志，属误读风险最低的一类）
-        #:   task_lease.py:178       判不出进程存活 → 判「活着」，避免误抢别人的活（安全侧）
-        #:   tts_client.py:423       读不到默认参数 → 按「开启」处理（与模块默认一致）
+                        rel = os.path.relpath(path, _ROOT)
+                        fname = self._enclosing_func(tree, sub.lineno)
+                        suspicious.append("%s:%s" % (rel, fname))
+        #: 2026-10-12 已逐个人工核对的**有意 fallback**（都返回字面量真值、都不打日志）。
+        #: ⭐ 2026-10-12 晚（t48 根治）：白名单键从「文件:行号」改为「文件:函数名」语义指纹，
+        #:   上游重构移动行号不再误报（今晚已因行号漂移误报两次）。语义键如下：
+        #:   agent_core.py:_settings_keys_hint   取不到 chat 字段清单 → 回硬编码清单
+        #:   config_center.py:_in_range          范围校验解析失败 → 判「在范围内」
+        #:   degradation.py:summary_line         统计格式化失败 → 返回占位文案
+        #:   schema.py:_migrate_units_fk         读 units 失败 → 「表不存在」（迁移状态描述）
+        #:   task_lease.py:_pid_alive            判不出进程存活 → 判「活着」（安全侧）
+        #:   tts_client.py:_emotion_aware        读不到默认参数 → 按「开启」处理
         #:   video_postprocess.py:99 —— ⭐ 2026-10-12 **已修（t13/B4）**：`except Exception`
         #:                           已补 `logger.warning`（含异常类型），fail-open 仍 `return True`。
         #:                           故它**不再**属于「零日志」形态，已从白名单移除；
         #:                           若哪天 warning 被删掉，本断言会把它重新判红（回归护栏）。
         #: 只允许这 6 处；新增任何一处都会让本断言变红。
         known_silent = {
-            "app/agent_core.py:97",
-            "app/config_center.py:151",
-            "app/degradation.py:101",
-            "app/schema.py:146",
-            "app/task_lease.py:178",
-            "app/tts_client.py:423",
+            "app/agent_core.py:_settings_keys_hint",
+            "app/config_center.py:_in_range",
+            "app/degradation.py:summary_line",
+            "app/schema.py:_migrate_units_fk",
+            "app/task_lease.py:_pid_alive",
+            "app/tts_client.py:_emotion_aware",
         }
         got = {p.replace(chr(92), '/') for p in suspicious}
         self.assertEqual(
