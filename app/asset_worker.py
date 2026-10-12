@@ -1590,6 +1590,25 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 # 成功走参考图链路或本就不适用时不写，保持结果形状零回归）。
                 if _item_degraded:
                     _asset_result["degraded"] = True
+                # T3（2026-10-12）：物品资产入库即**钉住固定参考图** —— 把 base.png 的文件号
+                # 与 sha256 写进 base.meta.json 的 ref_* 字段（只写元数据、不重生成任何图）。
+                # 分镜侧 resolve_item_reference 据此在任何镜头都取到同一张图。
+                if str(asset_type) == "item":
+                    try:
+                        _pin = pin_item_reference(project_name, name)
+                        if _pin.get("sha256"):
+                            _asset_result["fixed_ref"] = {
+                                "file": _pin.get("file"),
+                                "sha256": _pin.get("sha256"),
+                                "identity": item_ref_identity(
+                                    os.path.join(asset_dir, str(_pin.get("file") or "")), project_name),
+                                "changed": bool(_pin.get("changed")),
+                            }
+                        elif _pin.get("error"):
+                            _asset_result["fixed_ref"] = {"error": _pin["error"]}
+                    except Exception as _pin_e:  # noqa: BLE001 —— 钉住失败不影响入库
+                        logger.warning("[道具固定参考图] %s/%s 钉住失败（不影响入库）：%s: %s",
+                                       project_name, name, type(_pin_e).__name__, _pin_e)
                 results.append(_asset_result)
 
             except Exception as _asset_err:  # noqa: BLE001
@@ -1642,3 +1661,456 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
     _maybe_reclaim_comfyui_output()   # D-11a：任务收尾滚动回收 ComfyUI 重试残留（节流+全容错）
     _maybe_clear_comfyui_history("资产批量生成收尾")
 
+
+# ===================== 道具固定参考图复用（T3，2026-10-12） =====================
+#
+# 背景（用户 2026-10-12 成片质检报告）：「文字类道具（员工卡 / 楼层安全守则）在不同镜头里
+# 长得不一样」——同一个道具在剧本里反复出现，分镜侧却各镜各取一张图。
+#
+# 实测证据（2026-10-12，进境_整本小说 第1集真实产物）：
+#   · storyboard_manifest.json（60 镜）里，23 个带道具参考图的镜头，refs["道具"] 的取值
+#     **全是 "ref_canvas"** —— 那是「画幅统一」产物的目录名，既看不出用的是哪张图，
+#     也无法从产物反推「第 12 镜与第 26 镜用的是不是同一张员工卡」。
+#   · output/qc/<项目>/ref_canvas/ 下恰好 7 张 base_<sha1前8>_1664x928.png，按 sha1
+#     反查源码路径：4 张角色 base.png + 3 张道具 base.png（天合科技员工卡 / 楼层安全守则 /
+#     贴27号的无标签水瓶）——**每个道具只有一份统一产物**，说明这一批没有串图；
+#     但「没有串图」这件事此前无法从产物自证，只能靠反查哈希。
+#
+# 本节的职责（写侧 / 解算侧，与 storyboard_helpers 的读侧配合）：
+#   ① item_ref_identity：把资产路径归一成**稳定的身份串** items/<项目>/<道具>/base.png；
+#   ② pin_item_reference：为道具钉住一张固定参考图（默认 base.png），把文件号 + sha256 +
+#      字节数写进 base.meta.json 的 ref_* 字段。**只写元数据，不重生成任何图**（非目标）；
+#      幂等：同一张图重复 pin，内容一字不变（changed=False）。
+#   ③ resolve_item_reference：按「目录名精确 → 别名/近名 → 目录内首图」三级解析，
+#      保证**同一个道具名在任何镜头都解析到同一个文件**（脚本写「员工证」而资产目录叫
+#      「员工卡」这类情况也能落到同一张图）。
+#   ④ item_reference_report：一次汇总全项目的道具固定参考图（给日志/质检/排查用）。
+#
+# 为什么钉「文件」而不是钉「提示词」：分镜侧要的是**同一张输入图**（对齐参考图链路），
+# 提示词再一致也压不住两张不同的参考图带来的外观漂移。
+
+#: 写进道具 meta 的固定参考图字段（前缀 ref_ 统一，便于一次读取/一次核对）
+ITEM_REF_FIELDS = ("ref_file", "ref_sha256", "ref_bytes", "ref_pinned_at", "ref_project")
+
+#: 默认固定参考图文件名（与资产生成产出一致；改这里等于改全项目的道具锚点口径）
+ITEM_REF_DEFAULT_FILE = "base.png"
+
+#: 道具 meta 旁路文件的两种历史命名（新写入统一用 base.meta.json —— 与
+#: storyboard_helpers._write_artifact_meta 的 splitext(artifact)[0] + ".meta.json" 同口径）
+ITEM_REF_META_NAMES = ("base.meta.json", "base.png.meta.json")
+
+
+def item_asset_dir(project_name: str, item_name: str) -> str:
+    """道具资产目录绝对路径：<ITEMS_DIR>/<项目>/<道具>（不做存在性判断）。"""
+    return os.path.join(ITEMS_DIR, str(project_name or "").strip(), str(item_name or "").strip())
+
+
+def item_ref_identity(path, project_name: str = "") -> str:
+    """把任意资产路径归一成**稳定的资产身份串**：<kind>/<项目>/<名称>[/<文件>]。
+
+    - 只认三类资产根（items / characters / scenes）；不在资产根下 → 返回空串
+      （调用方自行回落旧口径，如「目录名」）。
+    - project_name 给定时只接受该项目下的路径（防跨项目串图）。
+    - 身份串**与绝对路径无关**：换机器、换输出根（桌面版 vs 便携版）都是同一个身份 ——
+      这正是「同一道具在跨镜头分镜中引用的参考图路径稳定一致」可比对的前提。
+    """
+    p = os.path.abspath(str(path or ""))
+    if not p:
+        return ""
+    want = str(project_name or "").strip()
+    for kind, root in (("items", ITEMS_DIR), ("characters", CHARACTERS_DIR), ("scenes", SCENES_DIR)):
+        try:
+            root_abs = os.path.abspath(root)
+            if os.path.normcase(p) == os.path.normcase(root_abs):
+                continue
+            rel = os.path.relpath(p, root_abs)
+        except (TypeError, ValueError):
+            continue
+        if os.path.isabs(rel) or rel == ".." or rel.startswith(".." + os.sep):
+            continue
+        parts = [x for x in rel.replace("\\", "/").split("/") if x]
+        if not parts:
+            continue
+        if want and parts[0] != want:
+            continue
+        return "/".join([kind] + parts)
+    return ""
+
+
+def _item_meta_path(asset_dir: str) -> str:
+    """道具旁路元数据路径：优先已存在的历史命名，否则用 base.meta.json（新写入口径）。"""
+    for name in ITEM_REF_META_NAMES:
+        p = os.path.join(asset_dir, name)
+        if os.path.isfile(p):
+            return p
+    return os.path.join(asset_dir, ITEM_REF_META_NAMES[0])
+
+
+def read_item_meta(asset_dir: str) -> dict:
+    """读道具旁路元数据（fail-open：缺失/损坏一律返回 {}，绝不抛）。"""
+    try:
+        p = _item_meta_path(asset_dir)
+        if not os.path.isfile(p):
+            return {}
+        import json as _json_meta
+        with open(p, encoding="utf-8") as f:
+            data = _json_meta.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("道具元数据读取失败（按无元数据处理）：%s: %s", type(e).__name__, e)
+        return {}
+
+
+# ===================== 项目级道具别名表（t16，2026-10-12） =====================
+#
+# 【为什么是别名表，而不是放宽近名匹配】
+#   t3 定的原则是「找不到就报错，绝不猜」——猜错＝给道具挂错图，比不挂更糟。实测里
+#   剧本把同一个物件写成两种名字（进境_整本小说 第1集.json：员工证 26 次 / 员工卡 38 次），
+#   而资产目录只有一个名（天合科技员工卡）。这不是「近名」，是**同名异写**：
+#   卡片正面印的字就是「员工证」（items[].surface_text），叙述与资产目录却叫「员工卡」。
+#   这类差异必须由人**显式登记**（含来源与理由），不能交给相似度算法自动判定 ——
+#   所以这里落地成配置表，算法侧一字不改（仍然「查不到就返回空串」）。
+#
+# 【登记规则（改动本表前必读）】
+#   ① 只在**有剧本/原文证据**证明是同一物件时登记（见每条 source）；
+#   ② target 必须是**已存在的资产目录名** —— 表里有、目录没有，仍然报错（不猜）；
+#   ③ 宁可不登记：未登记的别名走原有近名匹配，匹配不上就报错（见 test 用例）；
+#   ④ 项目级：不同项目的同名道具互不干扰（表按项目分包）。
+
+#: 内嵌别名表（打包 exe 的 datas 不含 app/*.json，故代码内必须有一份；与文件覆盖合并）
+#: 结构：{项目: {别名: {"target", "source", "reason"}}}
+ITEM_ALIAS_TABLE = {
+    "进境_整本小说": {
+        "员工证": {
+            "target": "天合科技员工卡",
+            "source": "output/scripts/进境_整本小说/第1集.json：全文 26 处；items[0].surface_text="
+                      "「天合科技 姓名 羡进 员工证，请勿转借」（卡片正面印的字就是「员工证」）",
+            "reason": "同一物件的两种写法：卡面印刷文字用「员工证」，叙述与资产目录名用「员工卡」。"
+                      "用户反馈「工牌前后不一致」的机制性根源之一。",
+        },
+        "天合科技员工证": {
+            "target": "天合科技员工卡",
+            "source": "同上（带公司前缀的写法；资产目录名 = 天合科技员工卡）",
+            "reason": "带前缀的同一物件写法，与资产目录名仅差「证/卡」一字。",
+        },
+        "员工卡": {
+            "target": "天合科技员工卡",
+            "source": "output/scripts/进境_整本小说/第1集.json：全文 38 处（叙述口径）",
+            "reason": "叙述主用名。此前靠 asset_name_match 近名匹配命中，改为显式登记（不再依赖相似度）。",
+        },
+        "蓝色员工卡": {
+            "target": "天合科技员工卡",
+            "source": "output/scripts/进境_整本小说/第1集.json shot#56 description「蓝色员工卡正面向外」，"
+                      "该镜 items_in_shot=['天合科技员工卡']",
+            "reason": "带颜色限定词的同一物件；剧本里该镜已把它挂在天合科技员工卡槽位。",
+        },
+        "工牌": {
+            "target": "天合科技员工卡",
+            "source": "output/scripts/进境_整本小说/第1集.json：全文 57 处；shot#55 items_in_shot="
+                      "['天合科技员工卡'] 而 description 写「她左胸工牌已由蓝色变为红色」；"
+                      "t1 canon 已判定「员工卡」与「工牌」同义（不作冲突）",
+            "reason": "剧本把「工牌」与「天合科技员工卡」挂在同一道具槽位（shot#55/56/57），"
+                      "登记为同一物件的别名。",
+        },
+        "守则纸": {
+            "target": "楼层安全守则",
+            "source": "output/scripts/进境_整本小说/第1集.json shot#27 description「羡进的手把守则纸翻面」，"
+                      "该镜 items_in_shot=['楼层安全守则']",
+            "reason": "剧本叙述里把守则称作「守则纸」，与资产目录名「楼层安全守则」同一物件。",
+        },
+        "守则": {
+            "target": "楼层安全守则",
+            "source": "同上（视觉锚点里大量写作「守则第N次」）",
+            "reason": "简称，与资产目录名同一物件。",
+        },
+    },
+}
+
+#: 别名表**不登记**的词（含不登记的理由）—— 与上面的规则③呼应：宁可不登记也不误挂。
+ITEM_ALIAS_REJECTS = {
+    "红色工牌": "指**红工牌女人左胸**那张牌（另一角色持有的物件，且颜色不同），"
+                "与羡进的蓝色员工卡不是同一份资产；挂同一张图会造成「工牌前后不一致」。"
+                "剧本 shot#55 虽把它写进同一槽位，但那是剧本层的归槽，资产层不据此建别名。",
+    "红工牌": "同上。",
+    "红底工牌": "同上。",
+}
+
+#: 项目级别名覆盖文件（可选）：<ITEMS_DIR>/<项目>/item_aliases.json
+#: 形如 {"别名": {"target": "...", "source": "...", "reason": "..."}}
+#: 存在则与内嵌表合并（**文件优先**，便于不改代码补登记）；缺失/损坏一律 fail-open。
+ITEM_ALIAS_FILE_NAME = "item_aliases.json"
+
+
+def _item_alias_file(project_name: str) -> str:
+    return os.path.join(ITEMS_DIR, str(project_name or "").strip(), ITEM_ALIAS_FILE_NAME)
+
+
+def load_item_aliases(project_name: str) -> dict:
+    """项目道具别名表（内嵌 + 项目文件覆盖，文件优先；fail-open）。"""
+    project = str(project_name or "").strip()
+    merged = {}
+    for alias, spec in (ITEM_ALIAS_TABLE.get(project) or {}).items():
+        if isinstance(spec, dict) and spec.get("target"):
+            merged[str(alias)] = dict(spec)
+    p = _item_alias_file(project)
+    if project and os.path.isfile(p):
+        try:
+            import json as _json_alias
+            with open(p, encoding="utf-8") as f:
+                data = _json_alias.load(f)
+            for alias, spec in (data or {}).items():
+                if isinstance(spec, dict) and spec.get("target"):
+                    merged[str(alias)] = dict(spec)
+                elif isinstance(spec, str) and spec.strip():
+                    merged[str(alias)] = {"target": spec.strip(), "source": p,
+                                          "reason": "项目文件登记（简写形式）"}
+        except Exception as e:  # noqa: BLE001 —— 覆盖文件坏了不该让解析失败
+            logger.warning("道具别名覆盖文件读取失败（只用内嵌表）：%s: %s", type(e).__name__, e)
+    return merged
+
+
+def resolve_item_alias(project_name: str, item_name: str) -> dict:
+    """查**显式登记**的道具别名（只查表，不算相似度）。
+
+    返回 {"alias", "target", "source", "reason", "exists"}；未登记 → target=""。
+    exists 表示该 target 目录是否真的存在于本项目资产里（不存在时不算命中，仍报错不猜）。
+    """
+    project = str(project_name or "").strip()
+    want = str(item_name or "").strip()
+    out = {"alias": want, "target": "", "source": "", "reason": "", "exists": False}
+    if not project or not want:
+        return out
+    spec = load_item_aliases(project).get(want)
+    if not spec:
+        return out
+    target = str(spec.get("target") or "").strip()
+    if not target:
+        return out
+    out.update({"target": target, "source": str(spec.get("source") or ""),
+                "reason": str(spec.get("reason") or "")})
+    out["exists"] = os.path.isdir(os.path.join(ITEMS_DIR, project, target))
+    return out
+
+
+def item_alias_report(project_name: str) -> dict:
+    """项目道具别名总览（只读；给日志 / 质检 / 排查用）。"""
+    project = str(project_name or "").strip()
+    table = load_item_aliases(project)
+    rows = []
+    for alias in sorted(table):
+        spec = table[alias]
+        target = str(spec.get("target") or "")
+        rows.append({"alias": alias, "target": target,
+                     "exists": os.path.isdir(os.path.join(ITEMS_DIR, project, target)) if target else False,
+                     "source": str(spec.get("source") or ""), "reason": str(spec.get("reason") or "")})
+    return {"project": project, "aliases": rows,
+            "rejects": dict(ITEM_ALIAS_REJECTS), "file": _item_alias_file(project)}
+
+
+def match_item_asset_name(project_name: str, item_name: str) -> str:
+    """把剧本里的道具名解析成**资产目录名**（精确 → 显式别名表 → 归一化近名 → 空串）。
+
+    例：脚本写「员工证」而资产目录叫「天合科技员工卡」时，显式别名表（t16）命中；
+    别名表也没登记、近名也匹配不上时返回空串，由调用方决定回落策略（绝不猜一个不存在的目录）。
+    """
+    base = os.path.join(ITEMS_DIR, str(project_name or "").strip())
+    want = str(item_name or "").strip()
+    if not want or not os.path.isdir(base):
+        return ""
+    try:
+        names = [d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))]
+    except OSError:
+        return ""
+    for d in names:
+        if d == want:
+            return d
+    # 显式别名表（t16）：登记了且 target 目录真实存在才算命中 —— 登记了但资产没生成时，
+    # 仍然走「找不到」（不猜、不回落到一个不存在的目录）。
+    alias = resolve_item_alias(str(project_name or "").strip(), want)
+    if alias.get("target") and alias.get("exists"):
+        logger.info("[道具别名] %s：%s → %s（显式登记）", project_name, want, alias["target"])
+        return alias["target"]
+    if alias.get("target") and not alias.get("exists"):
+        logger.warning("[道具别名] %s：别名 %s → %s 已登记，但资产目录不存在（按找不到处理）",
+                       project_name, want, alias["target"])
+    try:
+        index = {asset_name_match.normalize(d): d for d in names}
+        hit, _score = asset_name_match.match(want, index, kind="item")
+        if hit:
+            return index.get(asset_name_match.normalize(hit)) or hit
+    except Exception as e:  # noqa: BLE001 —— 近名匹配失败不阻断，回落「找不到」
+        logger.warning("道具近名匹配失败（%s vs %s）：%s: %s", project_name, want, type(e).__name__, e)
+    return ""
+
+
+def resolve_item_reference(project_name: str, item_name: str) -> dict:
+    """解析道具的**固定参考图**（读侧，任何镜头都用这一个入口）。
+
+    返回 {"requested", "name", "dir", "path", "identity", "file", "pinned", "source", "error"}：
+      · source="meta"  → 用了 meta 里 pin 住的 ref_file（换过图也仍指向同一文件）；
+      · source="base"  → 无 pin，回落到约定的 base.png；
+      · source="first" → 连 base.png 都没有，回落「目录内首图」（_ASSET_IMG_PRIORITY 顺序）；
+      · path=""  → 该项目里找不到这个道具（调用方按「无参考图」处理，不要自己编路径）。
+    """
+    project = str(project_name or "").strip()
+    want = str(item_name or "").strip()
+    out = {"requested": want, "name": "", "dir": "", "path": "", "identity": "",
+           "file": "", "pinned": False, "source": "", "error": "", "via_alias": "",
+           "alias_source": "", "alias_reason": ""}
+    if not project or not want:
+        out["error"] = "项目名或道具名为空"
+        return out
+    base = os.path.join(ITEMS_DIR, project)
+    if not os.path.isdir(base):
+        out["error"] = "项目道具目录不存在"
+        return out
+    # 别名命中留痕（验收可核对：请求名 ≠ 资产目录名时 via_alias 非空）
+    _alias = resolve_item_alias(project, want)
+    if _alias.get("target") and _alias.get("exists"):
+        out.update({"via_alias": _alias["target"], "alias_source": _alias.get("source") or "",
+                    "alias_reason": _alias.get("reason") or ""})
+    name = match_item_asset_name(project, want)
+    if not name:
+        out["error"] = "道具在项目资产里找不到（不做模糊猜测）"
+        return out
+    asset_dir = os.path.join(base, name)
+    out["name"] = name
+    out["dir"] = os.path.abspath(asset_dir)
+    meta = read_item_meta(asset_dir)
+    ref_file = str(meta.get("ref_file") or "").strip()
+    if ref_file:
+        p = os.path.join(asset_dir, ref_file)
+        if os.path.isfile(p) and os.path.getsize(p) > 0:
+            out.update({"path": os.path.abspath(p), "file": ref_file, "pinned": True, "source": "meta"})
+            out["identity"] = item_ref_identity(out["path"], project)
+            return out
+        out["error"] = "meta 里 pin 的参考图不存在（回落 base.png）"
+    p = os.path.join(asset_dir, ITEM_REF_DEFAULT_FILE)
+    if os.path.isfile(p) and os.path.getsize(p) > 0:
+        out.update({"path": os.path.abspath(p), "file": ITEM_REF_DEFAULT_FILE, "source": "base"})
+        out["identity"] = item_ref_identity(out["path"], project)
+        return out
+    first = ""
+    try:
+        first = _first_existing_asset_image(asset_dir) or ""
+    except Exception as e:  # noqa: BLE001
+        out["error"] = "目录内首图解析失败：%s: %s" % (type(e).__name__, e)
+    if first:
+        out.update({"path": os.path.abspath(first), "file": os.path.basename(first), "source": "first"})
+        out["identity"] = item_ref_identity(out["path"], project)
+        return out
+    if not out["error"]:
+        out["error"] = "道具目录内没有可用参考图"
+    return out
+
+
+def _now_stamp() -> str:
+    from datetime import datetime
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def pin_item_reference(project_name: str, item_name: str, image_path: str = None) -> dict:
+    """把某个道具的参考图**钉住**（幂等；只写元数据，不生成/不修改任何图）。
+
+    image_path 为空时钉 base.png（即资产产出的那张）；显式传路径时钉该文件 —— 调用方
+    可用它把「历史上被替换掉的那张图」重新钉回去。
+    """
+    out = {"project": str(project_name or "").strip(), "item": str(item_name or "").strip(),
+           "file": "", "sha256": "", "bytes": 0, "meta": "", "changed": False, "pinned": False,
+           "error": ""}
+    resolved = resolve_item_reference(project_name, item_name)
+    if not resolved.get("path") and not image_path:
+        out["error"] = resolved.get("error") or "道具参考图不存在"
+        return out
+    asset_dir = resolved.get("dir") or item_asset_dir(project_name, resolved.get("name") or item_name)
+    path = os.path.abspath(str(image_path or resolved.get("path") or ""))
+    if not os.path.isfile(path) or os.path.getsize(path) <= 0:
+        out["error"] = "参考图文件不可用（缺失或空文件）"
+        return out
+    try:
+        import hashlib
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        sha = digest.hexdigest()
+    except OSError as e:
+        out["error"] = "参考图哈希失败：%s: %s" % (type(e).__name__, e)
+        return out
+    meta_path = _item_meta_path(asset_dir)
+    meta = read_item_meta(asset_dir)
+    wanted = {"ref_file": os.path.basename(path), "ref_sha256": sha,
+              "ref_bytes": int(os.path.getsize(path)), "ref_project": out["project"]}
+    changed = any(str(meta.get(k) or "") != str(v) for k, v in wanted.items())
+    out.update({"file": wanted["ref_file"], "sha256": sha, "bytes": wanted["ref_bytes"],
+                "meta": os.path.abspath(meta_path), "pinned": True})
+    if not changed:
+        return out
+    meta.update(wanted)
+    meta["ref_pinned_at"] = _now_stamp()
+    try:
+        from fs_atomic import atomic_write_json
+        atomic_write_json(meta_path, meta)
+    except Exception as e:  # noqa: BLE001 —— 原子写失败时回落普通写，仍失败则只报错
+        try:
+            import json as _json_pin
+            os.makedirs(asset_dir, exist_ok=True)
+            with open(meta_path, "w", encoding="utf-8") as f:
+                _json_pin.dump(meta, f, ensure_ascii=False, indent=2)
+        except Exception as e2:  # noqa: BLE001
+            out["pinned"] = False
+            out["error"] = "元数据写入失败：%s: %s / %s: %s" % (type(e).__name__, e, type(e2).__name__, e2)
+            return out
+    out["changed"] = True
+    logger.info("[道具固定参考图] %s/%s 已钉住 %s（sha256 %s…，%d bytes）",
+                out["project"], resolved.get("name") or out["item"], out["file"], sha[:12], out["bytes"])
+    return out
+
+
+def pin_project_item_references(project_name: str) -> dict:
+    """把整个项目的道具参考图钉一遍（幂等；已有 pin 且哈希一致时零写入）。"""
+    project = str(project_name or "").strip()
+    base = os.path.join(ITEMS_DIR, project)
+    out = {"project": project, "total": 0, "pinned": 0, "changed": 0, "items": [], "error": ""}
+    if not os.path.isdir(base):
+        out["error"] = "项目道具目录不存在"
+        return out
+    try:
+        names = sorted(d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d)))
+    except OSError as e:
+        out["error"] = "目录列举失败：%s: %s" % (type(e).__name__, e)
+        return out
+    for name in names:
+        info = pin_item_reference(project, name)
+        out["total"] += 1
+        out["items"].append({"item": name, "file": info.get("file"), "sha256": info.get("sha256"),
+                             "changed": bool(info.get("changed")), "error": info.get("error") or ""})
+        if info.get("pinned"):
+            out["pinned"] += 1
+        if info.get("changed"):
+            out["changed"] += 1
+    logger.info("[道具固定参考图] 项目 %s：%d 个道具，%d 个已钉住（本次写入 %d 个）",
+                project, out["total"], out["pinned"], out["changed"])
+    return out
+
+
+def item_reference_report(project_name: str) -> dict:
+    """项目道具固定参考图总览（只读；给日志 / 质检 / 排查用）。"""
+    project = str(project_name or "").strip()
+    base = os.path.join(ITEMS_DIR, project)
+    out = {"project": project, "items": [], "error": ""}
+    if not os.path.isdir(base):
+        out["error"] = "项目道具目录不存在"
+        return out
+    try:
+        names = sorted(d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d)))
+    except OSError as e:
+        out["error"] = "目录列举失败：%s: %s" % (type(e).__name__, e)
+        return out
+    for name in names:
+        r = resolve_item_reference(project, name)
+        out["items"].append({"item": r.get("name") or name, "file": r.get("file"),
+                             "identity": r.get("identity"), "source": r.get("source"),
+                             "pinned": r.get("pinned"), "path": r.get("path"),
+                             "error": r.get("error") or ""})
+    return out

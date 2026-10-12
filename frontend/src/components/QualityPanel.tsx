@@ -14,6 +14,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Badge, Button, Skeleton, EmptyState, ErrorState } from '@/components/ui';
 import { BarChart3, Mic, ClipboardCheck, BookOpen, Play, RefreshCw, AlertTriangle } from '@/components/ui/icons';
+import { useApp } from '@/context/AppContext';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 
 const cx = (...p: Array<string | false | null | undefined>): string => p.filter(Boolean).join(' ');
 
@@ -68,6 +70,7 @@ function Section({ icon, title, right, children }: {
 }
 
 export default function QualityPanel({ project, className }: { project: string; className?: string }) {
+  const { t } = useApp();
   const [novelId, setNovelId] = useState('');
   const [cov, setCov] = useState<CovEp[]>([]);
   const [cap, setCap] = useState<CaptionStatus | null>(null);
@@ -182,8 +185,20 @@ export default function QualityPanel({ project, className }: { project: string; 
           <Play className="mr-1.5 h-3.5 w-3.5" />执行校验</Button>}>
         {cons ? (
           <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-surface-2 p-2 text-xs leading-relaxed text-ink-2">{cons}</pre>
+        ) : consErr ? (
+          /* t27（F6）：错误与空态此前混在同一行 —— 报错时用户看到的是「暂无一致性报告」，
+             真正的失败原因只作为前缀一闪而过。这里把两种状态分开，并给失败态补重试。 */
+          <div className="flex items-start gap-3">
+            <span className="min-w-0 flex-1 text-xs text-danger-strong">
+              {sanitizeErrorMessage(consErr)}
+            </span>
+            <Button size="sm" variant="secondary" loading={busy === 'consistency'}
+                    onClick={() => void runConsistency()}>
+              {t('common.retry')}
+            </Button>
+          </div>
         ) : (
-          <div className="text-xs text-ink-3">{consErr || '暂无一致性报告，点「执行校验」生成。'}</div>
+          <div className="text-xs text-ink-3">{t('consistency.empty')}</div>
         )}
       </Section>
 

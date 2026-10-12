@@ -460,6 +460,11 @@ export interface VideoRetryBatchItem {
   path?: string;
   /** 可直接播放/下载的地址 */
   url?: string;
+  /**
+   * t17/t27：该镜返工后**实际**失效的产物清单（如 ["final","upscale"]）。
+   * 批量端点把单镜 payload 原样展开进 results，所以这里能直接读到。
+   */
+  outputs_invalidated?: string[];
   error?: string;
 }
 
@@ -766,6 +771,35 @@ export interface Deliverable {
       marked_at?: string;
       detail?: { shot_id?: string | number; seq?: number; mode?: string; video?: string };
     };
+    /**
+     * 成片音轨客观层结论（t19 起后端在 record_deliverable 时自动挂上）。
+     * check_speech_ratio 恒 false：成片天然有大段无台词留白，不做有声占比下限判定。
+     */
+    audio_qc?: {
+      available?: boolean;
+      passed?: boolean | null;
+      blocked?: boolean;
+      score?: number | null;
+      reason?: string;
+      check_speech_ratio?: boolean;
+      generated_at?: string;
+      silent_shot_count?: number;
+      metrics?: {
+        duration?: number;
+        mean_db?: number | null;
+        max_db?: number | null;
+        silence_sec?: number;
+        speech_ratio?: number | null;
+      };
+    };
+    /** ⭐ 无声镜号（整段无声的镜头）：验收页据此定位到具体镜头（t28 前端消费） */
+    audio_qc_silent_shots?: Array<{
+      shot_id?: string | number;
+      start?: number;
+      end?: number;
+      speech_ratio?: number;
+      silence_sec?: number;
+    }>;
   };
   /** 验收状态：pending 待验收 / accepted 已验收 / rejected 已打回 */
   review?: 'pending' | 'accepted' | 'rejected';

@@ -139,8 +139,14 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'llm_client.REASONING_ONLY_TOKEN_FLOOR',
     },
     'max_tokens_ceiling': {
-        'default': 32768, 'type': 'int', 'range': (1024, 200000), 'group': 'LLM',
-        'desc': 'max_tokens 硬上限',
+        # ⭐ 2026-10-12 T14：登记漂移修正 —— default 原为 32768，而 llm_client.py:99 的实际默认是 65536
+        #   （MAX_TOKENS_CEILING = int(os.environ.get("MJSCXT_MAX_TOKENS_CEILING", "65536") or 65536)），
+        #   于是**冷进程** doctor() 恒报「登记默认 32768 但实际 65536」→ ok=False
+        #   （只有在同进程内先跑过 config_center.apply_to_runtime() 把登记值回写进去才会变绿，掩盖了漂移）。
+        #   本任务按契约「以更新登记解决、不改 llm_client.py 的实际值」：default 改为 65536，
+        #   并把「可被环境变量覆盖」写进 desc。
+        'default': 65536, 'type': 'int', 'range': (1024, 200000), 'group': 'LLM',
+        'desc': 'max_tokens 硬上限（cli 侧可由环境变量 MJSCXT_MAX_TOKENS_CEILING 覆盖；代码默认 65536）',
         'owner': 'llm_client.MAX_TOKENS_CEILING',
     },
     # ---- 镜头时长 ----
@@ -185,6 +191,19 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'desc': ': 有效音频最短时长（秒），更短视为空文件 / 合成失败（硬闸）',
         'owner': 'audio_qc.MIN_VALID_DURATION',
     },
+    'near_silent_mean_db': {
+        # ⭐ 2026-10-12 T14 登记：本条与下面 'hard_silent_ratio' 是**同一静音判据的两个字段** ——
+        #   quality_stage.py:262-263 的 A 层判定是 or 表达式：
+        #     mean_db < AUDIO_NEAR_SILENT_DB  or  ratio < AUDIO_HARD_SILENT_RATIO
+        #   两个 dB 常量此前**没有登记**，而且 orphan_candidates() 的关键词表不认 DB 类后缀
+        #   → 永远不会被报孤儿（双盲区），只能人工登记 + 显式声明跨模块等值。
+        #   方向说明：owner 取 audio_qc（这个键是用户改的主键），复制点用 must_match 声明在
+        #   audio_near_silent_db 那条上；**不要双向声明**（apply_to_runtime 会按 REGISTRY 顺序
+        #   各写一遍，先写的会被后写的按自己的默认值覆盖回去，实测见 .local/t14_lockstep.txt）。
+        'default': -50.0, 'type': 'float', 'range': (-100.0, 0.0), 'group': '音频',
+        'desc': ': 平均电平低于此值 → 视为近乎无声（硬闸）；实测纯静音轨为 -91 dB',
+        'owner': 'audio_qc.NEAR_SILENT_MEAN_DB',
+    },
     'hard_silent_ratio': {
         'default': 0.15, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
         'desc': ': 有声占比低于此值 → 视为整段无声（硬闸）',
@@ -201,10 +220,24 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         #     ② 本 REGISTRY 已有 6 处 must_match 先例（:65/:71/:301/:317/:352/:573）；
         #     ③ 本文件 :43 的字段文档写明 must_match 就是「跨模块重复定义的显式声明」。
         #   实测（内存态试算，未改文件）：补上后 doctor ok=True、duplicates=0、warnings 无新增。
+        # ⭐ 2026-10-12 T14 续：这个 or 判据的**另一半**（dB）见下方 audio_near_silent_db ——
+        #   只锁 ratio 不锁 dB 会让 A 层「dB 判死、ratio 判活」，两半必须成对。
         'default': 0.15, 'type': 'float', 'range': (0.0, 1.0), 'group': '音频',
         'desc': 'quality_stage 判「整段硬性静音」的有声占比阈值（与 audio_qc 同口径，0~1）',
         'owner': 'quality_stage.AUDIO_HARD_SILENT_RATIO',
         'must_match': ['audio_qc.HARD_SILENT_RATIO'],
+    },
+    'audio_near_silent_db': {
+        # ⭐ 2026-10-12 T14：补齐上面那个 or 判据的**另一半**。
+        #   为什么必须成对：只锁 ratio 不锁 dB，A 层判定在「改了一处」之后会自相矛盾 ——
+        #   dB 判死、ratio 判活（quality_stage.py:262-263 是 or）。
+        #   语义依据：audio_qc.py:275-276「平均电平低于该值 → 整段近乎无声」，与
+        #   quality_stage.py:262 的 near 判定同义，只有作用域是「单段 / 整轨」。
+        #   方向与 ratio 那条一致：owner 是 quality_stage 侧，复制点 audio_qc 用 must_match 声明。
+        'default': -50.0, 'type': 'float', 'range': (-100.0, 0.0), 'group': '音频',
+        'desc': 'quality_stage 判「整段近乎无声」的平均电平阈值 dB（与 audio_qc 同口径）',
+        'owner': 'quality_stage.AUDIO_NEAR_SILENT_DB',
+        'must_match': ['audio_qc.NEAR_SILENT_MEAN_DB'],
     },
     'probe_timeout': {
         'default': 300, 'type': 'int', 'range': (0, 100000), 'group': '音频',

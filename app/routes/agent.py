@@ -16,7 +16,7 @@ import ai_config
 from config import AI_CHAT_HISTORY_PATH, AI_CONFIG_PATH, LLM_CONFIG_PATH, LLM_REQUEST_TIMEOUT
 from datetime import datetime
 from routes.ai import LLM_NOT_CONFIGURED_GUIDE_MAP, _chat_project, _chat_state
-from routes._shared import _ai_gate_or_400
+from routes._shared import _ai_gate_or_400, _friendly_error
 
 agent_bp = Blueprint('agent', __name__)
 
@@ -125,5 +125,7 @@ def api_agent_log():
                 except json.JSONDecodeError:
                     continue
         except Exception as e:  # noqa: BLE001
-            return jsonify({"success": False, "error": f"读取审计日志失败：{e}"}), 500
+            return jsonify({"success": False,
+                            "error": _friendly_error(f"读取审计日志失败：{e}",
+                                                     "读取审计日志失败，请稍后重试（详情见后端日志）")}), 500
     return jsonify({"success": True, "count": len(items), "items": items})

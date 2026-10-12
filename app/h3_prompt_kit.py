@@ -1614,11 +1614,22 @@ def _h3_canon_texts(shot: dict) -> list:
     _cap = shot.get("caption")
     if isinstance(_cap, dict) and _cap.get("text"):
         out.append(("caption.text", str(_cap["text"])))
-    for _i, _ln in enumerate(shot.get("dialogue") or []):
-        if isinstance(_ln, dict) and _ln.get("text"):
-            out.append((f"dialogue[{_i}].text", str(_ln["text"])))
-        elif isinstance(_ln, str) and _ln.strip():
-            out.append((f"dialogue[{_i}]", _ln))
+    _dlg = shot.get("dialogue")
+    if isinstance(_dlg, str):
+        # t19：裸字符串形态（上游生成链路偶尔会这样产出）—— 必须当作**一整条文本**。
+        # 若放任它落到下面的 enumerate，str 会被逐字符拆分（'七层楼' → '七'/'层'/'楼'），
+        # 于是「七层楼」这类禁写错形再也命中不到 → 纠错静默失效，且表现为「设定矛盾又出现」，
+        # 排查成本极高。真实剧本 145 镜当前 str 形态为 0（数据形态侥幸，不是代码正确），
+        # 修它是一行成本，留着它是将来的一次难查故障。
+        if _dlg.strip():
+            out.append(("dialogue", _dlg))
+    else:
+        # list / None / 其它形态：行为与修复前逐字一致（不得回归）
+        for _i, _ln in enumerate(_dlg or []):
+            if isinstance(_ln, dict) and _ln.get("text"):
+                out.append((f"dialogue[{_i}].text", str(_ln["text"])))
+            elif isinstance(_ln, str) and _ln.strip():
+                out.append((f"dialogue[{_i}]", _ln))
     for _k in ("items_in_shot", "characters_in_shot"):
         for _i, _n in enumerate(shot.get(_k) or []):
             if str(_n or "").strip():

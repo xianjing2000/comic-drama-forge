@@ -31,7 +31,8 @@ import threading
 from config import AI_SETTINGS_PATH, CHARACTERS_DIR, DUB_DIR, DUB_MIX_DIR, FINAL_DIR, ITEMS_DIR, KEYFRAMES_DIR, PROJECT_TRASH_DIR, QC_DIR, SCENES_DIR, SCRIPT_DIR, STORYBOARDS_DIR, VIDEOS_DIR
 from flask import abort
 from fs_atomic import atomic_write_json
-from routes._shared import NOVELS_DIR, _autopilot_guard, _body, _move_with_retry, list_novels, novel_to_script
+from routes._shared import (NOVELS_DIR, _autopilot_guard, _body, _friendly_error,
+                             _move_with_retry, list_novels, novel_to_script)
 def _collect_matching(base_dir, prefixes):
     """收集 base_dir 下（递归）名字以任一前缀开头的文件/目录路径（浅层优先）。
 
@@ -72,7 +73,8 @@ def api_autopilot_reset_episode():
             _move_with_retry(src, dst)
             cleared.append({"category": category, "path": src})
         except Exception as e:  # noqa: BLE001  单项失败不阻断其余清理
-            skipped.append({"path": src, "error": str(e)})
+            skipped.append({"path": src,
+                            "error": _friendly_error(e, "移入回收站失败（该文件可能正被占用）")})
 
     # ---- 目录级产物：分镜图 / 尾帧 / 视频 / 成片 ----
     # 第 1 集平铺（只移文件，其它集的 epNN/ 子目录原地保留）；第 2 集起整块移 epNN/ 子目录
@@ -112,7 +114,7 @@ def api_autopilot_reset_episode():
             _script_path = novel_to_script.episode_script_path(SCRIPT_DIR, project_name, episode_no)
             _trash_move(_script_path, "scripts")
         except Exception as e:  # noqa: BLE001
-            notes.append(f"剧本定位失败（忽略）：{e}")
+            notes.append(_friendly_error(f"剧本定位失败（忽略）：{e}", "剧本定位失败（已忽略）"))
 
     # ---- 交付记录：把该集条目从 deliverables.json 摘除（被摘条目进回收站，可恢复）----
     _dl_file = os.path.join(PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
@@ -136,7 +138,7 @@ def api_autopilot_reset_episode():
                     atomic_write_json(_dl_file, _dl)
                 notes.append(f"交付记录已摘除 {len(_removed)} 条（被摘条目在回收站，可恢复）")
         except Exception as e:  # noqa: BLE001
-            notes.append(f"交付记录清理失败（忽略）：{e}")
+            notes.append(_friendly_error(f"交付记录清理失败（忽略）：{e}", "交付记录清理失败（已忽略）"))
 
     if not cleared and not skipped:
         notes.append("该集没有可清理的产物（本来就是空的）")
@@ -427,7 +429,17 @@ def api_autopilot_review():
         ep = int(data.get('episode_no') or 0)
     except (TypeError, ValueError):
         return jsonify({"success": False, "error": "episode_no 非法"}), 400
-    item = pipeline.set_deliverable_review(project, ep, review, str(data.get('note') or ''))
+    try:
+        item = pipeline.set_deliverable_review(project, ep, review, str(data.get('note') or ''))
+    except pipeline.PipelineError as e:
+        # t27：状态冲突（当前唯一来源：成片被标记「已过期」后仍试图验收）必须回 409 +
+        # 可读 code，而不是被 _autopilot_guard 兜底成 500 原始异常 —— 前端据此禁用
+        # 按钮并给出「重新合成」入口，而不是弹一个 Internal Server Error。
+        return jsonify({
+            "success": False,
+            "code": "deliverable_stale",
+            "error": _friendly_error(e, "该集成片当前状态不允许此操作，请先重新合成成片"),
+        }), 409
     if not item:
         return jsonify({"success": False, "error": f"未找到 {project} 第{ep}集的成片记录"}), 404
     return jsonify({"success": True, "item": item})
@@ -500,7 +512,9 @@ def api_autopilot_episode_log():
         try:
             log_path = pipeline._episode_log_path(project, episode_no)
         except Exception as e:  # noqa: BLE001
-            return jsonify({"success": False, "error": f"日志路径解析失败：{e}"}), 500
+            return jsonify({"success": False,
+                            "error": _friendly_error(f"日志路径解析失败：{e}",
+                                                     "日志路径解析失败，请稍后重试（详情见后端日志）")}), 500
         if os.path.isfile(log_path):
             exists = True
             try:
@@ -512,7 +526,9 @@ def api_autopilot_episode_log():
                     except json.JSONDecodeError:
                         continue
             except OSError as e:
-                return jsonify({"success": False, "error": f"读取操作日志失败：{e}"}), 500
+                return jsonify({"success": False,
+                                "error": _friendly_error(f"读取操作日志失败：{e}",
+                                                         "读取操作日志失败，请稍后重试（详情见后端日志）")}), 500
     resp = {"success": True, "project": project, "episode_no": episode_no,
             "exists": exists, "count": len(events), "events": events}
     if not exists:
@@ -628,7 +644,7 @@ def api_autopilot_run_once():
             _app_logger().error("run-once 后台生产失败（%s 第%s集）：%s",
                              project, ep, e, exc_info=True)
             result = {"ok": False, "status": "failed", "episode_no": ep,
-                      "project": project, "error": f"{type(e).__name__}: {e}",
+                      "project": project, "error": _friendly_error(e),
                       "elapsed_sec": 0, "deliverable": "", "steps": {}}
         finally:
             # 2026-09-30 修复「失败了总控不知道」：run-once 此前只 logger.error 再清 current，

@@ -312,6 +312,7 @@ TOOLS = [
                        "episodes（**选哪几章**：'all' 或 [1,2,3]，**不是总集数**）/ target_shots / "
                        "style / enable_upscale / "
                        "upscale_scale / enable_tts_pre / "
+                       "enable_tts / enable_mix / "
                        "step_max_retries / "
                        # ⭐⭐ 2026-10-10 用户**连续两次**纠正，勿再回退：
                        #   ① 此前只列参数名 → AI 总控把 target_shots 的默认值 12 当硬性方案报给用户
@@ -338,8 +339,26 @@ TOOLS = [
                         "与每集镜数无关。"
                        "auto_accept(产出即自动验收，默认 false) / auto_revive_hours(失败集挂起多久后"
                        "自动复活重试，默认 6 小时，0=永不) / max_episode_attempts 等。"
-                       "（enable_tts / enable_mix / video_mode 已废弃：tts/mix 步骤下线，"
-                       "视频只有整集模式，设置了也不会生效。）",
+                       # ⭐ 2026-10-12 T15 更正：此前这里写的是「enable_tts / enable_mix / video_mode
+                       #    已废弃、设置了也不会生效」——**与事实相反**。T11 之后三条配置通道
+                       #    （autopilot.PLAN_DEFAULTS / /api/autopilot/plan / /api/autonomous/start）
+                       #    已统一判定口径，enable_tts 与 enable_mix **可写、可读回**。
+                       #    这段文案的读者是 AI 总控自己：说「已废弃」会让它主动放弃设置这两个开关，
+                       #    即「错误的元信息比缺失的元信息更坏」。
+                       "（⭐ 更正：enable_tts / enable_mix **没有废弃，可写、可读回**（写进 patch 即生效）。"
+                       "enable_tts = 是否真的合成「每个角色的参考音色」（在 tts_pre 步内生效），"
+                       "**用户要停掉参考音色就关它**；"
+                       "enable_mix = 混音总开关，**本轮默认 False** —— 用户 2026-10-12 口径是"
+                       "「先以 H3 原生音轨为准」（成片音轨取 H3 原生轨，打开混音会与它冲突），"
+                       "所以除非用户明确要求，否则不要打开它。"
+                       "只有 video_mode 不属于计划字段：视频生成方式是**项目级**设定，写进 patch 会被拒绝。）\n"
+                       "⚠️ 入参纪律（2026-10-12 起）：patch 里只要出现不在计划字段表里的键，"
+                       "本工具走的那条接口会**整笔 400**并返回 rejected/reasons（**不做部分生效**，"
+                       "已写的键也不会生效）；另一条一键启动接口则是 200 + 响应里的 ignored/warning（并写后端日志）。"
+                       "所以**不要用未知键反复试错**：拿不准就不写，遇到 400 就照 reasons 改，"
+                       "不要换个键名再试一遍。\n"
+                       "要停/开某个环节时的正确键：参考音色 = enable_tts / enable_tts_pre；"
+                       "资产 / 视频 / 成片 = enable_assets / enable_video / enable_final；超分 = enable_upscale。",
         "parameters": _schema({"project": _proj_prop(), "patch": _OBJ},
                               ["patch"]),
         "risk": "write", "expensive": False,

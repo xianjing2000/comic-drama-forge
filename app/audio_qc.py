@@ -53,12 +53,16 @@ SILENCE_THRESHOLD_DB = -35.0
 #: 最短静音段（秒）：避免把正常换气、句读停顿当成静音
 SILENCE_MIN_DURATION = 0.35
 #: 平均电平低于此值 → 视为近乎无声（硬闸）。实测纯静音轨为 -91 dB
+#: ⚠️ 与 quality_stage.AUDIO_NEAR_SILENT_DB 是**同一判据的两份定义**（作用域：单段 / 整轨）。
+#:   两处同值已由 config_doctor.REGISTRY 显式声明（near_silent_mean_db 是 owner，
+#:   audio_near_silent_db.must_match 指回本条）；改这条请同步改那边，否则 doctor 报 duplicates 且 ok=False。
 NEAR_SILENT_MEAN_DB = -50.0
 #: 峰值电平高于此值 → 削波失真风险（软扣分项，不阻断）
 CLIP_MAX_DB = -0.1
 #: 有效音频最短时长（秒），更短视为空文件 / 合成失败（硬闸）
 MIN_VALID_DURATION = 0.15
 #: 有声占比低于此值 → 视为整段无声（硬闸）
+#: ⚠️ 与 quality_stage.AUDIO_HARD_SILENT_RATIO 同值锁定（REGISTRY audio_hard_silent_ratio.must_match）。
 HARD_SILENT_RATIO = 0.15
 #: 单次 ffmpeg 指标探测超时（秒）
 PROBE_TIMEOUT = 300

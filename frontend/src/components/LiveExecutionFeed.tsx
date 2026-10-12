@@ -16,6 +16,8 @@
 // ============================================================================
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Badge, Button, Skeleton, EmptyState, ErrorState } from '@/components/ui';
+import { useApp } from '@/context/AppContext';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 import { Brain, BarChart3, AlertTriangle, CheckCircle2, Play, ChevronDown, ChevronRight } from '@/components/ui/icons';
 
 const POLL_MS = 2000;
@@ -131,6 +133,7 @@ export default function LiveExecutionFeed({
   episodeNo?: number;
   className?: string;
 }) {
+  const { t } = useApp();
   const [feed, setFeed] = useState<LiveFeed | null>(null);
   const [err, setErr] = useState('');
   const [loading, setLoading] = useState(true);
@@ -248,7 +251,13 @@ export default function LiveExecutionFeed({
           )}
         </div>
       </div>
-      {err ? <div className="text-xs text-warning">轮询异常（将自动重试）：{err}</div> : null}
+      {/* t27（F6）：这一行把「正在自动重试」与「错误原文」混在一起，且文案硬编码。
+          错误原文统一脱敏后再进界面（后端异常里可能带本机路径），文案走 locales。 */}
+      {err ? (
+        <div className="text-xs text-warning">
+          {t('live.pollRetrying', { err: sanitizeErrorMessage(err) })}
+        </div>
+      ) : null}
     </div>
   );
 }
