@@ -8,11 +8,15 @@
 本模块提供**幂等**的 ensure_schema()：只补建缺失的表/索引并记录版本，
 不动任何既有数据，也不取代各模块自己的建表。
 
-## ⚠️ 表 DDL 必须与各模块的权威定义逐列一致
-初版我把 tasks.progress/total 写成 INTEGER —— 实际是 REAL（见 task_store._SCHEMA）。
-因为用的是 CREATE TABLE IF NOT EXISTS，谁先建谁生效，既有库没暴露问题；
-但**新装环境若先跑 ensure_schema，就会建成 INTEGER**（进度小数被截断）。
-凡在本文件重复 DDL 的地方，都以对应模块的定义为准。
+## 单一来源（t33）
+tasks / units 的 DDL 已收敛到本模块的 TABLES / INDEXES：task_store 不再各自
+CREATE TABLE，改为复用 schema.TABLES['tasks'] / TABLES['units'] 与 schema.INDEXES。
+units 的 FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE 为**唯一权威**，
+杜绝「谁先建谁生效」导致的两处 FK 定义不一致。
+
+## ⚠️ 历史教训（保留）
+初版把 tasks.progress/total 写成 INTEGER —— 实际是 REAL（进度小数被截断）。
+现在 tasks 表在本文件唯一定义，progress/total 恒为 REAL。
 
 ## 表状态说明（排查结论）
   tasks           —— 结构完整但**当前 0 行**：持久化任务队列（P0-4）建好了但从未接入，
@@ -48,7 +52,7 @@ TABLES: Dict[str, str] = {
         ' version INTEGER PRIMARY KEY,'
         ' applied_at TEXT,'
         ' note TEXT)'),
-    # 与 task_store._SCHEMA 逐列一致（progress/total 是 REAL，不是 INTEGER）。
+    # tasks 唯一权威 DDL（task_store 复用本模块；progress/total 是 REAL，不是 INTEGER）。
     'tasks': (
         'CREATE TABLE IF NOT EXISTS tasks ('
         " id TEXT PRIMARY KEY, project TEXT NOT NULL DEFAULT '',"

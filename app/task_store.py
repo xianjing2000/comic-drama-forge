@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import schema
 import sqlite3
 import threading
 import time
@@ -51,37 +52,10 @@ ST_CANCELLED = "cancelled"
 
 TERMINAL_STATES = (ST_DONE, ST_FAILED, ST_CANCELLED)
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS tasks (
-    id          TEXT PRIMARY KEY,
-    project     TEXT NOT NULL DEFAULT '',
-    kind        TEXT NOT NULL DEFAULT '',
-    label       TEXT NOT NULL DEFAULT '',
-    payload     TEXT NOT NULL DEFAULT '{}',
-    status      TEXT NOT NULL DEFAULT 'pending',
-    progress    REAL NOT NULL DEFAULT 0,
-    total       REAL NOT NULL DEFAULT 0,
-    result_path TEXT NOT NULL DEFAULT '',
-    error       TEXT NOT NULL DEFAULT '',
-    created_at  TEXT NOT NULL,
-    started_at  TEXT NOT NULL DEFAULT '',
-    finished_at TEXT NOT NULL DEFAULT '',
-    updated_at  TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_kind ON tasks(kind);
-
-CREATE TABLE IF NOT EXISTS units (
-    task_id     TEXT NOT NULL,
-    unit_key    TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'pending',
-    result_path TEXT NOT NULL DEFAULT '',
-    error       TEXT NOT NULL DEFAULT '',
-    updated_at  TEXT NOT NULL,
-    PRIMARY KEY (task_id, unit_key)
-);
-"""
+# t33（单一来源）：tasks / units 的 DDL 已收敛到 schema.py（schema.TABLES / schema.INDEXES），
+# 此处不再重复定义。TaskStore._init_schema 复用 schema.TABLES['tasks'] / ['units'] 与
+# schema.INDEXES，保证 units 的 FOREIGN KEY ... ON DELETE CASCADE 与 schema.py 唯一权威一致，
+# 杜绝「谁先建谁生效」导致的两处 FK 定义漂移。
 
 
 def _now() -> str:
@@ -123,13 +97,25 @@ class TaskStore:
             conn.execute("PRAGMA journal_mode=WAL")
         except Exception as e:  # noqa: BLE001
             logger.debug("开启 SQLite WAL 失败（忽略，回落默认 journal）：%s", e)
+        # t33：开外键约束（连接级）。对既有方法无副作用：create 用 ON CONFLICT DO UPDATE
+        # （不触发 DELETE 级联）；mark_unit 的 INSERT OR REPLACE 只作用于子表 units 行本身；
+        # purge_project 已手动先删 units。开启后 units.task_id 的 ON DELETE CASCADE 才真正生效。
+        try:
+            conn.execute("PRAGMA foreign_keys=ON")
+        except Exception as e:  # noqa: BLE001
+            logger.debug("开启 SQLite 外键失败（忽略）：%s", e)
         return conn
 
     def _init_schema(self) -> None:
+        # t33（单一来源）：tasks/units 的 DDL 收敛到 schema.py，此处不再重复定义，
+        # 避免「谁先建谁生效」导致 units 外键（ON DELETE CASCADE）定义不一致。
         with self._lock:
             conn = self._conn()
             try:
-                conn.executescript(_SCHEMA)
+                conn.execute(schema.TABLES['tasks'])
+                conn.execute(schema.TABLES['units'])
+                for sql in schema.INDEXES:
+                    conn.execute(sql)
                 conn.commit()
             finally:
                 conn.close()

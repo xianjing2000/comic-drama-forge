@@ -347,6 +347,10 @@ class Lease:
                            "current_pid": cur.get("pid") or 0},
                           owner=self.owner)
             return False
+        # t33 加固：若租约文件已被回收移走（_read 拿到的是旧快照），不要用 os.replace
+        # 重新创建「幽灵租约」文件。残余 TOCTOU 窗口极小（心跳间隔 ~TTL/3），未做原子 CAS。
+        if not os.path.exists(self.path):
+            return False
         cur["heartbeat_at"] = _now()
         return _write_atomic(self.path, cur)
 
@@ -455,6 +459,7 @@ def acquire(scope: str, *, owner: str = "", ttl_sec: int = DEFAULT_TTL_SEC,
                "ttl_sec": ttl, "reclaimed_by_pid": os.getpid(),
                "reclaimed_by_owner": owner or ""},
               owner=owner)
+    prune_archives()          # t33：回收归档只增不减 → 归档后顺手清理过期/超量归档
     try:
         if _try_create(path, me):
             lk = Lease(scope, token, path, ttl, hb, ok=True, owner=owner)
@@ -502,6 +507,7 @@ def reclaim_stale(scope: str, *, reason: str = "人工回收") -> Dict[str, Any]
                "heartbeat_at": float(rec.get("heartbeat_at") or 0),
                "heartbeat_age_sec": round(_now() - float(rec.get("heartbeat_at") or 0), 1),
                "reclaim_reason": str(reason or "")})
+    prune_archives()          # t33：归档后清理过期/超量归档
     return {"reclaimed": True, "reason": reason, "info": rec, "archive": stamp}
 
 
@@ -573,3 +579,76 @@ def purge_project(projects: list) -> int:
 #    漂移变红。这是「行号白名单」的固有脆弱性，改动顶部前请先看那份登记表。
 __all__ += ["lost_marker_path", "mark_lost", "read_lost_marker",
             "consume_lost_marker", "clear_lost_marker", "list_lost_markers"]
+
+
+# ===================== 归档保留策略（t33） =====================
+#
+# 为什么需要：acquire / reclaim_stale 回收过期租约时，把旧文件改名归档成
+# ``<scope>.<hash>.json.stale.<ts>.<token>`` / ``.reclaimed.<ts>``，原先**只增不减**，
+# .leases 目录会无限累积。这里加「按年龄 + 按数量」的保留上限，归档产生后顺手清理。
+# 只删归档文件；活跃租约（.json）与丢失留痕（.lost.json）一律不触碰。
+
+#: 回收归档保留时长（秒）。超过即清理。默认 7 天。
+ARCHIVE_MAX_AGE_SEC = 7 * 24 * 3600
+#: 回收归档最多保留条数。超上限按时间淘汰最旧。<=0 表示不限制数量。
+ARCHIVE_MAX_COUNT = 200
+
+
+def _is_archive_name(name: str) -> bool:
+    """判断 .leases 目录里的文件名是否为「回收归档」（.stale. / .reclaimed.）。
+
+    活跃租约 <scope>.<hash>.json、丢失留痕 <scope>.<hash>.lost.json 都不是归档。
+    """
+    return (".stale." in name or ".reclaimed." in name)
+
+
+def prune_archives(max_age_sec: int = ARCHIVE_MAX_AGE_SEC,
+                   max_count: int = ARCHIVE_MAX_COUNT) -> int:
+    """清理过期/超量的租约回收归档（fail-open，绝不抛异常）。
+
+    只删 ``.stale.*`` / ``.reclaimed.*`` 归档；活跃租约与丢失留痕一律不触碰。
+    判据：先按年龄（mtime 超 max_age_sec）淘汰，再按数量（超 max_count）淘汰最旧。
+    返回删除的文件数。
+    """
+    d = lease_dir()
+    try:
+        names = sorted(os.listdir(d)) if os.path.isdir(d) else []
+    except OSError:
+        return 0
+    now = _now()
+    archives = []
+    for n in names:
+        if not _is_archive_name(n):
+            continue
+        full = os.path.join(d, n)
+        try:
+            mt = os.path.getmtime(full)
+        except OSError:
+            mt = now          # 拿不到时间就当现在，按年龄判据保留（保守）
+        archives.append((mt, full))
+    archives.sort(key=lambda x: x[0], reverse=True)   # 新 → 旧
+    removed = 0
+    kept = []
+    for mt, full in archives:
+        if max_age_sec and (now - mt) > max_age_sec:
+            try:
+                os.remove(full)
+                removed += 1
+            except OSError as e:
+                logger.warning("清理租约归档失败（%s）：%s", full, e)
+            continue
+        kept.append((mt, full))
+    if max_count and len(kept) > max_count:
+        for mt, full in kept[max_count:]:
+            try:
+                os.remove(full)
+                removed += 1
+            except OSError as e:
+                logger.warning("清理租约归档失败（%s）：%s", full, e)
+    if removed:
+        logger.info("清理租约归档 %d 个（保留年龄<=%ss 且数量<=%s）",
+                    removed, max_age_sec, max_count)
+    return removed
+
+
+__all__ += ["ARCHIVE_MAX_AGE_SEC", "ARCHIVE_MAX_COUNT", "prune_archives"]
