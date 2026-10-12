@@ -227,3 +227,8 @@ docs/*报告*.md
 docs/*清单*.md
 archive/local_docs/
 comfyui_dir.json
+
+# 编辑器/脚本产生的备份（2026-10-12 误提交后补）
+*.bak2-*
+*.bak-*
+*.orig
