@@ -11,12 +11,13 @@
 - dramaclaw: 角色关系边 + 关系强度
 - AIComicBuilder: 角色关系管理
 """
-import json
 import logging
 import random
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from fs_atomic import atomic_write_json, read_json_strict
 
 logger = logging.getLogger(__name__)
 
@@ -57,13 +58,24 @@ class RelationManager:
         self._load_data()
 
     def _load_data(self):
-        """加载关系数据"""
+        """加载关系数据（A-4：损坏→.bak 恢复；无 .bak→fail-open 降级默认结构，不静默清空）。
+
+        read_json_strict 三态语义：缺失→default、正常→内容、损坏→先 .bak 恢复、
+        无可用 .bak 则抛错。这里捕获「损坏且无 .bak」的抛错并降级为默认空结构
+        （fail-open：不崩溃、不覆盖原始损坏文件，保留现场供人工恢复），与项目 A-4
+        「不静默清空」口径一致；若 .bak 可解析则由 read_json_strict 自动恢复并返回。
+        """
         data_file = self.relation_dir / "relations.json"
+        data = None
         if data_file.exists():
-            with open(data_file, 'r', encoding='utf-8') as f:
-                self.data = json.load(f)
-        else:
-            self.data = {
+            try:
+                data = read_json_strict(str(data_file), None)
+            except (ValueError, OSError) as e:
+                logger.error("关系数据 %s 损坏且无可用 .bak，按空结构初始化"
+                             "（不覆盖原始文件，请人工恢复）：%s", data_file, e)
+                data = None
+        if not isinstance(data, dict):
+            data = {
                 "project_key": self.project_key,
                 "characters": {},
                 "relations": {},
@@ -72,13 +84,12 @@ class RelationManager:
                     "version": "1.0"
                 }
             }
+        self.data = data
 
     def save(self):
-        """保存关系数据"""
-        self.relation_dir.mkdir(parents=True, exist_ok=True)
+        """保存关系数据（A-3：原子写 + .bak 快照，与 fs_atomic 契约对齐）"""
         data_file = self.relation_dir / "relations.json"
-        with open(data_file, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=2)
+        atomic_write_json(str(data_file), self.data)
 
     def sync_characters(self, characters: dict):
         """同步角色数据到关系库"""
