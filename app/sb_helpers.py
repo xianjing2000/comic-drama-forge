@@ -344,3 +344,48 @@ def _sb_structural_defect(gate) -> bool:
     #   「无明显畸变」这类正面结论误判成缺陷（t34 与 qc 侧口径对齐）。
     return bool(qc_client.find_critical_issues([txt], _SB_STRUCTURAL_DEFECT_KEYWORDS))
 
+
+# --------------------------------------------------------------------------- #
+# 软放行**硬门槛**（2026-10-13 T13，用户指令：「严重问题不要放行」）
+# --------------------------------------------------------------------------- #
+def _sb_gate_critical_issues(gate) -> list:
+    """gate 里的「严重问题」清单（critical_issues 非空即算）。
+
+    ⭐ 这是**事实**字段，不是又一份词表：shared_qc._qc_gate 的独立复核把它写进
+    gate（本地关键缺陷词表 local_hits ∪ 上游显式 critical_issues），前端「严重问题 N」
+    徽标（pipeline._crit）读的也是同一个键 —— 判定与展示同源。
+    """
+    if not isinstance(gate, dict):
+        return []
+    v = gate.get("critical_issues")
+    if isinstance(v, (list, tuple)):
+        return [str(x).strip() for x in v if str(x or "").strip()]
+    return [str(v).strip()] if v else []
+
+
+def _sb_soft_release_blocked(gate) -> bool:
+    """该镜**是否禁止软放行**（True = 必须硬阻断）。T13 新增。
+
+    两条**并列**的拦截理由（任一命中即拦）：
+      ① 严重问题非空（_sb_gate_critical_issues）—— 靠**事实**，不依赖措辞。
+         2026-10-12 实测：shot_11 的 critical_issues 是「第5格手部握包带的指头结构
+         模糊粘连，指头分离度不清」，硬闸门已判「关键缺陷阻断（独立复核）」，但当时
+         软放行闸门用的旧词表不含手部/粘连词 → 照样放行入库，且被后续轮次当
+         「已达标」跳过、永不重画（用户质问「为什么这个严重问题被放行了」）。
+         补词表治不了根（VLM 措辞无穷），所以这里改成**看事实**。
+      ② 结构性缺陷（_sb_structural_defect）—— 保留原有词表/正则闸门
+         （面板雷同 / 场景不一致 / 左右手镜像 …），与 ① 互补而非替代。
+    ⚠️ 只收紧「有严重问题」这一档：评分不达标但**无** critical_issues 的仍走软放行
+       （2026-10-08 用户拍板的初衷 —— 防 VLM 判官双标把可用图挡在门外、白烧 GPU）。
+    """
+    ci = _sb_gate_critical_issues(gate)
+    if ci:
+        logger.warning("分镜软放行被拒（严重问题非空 → 硬阻断，T13）：%d 条｜%s",
+                       len(ci), ci[0][:80])
+        return True
+    if _sb_structural_defect(gate):
+        logger.info("分镜软放行被拒（结构性缺陷词表命中，T13）：%s",
+                    (gate or {}).get("label") or "")
+        return True
+    return False
+

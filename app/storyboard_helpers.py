@@ -84,7 +84,8 @@ from shared_project import _apply_project_settings, _project_style  # noqa: F401
 from lesson_helpers import (_apply_audio_hints, _qc_lesson_from_record,  # noqa: F401, E402
                              _record_audio_qc_lesson, _record_preflight_lesson, _record_qc_lesson)
 from sb_helpers import (  # noqa: F401, E402
-    _SB_STRUCTURAL_DEFECT_KEYWORDS, _sb_heal_comfyui, _sb_structural_defect)
+    _SB_STRUCTURAL_DEFECT_KEYWORDS, _sb_heal_comfyui, _sb_soft_release_blocked,
+    _sb_structural_defect)
 from shared_project import _first_existing, _shot_num_key, comfyui_client  # noqa: F401  再导出
 from fs_atomic import atomic_write_json, read_json_strict
 import autopilot
@@ -501,6 +502,68 @@ def _sb_artifact_meta_soft(dst, seq=None, base_dir: str = "") -> dict:
     return out
 
 
+def _sb_reuse_label(facts) -> str:
+    """断点续跑**复用产物**时给 UI 的 label（T13：按事实证明，不再一律说「已达标」）。
+
+    旧文案无条件写「沿用已达标图」；而软放行（2026-10-08 起）的图同样写正式目录、
+    同样会被复用 —— UI 于是出现「严重问题 1」＋「质检未达标（软放行）：沿用已达标图」
+    这种自相矛盾（用户实测截图，逆天系统_全书 分镜 #11）。
+    """
+    if isinstance(facts, dict) and (facts.get("soft") or _sb_critical_issues(facts)):
+        return "沿用上一轮未达标图（未重生成，带严重问题）"
+    return "沿用已达标图"
+
+
+def _sb_fix_reuse_label(item) -> bool:
+    """就地修正条目上**误导的复用文案**（T13，历史 manifest 兼容）。
+
+    只改「沿用已达标图」这一种取值：若该条目其实是软放行 / 带 critical_issues，
+    改写为「沿用上一轮未达标图（未重生成，带严重问题）」。返回是否发生改写。
+    """
+    if not isinstance(item, dict):
+        return False
+    qc = item.get("qc")
+    if not isinstance(qc, dict) or str(qc.get("label") or "") != "沿用已达标图":
+        return False
+    facts = {"soft": _sb_soft_accepted(item),
+             "critical_issues": _sb_critical_issues(item.get("qc_gate") or {}, qc, item)}
+    new = _sb_reuse_label(facts)
+    if new == qc.get("label"):
+        return False
+    qc["label"] = new
+    return True
+
+
+def _sb_dst_soft_facts(dst, seq=None, base_dir: str = "", prev=None) -> dict:
+    """正式目录里**已存在的这张图**是否「并非真达标」（软放行 / 带严重问题）。
+
+    ⭐ T13（2026-10-13，用户指令「严重问题不要放行」）：断点续跑旧判据是
+    「正式目录里有非空 shot_XX.png ⟺ 上一轮该镜已通过质检」。该等式在软放行引入
+    （2026-10-08）之后**不再成立** —— 软放行的图同样写进正式目录（见下方软放行分支），
+    于是「质检不达标但被放行」的图会被下一轮当成**已达标**跳过、**永不重画**
+    （实测：逆天系统_全书 shot_11 带 critical_issues，shot_11.png mtime 停在
+    2026-10-12 05:49:53，此后每一轮都 skip，日志「质量=未交付 墙钟 1.2s」）。
+
+    证据优先级（fail-open：任何异常都返回「非软放行」，不改变既有的跳过行为）：
+      ① 产物旁 <shot>.meta.json（_sb_artifact_meta_soft —— 最耐久的那份证据）；
+      ② 上一轮 manifest 条目 prev（meta 缺失时的兜底）。
+
+    返回 {"soft": bool, "critical_issues": [...]}。
+    """
+    try:
+        facts = _sb_artifact_meta_soft(dst, seq, base_dir) or {}
+    except Exception:  # noqa: BLE001
+        facts = {}
+    soft = bool(facts.get("soft"))
+    ci = _sb_critical_issues(facts)
+    if not soft and not ci and isinstance(prev, dict):
+        prev_qc = prev.get("qc") if isinstance(prev.get("qc"), dict) else {}
+        prev_gate = prev.get("qc_gate") if isinstance(prev.get("qc_gate"), dict) else {}
+        soft = _sb_soft_accepted(prev)
+        ci = _sb_critical_issues(prev_gate, prev_qc, prev)
+    return {"soft": soft, "critical_issues": ci}
+
+
 def _sb_item_seq(item, fallback=None):
     """条目 → 镜号（优先显式 seq，其次从 shot_id/file 里抽数字）。"""
     if isinstance(item, dict):
@@ -671,6 +734,9 @@ def restat_storyboard_manifest(project: str, episode_no=None, write: bool = Fals
         for it in items:
             _seq = _sb_item_seq(it)
             _is_soft = _sb_soft_accepted(it)
+            # ⭐ T13（必修3）：历史 manifest 里「软放行 + 沿用已达标图」的误导文案
+            #    就地修正为事实表述（用户实测截图的直接来源）。
+            _sb_fix_reuse_label(it)
             _fact = ({"soft": False, "critical_issues": []} if _is_soft
                      else _sb_artifact_meta_soft(it.get("file") or "", _seq,
                                                  os.path.dirname(mpath)))
@@ -2187,17 +2253,43 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             shot_id = shot.get("shot_id", i + 1)
             seq = _shot_seq(shot_id, i + 1)
             dst = os.path.join(out_dir, f"shot_{seq:02d}.png")
-            # ---------- 断点续跑：已达标入库的镜头直接复用，只重跑缺失/不达标的 ----------
-            # 正式目录里已有非空 shot_XX.png ⟺ 上一轮该镜已通过质检（不达标的只落暂存区）。
-            # 因此这里跳过是安全的，且能把「补跑 N 个不达标镜」的代价从「全量 M 镜」降回 N 镜。
-            if not overwrite and os.path.isfile(dst) and os.path.getsize(dst) > 0:
-                prev = _prev_by_key.get(str(shot_id)) or _prev_by_key.get(f"shot_{seq:02d}") or {}
+            # ---------- 断点续跑：**真达标**的镜头才直接复用，只重跑缺失/不达标的 ----------
+            # 正式目录里已有非空 shot_XX.png **且该图不是软放行/带严重问题产物** → 跳过。
+            # ⭐ 2026-10-13 T13：旧判据只有「有文件就跳过」（注释自称「有文件 ⟺ 上一轮
+            #    已通过质检，不达标的只落暂存区」）—— 该等式在软放行（2026-10-08 起）
+            #    之后**不再成立**：软放行的图**同样写正式目录**（见下方软放行分支）。
+            #    后果：质检不达标但被放行的图被后续每一轮当成已达标跳过、**永不重画**
+            #    （实测 shot_11.png 停在 2026-10-12 05:49:53，最新一轮日志
+            #    「shot=11 质量=未交付 墙钟 1.2s」= 只做了 skip；用户质问「为什么放行了、
+            #    没有重新生成」）。现在叠加第二判据（产物 meta.json / 上一轮 manifest 的
+            #    软放行事实，见 _sb_dst_soft_facts）：非达标产物**不跳过**，交给下面的
+            #    生成+质检链路真正重画。
+            _prev_item = (_prev_by_key.get(str(shot_id))
+                          or _prev_by_key.get(f"shot_{seq:02d}") or {})
+            _dst_exists = bool(not overwrite and os.path.isfile(dst)
+                               and os.path.getsize(dst) > 0)
+            _dst_facts = (_sb_dst_soft_facts(dst, seq=seq, base_dir=out_dir,
+                                             prev=_prev_item) if _dst_exists else {})
+            _dst_unqualified = bool(_dst_facts.get("soft")
+                                    or _sb_critical_issues(_dst_facts))
+            if _dst_exists and _dst_unqualified:
+                logger.warning(
+                    "镜头 %s 正式目录里的图**并非达标产物**（软放行/严重问题 %s）→ "
+                    "本轮不跳过、重新生成（T13）",
+                    shot_id, (_sb_critical_issues(_dst_facts) or ["（软放行）"])[:2])
+            if _dst_exists and not _dst_unqualified:
+                prev = _prev_item
                 item = dict(prev) if prev else {}
                 item.update({"shot_id": shot_id, "success": True, "skipped": True,
                              "file": dst, "error": "",
                              "url": f"{_sb_url_base}shot_{seq:02d}.png"})
+                # ⭐ T13（必修3）：复用文案按**事实证明**取词，不再无条件写「沿用已达标图」
+                #    （该文案在软放行条目上会与「严重问题 N」同框、自相矛盾）。
                 item.setdefault("qc", {"enabled": False, "status": "skipped",
-                                       "label": "沿用已达标图", "attempts": 0, "regenerated": 0})
+                                       "label": _sb_reuse_label(_dst_facts),
+                                       "attempts": 0, "regenerated": 0})
+                # 历史 manifest 残留的旧文案就地修正。
+                _sb_fix_reuse_label(item)
                 item.pop("qc_blocked", None)
                 manifest_shots.append(item)
                 with lock:
@@ -2608,7 +2700,16 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                 #    拆解本身失败」，图不可用。实测 shot_04 格3/4/6/9
                                 #    四格近乎相同，质检已判「九宫格面板雷同」，却被
                                 #    软放行入库，用户看到的就是四格雷同的废图。
-                                and not _sb_structural_defect(gate)):
+                                # ⭐ 2026-10-13 T13（用户指令「严重问题不要放行」）：再叠加**严重问题**门槛 ——
+                                #    gate.critical_issues 非空一律落硬阻断（走下方「未达标 → 阻断」分支），
+                                #    **不再依赖词表命中措辞**。两道理并列：旧闸门靠措辞（结构类缺陷），
+                                #    这道靠事实（shared_qc 独立复核写进 gate 的 critical_issues）。
+                                #    实测：shot_11 的 critical_issues=「第5格手部握包带的指头结构模糊粘连，
+                                #    指头分离度不清」——旧词表不含手部词 → 被软放行入库（用户质问
+                                #    「为什么这个严重问题被放行了，没有重新生成」）。
+                                #    ⚠️ 只收紧这一档：「评分不达标但无严重问题」的仍软放行（2026-10-08
+                                #    用户拍板的初衷，防 VLM 判官双标把可用图挡在门外、白烧 GPU）。
+                                and not _sb_soft_release_blocked(gate)):
                             _soft_lbl = (gate or {}).get("label") or ""
                             _soft_rsn = ((gate or {}).get("reason") or "")[:200]
                             _soft_ok = False
