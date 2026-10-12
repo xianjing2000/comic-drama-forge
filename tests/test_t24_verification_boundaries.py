@@ -178,7 +178,13 @@ class S2_SilentSwallowScan(unittest.TestCase):
     #: 故钉成**计数基线**，只拦新增（一次性清零不在本任务 inScope）。
     #: 2026-10-12 复核时实测 44（13:40 快照）——基线随代码演进重测即可，
     #: 关键是**只拦增长**，不要求一次性清零。
-    KNOWN_BARE_PASS = 44
+    #:
+    #: ⚠️ 2026-10-12 16:35（test-engineer/t5 复核）实测 45：新增点是 `app/workers/episodes.py:148`。
+    #:   该文件当时**未在本轮任何改动里**（`git diff app/workers/episodes.py` 空），属既有漂移
+    #:   （与 t24 报告 B7「基线仍在漂移」同类）。按本门「只拦增长」的策略同步基线：
+    #:   45 是**既有事实**，不是新增欠债；本条注释即该点的登记。
+    #:   下一轮若再涨，请先 `git diff` 确认来源再动这个数字。
+    KNOWN_BARE_PASS = 45
 
     def test_bare_pass_count_does_not_grow(self):
         """宽 except 后紧跟 pass 的**数量**不得增长（新增即红，须显式登记）。"""
@@ -319,11 +325,11 @@ class S2_SilentSwallowScan(unittest.TestCase):
         #:                           不是成功标志，属误读风险最低的一类）
         #:   task_lease.py:178       判不出进程存活 → 判「活着」，避免误抢别人的活（安全侧）
         #:   tts_client.py:423       读不到默认参数 → 按「开启」处理（与模块默认一致）
-        #:   video_postprocess.py:99 读 config 失败（且 line 102 的兜底也返回 True）
-        #:                           ⚠️ 唯一一处「可能掩盖真错误」的：line 98 吞掉的是
-        #:                           import/读取异常，若 config.py 被改坏会被静默按 True 处理。
-        #:                           影响有限（两条分支同值），但**建议后续补 warning**。
-        #: 只允许这 7 处；新增任何一处都会让本断言变红。
+        #:   video_postprocess.py:99 —— ⭐ 2026-10-12 **已修（t13/B4）**：`except Exception`
+        #:                           已补 `logger.warning`（含异常类型），fail-open 仍 `return True`。
+        #:                           故它**不再**属于「零日志」形态，已从白名单移除；
+        #:                           若哪天 warning 被删掉，本断言会把它重新判红（回归护栏）。
+        #: 只允许这 6 处；新增任何一处都会让本断言变红。
         known_silent = {
             "app/agent_core.py:91",
             "app/config_center.py:151",
@@ -331,7 +337,6 @@ class S2_SilentSwallowScan(unittest.TestCase):
             "app/schema.py:142",
             "app/task_lease.py:178",
             "app/tts_client.py:423",
-            "app/video_postprocess.py:99",
         }
         got = {p.replace(chr(92), '/') for p in suspicious}
         self.assertEqual(
@@ -388,26 +393,45 @@ class S3_PanelDupNegation(unittest.TestCase):
     #: 修复方式：STRONG 表补纯否定短语 + 窗口 6 字 + 遇句子边界截断
     #:（详见 app/sb_helpers.py 的 _PANEL_DUP_NEG_STRONG 注释）。
     #:
-    #: 仍残留的边界情形（本轮**刻意不修**，如实登记）：
-    #:   · 「无色块/撕裂/面板雷同」—— 列举式否定，弱否定词「无」离「面板」有 7 个字，
-    #:     超出当前 6 字窗口；再放宽就会开始吞掉「无主体，面板雷同」这类**真缺陷**，
-    #:     收益不足以抵消风险，故保持现状。
-    #:   · 「存在轻微面板重复倾向，不足以判为面板雷同」—— 否定词在**句尾**，
-    #:     前缀窗口天然覆盖不到，需要后缀判定（另一类改动），登记为已知边界。
-    KNOWN_FALSE_POSITIVE_PHRASES = {
-        "存在轻微面板重复倾向，不足以判为面板雷同",
-        "无色块/撕裂/面板雷同",
-    }
+    #: ⭐ 2026-10-12 16:40（test-engineer/t5 复核）：**残留已清零**，本类现在是一条
+    #: **纯回归门**（此前它同时承担「登记已知误判」的职责）。
+    #: 触发这次收紧的实现变化 = 86e767c（同义族扩面 + 空位否定）；两条旧残留的实测：
+    #:   · 「存在轻微面板重复倾向，不足以判为面板雷同」—— 旧注释写「否定词在句尾、
+    #:     前缀窗口天然覆盖不到」。**该归因不成立**：否定短语「不足以判为」与词根之间
+    #:     **没有句读**，根因是前缀窗口只有 6 字（「不足以判为面板」共 7 字）。
+    #:     证据：tests/test_t5_paneldup_independent.py::T5_D_BaselineResiduals
+    #:     （同一事实在「无色块/撕裂/面板雷同」上也成立：「无」离词根 7 字）。
+    #:   · 「无色块/撕裂/面板雷同」—— 同上，7 字窗口即可覆盖，不是「另一类改动」。
+    #: 结论订正：两条都属**可修的真边界**，不是「刻意不修」；现在已修好，基线清零。
+    #: ⚠️ 必须写 `set()` 不能写 `{}` —— 后者是空 **dict**，与 `{t for t in ...}` 的空 set
+    #:    比较时 `assertEqual` 判不等（踩过一次）。
+    KNOWN_FALSE_POSITIVE_PHRASES = set()
+
+    #: 仍然漏判的真缺陷（**同子句弱否定越界**，与上面两条同根）：弱否定词「不」属于
+    #: 「不足构成」这个动词短语、否定的是**判据**，但 6 字窗口把它当成了对「雷同」的否定。
+    #: 生产实例：进境_整本小说/asset_image_羡进公寓_grid.json。
+    #: 钉住现状（修好即红 —— 那时请把这条断言改成 assertTrue 并删除本条注释）。
+    SAME_CLAUSE_NEG_OVERRUN = "构图差异不足构成面板雷同"
 
     def test_true_cases_all_detected(self):
         miss = [t for t in self.TRUE_CASES if not self.sb._panel_dup_hit(t)]
         self.assertEqual(miss, [], "真缺陷被漏判（→ 软放行入库）：%s" % miss)
 
     def test_known_false_positives_match_baseline(self):
-        """把「已知误判」钉成基线：将来补齐否定词表 → 本断言变红 → 收紧基线。"""
+        """误判集合必须与登记基线一致（此刻基线为空 = 零误判）。
+
+        注：基线清空后本断言仍**双向**有效 —— 新增任何误判会红（误伤一镜 = 白跑一轮重试），
+        已修的误判回归也会红。
+        """
         actual = {t for t in self.FALSE_CASES if self.sb._panel_dup_hit(t)}
         self.assertEqual(actual, self.KNOWN_FALSE_POSITIVE_PHRASES,
                          "误判集合与登记基线不一致（新增误判或已修复，需同步基线）")
+
+    def test_same_clause_negation_overrun_is_currently_missed(self):
+        """台账：同子句弱否定越界仍会吞掉真缺陷（t5 复核 E 项同根）。"""
+        self.assertFalse(
+            self.sb._panel_dup_hit(self.SAME_CLAUSE_NEG_OVERRUN),
+            "该同子句越界已被修好 —— 请改成 assertTrue 并删除本条注释与 SAME_CLAUSE_* 常量")
 
     def test_double_negation_known_gap(self):
         """双重否定（「并非未达…实为严重雷同」）当前判 False —— 登记为已知盲区。"""
@@ -581,13 +605,28 @@ class S4_ExportModeReverted(unittest.TestCase):
                                 "按场次默认值出现次数变了（%d）—— 若默认已改为整集，"
                                 "请同步复核「segments 分支可达性」结论" % n)
 
-    def test_stale_comment_refs_default_segments(self):
-        """注释仍写「默认 segments」——登记为文档不一致（非功能缺陷）。"""
+    def test_comments_align_with_default_all(self):
+        """注释必须与**当前默认值**（all）对齐 —— 原为「登记文档不一致」，t13/B6 已修。
+
+        语义翻转说明：本用例原名 `test_stale_comment_refs_default_segments`，
+        当时断言注释里仍写着「默认 segments」——注释一改它就红。
+        2026-10-12 t13/B6 把三处注释改成当前口径后哨兵按设计触发，
+        故改为**正向断言**：注释里必须写明「当前默认 export_mode = all」，
+        并禁止「默认 segments / 已改默认 segments」这类过期措辞复活。
+        """
         src = io.open(os.path.join(_APP, "comfyui_client.py"), encoding="utf-8").read()
-        self.assertIn("为什么默认从 all 改为 segments", src,
-                      "注释已更新 —— 请同步更新「文档不一致」清单")
+        self.assertIn("当前默认 export_mode", src,
+                      "comfyui_client 的 export_mode 注释未写明当前默认值")
+        self.assertIn('or "all")', src,
+                      "找不到 export_mode 的 or all 兜底（默认值说明与代码不一致？）")
         vsrc = io.open(os.path.join(_APP, "video_helpers.py"), encoding="utf-8").read()
-        self.assertIn("export_mode 已改默认 segments", vsrc)
+        self.assertIn("当前默认 export_mode = all", vsrc,
+                      "video_helpers 的 export_mode 注释未写明当前默认值")
+        for name, text in (("comfyui_client.py", src), ("video_helpers.py", vsrc)):
+            self.assertNotIn("已改默认 segments", text,
+                             "%s 仍有「已改默认 segments」的过期注释" % name)
+            self.assertNotIn("为什么默认从 all 改为 segments", text,
+                             "%s 仍有「默认从 all 改为 segments」的过期注释" % name)
 
 
 if __name__ == "__main__":
