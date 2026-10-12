@@ -759,7 +759,9 @@ class VideoUpscaler:
         return ("running" if prompt_id in qids else "gone"), {}
 
     def _wait(self, prompt_id: str, timeout: int, step, t0: float) -> dict:
-        deadline = t0 + timeout
+        # t77：对齐 comfyui_client.wait_for_completion 的 max(1, int(timeout)) 防御 ——
+        # timeout=0 / 极小值时 deadline 至少往后推 1s，不会立即误判超时 + interrupt。
+        deadline = t0 + max(1, int(timeout))
         # ⭐ t22：软超时续等（与 H3 那套**完全同名同语义**，见 comfyui_client.wait_for_completion）：
         #   到点先复查远端 —— 已完成 → 取回结果；仍在执行 → 续等；续等用尽才 interrupt + 报超时。
         #   env：MJSCXT_WAIT_EXTENSIONS（默认 3）、MJSCXT_WAIT_EXTEND_SECONDS（默认 1800）。
