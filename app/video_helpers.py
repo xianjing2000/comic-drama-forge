@@ -2065,7 +2065,7 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     #   「第 2 场的 seg_0000 覆盖第 1 场的」）→ 「段都算完了却合成不出 mp4」
                     #   的另一主因。命名口径 <项目>__ep<集号>__s<场次>：同场重跑名字不变 →
                     #   复用同一目录（保住断点续跑收益），不同场次/集次彼此隔离。
-                    _cn_scene = f"{project_name}__ep{int(_epn):02d}__s{_sn:02d}"
+                    _cn_scene = comfyui_client.h3_cache_name(project_name, int(_epn), _sn)
                     # ⭐ t18：长场次主动分批（MJSCXT_H3_BATCH_SEGMENTS，默认 0 = 不分批）。
                     #   单次提交 N 段的总超时有限，极端长场次（28 段 × 17min ≈ 8h）一旦中途
                     #   失败就要整批重来；分批把失败面压到一批。⚠️ 批边界是**硬切**（H3 段间
@@ -2090,7 +2090,7 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                                                  f"{episode_tag or 'episode'}_s{_sn:02d}"
                                                  f"_b{_bi:02d}"),
                                 # 每批独立缓存目录（批之间互不覆盖，也不与整场冲突）
-                                cache_name=f"{_cn_scene}__b{_bi:02d}",
+                                cache_name=comfyui_client.h3_cache_name(project_name, int(_epn), _sn, batch=_bi),
                                 seed=comfyui_job_store.get_or_create_seed(
                                     f"video|{project_name}|{episode_tag or 'episode'}"
                                     f"|scene{_sn}|b{_bi}",

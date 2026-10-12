@@ -91,5 +91,37 @@ class TestLoadWorkflowCacheName(unittest.TestCase):
                     "proj__ep01__s02")
 
 
+class TestH3CacheName(unittest.TestCase):
+    """h3_cache_name：区分性字段前置，长项目名截断后不同场次不撞名（t72 加固）。"""
+
+    def test_long_project_name_scenes_distinct_after_truncation(self):
+        """60 字符项目名：s01..s10 截断到 64 字符后仍互不相同（消除 KEY_MAX_LEN 隐性依赖）。"""
+        long_proj = "漫" * 60
+        names = [cc.h3_cache_name(long_proj, 1, sn) for sn in range(1, 11)]
+        self.assertEqual(len(set(names)), 10, "完整名应互不相同")
+        # 模拟插件 normalize_cache_name 截断到 H3_CACHE_NAME_MAX_LEN=64
+        truncated = [n[:cc.H3_CACHE_NAME_MAX_LEN] for n in names]
+        self.assertEqual(len(set(truncated)), 10,
+                         "截断后不同场次撞名：%s" % truncated)
+
+    def test_batch_distinct_after_truncation(self):
+        """同一场次内的分批（b00/b01）截断后也互不相同。"""
+        long_proj = "漫" * 60
+        names = [cc.h3_cache_name(long_proj, 1, 1, batch=bi) for bi in range(3)]
+        truncated = [n[:cc.H3_CACHE_NAME_MAX_LEN] for n in names]
+        self.assertEqual(len(set(truncated)), 3)
+
+    def test_cache_name_readable(self):
+        """排障可读：能看出场次(s07)/集号(ep03)/项目名。"""
+        name = cc.h3_cache_name("我的项目", 3, 7)
+        self.assertIn("s07", name)
+        self.assertIn("ep03", name)
+        self.assertIn("我的项目", name)
+
+    def test_same_scene_same_name(self):
+        """同场重跑同名（断点续跑的缓存收益保住）。"""
+        self.assertEqual(cc.h3_cache_name("proj", 1, 2), cc.h3_cache_name("proj", 1, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

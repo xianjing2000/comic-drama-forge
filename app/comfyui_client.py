@@ -858,6 +858,30 @@ def _h3_timeout_seconds(n_segments: int, timeout_per_segment: int = None) -> int
         total = min(total, cap)
     return max(floor, total)
 
+#: 插件侧 normalize_cache_name 对 cache_name 的截断长度（2026-10-12 t72 复核）。
+#: 插件实现（director/segment_cache.py）把清洗后的名字截断到 64 字符。
+#: 本仓 h3_cache_name 必须保证「截断到该长度后，不同场次/批次仍不撞名」。
+H3_CACHE_NAME_MAX_LEN = 64
+
+
+def h3_cache_name(project_name, ep, scene, batch=None) -> str:
+    """H3 分段缓存目录名（t72 加固：区分性字段前置，消除对 safe_key(KEY_MAX_LEN) 的隐性依赖）。
+
+    格式：s{scene}__ep{ep}[__b{batch}]__{proj_fp}__{project_name}
+
+    - 区分性字段（场次 s / 集号 ep / 批次 b）前置：插件 normalize_cache_name 截断到
+      H3_CACHE_NAME_MAX_LEN=64 时先丢项目名尾部，不同场次/批次天然不撞名；
+    - proj_fp = sha1(project_name)[:8]：项目指纹，超长截断后仍能凭前缀区分不同项目；
+    - project_name 放最后（可读性兜底，可被截断）—— 排障仍能从完整名看出项目/集/场。
+    """
+    proj_fp = hashlib.sha1(str(project_name or "").encode("utf-8")).hexdigest()[:8]
+    parts = [f"s{int(scene):02d}", f"ep{int(ep):02d}"]
+    if batch is not None:
+        parts.append(f"b{int(batch):02d}")
+    parts.append(proj_fp)
+    parts.append(str(project_name or ""))
+    return "__".join(parts)
+
 
 class ComfyUIClient:
     """ComfyUI API 客户端"""
