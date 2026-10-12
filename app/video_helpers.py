@@ -29,7 +29,7 @@ from config import (
     SCENE_GRID_MODE, SCENE_GRID_ONESHOT,
     SCENE_GRID_VIEW_KEYS, SCENE_GRID_ANGLE_ZH, SCENE_GRID_LABELS,
     SCENE_GRID_FILENAME, SCENE_GRID_DERIVE_MODE, SCENE_GRID_CELL_FILE_STEM,
-    H3_COMMON_REFS, H3_COMMON_REFS_MAX,
+    H3_COMMON_REFS, H3_COMMON_REFS_MAX, H3_BATCH_SEGMENTS,
     PROJECT_DEFAULT_CONFIG,
     PROMPT_ENHANCE_CONFIG_PATH, save_prompt_enhance_config, _prompt_enhance_file_flags,
 )
@@ -1661,7 +1661,11 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
 
             # ⭐ 2026-10-08：质检抽帧范围 = **当前场**的段（此前误用全 82 段占比去抽
             #    单场视频，抽帧位置必然算错、中段漏检）。渲染循环每场会覆写它。
-            _qc_scope = {"segs": []}
+            # ⭐ 2026-10-13（t10）新增 "shots" —— 质检「镜头信息摘要」的作用域：
+            #    · None（默认）= 用全集 shots，与改动前逐位一致；
+            #    · 分批渲染时批循环把它置为**本批涉及的镜头**，否则会出现
+            #      「描述里 46 镜、被检视频只有 5 镜」的信息错配。
+            _qc_scope = {"segs": [], "shots": None}
 
             def _seg_qc_fn(video_path, shot_desc, cfg, style):
                 """QC 门控：对整片抽帧 → 多模态判定 → 返回 {"passed": bool, "verdict": {...}, "gate": {...}}
@@ -1728,7 +1732,9 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 if _seg_ranges:
                     logger.info("[整集质检] 逐段一致性门禁：%d 段时间区间 + %d 张角色锚点图",
                                     len(_seg_ranges), len(_qc_refs))
-                verdict = qc_client.check_video(video_path, _episode_qc_desc(shots), cfg,
+                # t10：镜头摘要的作用域与 segs 同源（分批时=本批镜头；不分批=None→全集）
+                _qc_shots = _qc_scope.get("shots") or shots
+                verdict = qc_client.check_video(video_path, _episode_qc_desc(_qc_shots), cfg,
                                                frames_dir=fr_dir,
                                                style=style,
                                                frame_ratio=_qc_ratios or None,
@@ -2062,6 +2068,35 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                         "updated_at": _stamp(),
                     })
 
+                def _batch_shots(_bseg):
+                    """本批段集合 → 所属镜头列表（t10：分批渲染时质检「镜头信息摘要」用）。
+
+                    段名格式见 _shot_segment 的 shot_{seq:02d}{后缀}；seq 与
+                    _build_shots_for 同口径（_shot_seq(shot_id, 下标+1)）。
+                    任何解析失败 / 一个都对不上 → 返回 []（调用方回落全集口径，
+                    宁可用宽口径，也不误报成「本批只有 0 镜」）。
+                    """
+                    import re as _re_bs
+                    _seqs = set()
+                    for _bs in (_bseg or []):
+                        _bm = _re_bs.match(r"shot_(\d+)", str((_bs or {}).get("name") or ""))
+                        if not _bm:
+                            continue
+                        try:
+                            _seqs.add(int(_bm.group(1)))
+                        except (TypeError, ValueError):
+                            continue
+                    if not _seqs:
+                        return []
+                    _out = []
+                    for _si, _sh in enumerate(shots):
+                        try:
+                            if int(_shot_seq(_sh.get("shot_id"), _si + 1)) in _seqs:
+                                _out.append(_sh)
+                        except (TypeError, ValueError):
+                            continue
+                    return _out
+
                 import secrets as _secrets
                 for _gi, (_sn, _ssegs) in enumerate(_scene_groups):
                     # ⭐ 2026-10-08：流水线模式 —— 等本场提示词构建完成（后台线程发布），
@@ -2075,7 +2110,10 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                         _ssegs = _vbuilt[_sn]["segs"]
                         if not _ssegs:
                             raise RuntimeError(f"视频提示词为空（scene_{_sn:02d}）")
+                    # t10：每场开头同时复位两个作用域键 —— 批内异常退出时也不会把
+                    #      上一批的「本批镜头」残留到下一场（下一场会重新覆盖）。
                     _qc_scope["segs"] = _ssegs
+                    _qc_scope["shots"] = None
 
                     with lock:
                         generation_state[task_id].update({
@@ -2121,12 +2159,24 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     #   单次提交 N 段的总超时有限，极端长场次（28 段 × 17min ≈ 8h）一旦中途
                     #   失败就要整批重来；分批把失败面压到一批。⚠️ 批边界是**硬切**（H3 段间
                     #   隐变量只能在同一次提交内传递），故默认关闭、由运维显式开启。
-                    _batch_segs = 0
-                    try:
-                        _batch_segs = int(float(
-                            str(os.environ.get("MJSCXT_H3_BATCH_SEGMENTS") or "0").strip() or 0))
-                    except (TypeError, ValueError):
-                        _batch_segs = 0
+                    # ⭐ t10（2026-10-13）：默认值改由 config.H3_BATCH_SEGMENTS 提供（=5），
+                    #   env 仍**优先**（显式 0 = 关闭分批 → 渲染路径与改动前逐位一致）。
+                    #   保留「每次调用现读 env」的旧能力（不重启后端也能临时改），
+                    #   只把「env 缺失」时的默认值从 0 提到 5。
+                    _batch_segs = int(H3_BATCH_SEGMENTS)
+                    _batch_env = str(os.environ.get("MJSCXT_H3_BATCH_SEGMENTS") or "").strip()
+                    if _batch_env:
+                        try:
+                            _batch_segs = int(float(_batch_env))
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                "[episode][per-scene] MJSCXT_H3_BATCH_SEGMENTS 非法值 %r"
+                                " → 回落 config 默认 %d", _batch_env, int(H3_BATCH_SEGMENTS))
+                    _batch_segs = max(0, _batch_segs)
+                    if _batch_segs <= 0:
+                        logger.info("[episode][per-scene] 第 %d 场 %d 段：分批已关闭"
+                                    "（MJSCXT_H3_BATCH_SEGMENTS=0）→ 单次提交（旧行为）",
+                                    _sn, len(_ssegs))
                     if _batch_segs > 0 and len(_ssegs) > _batch_segs:
                         _batches = [_ssegs[_bi2:_bi2 + _batch_segs]
                                     for _bi2 in range(0, len(_ssegs), _batch_segs)]
@@ -2135,6 +2185,40 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                                     _sn, len(_ssegs), len(_batches), _batch_segs)
                         _bfiles, _berr = [], ""
                         for _bi, _bseg in enumerate(_batches):
+                            # ⭐ t10（2026-10-13）P0 修复：**批级 QC 作用域**。
+                            #   被检产物是本批的 mp4，而 _qc_scope["segs"] 此前只在
+                            #   每个**场**开头设过一次（= 整场段）→ 第 1 批实测 ≈25s
+                            #   的片子被拿去比整场期望 146s → 偏差 83% > 阈值 30%
+                            #   （qc_client._video_objective_issues 的 duration_drift
+                            #   判 fatal）→ 每批都换种子重试 → 开了分批反而白烧 GPU。
+                            #   现在把「抽帧占比 / 逐段时间区间 / expected_duration /
+                            #   镜头摘要 / 教训库段文本」全部收窄到**本批**；调用结束
+                            #   立即复位为整场，后续（批间 concat、复用判定）语义不变。
+                            _qc_scope["segs"] = _bseg
+                            _qc_scope["shots"] = _batch_shots(_bseg) or None
+                            _batch_dur = 0.0
+                            for _bsd in _bseg:
+                                try:
+                                    _batch_dur += float(_bsd.get("duration") or 0.0)
+                                except (TypeError, ValueError):
+                                    pass
+                            _scene_dur = 0.0
+                            for _ssd in _ssegs:
+                                try:
+                                    _scene_dur += float(_ssd.get("duration") or 0.0)
+                                except (TypeError, ValueError):
+                                    pass
+                            logger.info(
+                                "[episode][per-scene] 第 %d 场 第 %d/%d 批：%d 段"
+                                "（QC 作用域=本批 %s 镜 / 期望 %.1fs，整场 %.1fs）",
+                                _sn, _bi + 1, len(_batches), len(_bseg),
+                                len(_qc_scope["shots"] or []), _batch_dur, _scene_dur)
+                            with lock:
+                                generation_state[task_id].update({
+                                    "phase": (f"按场次生成：第 {_gi + 1}/"
+                                              f"{len(_scene_groups)} 场"
+                                              f"（scene_{_sn:02d} 第 {_bi + 1}/"
+                                              f"{len(_batches)} 批，{len(_bseg)} 段）")})
                             _bres = comfyui_client.generate_h3_sequence_sequential(
                                 segments=_bseg,
                                 filename_prefix=(f"comic_drama/{project_name}_"
@@ -2155,6 +2239,9 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                                 common_refs=[c["path"] for c in _common if c.get("path")],
                                 common_ref_audios=_common_audio_paths,
                                 common_prompt=_common_prompt)
+                            # t10：无论本批成功/失败都复位为整场作用域（后续逻辑按整场）
+                            _qc_scope["segs"] = _ssegs
+                            _qc_scope["shots"] = None
                             _bf = (_bres or {}).get("files") or []
                             if not _bf or not os.path.isfile(_bf[0]):
                                 _berr = ((_bres or {}).get("error")

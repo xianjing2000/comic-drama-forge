@@ -862,6 +862,22 @@ H3_COMMON_REFS = _env_bool("H3_COMMON_REFS", True)
 # 故实际生效值被 clamp 到 ``H3_COMMON_REFS_MAX <= 9 - 2 = 7``（见 h3_common_refs.plan_common_refs）。
 H3_COMMON_REFS_MAX = max(0, _env_int("H3_COMMON_REFS_MAX", 6))
 
+# ⭐ 2026-10-13（t10）：单次 H3 提交的**段数上限**（0 = 不分批，即旧行为）。
+#
+# 为什么要切小：实测单次提交规模 2~56 段（同一套代码跑出来的结果，取决于剧本场次
+# 被分成了多少镜）。总超时公式 comfyui_client._h3_timeout_seconds =
+# max(3600, 1800 + 单段标定 1020s × 段数 × 1.5)：
+#   · 56 段 = 87480s = **24.3h** 超时窗口，且一次质检不达标就换种子**整批重跑**
+#     （几十分钟到几小时的 GPU 白烧）；
+#   · 切成 ≤5 段后 = 9450s = **2.6h**，失败重跑代价同比例下降。
+# 分批实现在 video_helpers（**场次内**切批 → 每批独立 cache_name(batch=bi) →
+# 批间 concat 成 scene_NN.mp4），批边界是硬切（H3 段间隐变量只能在同一次提交内
+# 传递），故批**永远落在场内**，换场点仍恰好落在提交边界（与历史行为一致）。
+#
+# env MJSCXT_H3_BATCH_SEGMENTS 可覆盖本默认值；**设 0 = 关闭分批**，
+# 此时渲染路径与改动前逐位一致（只剩「分批」这一条分支不进）。
+H3_BATCH_SEGMENTS = max(0, _env_int("MJSCXT_H3_BATCH_SEGMENTS", 5))
+
 # AI 对话（创作总控）：多轮对话历史 + 已生效的项目创作设定
 AI_CHAT_DIR = os.path.join(PROJECT_OUTPUT_DIR, "ai_chat")
 AI_CHAT_HISTORY_PATH = os.path.join(AI_CHAT_DIR, "chat_history.json")
