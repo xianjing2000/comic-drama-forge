@@ -891,6 +891,53 @@ def _ensure_voice_bank_refs(common: list, project_name: str, all_characters=None
                 pass
 
 
+def prewarm_video_prompts(project_name, shots, character_refs=None, scene_refs=None,
+                           episode_no=None, style=""):
+    """依赖驱动预热：分镜齐备后，后台预热各场 h3 视频提示词（只填缓存，不碰 GPU）。
+
+    用户早期明确要求（一直未落地）：「视频场次需要 1-20 分镜在这些分镜生成后就可以
+    开始预热了」。本函数补上『分镜完成 → 预热视频(h3)提示词』这半边：某一场次所需的
+    1..N 个分镜全部生成完毕后，立即在后台把该场 h3 提示词（切段 / LoRA / 增强 / 预检）
+    提前构建一遍，只填 prompt_qc / prompt_enhance / h3_segment_loras / 切段缓存，
+    正式视频阶段跑 _shot_segment 时全部命中秒过，GPU 不再等 CPU/LLM。
+
+    安全纪律（与 asset_worker._prewarm_asset_prompts 同范式）：
+      · daemon 线程 + 抓异常：预热失败绝不影响主线；
+      · 纯 LLM/CPU：只构建提示词，不提交 ComfyUI、不烧 GPU、不触发资产补做；
+      · 复用 _video_generate_worker_body(prewarm_only=True)，与正式跑共用同一段
+        _shot_segment / _build_shots_for，缓存 key 不漂移。
+
+    开关：env MJSCXT_PREWARM_VIDEO_PROMPT=0 可强制关闭（默认恒开）。
+    """
+    try:
+        if str(os.environ.get("MJSCXT_PREWARM_VIDEO_PROMPT") or "1").strip().lower() \
+                in ("0", "false", "off", "no"):
+            return
+        if not shots:
+            return
+        try:
+            _epn = int(episode_no) if str(episode_no or "").strip() else 1
+        except (TypeError, ValueError):
+            _epn = 1
+        _ep_tag = f"ep{_epn:02d}"
+        _tid = f"prewarm_video_{int(time.time() * 1000)}_{os.getpid()}"
+
+        def _run():
+            try:
+                _video_generate_worker_body(
+                    _tid, project_name, list(shots),
+                    list(character_refs or []), list(scene_refs or []),
+                    {}, True, "episode", 900, _ep_tag, episode_no,
+                    "auto", style, False, False, None, prewarm_only=True)
+            except Exception as _pw_e:  # noqa: BLE001  预热整体失败不影响生产
+                logger.warning("[视频提示词预热] 调度失败（忽略，不影响生产）：%s", _pw_e)
+
+        threading.Thread(target=_run, daemon=True,
+                         name=f"prewarm-video-{project_name}").start()
+    except Exception as _pw_e:  # noqa: BLE001
+        logger.warning("[视频提示词预热] 启动失败（忽略）：%s", _pw_e)
+
+
 def _video_generate_worker(task_id, project_name, shots, character_refs,
                           scene_refs, storyboards, use_storyboard, mode,
                           timeout_per_segment, episode_tag, episode_no=None,
@@ -981,7 +1028,7 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                                 scene_refs, storyboards, use_storyboard, mode,
                                 timeout_per_segment, episode_tag, episode_no=None,
                                 chain_mode="auto", style="", overwrite=False,
-                                build_only=False, only_scenes=None):
+                                build_only=False, only_scenes=None, prewarm_only=False):
     """视频生成的实际业务体（外壳见 :func:`_video_generate_worker`，负责注册中止信号）"""
     try:
         # 风格/画幅：整集共用一次解析
@@ -1039,6 +1086,10 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 logger.info("[视频] 参考图已由磁盘资产补齐：角色 %d / 合计 %d",
                                 len(main_char_img), len(ref_imgs))
             else:
+                if prewarm_only:
+                    # 预热只填缓存、绝不触发资产补做（补做会碰 GPU）：无参考图直接放弃预热
+                    logger.info("[视频提示词预热] 磁盘无参考图，跳过（不触发资产补做，避免抢 GPU）")
+                    return
                 # 优化#1（2026-10-01）：连磁盘兜底都拿不到参考图 → 角色资产从未生成或
                 # 目录被清空。此前只 warning 后照跑（人物全靠模型自由发挥，成片必 OOC）。
                 # 现在自动补做：从剧本取角色清单，同步触发生成（上限 4 个、总等待 30 分钟），
@@ -1448,7 +1499,10 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     #    逐镜上报，前端显示「视频提示词 12/41」。
                     try:
                         import autopilot as _ap
-                        _ap.report_progress(f"视频提示词 {i + 1}/{len(shots)}")
+                        if prewarm_only:
+                            _ap.report_progress(f"预热视频提示词 {i + 1}/{len(shots)}")
+                        else:
+                            _ap.report_progress(f"视频提示词 {i + 1}/{len(shots)}")
                     except Exception:  # noqa: BLE001
                         pass
                     # shot_meta_map 是**按镜头**的报表（每镜一条），时长取该镜各子段之和 ——
@@ -1476,6 +1530,25 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 and str(os.environ.get("MJSCXT_VIDEO_PER_SCENE") or "1").strip().lower()
                 not in ("0", "false", "off", "no")
             )
+
+            if prewarm_only:
+                # ===================== 视频(h3)提示词预热（依赖驱动，2026-10-12）============
+                # 用户早期要求「视频提示词也要预热」：某一场次所需的 1..N 个分镜全部生成后，
+                # 立即后台把该场 h3 提示词（切段/LoRA/增强/预检）提前构建一遍，**只填缓存**
+                # （prompt_qc / prompt_enhance / h3_segment_loras / 切段），正式视频阶段跑
+                # _shot_segment 时全部命中秒过，GPU 不再等 CPU/LLM（本次生产实测 46 镜逐镜
+                # 现场增强+预检，GPU 干等）。
+                # 安全纪律（与 asset_worker._prewarm_asset_prompts 同范式）：
+                #   · 纯 LLM/CPU，只构建提示词，不提交 ComfyUI、不烧 GPU、不写教训库；
+                #   · daemon 线程 + 抓异常：预热失败绝不影响主线；
+                #   · 复用 _build_shots_for / _shot_segment（与正式跑同一实现，缓存 key 不漂移）。
+                _pw_t0 = time.perf_counter()
+                _pw_segs, _pw_metas = _build_shots_for(list(range(len(shots))))
+                logger.info("[视频提示词预热] 已构建 %d 段 h3 提示词（%d 镜，耗时 %.1fs），"
+                            "正式生成时命中缓存（只填缓存，未提交 GPU）",
+                            len(_pw_segs), len(_pw_metas), time.perf_counter() - _pw_t0)
+                return
+
             _scene_plan = []          # [(scene_no, [shot_idx, ...]), ...]
             for _si2, _sshot in enumerate(shots):
                 try:

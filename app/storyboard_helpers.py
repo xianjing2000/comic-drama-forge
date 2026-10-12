@@ -1658,7 +1658,8 @@ def _grid_panel_plan(shot, chars, style, client, project_name: str = "",
 
 def _storyboard_worker(task_id: str, project_name: str, shots: list,
                        char_idx: dict, item_idx: dict, scene_idx: dict,
-                       episode_no=None, style: str = "", overwrite: bool = False):
+                       episode_no=None, style: str = "", overwrite: bool = False,
+                       prewarm_only: bool = False):
     """后台分镜图生成任务：逐镜头生成并落盘 output/storyboards/<项目>[/epNN]/shot_XX.png
 
     style：用户与总控敲定的风格。用于 ① 补齐镜头 style 字段（老剧本无该字段时兜底）
@@ -2134,6 +2135,52 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         """取走 seq_p 的预取包（有则弹出）；没有返回 None（主循环转内联）。"""
         with _pf_lock:
             return _pf_cache.pop(seq_p, None)
+
+    if prewarm_only:
+        # ===================== 分镜提示词预热（依赖驱动，2026-10-12）=====================
+        # 用户早期要求「分镜提示词也要预热」：某一镜所需的角色/物品/场景资产**全部就绪后**，
+        # 立即后台把该镜前置段（参考图分配→画幅统一→身份网格→3D基准→build prompt→预检）
+        # 提前跑一遍，**只填缓存**（prompt_qc / prompt_enhance / 九宫格规划 / 3D基准图），
+        # 正式跑 _prep_shot 时全部命中秒过，GPU 不再等 CPU/LLM。
+        # 安全纪律（与 asset_worker._prewarm_asset_prompts 同范式）：
+        #   · 纯 LLM/CPU：3D 基准图走 SwiftShader 软渲染（--disable-gpu），不抢 ComfyUI；
+        #   · 只填缓存，不落分镜产物、不写 manifest、不碰 generation_state / results；
+        #   · 资产未齐的镜在 _prep_shot 内 refs_empty 提前返回（天然跳过，零 LLM）；
+        #   · 异常逐镜抓取，预热失败绝不影响主线（本函数由调用方 daemon 线程兜底）。
+        from concurrent.futures import ThreadPoolExecutor
+        _pw_total = len(_pf_pending)
+        _pw_done = {"n": 0, "fail": 0, "skip": 0}
+        _pw_lock = threading.Lock()
+        logger.info("[分镜提示词预热] 开始：待预热 %d 镜（只填缓存，不碰 GPU）", _pw_total)
+
+        def _pw_one(_item):
+            _seq, _shot = _item
+            try:
+                _pack = _prep_shot(_seq, _shot)
+                with _pw_lock:
+                    _pw_done["n"] += 1
+                    # 资产未齐的镜 _prep_shot 内 refs_empty 提前返回、无 prompt → 计跳过
+                    if _pack.get("refs_empty") and not _pack.get("prompt"):
+                        _pw_done["skip"] += 1
+                    _cur = _pw_done["n"] + _pw_done["fail"]
+                    logger.info("[分镜提示词预热] 已预热 %d/%d（失败 %d，资产未齐跳过 %d）",
+                                _cur, _pw_total, _pw_done["fail"], _pw_done["skip"])
+            except Exception:  # noqa: BLE001  单个失败不影响其余
+                with _pw_lock:
+                    _pw_done["fail"] += 1
+                    _cur = _pw_done["n"] + _pw_done["fail"]
+                    logger.info("[分镜提示词预热] 已预热 %d/%d（失败 %d）",
+                                _cur, _pw_total, _pw_done["fail"])
+
+        try:
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix='prewarm-sb') as _ex:
+                list(_ex.map(_pw_one, _pf_pending))
+        except Exception as _pw_ex:  # noqa: BLE001  线程池调度失败不影响生产
+            logger.warning("[分镜提示词预热] 调度失败（忽略，不影响生产）：%s", _pw_ex)
+        logger.info("[分镜提示词预热] 完成：预热 %d/%d 镜（失败 %d，资产未齐跳过 %d），"
+                    "正式生成时命中缓存",
+                    _pw_done["n"], _pw_total, _pw_done["fail"], _pw_done["skip"])
+        return
 
     try:
         for i, shot in enumerate(shots):
@@ -2823,6 +2870,48 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     _maybe_reclaim_comfyui_output()   # D-11a：任务收尾滚动回收 ComfyUI 重试残留（节流+全容错）
     # 分镜批量是本项目重跑最密集的环节（每失败一次多一条任务历史）→ 收尾顺手清历史面板。
     _maybe_clear_comfyui_history("storyboard 批量生成收尾")
+
+
+def prewarm_storyboard_prompts(project_name: str, shots: list, char_idx: dict,
+                               item_idx: dict, scene_idx: dict, episode_no=None,
+                               style: str = ""):
+    """依赖驱动预热：资产就绪后，后台预热各镜分镜提示词（只填缓存，不碰 GPU）。
+
+    用户早期明确要求（一直未落地）：「分镜和视频提示词也要预热啊」「比如这个分镜需要
+    角色1、物品1、场景1，在这个生成后就可以开始预热了」。本函数补上『资产完成 → 预热
+    分镜提示词』这半边：某一镜所需的角色/物品/场景资产全部就绪后，立即在后台把该镜
+    前置段（增强 + 预检）提前跑一遍，只填 prompt_qc / prompt_enhance / 九宫格规划 /
+    3D基准图缓存，不落分镜产物。
+
+    安全纪律（与 asset_worker._prewarm_asset_prompts 同范式）：
+      · daemon 线程 + 抓异常：预热失败绝不影响主线；
+      · 只填缓存，不碰 ComfyUI、不抢 GPU、不写教训库、不改 results；
+      · 复用 _storyboard_worker(prewarm_only=True)，与正式跑共用同一段 _prep_shot，
+        缓存 key 不漂移（这正是 prompt_qc 预检缓存作为命中层的意义）。
+
+    开关：env MJSCXT_PREWARM_STORYBOARD_PROMPT=0 可强制关闭（默认恒开 —— 与资产
+    预热同口径：只填缓存、纯 LLM、与出图并行，关掉毫无收益）。
+    """
+    try:
+        if str(os.environ.get("MJSCXT_PREWARM_STORYBOARD_PROMPT") or "1").strip().lower() \
+                in ("0", "false", "off", "no"):
+            return
+        if not shots:
+            return
+        _tid = f"prewarm_sb_{int(time.time() * 1000)}_{os.getpid()}"
+
+        def _run():
+            try:
+                _storyboard_worker(
+                    _tid, project_name, list(shots), char_idx, item_idx, scene_idx,
+                    episode_no, style, overwrite=False, prewarm_only=True)
+            except Exception as _pw_e:  # noqa: BLE001  预热整体失败不影响生产
+                logger.warning("[分镜提示词预热] 调度失败（忽略，不影响生产）：%s", _pw_e)
+
+        threading.Thread(target=_run, daemon=True,
+                         name=f"prewarm-sb-{project_name}").start()
+    except Exception as _pw_e:  # noqa: BLE001
+        logger.warning("[分镜提示词预热] 启动失败（忽略）：%s", _pw_e)
 
 
 def _blocking_spec_text(shot: dict) -> str:

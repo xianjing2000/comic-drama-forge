@@ -1514,6 +1514,55 @@ def step_tts_pre(ctx) -> dict:
                 "detail": {"note": f"配音先行失败，已跳过（不阻断）：{e}"}}
 
 
+def _trigger_storyboard_prewarm(ctx: dict) -> None:
+    """依赖驱动预热：资产就绪后，后台预热分镜提示词（daemon 线程，绝不阻塞主线）。
+
+    在 step_assets 每类资产生成完成后调用一次：每完成一类资产，就解锁一批镜的分镜
+    提示词预热（某一镜所需的角色/物品/场景资产齐了，就立即预热该镜）。预热只填缓存、
+    纯 LLM/CPU，与后续资产生成 / 分镜出图并行，GPU 不被抢占。
+    """
+    try:
+        import storyboard_helpers as _sbh
+        script = ctx.get("script") or {}
+        shots = script.get("shots") or []
+        if not shots:
+            return
+        A = _A()
+        char_idx = A._build_asset_index(script.get("characters") or [],
+                                         ctx["project_name"], "character")
+        item_idx = A._build_asset_index(script.get("items") or [],
+                                       ctx["project_name"], "item")
+        scene_idx = A._build_asset_index(script.get("scenes") or [],
+                                        ctx["project_name"], "scene")
+        _sbh.prewarm_storyboard_prompts(
+            ctx["project_name"], shots, char_idx, item_idx, scene_idx,
+            episode_no=ctx.get("episode_no"), style=(ctx["config"].get("style") or ""))
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[分镜提示词预热] 触发失败（忽略）：%s", _e)
+
+
+def _trigger_video_prewarm(ctx: dict) -> None:
+    """依赖驱动预热：分镜齐备后，后台预热各场 h3 视频提示词（daemon 线程，绝不阻塞主线）。
+
+    在 step_storyboard 分镜全部生成完成后调用一次：此时所有场次的分镜图已就绪，立即后台
+    预热整集 h3 提示词（切段/LoRA/增强/预检，只填缓存），正式视频阶段跑 _shot_segment
+    时全部命中秒过，GPU 不再等 CPU/LLM。
+    """
+    try:
+        import video_helpers as _vh
+        script = ctx.get("script") or {}
+        shots = script.get("shots") or []
+        if not shots:
+            return
+        _vh.prewarm_video_prompts(
+            ctx["project_name"], shots,
+            character_refs=(script.get("characters") or []),
+            scene_refs=(script.get("scenes") or []),
+            episode_no=ctx.get("episode_no"), style=(ctx["config"].get("style") or ""))
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[视频提示词预热] 触发失败（忽略）：%s", _e)
+
+
 def step_assets(ctx) -> dict:
     """角色 / 物品 / 场景资产（项目级；三种类型各自带 AI 质检与重生成）"""
     A = _A()
@@ -1554,6 +1603,11 @@ def step_assets(ctx) -> dict:
                          "blocked": out["blocked"], "error": out["error"]}
         if not out["ok"]:
             errs.append(f"{kind}: {out['error']}")
+        # ===================== 依赖驱动预热：资产完成 → 分镜提示词 =====================
+        # 每完成一类资产就触发一次后台预热（daemon 线程，不阻塞）：该类资产就绪后，
+        # 依赖它的镜即可开始预热分镜提示词（增强 + 预检，只填缓存）。预热与后续资产生成
+        # / 分镜出图并行，纯 LLM/CPU，不抢 GPU、不抢 ComfyUI 队列。
+        _trigger_storyboard_prewarm(ctx)
     if errs:
         return {"ok": False, "detail": {"results": results}, "error": "；".join(errs)}
     return {"ok": True, "detail": {"results": results}}
@@ -1612,6 +1666,11 @@ def step_storyboard(ctx) -> dict:
         return {"ok": False, "detail": detail,
                 "error": f"分镜图缺失 {len(recheck.get('missing') or [])} 镜："
                          f"{recheck.get('missing')[:8]}"}
+    # ===================== 依赖驱动预热：分镜完成 → 视频(h3)提示词 =====================
+    # 分镜全部生成并复核通过后，立即后台预热整集 h3 提示词（daemon 线程，不阻塞）：
+    # 各场次的 1..N 分镜已齐备，正式视频阶段跑 _shot_segment 时全部命中缓存，
+    # GPU 不再逐镜等 CPU/LLM 现场增强 + 预检。纯 LLM/CPU，不抢 GPU、不抢 ComfyUI 队列。
+    _trigger_video_prewarm(ctx)
     return {"ok": True, "detail": detail, "artifact": recheck["dir"]}
 
 
