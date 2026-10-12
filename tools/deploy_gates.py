@@ -101,9 +101,34 @@ def gate_app_sync(opts: dict) -> dict:
 #: 为什么单列一条门禁：check_app_sync.py 只比对 app/*.py，**不含 main.js** ——
 #: 而「改了 main.js 但安装区那份没同步」会让桌面版继续跑旧启动逻辑（t15 修的就是
 #: 这一类「改了不生效」）。打包产物（dist / 便携版）允许陈旧，只提示不判失败。
-MAIN_JS_STRICT_COPIES = [
-    Path("C:/mjscxt_p139/resources/app/main.js"),
-]
+def _installed_root() -> str:
+    """安装区根目录探测（t43，2026-10-12）：原先硬编码 C:/mjscxt_p139，换机即失效。
+
+    优先级：环境变量 MJSCXT_INSTALLED_ROOT → 自动探测常见盘符根下的 mjscxt* 目录
+    （含 resources/）→ 找不到返回空串（对应目标跳过，不误报）。
+    """
+    env = (os.environ.get("MJSCXT_INSTALLED_ROOT") or "").strip()
+    if env:
+        return os.path.abspath(env)
+    for drive in ("C", "D", "E"):
+        base = f"{drive}:\\"
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for name in names:
+            full = os.path.join(base, name)
+            if name.lower().startswith("mjscxt") and os.path.isdir(full) \
+                    and os.path.isdir(os.path.join(full, "resources")):
+                return full
+    return ""
+
+
+_INSTALLED_MAIN_JS = _installed_root()
+MAIN_JS_STRICT_COPIES = (
+    [Path(_INSTALLED_MAIN_JS) / "resources" / "app" / "main.js"]
+    if _INSTALLED_MAIN_JS else []
+)
 MAIN_JS_STALE_COPIES = [
     ROOT / "electron-app" / "dist" / "win-unpacked" / "resources" / "app" / "main.js",
 ]

@@ -123,18 +123,45 @@ def scan(d: Path) -> dict:
     return out
 
 
+def _installed_root() -> str:
+    """安装区根目录探测（t43，2026-10-12）：原先硬编码 C:/mjscxt_p139，换机即失效。
+
+    优先级：环境变量 MJSCXT_INSTALLED_ROOT → 自动探测常见盘符根下的 mjscxt* 目录
+    （含 resources/）→ 找不到返回空串（对应目标跳过，不误报）。
+    """
+    env = (os.environ.get("MJSCXT_INSTALLED_ROOT") or "").strip()
+    if env:
+        return os.path.abspath(env)
+    for drive in ("C", "D", "E"):
+        base = f"{drive}:\\"
+        try:
+            names = os.listdir(base)
+        except OSError:
+            continue
+        for name in names:
+            full = os.path.join(base, name)
+            if name.lower().startswith("mjscxt") and os.path.isdir(full) \
+                    and os.path.isdir(os.path.join(full, "resources")):
+                return full
+    return ""
+
+
 def default_targets() -> list:
     """返回 [(path, allow_stale)]；allow_stale=True 的是打包产物。"""
     appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-    return [
+    targets = [
         # —— 必须与源一致（改代码就要同步）——
         (ROOT / "electron-app" / "_backend" / "app", False),
-        (Path(r"C:\mjscxt_p139\resources\backend"), False),
         (Path(appdata) / "mjscxt-desktop" / "resource-mirror" / "app", False),
         # —— 打包产物：允许陈旧，落后不算失败 ——
         (ROOT / "electron-app" / "dist" / "win-unpacked" / "resources" / "backend", True),
         (ROOT / "packaging" / "_dist" / "漫剧工坊_便携版" / "app", True),
     ]
+    # 安装区 backend（部署镜像）：探测到才纳入比对，探测不到则跳过（不误报）。
+    inst = _installed_root()
+    if inst:
+        targets.insert(1, (Path(inst) / "resources" / "backend", False))
+    return targets
 
 
 def compare(src: dict, dst: dict, ignored_extra=frozenset()) -> dict:
