@@ -422,8 +422,11 @@ def _migrate_merge_chat(raw: dict, config_path: str) -> tuple:
     chat = modules.get("chat") if isinstance(modules.get("chat"), dict) else {}
     text = modules.get("text") if isinstance(modules.get("text"), dict) else {}
 
+    # ⭐ P1-②（t71）：api_key 必须纳入「有内容」判定 —— 否则「chat 只有明文 api_key、
+    # 无 base_url/model」的旧结构会被判为空 chat 直接删除，明文密钥静默丢失
+    # （t65 实测：密钥未进加密库、明文被删）。
     has_fields = any(str(chat.get(k) or "").strip()
-                     for k in ("base_url", "model", "reasoning_effort"))
+                     for k in ("base_url", "model", "reasoning_effort", "api_key"))
     has_fb = bool(_normalize_fallbacks(chat.get("fallbacks"), "chat"))
     store = _store()
     chat_key = store.get_api_key("ai.chat")
@@ -445,6 +448,13 @@ def _migrate_merge_chat(raw: dict, config_path: str) -> tuple:
         cv = str(chat.get(k) or "").strip()
         if not tv and cv:
             merged[k] = cv
+    # ⭐ P1-②（t71）：明文 api_key 也要合并（text 优先，text 空取 chat 明文）。
+    #   明文不直接落盘为最终态 —— load_config 后续的 scrub_plaintext_key 会把
+    #   text 的明文写进 ai.text 加密库并清空 json（复用既有 scrub，密钥不丢）。
+    _tv_key = str(merged.get("api_key") or "").strip()
+    _cv_key = str(chat.get("api_key") or "").strip()
+    if not _tv_key and _cv_key and "*" not in _cv_key:
+        merged["api_key"] = _cv_key
     merged["updated_at"] = merged.get("updated_at") or chat.get("updated_at")
     merged["fallbacks"] = _merge_fallback_items(text.get("fallbacks"), chat.get("fallbacks"))
     _migrate_chat_key_to_text()

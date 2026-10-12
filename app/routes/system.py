@@ -38,6 +38,105 @@ _MODELS_TIMEOUT = 8.0
 _MODELS_CACHE = {}
 _MODELS_LOCK = threading.RLock()
 
+# --------------------------------------------------------------------------- #
+# SSRF 防护（2026-10-12 t71，t65 独立验证发现的 P1）
+# --------------------------------------------------------------------------- #
+# 原实现对 base_url 零协议白名单/零内网黑名单/零重定向防护，实测 file:// 可读本地文件。
+# 修复：① 协议白名单 http/https；② 主机解析后校验实际 IP（回环/私有/链路本地/云元数据/
+#   ULA/CGNAT/保留/多播/未指定全拒，防 DNS rebinding 与十进制 IP）；③ 禁用重定向；
+#   ④ 显式白名单放行本地 LLM 网关（精确 host:port，默认 127.0.0.1:7863 等生产在用），
+#   env MJSCXT_AI_MODELS_ALLOW_HOSTS 可追加（逗号分隔 host 或 host:port）。
+# 取舍说明：默认**只放行 7863 端口**的本地网关，其余回环/内网一律拒绝 —— 既保住
+#   生产在用的本地 LLM，又不给任意 SSRF 开「回环全放」的口子；用户自建其它端口需显式加白。
+_DEFAULT_MODELS_ALLOW_HOSTS = ("127.0.0.1:7863", "localhost:7863", "::1:7863", "[::1]:7863")
+
+
+def _models_allow_hosts() -> set:
+    """显式放行白名单（精确 host 或 host:port；默认含生产本地网关，env 可追加）。"""
+    raw = os.getenv("MJSCXT_AI_MODELS_ALLOW_HOSTS", "").strip()
+    out = set(_DEFAULT_MODELS_ALLOW_HOSTS)
+    for item in raw.split(","):
+        item = item.strip().lower()
+        if item:
+            out.add(item)
+    return out
+
+
+def _is_blocked_ip(addr) -> bool:
+    """是否属于禁止访问的 IP（回环/私有/链路本地/云元数据/ULA/CGNAT/保留/多播/未指定）。"""
+    import ipaddress as _ipa
+    if isinstance(addr, _ipa.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return _is_blocked_ip(_ipa.ip_address(addr.ipv4_mapped))
+        return (addr.is_loopback or addr.is_link_local or addr.is_multicast
+                or addr.is_unspecified or addr.is_private or addr.is_reserved)
+    return (addr.is_loopback or addr.is_private or addr.is_link_local
+            or addr.is_multicast or addr.is_unspecified or addr.is_reserved
+            or addr in _ipa.ip_network("100.64.0.0/10")     # CGNAT
+            or addr in _ipa.ip_network("0.0.0.0/8")
+            or addr in _ipa.ip_network("198.18.0.0/15"))    # benchmark
+
+
+def _validate_base_url(base_url: str) -> tuple:
+    """SSRF 防护校验。返回 (ok, error)。"""
+    import ipaddress as _ipa
+    import socket as _socket
+
+    u = (base_url or "").strip()
+    if not u:
+        return False, "base_url 不能为空"
+    try:
+        p = urlparse(u)
+    except ValueError:
+        return False, "base_url 非法"
+
+    scheme = (p.scheme or "").lower()
+    if scheme not in ("http", "https"):
+        return False, "仅支持 http/https 协议（收到 %s）" % (scheme or "空")
+
+    host = (p.hostname or "").strip().lower()
+    if not host:
+        return False, "base_url 缺主机名"
+    port = str(p.port or (443 if scheme == "https" else 80))
+
+    # 显式白名单（精确 host 或 host:port）—— 生产本地网关在此放行
+    allowed = _models_allow_hosts()
+    if host in allowed or (host + ":" + port) in allowed:
+        return True, ""
+
+    # 解析实际 IP（防 DNS rebinding / 十进制 IP / IPv6 映射）
+    try:
+        infos = _socket.getaddrinfo(host, port, type=_socket.SOCK_STREAM)
+    except _socket.gaierror:
+        return False, "主机名无法解析：%s" % host
+    if not infos:
+        return False, "主机名无法解析：%s" % host
+    for info in infos:
+        ip_str = info[4][0]
+        try:
+            addr = _ipa.ip_address(ip_str)
+        except ValueError:
+            continue
+        if _is_blocked_ip(addr):
+            return False, "拒绝访问内网/保留地址：%s（解析为 %s）" % (host, ip_str)
+    return True, ""
+
+
+def _safe_models_opener():
+    """禁用 HTTP 重定向 + 禁用代理的 opener（防重定向/代理绕过 SSRF 校验）。
+
+    用 build_opener（与标准 urlopen 同构）：_NoRedirect 替代默认 HTTPRedirectHandler，
+    ProxyHandler({}) 禁用环境代理。协议白名单已挡 file/ftp，故无需额外 handler。
+    """
+    import urllib.request
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        """禁用 HTTP 重定向：redirect_request 返回 None = 不跟随跳转（3xx 将被当错误抛出）。"""
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    return urllib.request.build_opener(_NoRedirect(), urllib.request.ProxyHandler({}))
+
 
 def _build_models_url(base_url: str) -> str:
     """把 base_url 规范化为 OpenAI 兼容的模型清单地址。
@@ -97,13 +196,18 @@ def _detect_provider_models(base_url: str, api_key: str, timeout: float) -> dict
     import urllib.error
     import urllib.request
 
+    # ⭐ SSRF 防护（t71）：协议白名单 + 主机解析后 IP 校验 + 显式白名单
+    _ok, _err = _validate_base_url(base_url)
+    if not _ok:
+        return {"success": False, "code": "ssrf_blocked", "error": _err, "models_url": ""}
     url = _build_models_url(base_url)
     if not url:
         return {"success": False, "code": "invalid_url", "error": "base_url 非法", "models_url": ""}
     req = urllib.request.Request(
         url, headers={"Authorization": "Bearer " + api_key, "Accept": "application/json"})
+    opener = _safe_models_opener()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 固定 https/http 网关
+        with opener.open(req, timeout=timeout) as resp:
             code = getattr(resp, "status", 200) or 200
             body = resp.read().decode("utf-8", "replace")
             try:
