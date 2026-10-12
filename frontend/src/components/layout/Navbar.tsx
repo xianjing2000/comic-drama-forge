@@ -118,7 +118,7 @@ export function Navbar() {
           label={t('common.statusBackendOnline')}
           offlineLabel={t('common.statusBackendOffline')}
           checkingLabel={t('common.statusChecking')}
-          title="后端"
+          title={t('nav.backend')}
         />
         <StatusPill
           status={comfy}

@@ -17,6 +17,7 @@ import {
   type DesktopUpdateInfo,
   type DesktopUpdateApplyResult,
 } from '@/desktop/updater';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 
 type Phase = 'idle' | 'checking' | 'choosing' | 'applying-resource' | 'applying-full';
 
@@ -44,7 +45,7 @@ export function UpdateChecker() {
       const res = await updater.check();
       if (!res.ok) {
         setPhase('idle');
-        setErrMsg(res.error || '检查更新失败');
+        setErrMsg(res.error || t('updater.checkFailed'));
         return;
       }
       setInfo(res);
@@ -63,11 +64,11 @@ export function UpdateChecker() {
     try {
       const r: DesktopUpdateApplyResult = await updater.applyResource();
       if (r.ok) {
-        setDoneMsg('资源已更新到 ' + (r.latest || info?.latest || '最新版') + '，正在重载应用…');
-        toast.success(doneMsg || '资源已更新，正在重载');
+        setDoneMsg(t('updater.resourceUpdated', { v: r.latest || info?.latest || t('updater.latestTag') }));
+        toast.success(doneMsg || t('updater.resourceUpdatedShort'));
         setTimeout(() => window.location.reload(), 1200);
       } else {
-        setErrMsg(r.error || '资源更新失败');
+        setErrMsg(r.error || t('updater.resourceFailed'));
         setBusyKind(null);
         setPhase(info?.update ? 'choosing' : 'idle');
       }
@@ -89,15 +90,15 @@ export function UpdateChecker() {
       if (deferred) {
         setBusyKind(null);
         setPhase('choosing');
-        toast.info('整包已下载完成，可再次点击「整包更新」立即应用，或稍后重启生效。');
+        toast.info(t('updater.fullDownloaded'));
         return;
       }
       if (r.ok) {
-        setDoneMsg('整包已应用，新进程即将接管并重启。');
+        setDoneMsg(t('updater.fullApplied'));
         toast.success(doneMsg);
         setTimeout(() => { window.location.replace('about:blank'); }, 1500);
       } else {
-        setErrMsg(r.error || '整包更新失败');
+        setErrMsg(r.error || t('updater.fullFailed'));
         setBusyKind(null);
         setPhase(info?.update ? 'choosing' : 'idle');
       }
@@ -113,8 +114,8 @@ export function UpdateChecker() {
       <button
         type="button"
         onClick={() => { void openAndCheck(); }}
-        title="检查更新（GitHub 最新版）"
-        aria-label="检查更新"
+        title={t('updater.checkTitle')}
+        aria-label={t('updater.checkLabel')}
         disabled={busy}
         className="flex shrink-0 items-center gap-1.5 rounded-md border border-line bg-surface-2/60 px-2.5 py-1.5 text-xs font-medium text-ink-2 transition-all duration-200 hover:border-brand/40 hover:text-brand hover:shadow-md disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
       >
@@ -122,31 +123,31 @@ export function UpdateChecker() {
           <path d="M21 12a9 9 0 1 1-2.64-6.36" />
           <path d="M21 3v6h-6" />
         </svg>
-        <span className="hidden sm:inline">{busy ? '更新中…' : '检查更新'}</span>
+        <span className="hidden sm:inline">{busy ? t('updater.updating') : t('updater.checkLabel')}</span>
       </button>
 
       <Modal
         isOpen={open}
         onClose={() => { if (!busy) setOpen(false); }}
-        title="软件更新"
-        description="来自 GitHub 公开发布仓库（xianjing2000/comic-drama-forge）"
+        title={t('updater.dialogTitle')}
+        description={t('updater.dialogDesc')}
         size="md"
         preventClose={busy}
         footer={
           phase === 'choosing' ? (
             <div className="flex w-full items-center justify-end gap-2">
-              <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>关闭</Button>
+              <Button variant="ghost" onClick={() => setOpen(false)} disabled={busy}>{t('common.close')}</Button>
               {info?.needResource && (
-                <Button variant="secondary" onClick={() => void applyResource()} disabled={busy}>资源增量</Button>
+                <Button variant="secondary" onClick={() => void applyResource()} disabled={busy}>{t('updater.resourceBtn')}</Button>
               )}
               {info?.needFull && (
-                <Button variant="primary" onClick={() => void applyFull()} disabled={busy}>整包更新</Button>
+                <Button variant="primary" onClick={() => void applyFull()} disabled={busy}>{t('updater.fullBtn')}</Button>
               )}
             </div>
           ) : (
             <div className="flex w-full items-center justify-end gap-2">
               <Button variant="ghost" onClick={() => { setOpen(false); setPhase('idle'); }} disabled={busy}>
-                {busy ? '处理中…' : '关闭'}
+                {busy ? t('common.loading') : t('common.close')}
               </Button>
             </div>
           )
@@ -156,7 +157,7 @@ export function UpdateChecker() {
           {phase === 'checking' && (
             <div className="flex items-center gap-2 text-ink-2">
               <span className="h-3 w-3 animate-spin rounded-full border-2 border-line border-t-brand" />
-              正在检查 GitHub 最新版本…
+              {t('updater.checkingGithub')}
             </div>
           )}
 
@@ -164,19 +165,19 @@ export function UpdateChecker() {
             <>
               <div className="rounded-lg border border-line bg-surface-2/40 p-3">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-ink-2">当前版本</span>
+                  <span className="text-ink-2">{t('updater.currentVersion')}</span>
                   <span className="font-mono text-ink-1">{info.current || '—'}</span>
                 </div>
                 <div className="mt-1 flex items-center justify-between gap-2">
-                  <span className="text-ink-2">最新版本</span>
+                  <span className="text-ink-2">{t('updater.latestVersion')}</span>
                   <span className="font-mono text-brand">{info.latest || '—'}</span>
                 </div>
                 {info.releaseName && <p className="mt-2 text-xs text-ink-3">{info.releaseName}</p>}
               </div>
               <div className="text-xs leading-relaxed text-ink-2">
-                <p><b>资源增量</b>：只更新工作流/前端/后端代码，体积小，保留密钥与数据；重启后端后生效。</p>
-                <p className="mt-1"><b>整包</b>：下载完整 Portable 应用（含 Python 运行时），约 200MB+；下载后由 bootstrapper 接管替换并重启整个应用。</p>
-                <p className="mt-1 text-ink-3">两种方式都会自动做 SHA256 校验。</p>
+                <p><b>{t('updater.resourceDescTitle')}</b>：{t('updater.resourceDescBody')}</p>
+                <p className="mt-1"><b>{t('updater.fullDescTitle')}</b>：{t('updater.fullDescBody')}</p>
+                <p className="mt-1 text-ink-3">{t('updater.shaNote')}</p>
               </div>
             </>
           )}
@@ -185,8 +186,8 @@ export function UpdateChecker() {
             <div className="flex items-center gap-2 text-ink-2">
               <span className="h-3 w-3 animate-spin rounded-full border-2 border-line border-t-brand" />
               {phase === 'applying-resource'
-                ? '正在下载并应用资源增量（可能需数十秒到数分钟）…'
-                : '正在下载整包（约 200MB+，可能需数分钟）…'}
+                ? t('updater.downloadingResource')
+                : t('updater.downloadingFull')}
             </div>
           )}
 
@@ -197,13 +198,13 @@ export function UpdateChecker() {
           )}
           {errMsg && (
             <div className="rounded-md border border-danger/30 bg-danger-subtle p-3 text-xs text-danger">
-              {errMsg}
+              {sanitizeErrorMessage(errMsg)}
             </div>
           )}
 
           {phase === 'idle' && info && !info.update && !errMsg && (
             <div className="rounded-md border border-line bg-surface-2/40 p-3 text-xs text-ink-2">
-              当前已是最新版本（{info.current}）。
+              {t('updater.latestAlready', { v: info.current ?? '' })}
             </div>
           )}
         </div>

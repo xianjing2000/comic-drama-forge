@@ -9,14 +9,17 @@
 //   GET  /api/final/<filename>?download=1       成片下载（支持 Range 内联播放）
 // ============================================================================
 import React, { useCallback, useEffect, useState } from 'react';
+import { t } from '@/i18n';
 import { Badge, Button, Skeleton, EmptyState, ErrorState } from '@/components/ui';
 import { Download, Film, FolderOpen, Share2, RefreshCw, Play, AlertTriangle } from '@/components/ui/icons';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 
 const cx = (...p: Array<string | false | null | undefined>): string => p.filter(Boolean).join(' ');
 
 interface ExportItem { filename?: string; name?: string; path?: string; format?: string; created_at?: string; size?: number; [k: string]: unknown }
 
-const FORMATS = [['jianying', '剪映草稿'], ['fcpxml', 'FCPXML'], ['srt', 'SRT 字幕'], ['frames', '帧序列清单']] as const;
+// label 位放的是 i18n 键，渲染时再取文案（模块级常量不能直接调 t：语言包此时可能还没加载）
+const FORMATS = [['jianying', 'export.fmtJianying'], ['fcpxml', 'export.fmtFcpxml'], ['srt', 'export.fmtSrt'], ['frames', 'export.fmtFrames']] as const;
 
 async function jget<T>(u: string): Promise<T> { return (await (await fetch(u)).json()) as T; }
 async function jpost<T>(u: string, b: unknown): Promise<T> {
@@ -43,7 +46,7 @@ function FileRow({ label, href, sub }: { label: string; href: string; sub?: stri
       <span className="min-w-0 flex-1 truncate text-xs text-ink-1">{label}</span>
       {sub ? <span className="shrink-0 text-xs text-ink-3">{sub}</span> : null}
       <a className="inline-flex h-7 shrink-0 items-center rounded-md border border-line px-2 text-xs text-ink-2 hover:bg-surface-2" href={href} target="_blank" rel="noreferrer">
-        <Download className="mr-1 h-3 w-3" />下载
+        <Download className="mr-1 h-3 w-3" />{t('common.download')}
       </a>
     </div>
   );
@@ -77,37 +80,56 @@ export default function ExportPanel({ project, episodeNo = 1, className }: { pro
     try {
       const r = await jpost<{ files?: unknown[]; count?: number }>('/api/export/run',
         { project_name: project, episode_no: episodeNo, formats: picked });
-      setMsg(`导出完成，共 ${r?.count ?? (r?.files || []).length} 个文件`);
+      setMsg(t('export.doneMsg', { n: r?.count ?? (r?.files || []).length }));
       await load();
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(''); }
   };
   const doFinal = async () => {
     setBusy('final'); setErr(''); setMsg('');
-    try { await jpost('/api/final/video', { project_name: project, episode_no: episodeNo }); setMsg('成片合成已提交'); }
+    try { await jpost('/api/final/video', { project_name: project, episode_no: episodeNo }); setMsg(t('export.finalSubmitted')); }
     catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(''); }
   };
 
-  if (!project) return <EmptyState title="请先选择项目" />;
+  if (!project) return (
+    <EmptyState
+      title={t('common.selectProjectFirst')}
+      description={t('common.selectProjectHint')}
+      action={(
+        <Button size="sm" variant="secondary" onClick={() => { window.location.hash = '#projects'; }}>
+          {t('common.backToProjects')}
+        </Button>
+      )}
+    />
+  );
   if (loading) return <Skeleton className="h-36" />;
 
   return (
     <div className={cx('flex flex-col gap-3', className)}>
-      <Section icon={<Share2 className="h-4 w-4" />} title="导出（剪辑软件 / 字幕）"
+      <Section icon={<Share2 className="h-4 w-4" />} title={t('export.exportTitle')}
         right={<Button size="sm" variant="brand" loading={busy === 'export'} onClick={() => void doExport()}>
-          <Download className="mr-1.5 h-3.5 w-3.5" />导出本集</Button>}>
+          <Download className="mr-1.5 h-3.5 w-3.5" />{t('export.exportThis')}</Button>}>
         <div className="mb-3 flex flex-wrap gap-x-4 gap-y-2">
           {FORMATS.map(([k, label]) => (
             <label key={k} className="flex cursor-pointer items-center gap-1.5 text-xs text-ink-2">
               <input type="checkbox" className="h-3.5 w-3.5 accent-brand" checked={picked.includes(k)}
                 onChange={(e) => setPicked((v) => e.target.checked ? [...v, k] : v.filter((x) => x !== k))} />
-              {label}
+              {t(label)}
             </label>
           ))}
         </div>
         {exports_.length === 0 ? (
-          <div className="text-xs text-ink-3">还没有导出记录。</div>
+          <EmptyState
+            icon={<Share2 className="h-10 w-10" />}
+            title={t('export.noRecords')}
+            description={t('export.noRecordsHint')}
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => void load()}>
+                {t('common.refresh')}
+              </Button>
+            )}
+          />
         ) : (
           <div className="flex flex-col gap-0.5">
             {exports_.map((it, i) => {
@@ -119,18 +141,18 @@ export default function ExportPanel({ project, episodeNo = 1, className }: { pro
         )}
       </Section>
 
-      <Section icon={<Film className="h-4 w-4" />} title="成片"
+      <Section icon={<Film className="h-4 w-4" />} title={t('export.finalTitle')}
         right={<Button size="sm" variant="secondary" loading={busy === 'final'} onClick={() => void doFinal()}>
-          <Play className="mr-1.5 h-3.5 w-3.5" />合成成片</Button>}>
+          <Play className="mr-1.5 h-3.5 w-3.5" />{t('export.composeFinal')}</Button>}>
         <div className="flex items-center gap-2 text-xs text-ink-3">
-          <span>第 {episodeNo} 集成片：</span>
+          <span>{t('export.finalOf', { n: episodeNo })}</span>
           <a className="inline-flex h-7 items-center rounded-md border border-line px-2 text-xs text-ink-2 hover:bg-surface-2"
              href={`/api/final/ep${String(episodeNo).padStart(2, '0')}_final.mp4`} target="_blank" rel="noreferrer">
-            <Play className="mr-1 h-3 w-3" />在浏览器打开
+            <Play className="mr-1 h-3 w-3" />{t('export.openInBrowser')}
           </a>
           <a className="inline-flex h-7 items-center rounded-md border border-line px-2 text-xs text-ink-2 hover:bg-surface-2"
              href={`/api/final/ep${String(episodeNo).padStart(2, '0')}_final.mp4?download=1`}>
-            <Download className="mr-1 h-3 w-3" />下载
+            <Download className="mr-1 h-3 w-3" />{t('common.download')}
           </a>
         </div>
       </Section>
@@ -138,7 +160,7 @@ export default function ExportPanel({ project, episodeNo = 1, className }: { pro
       {msg ? <div className="text-xs text-success">{msg}</div> : null}
       {err ? (
         <div className="flex items-start gap-1.5 rounded-md border border-danger/40 bg-danger/5 p-2 text-xs text-danger">
-          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1 break-words">{err}</span>
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span className="min-w-0 flex-1 break-words">{sanitizeErrorMessage(err)}</span>
         </div>
       ) : null}
     </div>

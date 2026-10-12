@@ -63,11 +63,11 @@ interface LiveFeed {
 }
 
 // ---- 事件类型 → 视觉语义（全部走语义色 token，不写 hex / dark:）------------
-const KIND_STYLE: Record<Kind, { icon: React.ReactNode; dot: string; chip: string; label: string }> = {
-  action:   { icon: <Play className="h-3.5 w-3.5" />,          dot: 'bg-info',    chip: 'border-info/40 bg-info/10 text-info',       label: '执行' },
-  thinking: { icon: <Brain className="h-3.5 w-3.5" />,         dot: 'bg-accent',  chip: 'border-accent/40 bg-accent/10 text-accent', label: '思考' },
-  result:   { icon: <CheckCircle2 className="h-3.5 w-3.5" />,   dot: 'bg-success', chip: 'border-success/40 bg-success/10 text-success', label: '完成' },
-  warn:     { icon: <AlertTriangle className="h-3.5 w-3.5" />,  dot: 'bg-warning', chip: 'border-warning/40 bg-warning/10 text-warning', label: '告警' },
+const KIND_STYLE: Record<Kind, { icon: React.ReactNode; dot: string; chip: string; labelKey: string }> = {
+  action:   { icon: <Play className="h-3.5 w-3.5" />,          dot: 'bg-info',    chip: 'border-info/40 bg-info/10 text-info',       labelKey: 'live.kindAction' },
+  thinking: { icon: <Brain className="h-3.5 w-3.5" />,         dot: 'bg-accent',  chip: 'border-accent/40 bg-accent/10 text-accent', labelKey: 'live.kindThinking' },
+  result:   { icon: <CheckCircle2 className="h-3.5 w-3.5" />,   dot: 'bg-success', chip: 'border-success/40 bg-success/10 text-success', labelKey: 'live.kindResult' },
+  warn:     { icon: <AlertTriangle className="h-3.5 w-3.5" />,  dot: 'bg-warning', chip: 'border-warning/40 bg-warning/10 text-warning', labelKey: 'live.kindWarn' },
 };
 
 const STEP_DOT: Record<string, string> = {
@@ -89,6 +89,7 @@ function StepChip({ s }: { s: StepItem }) {
 
 function StreamRow({ it, defaultOpen = false }: { it: FeedItem; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
+  const { t } = useApp();
   const st = KIND_STYLE[it.kind] || KIND_STYLE.action;
   const hasDetail = Boolean(it.detail);
   return (
@@ -98,7 +99,7 @@ function StreamRow({ it, defaultOpen = false }: { it: FeedItem; defaultOpen?: bo
       </span>
       <span className="mt-[2px] w-[62px] shrink-0 font-mono text-xs tabular-nums text-ink-3">{it.t}</span>
       <span className={cx('mt-[1px] h-[18px] shrink-0 rounded border px-1.5 text-xs leading-[16px]', st.chip)}>
-        {st.label}
+        {t(st.labelKey)}
       </span>
       <span className="min-w-0 flex-1">
         <button
@@ -147,7 +148,7 @@ export default function LiveExecutionFeed({
       const q = new URLSearchParams({ project, episode_no: String(episodeNo), tail: '200' });
       const r = await fetch(`/api/autopilot/live_feed?${q.toString()}`);
       const j = (await r.json()) as LiveFeed;
-      if (!j.success) { setErr(j.error || '读取执行流失败'); return; }
+      if (!j.success) { setErr(j.error || t('live.loadFailed')); return; }
       setFeed(j);
       setErr('');
     } catch (e) {
@@ -170,7 +171,17 @@ export default function LiveExecutionFeed({
     if (el && autoScroll) el.scrollTop = 0;
   }, [feed, autoScroll]);
 
-  if (!project) return <EmptyState title="请先选择项目" />;
+  if (!project) return (
+    <EmptyState
+      title={t('common.selectProjectFirst')}
+      description={t('common.selectProjectHint')}
+      action={(
+        <Button size="sm" variant="secondary" onClick={() => { window.location.hash = '#projects'; }}>
+          {t('common.backToProjects')}
+        </Button>
+      )}
+    />
+  );
   if (loading && !feed) return <div className="flex flex-col gap-2"><Skeleton className="h-20" /><Skeleton className="h-40" /></div>;
   if (err && !feed) return <ErrorState description={err} onRetry={() => void load()} />;
 
@@ -189,16 +200,16 @@ export default function LiveExecutionFeed({
             <span className={cx('h-2 w-2 shrink-0 rounded-full',
               running ? 'animate-pulse bg-brand' : (feed?.sources?.live_task ? 'bg-success' : 'bg-ink-3'))} />
             <span className="truncate text-sm font-medium text-ink-1">
-              {running ? (now.phase || now.label || '执行中') : '总控待命（当前无任务）'}
+              {running ? (now.phase || now.label || t('live.runningNow')) : t('live.idleNoTask')}
             </span>
             {typeof now.attempt === 'number' && now.attempt > 0 ? (
-              <Badge variant="warning">第 {now.attempt + 1} 次尝试</Badge>
+              <Badge variant="warning">{t('live.attemptNth', { n: now.attempt + 1 })}</Badge>
             ) : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            {typeof counters.done === 'number' && counters.done > 0 ? <Badge variant="success">完成 {counters.done}</Badge> : null}
-            {typeof counters.failed === 'number' && counters.failed > 0 ? <Badge variant="danger">失败 {counters.failed}</Badge> : null}
-            {typeof counters.skipped === 'number' && counters.skipped > 0 ? <Badge variant="default">跳过 {counters.skipped}</Badge> : null}
+            {typeof counters.done === 'number' && counters.done > 0 ? <Badge variant="success">{t('live.badgeDone', { n: counters.done })}</Badge> : null}
+            {typeof counters.failed === 'number' && counters.failed > 0 ? <Badge variant="danger">{t('live.badgeFailed', { n: counters.failed })}</Badge> : null}
+            {typeof counters.skipped === 'number' && counters.skipped > 0 ? <Badge variant="default">{t('live.badgeSkipped', { n: counters.skipped })}</Badge> : null}
           </div>
         </div>
         {pct !== null ? (
@@ -207,13 +218,13 @@ export default function LiveExecutionFeed({
           </div>
         ) : null}
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-3">
-          {now.label ? <span>任务：{now.label}</span> : null}
-          {now.phase ? <span>阶段：{now.phase}</span> : null}
-          {now.asset ? <span>当前：{now.asset}</span> : null}
+          {now.label ? <span>{t('live.taskLabel', { name: now.label })}</span> : null}
+          {now.phase ? <span>{t('live.phaseLabel', { name: now.phase })}</span> : null}
+          {now.asset ? <span>{t('live.currentAsset', { name: now.asset })}</span> : null}
           {typeof now.shot === 'number' ? (
-            <span>镜头 {now.shot}{typeof now.current === 'number' && typeof now.total === 'number' && now.total > 0 ? `（${now.current}/${now.total}）` : ''}</span>
-          ) : (typeof now.current === 'number' && typeof now.total === 'number' && now.total > 0 ? <span>进度 {now.current}/{now.total}</span> : null)}
-          {feed?.sources?.episode_log ? <span>日志已接入</span> : <span>暂无本集日志</span>}
+            <span>{t('live.shotLabel', { n: now.shot })}{typeof now.current === 'number' && typeof now.total === 'number' && now.total > 0 ? `（${now.current}/${now.total}）` : ''}</span>
+          ) : (typeof now.current === 'number' && typeof now.total === 'number' && now.total > 0 ? <span>{t('live.progressLabel', { a: now.current, b: now.total })}</span> : null)}
+          {feed?.sources?.episode_log ? <span>{t('live.logAttached')}</span> : <span>{t('live.logMissing')}</span>}
         </div>
         {(feed?.steps?.length || 0) > 0 ? (
           <div className="mt-2 flex flex-wrap gap-1.5">
@@ -227,21 +238,37 @@ export default function LiveExecutionFeed({
         <div className="flex items-center justify-between border-b border-line px-3 py-2">
           <div className="flex items-center gap-2 text-sm font-medium text-ink-1">
             <BarChart3 className="h-4 w-4 text-ink-3" />
-            执行流
-            <span className="text-xs font-normal text-ink-3">{stream.length} 条</span>
+            {t('live.feedTitle')}
+            <span className="text-xs font-normal text-ink-3">{t('live.entryCount', { n: stream.length })}</span>
           </div>
           <div className="flex items-center gap-2">
             <Button size="sm" variant="ghost" onClick={() => setAutoScroll((v) => !v)}>
-              {autoScroll ? '跟随最新' : '已暂停跟随'}
+              {autoScroll ? t('live.following') : t('live.followPaused')}
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => void load()}>刷新</Button>
+            <Button size="sm" variant="ghost" onClick={() => void load()}>{t('common.refresh')}</Button>
           </div>
         </div>
         <div ref={scrollRef} className="max-h-[460px] overflow-auto p-1.5">
           {stream.length === 0 ? (
-            <div className="px-2 py-8 text-center text-xs text-ink-3">
-              本集还没有可展示的执行事件。启动生产后，这里会实时显示每一步动作与判断依据。
-            </div>
+            <EmptyState
+              icon={<BarChart3 className="h-10 w-10" />}
+              title={t('live.emptyTitle')}
+              description={t('live.emptyHint')}
+              action={(
+                <div className="flex flex-wrap items-center justify-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="brand"
+                    onClick={() => { window.location.hash = `#/project?p=${encodeURIComponent(project)}`; }}
+                  >
+                    {t('wb.startProduction')}
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => void load()}>
+                    {t('common.refresh')}
+                  </Button>
+                </div>
+              )}
+            />
           ) : (
             <ol className="flex flex-col">
               {stream.map((it, i) => (

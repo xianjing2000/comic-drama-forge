@@ -184,6 +184,11 @@ export function ProjectWorkbenchPage({ projectKey }: ProjectWorkbenchPageProps) 
       icon={<AlertTriangle className="h-10 w-10" />}
       title={t('wb.projectNotFound')}
       description={projectKey}
+      action={(
+        <Button size="sm" variant="secondary" onClick={() => { window.location.hash = '#projects'; }}>
+          {t('wb.backToProjects')}
+        </Button>
+      )}
     />
   );
 
@@ -468,11 +473,11 @@ function ProductionProgress({ projectKey }: { projectKey: string }) {
         <div className="flex items-start gap-2.5 mt-3 p-3 rounded-lg bg-danger-subtle border border-danger text-danger-strong text-xs">
           <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
           <div className="flex-1">
-            <p className="font-semibold text-sm">{failurePause.reason || ('第' + (failurePause.episode ?? '') + '集生产失败，已暂停')}</p>
+              <p className="font-semibold text-sm">{sanitizeErrorMessage(failurePause.reason || t('wb.failurePauseTitle', { n: failurePause.episode ?? '' }))}</p>
             {failurePause.error && (
-              <p className="mt-1 break-all text-danger/80">{failurePause.error}</p>
+              <p className="mt-1 break-all text-danger/80">{sanitizeErrorMessage(failurePause.error)}</p>
             )}
-            <p className="mt-1.5 text-danger/70">任务已自动暂停（stop_on_failure）。处理后点上方「恢复托管」继续；第{failurePause.episode ?? ''}集数据已保留，不会丢失。</p>
+              <p className="mt-1.5 text-danger/70">{t('wb.failurePauseHint', { n: failurePause.episode ?? '' })}</p>
           </div>
           <button
             type="button"
@@ -546,19 +551,19 @@ function ProductionModeCard({ projectKey }: { projectKey: string }) {
   return (
     <div className="mb-4">
       <div className="mb-3 flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface px-3 py-2">
-        <span className="text-sm font-semibold text-ink-1">生产模式</span>
+        <span className="text-sm font-semibold text-ink-1">{t('wb.productionMode')}</span>
         <div className="inline-flex rounded-md border border-line p-0.5">
           <button type="button" className={seg(mode === 'autopilot')} onClick={() => setMode('autopilot')}>
-            托管 · 按计划
+            {t('wb.modeAutopilot')}
           </button>
           <button type="button" className={seg(mode === 'autonomous')} onClick={() => setMode('autonomous')}>
-            自主 · AI 决策
+            {t('wb.modeAutonomous')}
           </button>
         </div>
         <span className="min-w-0 flex-1 text-xs text-ink-3">
           {mode === 'autopilot'
-            ? '按既定计划逐集生产，步骤固定；单集失败会自动暂停等你处理。'
-            : '由总控 AI 自己判断下一步做什么（可调用工具），适合无人值守长跑。'}
+            ? t('wb.modeAutopilotDesc')
+            : t('wb.modeAutonomousDesc')}
         </span>
       </div>
       {mode === 'autopilot'
@@ -792,7 +797,7 @@ function StartProductionCard({
           {statusError && (
             <div className="flex items-start gap-2 rounded-md border border-warning/40 bg-warning-subtle px-2.5 py-1.5 text-xs text-warning-strong">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-              <span className="break-words">{statusError}</span>
+              <span className="break-words">{sanitizeErrorMessage(statusError)}</span>
               <button
                 type="button"
                 className="ml-auto shrink-0 underline underline-offset-2"
@@ -867,7 +872,7 @@ function StartProductionCard({
               role="alert"
             >
               <span className="font-medium">{t('wb.startFailed')}</span>
-              <span className="ml-2 break-words">{actionError}</span>
+              <span className="ml-2 break-words">{sanitizeErrorMessage(actionError)}</span>
               <p className="mt-0.5 text-ink-2">{t('wb.startFailedHint')}</p>
             </div>
           )}
@@ -1597,7 +1602,7 @@ function OverviewTab({
         ) : scriptError ? (
           <ErrorState
             title={t('project.loadingFailed')}
-            description={scriptError}
+            description={sanitizeErrorMessage(scriptError)}
             onRetry={fetchEpisodes}
           />
         ) : episodes.length === 0 ? (
@@ -1605,6 +1610,11 @@ function OverviewTab({
             icon={<ClipboardList className="h-10 w-10" />}
             title={t('episodes.noEpisodes')}
             description={t('wb.startAutoFirst')}
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => fetchEpisodes()}>
+                {t('common.refresh')}
+              </Button>
+            )}
           />
         ) : (
           <>
@@ -1748,7 +1758,7 @@ function OverviewTab({
                   )}
                   {!splitPlanLoading && splitPlanError && (
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-sm text-danger-strong">{splitPlanError}</span>
+                      <span className="text-sm text-danger-strong">{sanitizeErrorMessage(splitPlanError)}</span>
                       <button
                         onClick={fetchSplitPlan}
                         className={`px-2.5 py-1 rounded-md text-xs bg-surface-2 text-ink-2 hover:bg-line ${FOCUS_RING}`}
@@ -2106,7 +2116,7 @@ function ScreenplayModal({
       <div className="space-y-3">
         {error && (
           <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm break-words">
-            {error}
+            {sanitizeErrorMessage(error)}
           </div>
         )}
         {loading ? (
@@ -2600,7 +2610,15 @@ function AssetPreviewModal({
               className="w-full rounded-md bg-surface-2"
             />
           ) : (
-            <EmptyState icon={<ImageIcon className="h-10 w-10" />} title={t('wb.imageUnavailable')} />
+            <EmptyState
+              icon={<ImageIcon className="h-10 w-10" />}
+              title={t('wb.imageUnavailable')}
+              action={(
+                <Button size="sm" variant="secondary" onClick={onClose}>
+                  {t('common.close')}
+                </Button>
+              )}
+            />
           )}
 
           {gallery.length > 1 && (
@@ -3202,7 +3220,7 @@ function QcTab({ projectKey }: { projectKey: string }) {
     return (
       <ErrorState
         title={t('project.loadingFailed')}
-        description={error}
+        description={sanitizeErrorMessage(error)}
         onRetry={load}
       />
     );
@@ -3498,6 +3516,11 @@ function QcTab({ projectKey }: { projectKey: string }) {
           icon={<ClipboardCheck className="h-10 w-10" />}
           title={t('qc.noRecords')}
           description={t('qc.noRecordsHint')}
+          action={(
+            <Button size="sm" variant="secondary" onClick={() => { void load(); }}>
+              {t('common.refresh')}
+            </Button>
+          )}
         />
       ) : (
         <div className="bg-surface rounded-lg border border-line overflow-x-auto">
@@ -3698,11 +3721,11 @@ function ShotPromptEditor({ shot, novelId, episodeNo, onSaved }: {
         }
       );
       const d = await r.json();
-      if (!d.success) throw new Error(d.error || '保存失败');
-      toast.success(`镜头 ${shot.shot_id} 提示词已保存`);
+      if (!d.success) throw new Error(d.error || t('wb.promptSaveFailed'));
+      toast.success(t('wb.promptSaved', { n: shot.shot_id }));
       onSaved();
     } catch (e: any) {
-      toast.error(e.message || '保存失败');
+      toast.error(e.message || t('wb.promptSaveFailed'));
     } finally {
       setSaving(false);
     }
@@ -3724,12 +3747,12 @@ function ShotPromptEditor({ shot, novelId, episodeNo, onSaved }: {
       if (d.task_id) {
         setLive(null);
         pollTask(d.task_id);
-        toast.info(`分镜 ${shot.shot_id} 重新生成任务已启动（提示词随质检实时刷新）`);
+        toast.info(t('wb.shotRegenStarted', { n: shot.shot_id }));
       } else {
-        throw new Error(d.error || '启动失败');
+        throw new Error(d.error || t('wb.regenStartFailed'));
       }
     } catch (e: any) {
-      toast.error(e.message || '重新生成失败');
+      toast.error(e.message || t('wb.regenFailed'));
     } finally {
       setRegenerating(false);
     }
@@ -3741,8 +3764,8 @@ function ShotPromptEditor({ shot, novelId, episodeNo, onSaved }: {
       <div className="flex items-center gap-2 text-xs">
         <span className={`font-medium ${live.done ? 'text-success' : 'text-brand'}`}>
           {live.done
-            ? '定稿提示词（本轮出图实际使用）'
-            : `QC 实时改写 · 第 ${(live.attempt ?? 0) + 1} 次尝试 · ${live.phase === 'regenerating' ? '改写后重新生成中' : live.phase === 'checking' ? '质检判定中' : '生成中'}`}
+            ? t('wb.promptFinal')
+            : t('wb.promptLiveRewrite', { n: (live.attempt ?? 0) + 1, phase: live.phase === 'regenerating' ? t('wb.phaseRegenerating') : live.phase === 'checking' ? t('wb.phaseChecking') : t('wb.phaseGenerating') })}
         </span>
         {!live.done && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand" />}
       </div>
@@ -3759,7 +3782,7 @@ function ShotPromptEditor({ shot, novelId, episodeNo, onSaved }: {
             className="text-xs text-brand hover:underline shrink-0 cursor-pointer"
             onClick={() => { setDesc(shot.description || ''); setMotion(shot.motion || ''); setEditing(true); }}
           >
-            编辑
+            {t('common.editBtn')}
           </button>
         </div>
         {shot.motion && <p className="text-xs text-ink-3 ml-2">{shot.motion}</p>}
@@ -3770,31 +3793,31 @@ function ShotPromptEditor({ shot, novelId, episodeNo, onSaved }: {
 
   return (
     <div className="mt-2 bg-surface rounded border border-line p-3 space-y-2">
-      <label className="text-xs font-medium text-ink-2 block">镜头描述（提示词）</label>
+      <label className="text-xs font-medium text-ink-2 block">{t('wb.shotDescLabel')}</label>
       <textarea
         value={desc}
         onChange={(e) => setDesc(e.target.value)}
         rows={2}
         className="w-full text-sm bg-surface border border-line rounded p-2 text-ink-1 resize-y"
-        placeholder="中近景（腰部以上取景），赵天霸右手食指伸出指向右前方…"
+        placeholder={t('wb.shotDescPlaceholder')}
       />
-      <label className="text-xs font-medium text-ink-2 block">画面内动作（motion）</label>
+      <label className="text-xs font-medium text-ink-2 block">{t('wb.motionLabel')}</label>
       <textarea
         value={motion}
         onChange={(e) => setMotion(e.target.value)}
         rows={2}
         className="w-full text-sm bg-surface border border-line rounded p-2 text-ink-1 resize-y"
-        placeholder="【摄影机】无；【画面内】赵天霸右手食指前伸，左手丹丸位于胸前"
+        placeholder={t('wb.motionPlaceholder')}
       />
       {livePanel}
       <div className="flex items-center gap-2">
         <Button size="sm" onClick={save} disabled={saving || !desc.trim()}>
-          {saving ? '保存中…' : '保存提示词'}
+          {saving ? t('common.saving') : t('wb.promptSave')}
         </Button>
         <Button size="sm" variant="secondary" onClick={regenerate} disabled={regenerating || !desc.trim()}>
-          {regenerating ? '生成中…' : '重新生成分镜'}
+          {regenerating ? t('common.generating') : t('wb.regenShot')}
         </Button>
-        <button className="text-xs text-ink-3 hover:text-ink-1 cursor-pointer" onClick={() => setEditing(false)}>取消</button>
+        <button className="text-xs text-ink-3 hover:text-ink-1 cursor-pointer" onClick={() => setEditing(false)}>{t('common.cancel')}</button>
       </div>
     </div>
   );
@@ -4582,7 +4605,7 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput,
       {error && error !== 'no-data' && cards.length === 0 && (
         <ErrorState
           title={t('project.loadingFailed')}
-          description={error}
+          description={sanitizeErrorMessage(error)}
           onRetry={fetchCanvas}
         />
       )}
@@ -5302,7 +5325,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
 
       {error && (
         <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-sm text-danger-strong">
-          {error}
+          {sanitizeErrorMessage(error)}
         </div>
       )}
 
@@ -5313,6 +5336,11 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
             icon={<ZoomIn className="h-10 w-10" />}
             title={t('upscale.sourceEmpty')}
             description={t('upscale.sourceEmptyTip')}
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => { void load(); }}>
+                {t('common.refresh')}
+              </Button>
+            )}
           />
         ) : (
           <>
@@ -5432,7 +5460,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
             <p className="text-xs text-ink-2">{task.message}</p>
           )}
           {task.status === 'error' && task.error && (
-            <p className="text-xs text-danger-strong break-all">{task.error}</p>
+            <p className="text-xs text-danger-strong break-all">{sanitizeErrorMessage(task.error)}</p>
           )}
 
           {task.status === 'done' && res && (
@@ -5872,7 +5900,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
 
   const toggleKill = async () => {
     try {
-      const d = await agentApi.setKill(!killOn, !killOn ? '前端手动急停' : '');
+      const d = await agentApi.setKill(!killOn, !killOn ? t('wb.killReasonManual') : '');
       setKillOn(!!d.kill?.on);
     } catch (err) {
       setError(err instanceof Error ? err.message : t('chat.killFailed'));
@@ -6042,7 +6070,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
 
       {error && (
         <div className="mx-3 mt-3 p-2 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-xs shrink-0">
-          {error}
+          {sanitizeErrorMessage(error)}
         </div>
       )}
 
@@ -6056,6 +6084,15 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
               icon={<MessageSquare className="h-10 w-10" />}
               title={autoMode ? t('chat.autoEmptyTitle') : t('chat.chatEmptyTitle')}
               description={autoMode ? t('chat.autoEmptyDesc') : t('chat.chatEmptyDesc')}
+              action={(
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setInput(autoMode ? t('chat.suggestAuto1') : t('chat.suggestChat1'))}
+                >
+                  {t('chat.emptyAction')}
+                </Button>
+              )}
             />
             <div className="w-full space-y-1.5">
               {(autoMode

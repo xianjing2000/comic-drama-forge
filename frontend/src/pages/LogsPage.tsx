@@ -4,6 +4,7 @@ import { Badge, Button, Card, Input, Select } from '@/components/ui';
 import { logsApi } from '@/api/client';
 import LiveExecutionFeed from '@/components/LiveExecutionFeed';
 import type { LogSource, LogsResponse } from '@/types';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 
 /** 内存中最多保留多少行（防止长时间挂着拖垮浏览器） */
 const MAX_KEEP = 2000;
@@ -187,18 +188,15 @@ export function LogsPage() {
 
       {/* ===== 结构化执行流（原概览页的「执行流」，并入日志页）===== */}
       <div className="flex flex-wrap items-center gap-3">
-        <span className="text-sm font-medium text-ink-1">执行流 · 所属项目</span>
+        <span className="text-sm font-medium text-ink-1">{t('logs.projectTitle')}</span>
         <Select
           value={feedProject}
           onChange={setFeedProject}
           options={projList.length ? projList.map(p => ({ value: p.key, label: p.name }))
-                                   : [{ value: '', label: '（暂无项目）' }]}
+                                   : [{ value: '', label: t('logs.noProjectOption') }]}
           className="min-w-[220px]"
         />
-        <span className="text-xs text-ink-3">
-          下方是结构化的生产事件（步骤开始/完成/失败/跳过 + 耗时 + 判断依据）；
-          最下面的「日志正文」是服务进程的原始输出。
-        </span>
+        <span className="text-xs text-ink-3">{t('logs.hint')}</span>
       </div>
       {feedProject ? <LiveExecutionFeed project={feedProject} /> : null}
 
@@ -261,7 +259,7 @@ export function LogsPage() {
 
       {error && (
         <div className="rounded-lg border border-danger/40 bg-danger/5 p-3 text-sm text-danger">
-          {error}
+          {sanitizeErrorMessage(error)}
         </div>
       )}
 

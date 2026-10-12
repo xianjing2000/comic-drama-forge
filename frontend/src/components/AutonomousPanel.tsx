@@ -12,8 +12,10 @@
 // 总控 AI（function-calling），由它自己判断下一步做什么（见 agent_core.py）。
 // ============================================================================
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { t } from '@/i18n';
 import { Badge, Button, Skeleton, EmptyState, Input } from '@/components/ui';
 import { Play, Pause, RefreshCw, FileText, Download, AlertTriangle } from '@/components/ui/icons';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 
 const POLL_MS = 3000;
 const cx = (...p: Array<string | false | null | undefined>): string => p.filter(Boolean).join(' ');
@@ -128,7 +130,17 @@ export default function AutonomousPanel({
     } finally { setBusy(''); }
   };
 
-  if (!project) return <EmptyState title="请先选择项目" />;
+  if (!project) return (
+    <EmptyState
+      title={t('common.selectProjectFirst')}
+      description={t('common.selectProjectHint')}
+      action={(
+        <Button size="sm" variant="secondary" onClick={() => { window.location.hash = '#projects'; }}>
+          {t('common.backToProjects')}
+        </Button>
+      )}
+    />
+  );
   if (loading && !st) return <Skeleton className="h-24" />;
 
   const ap = st?.autopilot || {};
@@ -148,29 +160,29 @@ export default function AutonomousPanel({
           <div className="flex min-w-0 items-center gap-2">
             <span className={cx('h-2 w-2 shrink-0 rounded-full', running ? 'animate-pulse bg-brand' : 'bg-ink-3')} />
             <span className="truncate text-sm font-medium text-ink-1">
-              {running ? (paused ? '自主生产（已暂停）' : '自主生产中') : '自主生产未启动'}
+              {running ? (paused ? t('auto.statePaused') : t('auto.stateRunning')) : t('auto.stateIdle')}
             </span>
-            <Badge variant="success">完成 {done}</Badge>
-            {failed > 0 ? <Badge variant="danger">失败 {failed}</Badge> : null}
-            {pending > 0 ? <Badge variant="info">待产 {pending}</Badge> : null}
+            <Badge variant="success">{t('auto.doneN', { n: done })}</Badge>
+            {failed > 0 ? <Badge variant="danger">{t('auto.failedN', { n: failed })}</Badge> : null}
+            {pending > 0 ? <Badge variant="info">{t('auto.pendingN', { n: pending })}</Badge> : null}
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {running ? (
               <>
                 <Button size="sm" variant="secondary" loading={busy === 'resume'} onClick={() => void act('resume')}>
-                  <RefreshCw className="mr-1.5 h-3.5 w-3.5" />恢复
+                  <RefreshCw className="mr-1.5 h-3.5 w-3.5" />{t('auto.resumeBtn')}
                 </Button>
                 <Button size="sm" variant="danger" loading={busy === 'stop'} onClick={() => void act('stop')}>
-                  <Pause className="mr-1.5 h-3.5 w-3.5" />停止
+                  <Pause className="mr-1.5 h-3.5 w-3.5" />{t('auto.stopBtn')}
                 </Button>
               </>
             ) : (
               <Button size="sm" variant="brand" loading={busy === 'start'} onClick={() => void act('start')}>
-                <Play className="mr-1.5 h-3.5 w-3.5" />一键启动
+                <Play className="mr-1.5 h-3.5 w-3.5" />{t('auto.startNow')}
               </Button>
             )}
             <Button size="sm" variant="ghost" onClick={() => setOpenCfg((v) => !v)}>
-              {openCfg ? '收起参数' : '启动参数'}
+              {openCfg ? t('auto.configCollapse') : t('auto.configTitle')}
             </Button>
           </div>
         </div>
@@ -181,23 +193,23 @@ export default function AutonomousPanel({
         <div className="flex flex-col gap-3 rounded-lg border border-line bg-surface-2 p-3">
           <div className="grid grid-cols-2 gap-3">
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-ink-3">画风（留空＝用项目已保存风格）</span>
-              <Input value={style} onChange={setStyle} placeholder="如：超现实悬疑惊悚" />
+              <span className="text-xs text-ink-3">{t('auto.styleLabel')}</span>
+              <Input value={style} onChange={setStyle} placeholder={t('auto.stylePlaceholder')} />
             </label>
             <label className="flex flex-col gap-1">
-              <span className="text-xs text-ink-3">目标镜头数（留空＝按剧本）</span>
-              <Input value={targetShots} onChange={(v) => setTargetShots(v.replace(/\D/g, ''))} placeholder="如：24" />
+              <span className="text-xs text-ink-3">{t('auto.targetShotsLabel')}</span>
+              <Input value={targetShots} onChange={(v) => setTargetShots(v.replace(/\D/g, ''))} placeholder={t('auto.targetShotsPlaceholder')} />
             </label>
           </div>
           <div className="flex flex-wrap gap-x-4 gap-y-2">
             {([
-              ['enable_assets', '资产图'], ['enable_storyboard', '分镜图'],
-              ['enable_video', '视频'], ['enable_tts_pre', '参考音色'],
-              ['enable_tts', '配音'], ['enable_final', '成片'],
+              ['enable_assets', t('auto.optEnableAssets')], ['enable_storyboard', t('auto.optEnableStoryboard')],
+              ['enable_video', t('auto.optEnableVideo')], ['enable_tts_pre', t('auto.optEnableTtsPre')],
+              ['enable_tts', t('auto.optEnableTts')], ['enable_final', t('auto.optEnableFinal')],
               // ⭐ 集间流水线：本集烧 GPU 时后台预热下一集剧本（见后端 prewarm_next_script）
-              ['prewarm_next_script', '预热下集剧本'],
-              ['prewarm_asset_prompt', '预热资产提示词'],
-              ['auto_screenplay', '自动生成文学剧本'],
+              ['prewarm_next_script', t('auto.optPrewarmNextScript')],
+              ['prewarm_asset_prompt', t('auto.optPrewarmAssetPrompt')],
+              ['auto_screenplay', t('auto.optAutoScreenplay')],
             ] as const).map(([k, label]) => (
               <label key={k} className="flex cursor-pointer items-center gap-1.5 text-xs text-ink-2">
                 <input
@@ -217,30 +229,30 @@ export default function AutonomousPanel({
       <div className="rounded-lg border border-line bg-surface">
         <div className="flex items-center justify-between border-b border-line px-3 py-2">
           <div className="flex items-center gap-2 text-sm font-medium text-ink-1">
-            <FileText className="h-4 w-4 text-ink-3" />生产报告
+            <FileText className="h-4 w-4 text-ink-3" />{t('auto.reportTitle')}
           </div>
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="ghost" loading={busy === 'report'} onClick={() => void loadReport()}>查看</Button>
+            <Button size="sm" variant="ghost" loading={busy === 'report'} onClick={() => void loadReport()}>{t('auto.reportView')}</Button>
             <a
               className="inline-flex h-8 items-center rounded-md border border-line px-2.5 text-xs text-ink-2 hover:bg-surface-2"
               href={`/api/autonomous/report/export/${encodeURIComponent(project)}?format=json`}
               target="_blank" rel="noreferrer"
             >
-              <Download className="mr-1 h-3.5 w-3.5" />导出
+              <Download className="mr-1 h-3.5 w-3.5" />{t('auto.reportExport')}
             </a>
           </div>
         </div>
         {report ? (
           <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words p-3 text-xs leading-relaxed text-ink-2">{report}</pre>
         ) : (
-          <div className="px-3 py-6 text-center text-xs text-ink-3">点「查看」加载本项目的生产报告</div>
+          <div className="px-3 py-6 text-center text-xs text-ink-3">{t('auto.reportEmptyHint')}</div>
         )}
       </div>
 
       {err ? (
         <div className="flex items-start gap-1.5 rounded-md border border-danger/40 bg-danger/5 p-2 text-xs text-danger">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 break-words">{err}</span>
+          <span className="min-w-0 flex-1 break-words">{sanitizeErrorMessage(err)}</span>
         </div>
       ) : null}
     </div>

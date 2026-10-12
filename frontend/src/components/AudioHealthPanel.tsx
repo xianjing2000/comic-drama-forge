@@ -27,7 +27,7 @@ import { Badge, Button, EmptyState, ErrorState, Modal, Skeleton } from '@/compon
 import { AlertTriangle, CheckCircle2, Film, Music, RefreshCw, Volume2 } from '@/components/ui/icons';
 import { autopilotApi, episodesApi, qcApi, qualityApi, type QCTriageResult, type QualityEpisodeRow } from '@/api/client';
 import type { Deliverable } from '@/types';
-import { describeError } from '@/utils/errorText';
+import { describeError, sanitizeErrorMessage } from '@/utils/errorText';
 import {
   AUDIO_KINDS, KIND_KEY, SILENT_MEAN_DB, SILENT_RATIO,
   isSilentFail, kindStateOf, pickDeliverable, resolveGate, summarizeAudioHealth,
@@ -239,7 +239,7 @@ export default function AudioHealthPanel({ project, novelId, onLocateShot, class
         {!loading && err ? (
           <ErrorState
             title={t('audio.healthLoadFailed')}
-            description={err}
+            description={sanitizeErrorMessage(err)}
             code={errCode || undefined}
             onRetry={() => void load(episodeNo ?? 1, deep)}
           />
@@ -496,7 +496,7 @@ export default function AudioHealthPanel({ project, novelId, onLocateShot, class
           {vis.loading ? <Skeleton className="h-48" /> : null}
           {!vis.loading && vis.error ? (
             <ErrorState
-              description={vis.error}
+              description={sanitizeErrorMessage(vis.error)}
               onRetry={() => void openVisuals(vis.source, vis.label)}
             />
           ) : null}

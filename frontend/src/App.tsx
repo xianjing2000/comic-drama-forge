@@ -6,7 +6,6 @@ import { Navbar } from '@/components/layout/Navbar';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ServiceMonitor } from '@/components/ServiceMonitor';
-import { OverviewPage } from '@/pages/OverviewPage';
 import { ProjectsPage } from '@/pages/ProjectsPage';
 import { AIVaultPage } from '@/pages/AIVaultPage';
 import { MemoryPage } from '@/pages/MemoryPage';
@@ -56,7 +55,11 @@ function AppContent() {
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
 
-  const PageComponent = useMemo(() => SECTIONS[activeSection] || OverviewPage, [activeSection]);
+  // 兜底必须落在真实存在的页面上：parseRoute 只会产出 SECTIONS 的 key 或 'project-workbench'
+  // （后者必带 projectKey → 走上方的 ProjectWorkbenchPage 分支），所以这里永远不会命中。
+  // 曾兜底到 OverviewPage —— 那个页面因此**运行期不可达**（t25 N1），已删除；
+  // 兜底改为项目中心，语义与「未知路由回默认页」一致。
+  const PageComponent = useMemo(() => SECTIONS[activeSection] || ProjectsPage, [activeSection]);
 
   return (
     // bg-canvas 半透明：透出 body::before 的科技感辉光层（见 index.css），玻璃面板才有景深

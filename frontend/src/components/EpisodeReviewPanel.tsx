@@ -21,6 +21,7 @@ import {
 import { Button, Textarea, Skeleton, ErrorState, Badge } from '@/components/ui';
 import { Eye, Film, ChevronRight, ChevronDown } from '@/components/ui/icons';
 import { useToast } from '@/components/ui/toast';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 
 // ---- helpers ----------------------------------------------------------------
 
@@ -324,12 +325,17 @@ function StageCard({ stage, info, note, setNote, busy, onAct, artifactExists, re
 
 // ---- 主组件 -----------------------------------------------------------------
 
-export function EpisodeReviewPanel({ projectKey, episode, onChanged }: {
+export function EpisodeReviewPanel({ projectKey, episode, onChanged, focusShot }: {
   projectKey: string;
   /** 要复核的集号（成片验收行里的那一集） */
   episode: number;
   /** C/D 判定或预演批准成功后的回调：让外层刷新列表与验收状态 */
   onChanged?: () => void;
+  /**
+   * 要定位到的镜号（t28：交付页「无声镜号」点进来的那一镜）。
+   * 传了就自动展开该镜所在场次、滚动到它并高亮；不传则行为与改动前完全一致。
+   */
+  focusShot?: number | string;
 }) {
   const { t } = useApp();
   const toast = useToast();
@@ -366,6 +372,20 @@ export function EpisodeReviewPanel({ projectKey, episode, onChanged }: {
   }, [projectKey, episode, t]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // ⭐ 2026-10-12（t28）：从交付页点「无声镜号」跳进来时，把该镜滚到视野中央。
+  //    场次折叠由下面渲染里的 focusGroup 覆盖（目标镜所在场次强制展开）——
+  //    否则目标镜可能躺在收起的场次里，滚动过去什么也看不到。
+  useEffect(() => {
+    if (focusShot === undefined || focusShot === null || focusShot === '') return;
+    const timer = window.setTimeout(() => {
+      const el = document.getElementById('ep-shot-' + String(focusShot));
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 160);
+    return () => window.clearTimeout(timer);
+  }, [focusShot, data]);
 
   const act = async (stage: 'C' | 'D', status: string) => {
     if (busy) return;
@@ -419,7 +439,7 @@ export function EpisodeReviewPanel({ projectKey, episode, onChanged }: {
     return (
       <ErrorState
         title={String(t('common.loadFailed'))}
-        description={error}
+        description={sanitizeErrorMessage(error)}
         onRetry={load}
       />
     );
@@ -430,7 +450,7 @@ export function EpisodeReviewPanel({ projectKey, episode, onChanged }: {
       {/* Soft error banner */}
       {error && (
         <div className="rounded border border-danger/30 bg-danger-subtle px-3 py-2 text-sm text-danger-strong">
-          {error}
+          {sanitizeErrorMessage(error)}
         </div>
       )}
 
@@ -551,36 +571,58 @@ export function EpisodeReviewPanel({ projectKey, episode, onChanged }: {
               const sref = (shot.refs || []).find(
                 (r: { kind?: string; name?: string }) => r.kind === 'scenes' || r.kind === 'scene',
               );
-              const nm = String(sref?.name || shot.location || '未命名场次');
+              const nm = String(sref?.name || shot.location || t('review.unnamedScene'));
               if (!(nm in idx)) { idx[nm] = groups.length; groups.push({ name: nm, shots: [] }); }
               groups[idx[nm]].shots.push(shot);
             });
-            return groups.map((g, gi) => (
+            // ⭐ 2026-10-12（t28）：目标镜所在场次**强制展开** —— 交付页点「无声镜号」
+            //    跳进来时，目标镜可能躺在默认收起的场次里，不展开就滚不到它。
+            const _focus = (focusShot === undefined || focusShot === null || focusShot === '')
+              ? ''
+              : String(focusShot);
+            const focusGroup = _focus
+              ? groups.find((g) => g.shots.some((sh) => String(sh.seq) === _focus))
+              : undefined;
+            return groups.map((g, gi) => {
+              const sceneOpen = !isSceneCollapsed(g.name, gi === 0) || g === focusGroup;
+              return (
               <div key={g.name}>
                 <button
                   type="button"
                   onClick={() => toggleScene(g.name, gi === 0)}
                   className="mb-2 flex w-full flex-wrap items-center gap-2 rounded-md border border-line bg-surface-2 px-3 py-2 text-left transition-colors hover:bg-surface-2/70"
                 >
-                  {isSceneCollapsed(g.name, gi === 0)
+                  {!sceneOpen
                     ? <ChevronRight className="h-3.5 w-3.5 text-ink-3" />
                     : <ChevronDown className="h-3.5 w-3.5 text-ink-3" />}
                   <span className="text-sm font-medium text-ink-1">{g.name}</span>
-                  <Badge variant="default">{g.shots.length} 镜</Badge>
+                  <Badge variant="default">{t('review.shotCount', { n: g.shots.length })}</Badge>
                   <span className="text-xs text-ink-3">
-                    {`镜 ${g.shots[0]?.seq}–${g.shots[g.shots.length - 1]?.seq}`}
+                    {t('review.shotRange', { from: g.shots[0]?.seq, to: g.shots[g.shots.length - 1]?.seq })}
                   </span>
                   <span className="ml-auto text-xs text-ink-3">
-                    {isSceneCollapsed(g.name, gi === 0) ? '展开' : '收起'}
+                    {!sceneOpen ? t('review.sceneExpand') : t('review.sceneCollapse')}
                   </span>
                 </button>
-                {!isSceneCollapsed(g.name, gi === 0) && (
+                {sceneOpen && (
                   <div className="space-y-3">
-                    {g.shots.map((shot) => <ShotCard key={shot.seq} shot={shot} t={t} />)}
+                    {g.shots.map((shot) => {
+                      const isFocus = !!_focus && String(shot.seq) === _focus;
+                      return (
+                        <div
+                          key={shot.seq}
+                          id={'ep-shot-' + String(shot.seq)}
+                          className={isFocus ? 'rounded-lg ring-2 ring-warning/60' : undefined}
+                        >
+                          <ShotCard shot={shot} t={t} />
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
-            ));
+              );
+            });
           })()}
         </div>
       )}

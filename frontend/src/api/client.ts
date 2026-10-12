@@ -34,10 +34,30 @@ const API_BASE = '/api';
 // 后端统一返回 {success, error?, message?}。此前 request() 直接抛
 // `HTTP 500: Internal Server Error`，把后端精心脱敏过的中文错误丢掉了，
 // 界面上只能看到无信息的英文报错。这里优先取后端的可读文案。
-async function readError(response: Response): Promise<string> {
+/**
+ * 统一 API 错误（t27）：带上后端错误码与 HTTP 状态。
+ *
+ * 为什么现在才加：此前 request() 只抛 new Error(文案)，于是「被 stale 阻断」这类
+ * **可编程状态**只能靠匹配中文文案来判断 —— 文案一改，判断就静默失效。
+ * 保留 message（界面照常展示可读原因），额外把 code/status 暴露给分流逻辑。
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  constructor(message: string, opts: { status?: number; code?: string } = {}) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = opts.status ?? 0;
+    this.code = opts.code ?? '';
+  }
+}
+
+async function readErrorDetail(response: Response): Promise<{ message: string; code: string }> {
   let detail = '';
+  let code = '';
   try {
     const data = await response.clone().json();
+    if (typeof data?.code === 'string' && data.code.trim()) code = data.code.trim();
     const raw = data?.error || data?.message || data?.detail;
     if (typeof raw === 'string' && raw.trim()) detail = raw.trim();
     else if (raw) detail = JSON.stringify(raw);
@@ -57,7 +77,13 @@ async function readError(response: Response): Promise<string> {
     }
   }
   const status = `HTTP ${response.status}`;
-  return detail ? `${detail}` : `${status} ${response.statusText || ''}`.trim();
+  const message = detail ? `${detail}` : `${status} ${response.statusText || ''}`.trim();
+  return { message, code };
+}
+
+/** 兼容旧调用点：只取可读文案（新增的 code 走 readErrorDetail） */
+async function readError(response: Response): Promise<string> {
+  return (await readErrorDetail(response)).message;
 }
 
 async function request<T>(
@@ -74,7 +100,8 @@ async function request<T>(
       : { 'Content-Type': 'application/json', ...options.headers },
   });
   if (!response.ok) {
-    throw new Error(await readError(response));
+    const { message, code } = await readErrorDetail(response);
+    throw new ApiError(message, { status: response.status, code });
   }
   return response.json() as Promise<T>;
 }
@@ -157,7 +184,8 @@ export const novelsApi = {
       body: formData,
     });
     if (!response.ok) {
-      throw new Error(await readError(response));
+      const { message, code } = await readErrorDetail(response);
+      throw new ApiError(message, { status: response.status, code });
     }
     return response.json() as Promise<NovelUploadResponse>;
   },
@@ -535,8 +563,14 @@ export const videoApi = {
       url: string;
       ref_count: number;
       duration: number;
-      /** 后端已把同集旧成片标记为「需重新合成」 */
+      /** 后端已把同集旧成片标记为「需重新合成」（t17 前字段，保留兼容） */
       deliverable_marked_stale?: boolean;
+      /**
+       * t17 新增：本次返工**实际**失效的产物清单（如 ["final","upscale"]）。
+       * 比 deliverable_marked_stale 更精确 —— 界面据此提示「成片/超分已失效，
+       * 需重新合成」，而不是笼统地说「已过期」。
+       */
+      outputs_invalidated?: string[];
     }>('/video/retry-shot', { method: 'POST', body: JSON.stringify(data) }),
 
   // ---- 批量重生成镜头视频（2026-10-02）：POST /api/video/retry-shots-batch ----
@@ -681,6 +715,49 @@ export interface QCAudioResult {
   error?: string;
 }
 
+export interface QCTriageAudioFailed {
+  line?: string;
+  reason?: string[];
+  /** 产物类目（t19 起后端返回）：line / voice_bank / merged / mix / final */
+  kind?: string;
+  /** 是否整轨口径（true = 不设有声占比下限的整轨产物） */
+  whole_track?: boolean;
+  critical?: string[];
+  source?: string;
+  metrics?: {
+    duration?: number;
+    mean_db?: number | null;
+    max_db?: number | null;
+    silence_sec?: number;
+    speech_ratio?: number | null;
+  };
+}
+
+/** POST /api/qc/triage（诊断与补救建议）响应。 */
+export interface QCTriageResult {
+  success?: boolean;
+  project?: string;
+  episode_no?: number;
+  deep?: boolean;
+  error?: string;
+  visual?: { ok?: boolean; failed_count?: number; failed?: Array<{ key?: string; kind?: string; attempts?: number; issues?: string[] }> };
+  audio?: {
+    ok?: boolean;
+    checked?: number;
+    failed_count?: number;
+    mode?: string;
+    failed?: QCTriageAudioFailed[];
+    /** ⭐ 2026-10-12（t19/t28）：五类产物分类计数 —— 旧实现只扫 *_lines/，现役链路恒为 0 */
+    scanned?: Record<string, number>;
+    /** 类目中文名（后端给，前端用作 chips 标签的后备） */
+    legend?: Record<string, string>;
+  };
+  caption?: { available?: boolean; ok?: boolean | null; note?: string; missing?: string[]; extra?: string[]; similarity?: number | null };
+  verdict?: string;
+  remedy?: string;
+  reason?: string;
+  actions?: Array<{ label?: string; method?: string; endpoint?: string; payload?: Record<string, unknown>; cost?: string }>;
+}
 export const qcApi = {
   config: () => request<QCResponse>('/qc/config'),
   updateConfig: (config: QCConfig) =>
@@ -709,8 +786,14 @@ export const qcApi = {
     project_name?: string;
     /** 显式指定产物文件（必须在 output/ 内） */
     path?: string;
-    /** 未给 path 时按此推导：final（成片音轨）> mix > merged > line */
-    source?: 'final' | 'mix' | 'merged' | 'line';
+    /**
+     * 未给 path 时按此推导：
+     * final（成片音轨）> mix > merged > line > voice_bank。
+     * ⚠️ 2026-10-12（t28）：新增 voice_bank 档 —— 现役 7 步流水线的 tts_pre 只产
+     * voice_bank（参考音色），不产 *_lines/，不给这一档前端在现役链路上点不到任何产物。
+     * 其余四档沿用后端（t19 起 voice_bank 与 final/mix/merged 同走整轨口径）。
+     */
+    source?: 'final' | 'mix' | 'merged' | 'line' | 'voice_bank';
     expect_sec?: number;
     line_text?: string;
     /** 有声占比下限判定。单句传 true；整集/成片必须 false（天然有留白） */
@@ -718,6 +801,13 @@ export const qcApi = {
     /** false=只跑客观层（毫秒级、零模型调用） */
     with_ai?: boolean;
   }) => request<QCAudioResult>('/qc/audio', { method: 'POST', body: JSON.stringify(data) }),
+  /**
+   * 诊断与补救建议（POST /api/qc/triage）。
+   * 2026-10-12（t28）：走统一 request（错误带 code/status，界面用 describeError 脱敏），
+   * 替代组件内裸 fetch —— 裸 fetch 不脱敏，后端 error 原文可能带本机绝对路径。
+   */
+  triage: (data: { project: string; episode_no?: number; deep?: boolean }) =>
+    request<QCTriageResult>('/qc/triage', { method: 'POST', body: JSON.stringify(data) }),
   /** 提示词预检（生成前质检）：确定性检查 + 自愈。kind 支持 storyboard/h3/asset/keyframe/audio */
   promptCheck: (data: {
     kind: string;
@@ -988,7 +1078,9 @@ export const autopilotApi = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  runOnce: (data: { project_name: string }) =>
+  // t27：补 episode_no —— 「重新合成」（交付页 stale 阻断后的动作）要指定集号；
+  // 后端 api_autopilot_run_once 一直支持该入参（默认为 1），只是前端签名漏了。
+  runOnce: (data: { project_name: string; episode_no?: number }) =>
     request<{ success: boolean; task_id: string }>(
       '/autopilot/run-once',
       { method: 'POST', body: JSON.stringify(data) }

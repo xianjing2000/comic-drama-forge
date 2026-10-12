@@ -8,6 +8,7 @@
 // ⚠️ /api/tts/env 的参数名是 project_name（不是 project）—— 实测确认。
 // ============================================================================
 import React, { useCallback, useEffect, useState } from 'react';
+import { t } from '@/i18n';
 import { Badge, Button, Skeleton, EmptyState, ErrorState } from '@/components/ui';
 import { Mic, ImageIcon, RefreshCw, CheckCircle2, AlertTriangle } from '@/components/ui/icons';
 
@@ -62,7 +63,17 @@ export default function AssetPanel({ project, className }: { project: string; cl
 
   useEffect(() => { setLoading(true); void load(); }, [load]);
 
-  if (!project) return <EmptyState title="请先选择项目" />;
+  if (!project) return (
+    <EmptyState
+      title={t('common.selectProjectFirst')}
+      description={t('common.selectProjectHint')}
+      action={(
+        <Button size="sm" variant="secondary" onClick={() => { window.location.hash = '#projects'; }}>
+          {t('common.backToProjects')}
+        </Button>
+      )}
+    />
+  );
   if (loading) return <Skeleton className="h-36" />;
 
   const models = env?.expected_models || [];
@@ -82,16 +93,25 @@ export default function AssetPanel({ project, className }: { project: string; cl
        *  且同样调用 ttsApi.env 做环境自检。同一件事不再两处渲染。
        *  本面板只保留它独有的：① 模型逐条就绪明细 ② 关键帧清单。 */}
 
-      <Section icon={<ImageIcon className="h-4 w-4" />} title={`关键帧（${kfCount}）`}>
+      <Section icon={<ImageIcon className="h-4 w-4" />} title={t('asset.keyframesTitle', { n: kfCount })}>
         {kf.length === 0 ? (
-          <div className="text-xs text-ink-3">还没有关键帧产物。</div>
+          <EmptyState
+            icon={<ImageIcon className="h-10 w-10" />}
+            title={t('asset.noKeyframes')}
+            description={t('asset.noKeyframesHint')}
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => void load()}>
+                {t('common.refresh')}
+              </Button>
+            )}
+          />
         ) : (
           <div className="flex flex-col gap-0.5">
             {kf.slice(0, 30).map((it, i) => {
               const fn = String(it.filename || it.name || it.path || '');
               return (
                 <div key={i} className="flex items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-surface-2">
-                  <span className="w-16 shrink-0 text-ink-3">{it.shot_id != null ? `镜 ${it.shot_id}` : ''}</span>
+                  <span className="w-16 shrink-0 text-ink-3">{it.shot_id != null ? `${t('asset.shotN', { n: it.shot_id })}` : ''}</span>
                   <span className="min-w-0 flex-1 truncate text-ink-2">{fn}</span>
                 </div>
               );

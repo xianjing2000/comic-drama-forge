@@ -6,6 +6,7 @@ import { AlertTriangle, Brain, CheckCircle2, Eye, EyeOff, Network, Pencil, Refre
 import type { IconProps } from '@/components/ui/icons';
 import type { AIConfigModule, AIConfigResponse, AITestResult, AIFallbackModel } from '@/types';
 import { PromptManagerTab } from '@/components/PromptManagerTab';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 
 type ModuleKey = 'text' | 'qc' | 'chat';
 
@@ -408,7 +409,7 @@ export function AIVaultPage() {
   const handleTestFallback = async (module: ModuleKey, index: number) => {
     const key = `${module}#${index}`;
     const fb = (fallbacks[module] || [])[index];
-    const label = fb?.label || `备用${index + 1}`;
+    const label = fb?.label || t('vault.fallbackN', { n: index + 1 });
     const typedKey = (fb?.api_key || '').trim();
     const canTestByIndex = !typedKey && typeof fb?.index === 'number';
     setFbTesting(key);
@@ -807,7 +808,7 @@ export function AIVaultPage() {
                         <div className="flex items-center gap-2">
                           <div className="flex-1 min-w-0">
                             <div className="font-mono text-xs text-ink-1 truncate">
-                              {fb.label || `备用${i + 1}`}
+                              {fb.label || t('vault.fallbackN', { n: i + 1 })}
                               <span className="ml-2 text-ink-3">{fb.model}</span>
                             </div>
                             <div className="font-mono text-xs text-ink-3 truncate">{fb.base_url}</div>
@@ -874,8 +875,8 @@ export function AIVaultPage() {
                           return (
                             <div className={`mt-1 text-xs ${r.success ? (partial ? 'text-warning-strong' : 'text-success-strong') : 'text-danger-strong'}`}>
                               {r.success
-                                ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: fb.label || `备用${i + 1}` }))
-                                : `${t('vault.fallbackTestFail')}：${String(r.error || '').slice(0, 180)}`}
+                                ? (partial ? t('vault.fallbackTestPartial') : t('vault.fallbackTestOk', { label: fb.label || t('vault.fallbackN', { n: i + 1 }) }))
+                                : `${t('vault.fallbackTestFail')}：${sanitizeErrorMessage(String(r.error || '')).slice(0, 180)}`}
                             </div>
                           );
                         })()}
@@ -994,7 +995,7 @@ export function AIVaultPage() {
                     ) : null}
                     {result.hint && <p className="mt-1 text-xs opacity-75">{result.hint}</p>}
                     {!result.success && result.error && (
-                      <p className="mt-1 text-xs opacity-75">{result.error}</p>
+                      <p className="mt-1 text-xs opacity-75">{sanitizeErrorMessage(result.error)}</p>
                     )}
                     {!result.success && result.guide && (
                       <p className="mt-1 text-xs opacity-75">{result.guide}</p>

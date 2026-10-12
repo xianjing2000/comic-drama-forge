@@ -127,7 +127,17 @@ export default function QualityPanel({ project, className }: { project: string; 
     finally { setBusy(''); }
   };
 
-  if (!project) return <EmptyState title="请先选择项目" />;
+  if (!project) return (
+    <EmptyState
+      title={t('common.selectProjectFirst')}
+      description={t('common.selectProjectHint')}
+      action={(
+        <Button size="sm" variant="secondary" onClick={() => { window.location.hash = '#projects'; }}>
+          {t('common.backToProjects')}
+        </Button>
+      )}
+    />
+  );
   if (loading) return <Skeleton className="h-40" />;
 
   const chars = cont?.bible?.characters || [];
@@ -136,53 +146,62 @@ export default function QualityPanel({ project, className }: { project: string; 
   return (
     <div className={cx('flex flex-col gap-3', className)}>
       {/* 原文覆盖率 */}
-      <Section icon={<BarChart3 className="h-4 w-4" />} title="原文覆盖率"
+      <Section icon={<BarChart3 className="h-4 w-4" />} title={t('qc.covTitle')}
         right={<Button size="sm" variant="ghost" onClick={() => void load()}><RefreshCw className="h-3.5 w-3.5" /></Button>}>
         {cov.length === 0 ? (
-          <div className="text-xs text-ink-3">还没有覆盖率数据（生成剧本后自动记录）。</div>
+          <EmptyState
+            icon={<BarChart3 className="h-10 w-10" />}
+            title={t('qc.covEmpty')}
+            description={t('qc.covEmptyHint')}
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => void load()}>
+                {t('common.refresh')}
+              </Button>
+            )}
+          />
         ) : (
           <div className="flex flex-col gap-2.5">
             {cov.map((e) => (
               <div key={String(e.episode_no)} className="flex items-center gap-3">
-                <span className="w-14 shrink-0 text-xs text-ink-2">第 {e.episode_no} 集</span>
+                <span className="w-14 shrink-0 text-xs text-ink-2">{t('qc.episodeN', { n: e.episode_no ?? '' })}</span>
                 <div className="min-w-0 flex-1"><Bar pct={e.detail_coverage_percent ?? e.coverage_percent ?? 0} /></div>
                 <span className="w-14 shrink-0 text-right font-mono text-xs tabular-nums text-ink-2">
                   {(e.detail_coverage_percent ?? e.coverage_percent ?? 0).toFixed(1)}%
                 </span>
                 <span className="w-16 shrink-0 text-right">
-                  {e.detail_passed ? <Badge variant="success">达标</Badge> : <Badge variant="warning">偏低</Badge>}
+                  {e.detail_passed ? <Badge variant="success">{t('qc.covPass')}</Badge> : <Badge variant="warning">{t('qc.covLow')}</Badge>}
                 </span>
               </div>
             ))}
             <div className="text-xs text-ink-3">
-              阈值 {cov[0]?.detail_threshold_percent ?? '—'}%；覆盖字数 {cov.reduce((a, e) => a + (e.covered_char_count || 0), 0)} / 原文 {cov.reduce((a, e) => a + (e.body_char_count || 0), 0)}
+              {t('qc.covThreshold', { t: cov[0]?.detail_threshold_percent ?? '—', c: cov.reduce((a, e) => a + (e.covered_char_count || 0), 0), b: cov.reduce((a, e) => a + (e.body_char_count || 0), 0) })}
             </div>
           </div>
         )}
       </Section>
 
       {/* 字幕校对 */}
-      <Section icon={<Mic className="h-4 w-4" />} title="字幕校对"
+      <Section icon={<Mic className="h-4 w-4" />} title={t('qc.captionTitle')}
         right={<Button size="sm" variant={capOk ? 'brand' : 'ghost'} disabled={!capOk} loading={busy === 'caption'} onClick={() => void runCaption()}>
-          <Play className="mr-1.5 h-3.5 w-3.5" />开始校对</Button>}>
+          <Play className="mr-1.5 h-3.5 w-3.5" />{t('qc.captionRun')}</Button>}>
         {capOk ? (
-          <div className="text-xs text-ink-2">环境就绪{cap?.model ? ` · 模型 ${cap.model}` : ''}</div>
+          <div className="text-xs text-ink-2">{t('qc.captionReady')}{cap?.model ? ` ${t('qc.captionModel', { model: cap.model })}` : ''}</div>
         ) : (
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center gap-1.5 text-xs font-medium text-warning">
-              <AlertTriangle className="h-3.5 w-3.5" />校对环境未就绪，无法启动
+              <AlertTriangle className="h-3.5 w-3.5" />{t('qc.captionNotReady')}
             </div>
             <ul className="ml-4 list-disc space-y-0.5 text-xs text-ink-3">
-              {(cap?.reasons || ['未返回原因']).map((r, i) => <li key={i}>{r}</li>)}
+              {(cap?.reasons || [t('qc.captionNoReason')]).map((r, i) => <li key={i}>{r}</li>)}
             </ul>
           </div>
         )}
       </Section>
 
       {/* 一致性校验 */}
-      <Section icon={<ClipboardCheck className="h-4 w-4" />} title="跨集一致性校验"
+      <Section icon={<ClipboardCheck className="h-4 w-4" />} title={t('qc.consistencyTitle')}
         right={<Button size="sm" variant="secondary" loading={busy === 'consistency'} onClick={() => void runConsistency()}>
-          <Play className="mr-1.5 h-3.5 w-3.5" />执行校验</Button>}>
+          <Play className="mr-1.5 h-3.5 w-3.5" />{t('consistency.run')}</Button>}>
         {cons ? (
           <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-md border border-line bg-surface-2 p-2 text-xs leading-relaxed text-ink-2">{cons}</pre>
         ) : consErr ? (
@@ -203,9 +222,18 @@ export default function QualityPanel({ project, className }: { project: string; 
       </Section>
 
       {/* 连贯性 */}
-      <Section icon={<BookOpen className="h-4 w-4" />} title="项目连贯性（人物锁定状态）">
+      <Section icon={<BookOpen className="h-4 w-4" />} title={t('qc.continuityTitle')}>
         {chars.length === 0 ? (
-          <div className="text-xs text-ink-3">暂无连贯性数据。</div>
+          <EmptyState
+            icon={<BookOpen className="h-10 w-10" />}
+            title={t('qc.continuityEmpty')}
+            description={t('qc.continuityEmptyHint')}
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => void load()}>
+                {t('common.refresh')}
+              </Button>
+            )}
+          />
         ) : (
           <div className="flex flex-col gap-2">
             {chars.map((c, i) => (
@@ -214,7 +242,7 @@ export default function QualityPanel({ project, className }: { project: string; 
                 <span className="w-20 shrink-0 truncate font-medium text-ink-1">{c.name}</span>
                 <span className="w-20 shrink-0 truncate text-ink-3">{c.identity || c.gender || ''}</span>
                 <span className="min-w-0 flex-1 truncate text-ink-2">{c.current_outfit || ''}</span>
-                {c.locked ? <Badge variant="success">已锁定</Badge> : <Badge variant="default">未锁定</Badge>}
+                {c.locked ? <Badge variant="success">{t('qc.locked')}</Badge> : <Badge variant="default">{t('qc.unlocked')}</Badge>}
               </div>
             ))}
           </div>

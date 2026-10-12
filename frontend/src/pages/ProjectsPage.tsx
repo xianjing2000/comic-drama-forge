@@ -72,6 +72,7 @@ import img_RpCourtIntrigue from '@/assets/styles/rp_court_intrigue.jpg';
 import img_RpWilderness from '@/assets/styles/rp_wilderness.jpg';
 import img_Rp60sScifi from '@/assets/styles/rp_60s_scifi.jpg';
 import img_RpAncientChineseReal from '@/assets/styles/rp_ancient_chinese_real.jpg';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 
 type NovelSource = 'upload' | 'existing';
 
@@ -491,7 +492,7 @@ export function ProjectsPage() {
       {/* 软失败：项目列表非空 → 只是这一次刷新失败，保留紧凑行内提示条，绝不吃掉已展示的列表 */}
       {loadError && projects.length > 0 && (
         <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm">
-          {t('project.loadingFailed')}: {loadError}
+          {t('project.loadingFailed')}: {sanitizeErrorMessage(loadError)}
         </div>
       )}
 
@@ -500,7 +501,7 @@ export function ProjectsPage() {
           /* 硬失败：项目列表为空且加载出错，没有任何数据可展示 → 整块错误态 + 重试 */
           <ErrorState
             title={t('project.loadingFailed')}
-            description={loadError}
+            description={sanitizeErrorMessage(loadError)}
             onRetry={() => {
               setLoadError('');
               setLoading(true);

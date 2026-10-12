@@ -282,6 +282,11 @@ export function PromptManagerTab() {
             icon={<FileText className="h-10 w-10" />}
             title={t('prompts.empty')}
             description={t('prompts.emptyHint')}
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => { void loadList(null, { initial: true }); }}>
+                {t('prompts.emptyAction')}
+              </Button>
+            )}
           />
         ) : (
           <div className="flex flex-col md:flex-row">
@@ -332,6 +337,11 @@ export function PromptManagerTab() {
                   icon={<FileText className="h-10 w-10" />}
                   title={t('prompts.empty')}
                   description={t('prompts.emptyHint')}
+                  action={templates.length > 0 ? (
+                    <Button size="sm" variant="secondary" onClick={() => handleSelectClick(templates[0].name)}>
+                      {t('prompts.noSelectionAction')}
+                    </Button>
+                  ) : undefined}
                 />
               )}
               {selected && (

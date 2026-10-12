@@ -5,7 +5,7 @@ import { Button, Textarea, Skeleton, EmptyState, ErrorState } from '@/components
 import { ChevronDown, ChevronRight, ClipboardCheck, FileText, Film, FolderOpen } from '@/components/ui/icons';
 import { EpisodeReviewPanel, STATUS_DOT } from '@/components/EpisodeReviewPanel';
 import { useToast } from '@/components/ui/toast';
-import { describeError } from '@/utils/errorText';
+import { describeError, sanitizeErrorMessage } from '@/utils/errorText';
 import type { Deliverable } from '@/types';
 
 interface AssetItem {
@@ -209,7 +209,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
       {/* 软失败：页面仍有数据在展示（刷新/生成/验收动作失败），保留紧凑行内提示条，不吃掉已展示内容 */}
       {error && hasContent && (
         <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-sm text-danger-strong">
-          {error}
+          {sanitizeErrorMessage(error)}
         </div>
       )}
       {/* 区域 1: 导出配置 */}
@@ -274,7 +274,7 @@ export function OutputReviewTab({ projectKey, assets }: OutputReviewTabProps) {
             /* 硬失败：该区块没有任何数据可展示，且加载出错 → 整块错误态 + 重试 */
             <ErrorState
               title={t('project.loadingFailed')}
-              description={error}
+              description={sanitizeErrorMessage(error)}
               onRetry={loadAll}
             />
           ) : (

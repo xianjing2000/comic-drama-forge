@@ -16,6 +16,8 @@
 //     summary:{all_ok,models_ok,plugins_ok,blockers[],workflows:[{file,key,found,types[]}]} }
 // ============================================================================
 import React, { useCallback, useEffect, useState } from 'react';
+import { t } from '@/i18n';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 import { Badge, Button, Skeleton, ErrorState } from '@/components/ui';
 import { CheckCircle2, AlertTriangle, X, RefreshCw, ClipboardList } from '@/components/ui/icons';
 
@@ -75,11 +77,11 @@ export default function DepsReportPanel({ className }: { className?: string }) {
     <div className={cx('rounded-lg border border-line bg-surface', className)}>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
         <span className="flex items-center gap-2 text-sm font-medium text-ink-1">
-          <ClipboardList className="h-4 w-4 text-ink-3" />依赖就绪报告（按当前工作流比对）
+          <ClipboardList className="h-4 w-4 text-ink-3" />{t('deps.title')}
         </span>
         <div className="flex items-center gap-2">
-          <Badge variant={cf.online ? 'success' : 'danger'}>ComfyUI {cf.online ? '在线' : '离线'}</Badge>
-          <Badge variant={s.all_ok ? 'success' : 'warning'}>{s.all_ok ? '全部就绪' : '有缺失'}</Badge>
+          <Badge variant={cf.online ? 'success' : 'danger'}>ComfyUI {cf.online ? t('deps.comfyOnline') : t('deps.comfyOffline')}</Badge>
+          <Badge variant={s.all_ok ? 'success' : 'warning'}>{s.all_ok ? t('deps.allReady') : t('deps.hasMissing')}</Badge>
           <Button size="sm" variant="ghost" onClick={() => void load()}><RefreshCw className="h-3.5 w-3.5" /></Button>
         </div>
       </div>
@@ -89,7 +91,7 @@ export default function DepsReportPanel({ className }: { className?: string }) {
         {(s.blockers || []).length > 0 ? (
           <div className="rounded-md border border-danger/40 bg-danger/5 p-2.5">
             <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-danger">
-              <X className="h-3.5 w-3.5" />阻塞项（不解决无法出图）
+              <X className="h-3.5 w-3.5" />{t('deps.blockers')}
             </div>
             <ul className="ml-4 list-disc space-y-0.5 text-xs text-danger/90">
               {(s.blockers || []).map((b, i) => <li key={i} className="break-words">{b}</li>)}
@@ -97,7 +99,7 @@ export default function DepsReportPanel({ className }: { className?: string }) {
           </div>
         ) : (
           <div className="flex items-center gap-1.5 text-xs text-success">
-            <CheckCircle2 className="h-3.5 w-3.5" />无阻塞项
+            <CheckCircle2 className="h-3.5 w-3.5" />{t('deps.noBlockers')}
           </div>
         )}
 
@@ -105,9 +107,9 @@ export default function DepsReportPanel({ className }: { className?: string }) {
         <div>
           <div className="mb-1.5 flex items-center gap-2 text-xs font-medium text-ink-1">
             <Dot ok={m.ready} />
-            模型 {m.ready ? '齐备' : `缺 ${missingModels.length} 个`}
+            {t('deps.modelsLabel')} {m.ready ? t('deps.modelsReady') : t('deps.modelsMissing', { n: missingModels.length })}
             <span className="font-normal text-ink-3">
-              需要 {(m.required_names || []).length} 个 · 目录 {m.dir_exists ? '存在' : '不存在'}
+              {t('deps.requiredN', { n: (m.required_names || []).length })} · {t('deps.dirLabel')} {m.dir_exists ? t('deps.dirExists') : t('deps.dirMissing')}
             </span>
           </div>
           {missingModels.length > 0 ? (
@@ -115,7 +117,7 @@ export default function DepsReportPanel({ className }: { className?: string }) {
               {missingModels.map((n, i) => <li key={i} className="break-all font-mono">{n}</li>)}
             </ul>
           ) : null}
-          <div className="mt-1 break-all text-xs text-ink-3">目录：{m.dir}</div>
+          <div className="mt-1 break-all text-xs text-ink-3">{t('deps.dirLine', { dir: m.dir ?? '' })}</div>
         </div>
 
         {/* 插件 / 自定义节点 */}
@@ -123,9 +125,9 @@ export default function DepsReportPanel({ className }: { className?: string }) {
           <button type="button" onClick={() => setOpenPlugins((v) => !v)}
             className="mb-1.5 flex w-full items-center gap-2 text-left text-xs font-medium text-ink-1">
             <Dot ok={pl.ready} />
-            自定义节点 {pl.ready ? '齐备' : `异常 ${badPlugins.length} 个`}
-            <span className="font-normal text-ink-3">需要 {needed.length} 个节点</span>
-            <span className="text-ink-3">{openPlugins ? '收起' : '展开'}</span>
+            {t('deps.pluginsLabel')} {pl.ready ? t('deps.modelsReady') : t('deps.pluginsBad', { n: badPlugins.length })}
+            <span className="font-normal text-ink-3">{t('deps.nodesRequired', { n: needed.length })}</span>
+            <span className="text-ink-3">{openPlugins ? t('common.collapse') : t('deps.expand')}</span>
           </button>
           {openPlugins ? (
             <div className="flex flex-col gap-1 rounded-md border border-line bg-surface-2 p-2">
@@ -136,7 +138,7 @@ export default function DepsReportPanel({ className }: { className?: string }) {
                   <span className="w-52 shrink-0 truncate font-mono text-ink-2">{n.node_type}</span>
                   <span className="w-56 shrink-0 truncate text-ink-3">{n.plugin}</span>
                   <span className="min-w-0 flex-1 truncate text-ink-3">{n.note || n.repo || ''}</span>
-                  {n.optional ? <Badge variant="default">可选</Badge> : null}
+                  {n.optional ? <Badge variant="default">{t('deps.optional')}</Badge> : null}
                 </div>
               ))}
             </div>
@@ -148,8 +150,8 @@ export default function DepsReportPanel({ className }: { className?: string }) {
           <button type="button" onClick={() => setOpenWf((v) => !v)}
             className="flex w-full items-center gap-2 text-left text-xs font-medium text-ink-1">
             <span className="mt-[5px] h-2 w-2 shrink-0 rounded-full bg-info" />
-            工作流 {wfs.length} 个
-            <span className="text-ink-3">{openWf ? '收起' : '展开'}</span>
+            {t('deps.workflowsN', { n: wfs.length })}
+            <span className="text-ink-3">{openWf ? t('common.collapse') : t('deps.expand')}</span>
           </button>
           {openWf ? (
             <div className="mt-1.5 flex flex-col gap-1 rounded-md border border-line bg-surface-2 p-2">
@@ -159,7 +161,7 @@ export default function DepsReportPanel({ className }: { className?: string }) {
                     w.found === false || w.error ? 'bg-danger' : 'bg-success')} />
                   <span className="w-64 shrink-0 truncate font-mono text-ink-2">{w.file}</span>
                   <span className="min-w-0 flex-1 truncate text-ink-3">
-                    {w.error ? w.error : `${(w.types || []).length} 类节点${(w.types || []).length ? '：' + (w.types || []).slice(0, 4).join(', ') : ''}`}
+                    {w.error ? sanitizeErrorMessage(w.error) : `${t('deps.nodesN', { n: (w.types || []).length })}${(w.types || []).length ? '：' + (w.types || []).slice(0, 4).join(', ') : ''}`}
                   </span>
                 </div>
               ))}
@@ -167,7 +169,7 @@ export default function DepsReportPanel({ className }: { className?: string }) {
           ) : null}
         </div>
 
-        {rep?.docs ? <div className="text-xs text-ink-3">依赖清单文档：{rep.docs}</div> : null}
+        {rep?.docs ? <div className="text-xs text-ink-3">{t('deps.docsLine')} {rep.docs}</div> : null}
       </div>
     </div>
   );

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useApp } from '@/context/AppContext';
+import { sanitizeErrorMessage } from '@/utils/errorText';
 import { memoryApi, projectsApi } from '@/api/client';
 import { Card, Button, Loading, EmptyState, Badge, ConfirmDialog, Input, Select, Skeleton, ErrorState } from '@/components/ui';
 import { BookOpen, Brain } from '@/components/ui/icons';
@@ -275,7 +276,7 @@ export function MemoryPage() {
       <div className="space-y-6 fade-in">
         <ErrorState
           title={t('project.loadingFailed')}
-          description={loadError}
+          description={sanitizeErrorMessage(loadError)}
           onRetry={reloadMain}
         />
       </div>
@@ -425,6 +426,11 @@ export function MemoryPage() {
             icon={<BookOpen className="h-10 w-10" />}
             title={t('memory.noLessons')}
             description={t('memory.noLessonsDesc')}
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => setReloadTick((x) => x + 1)}>
+                {t('common.refresh')}
+              </Button>
+            )}
           />
         ) : (
           <div className="space-y-3">
@@ -558,7 +564,16 @@ export function MemoryPage() {
       {/* Memories list */}
       <Card title={t('memory.listTitle')}>
         {memories.length === 0 ? (
-          <EmptyState icon={<Brain className="h-10 w-10" />} title={t('memory.noMemories')} description={t('memory.noMemoriesDesc')} />
+          <EmptyState
+            icon={<Brain className="h-10 w-10" />}
+            title={t('memory.noMemories')}
+            description={t('memory.noMemoriesDesc')}
+            action={(
+              <Button size="sm" variant="secondary" onClick={() => { void reloadMain(); }}>
+                {t('common.refresh')}
+              </Button>
+            )}
+          />
         ) : (
           <div className="space-y-3">
             {memories.slice(0, 20).map((mem) => (
