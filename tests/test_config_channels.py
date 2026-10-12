@@ -88,7 +88,14 @@ class TestRoundTrip(unittest.TestCase):
     """写入被接受的键后必须能读回（计划文件 + get_plan 两条路径）"""
 
     def setUp(self):
-        self.project = 't11_rt_%d' % (id(self) % 100000)
+        # ⚠️ 2026-10-12（t9 收口）修：原写法用 id(self) % 100000 生成项目名，
+        # CPython 会复用已释放对象的地址，实测 200 次实例化里 170 次撞名 ——
+        # 两个用例撞到同一个 <数据根>/autopilot/<项目>/plan.json 时，先跑的那个
+        # 留下的 enable_tts=False 会被后跑的 test_strict_is_all_or_nothing 读到，
+        # 断言 assertIs(get_plan()['enable_tts'], True) 就间歇失败
+        # （全量连跑实测：6 次里 1 次红，单跑该文件 6 次全绿 —— 典型幽灵失败）。
+        # 现改为「进程唯一 + 用例唯一」，彻底消除跨用例/跨进程污染。
+        self.project = 't11_rt_%d_%s' % (os.getpid(), self.id().rsplit('.', 1)[-1])
 
     def test_enable_tts_roundtrip(self):
         self.assertIs(autopilot.get_plan(self.project)['enable_tts'], True)
