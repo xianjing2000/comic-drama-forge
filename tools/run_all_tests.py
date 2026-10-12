@@ -25,7 +25,8 @@ import time
 
 #: 关键依赖（缺了会 import 失败或大量 error）。app/requirements.txt 的纯 CPU 子集。
 _REQUIRED = ["flask", "flask_cors", "requests", "PIL", "numpy", "anthropic",
-             "openai", "cryptography", "dotenv", "waitress"]
+             "openai", "cryptography", "dotenv", "waitress",
+             "docx", "pypdf", "ebooklib"]
 
 
 def _check_deps():
@@ -57,7 +58,7 @@ def main():
         import glob
         mods = []
         for pat in filters:
-            mods.extend(glob.glob(os.path.join(root, "tests", "test_*%s*.py") % pat))
+            mods.extend(glob.glob(os.path.join(root, "tests", "*%s*.py") % pat))
         if not mods:
             print("没有匹配的测试模块：%s" % filters)
             return 2
