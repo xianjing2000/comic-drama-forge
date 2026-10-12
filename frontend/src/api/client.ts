@@ -44,19 +44,29 @@ const API_BASE = '/api';
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(message: string, opts: { status?: number; code?: string } = {}) {
+  /**
+   * 后端错误响应体的**原始 JSON**（解析不出来时为 undefined）。
+   * 有些错误体不只是文案：例如 409 跨集覆盖会带 overwrite_scope / assets_affected，
+   * 调用方需要结构化字段才能弹「影响范围确认框」—— 只给中文文案只能靠匹配字符串。
+   */
+  readonly body?: unknown;
+  constructor(message: string, opts: { status?: number; code?: string; body?: unknown } = {}) {
     super(message);
     this.name = 'ApiError';
     this.status = opts.status ?? 0;
     this.code = opts.code ?? '';
+    this.body = opts.body;
   }
 }
 
-async function readErrorDetail(response: Response): Promise<{ message: string; code: string }> {
+async function readErrorDetail(response: Response): Promise<{ message: string; code: string; body?: unknown }> {
   let detail = '';
   let code = '';
+  /** 错误体原文（结构化分流用，见 ApiError.body） */
+  let body: unknown;
   try {
     const data = await response.clone().json();
+    body = data;
     if (typeof data?.code === 'string' && data.code.trim()) code = data.code.trim();
     const raw = data?.error || data?.message || data?.detail;
     if (typeof raw === 'string' && raw.trim()) detail = raw.trim();
@@ -78,7 +88,7 @@ async function readErrorDetail(response: Response): Promise<{ message: string; c
   }
   const status = `HTTP ${response.status}`;
   const message = detail ? `${detail}` : `${status} ${response.statusText || ''}`.trim();
-  return { message, code };
+  return { message, code, body };
 }
 
 /** 兼容旧调用点：只取可读文案（新增的 code 走 readErrorDetail） */
@@ -100,11 +110,126 @@ async function request<T>(
       : { 'Content-Type': 'application/json', ...options.headers },
   });
   if (!response.ok) {
-    const { message, code } = await readErrorDetail(response);
-    throw new ApiError(message, { status: response.status, code });
+    const { message, code, body } = await readErrorDetail(response);
+    throw new ApiError(message, { status: response.status, code, body });
   }
   return response.json() as Promise<T>;
 }
+
+// ============================================
+// 跨集覆盖二次确认（后端 app/routes/assets_api.py · t16 P0-① 的配套）
+// ============================================
+//
+// 事实：角色设定图是**项目级**产物（assets/characters/<项目>/<角色>/base.png），
+// 全项目共用一份 —— 点一次「重新生成」= 改写从第 1 集起的人物形象基准。
+// 后端已把这件事变成显式两步：跨集覆盖且未确认 → 409 + 影响清单。
+// 这里只做**识别与展示**，判定一律用后端给的 code/needs_confirm，
+// 绝不按 HTTP 状态码猜（后端换状态码或新增别的 409 语义时不会误伤）。
+
+/** 后端 _overwrite_scope() 的结构（原样透传，前端只读不改） */
+export interface OverwriteScopeAsset {
+  kind?: string;
+  name?: string;
+  episodes?: number[];
+}
+export interface OverwriteScope {
+  episodes_seen?: number[];
+  /** 本次覆盖会改写到的集号（升序） */
+  episodes_hit?: number[];
+  /** 影响 > 1 集时才为 true（后端就是按它决定要不要 409） */
+  cross_episode?: boolean;
+  assets?: OverwriteScopeAsset[];
+  source?: string;
+}
+
+/** 409「跨集覆盖未确认」的结构化错误体（已归一化字段名） */
+export interface OverwriteConfirmPayload {
+  /** 后端错误码，默认 cross_episode_overwrite_needs_confirm */
+  code: string;
+  /** 后端指定的确认字段名（默认 confirm_overwrite）—— 重发时用它 */
+  confirmField: string;
+  /** 后端原文案（可直接展示） */
+  message: string;
+  scope: OverwriteScope;
+  assetsAffected: string[];
+}
+
+/**
+ * 从错误里识别「跨集覆盖需要二次确认」。
+ *
+ * 返回 null = 与跨集覆盖无关的错误 → 调用方**照原逻辑**提示失败（零回归）。
+ */
+export function asOverwriteConfirm(err: unknown): OverwriteConfirmPayload | null {
+  if (!(err instanceof ApiError)) return null;
+  const b = err.body && typeof err.body === 'object'
+    ? (err.body as Record<string, unknown>)
+    : null;
+  if (!b) return null;
+  const code = String(b.code || err.code || '').trim();
+  const needs = b.needs_confirm === true || String(b.needs_confirm ?? '').toLowerCase() === 'true';
+  // 判据：needs_confirm 为真 或 code 命中 —— 两者有一个就认，不看 status
+  if (!needs && code !== 'cross_episode_overwrite_needs_confirm') return null;
+  const scope = b.overwrite_scope && typeof b.overwrite_scope === 'object'
+    ? (b.overwrite_scope as OverwriteScope)
+    : {};
+  const affected = Array.isArray(b.assets_affected)
+    ? (b.assets_affected as unknown[]).map((x) => String(x)).filter(Boolean)
+    : (scope.assets || []).map((a) => String(a?.name || '')).filter(Boolean);
+  return {
+    code: code || 'cross_episode_overwrite_needs_confirm',
+    confirmField: String(b.confirm_field || 'confirm_overwrite'),
+    message: String(b.error || err.message || ''),
+    scope,
+    assetsAffected: affected,
+  };
+}
+
+/** 影响范围的可读摘要（确认框如实展示用；**不自己拼猜**，全部来自后端返回） */
+export function overwriteScopeSummary(p: OverwriteConfirmPayload) {
+  const nums = (xs?: number[]) =>
+    (xs || []).map((n) => Number(n)).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
+  const episodes = nums(p.scope.episodes_hit);
+  const assets = (p.scope.assets || []).map((a) => ({
+    name: String(a?.name || ''),
+    episodes: nums(a?.episodes),
+  }));
+  return {
+    episodes,
+    /** 「1,2,3」 */
+    episodeText: episodes.join(','),
+    /** 逐资产一行：角色名 + 该角色出现的集 */
+    assets: assets.map((a) => ({ ...a, episodeText: a.episodes.join(',') })),
+    assetCount: assets.length || p.assetsAffected.length,
+    assetsAffected: p.assetsAffected,
+    scopeSource: String(p.scope.source || ''),
+  };
+}
+
+/** 生成资产（角色/物品/场景）。overwrite=true 时若跨集覆盖，后端会先 409（见上）。 */
+export interface AssetGenerateRequest {
+  asset_type: string;
+  project_name: string;
+  overwrite?: boolean;
+  /** 二次确认标志（后端 confirm_field 的默认值） */
+  confirm_overwrite?: boolean;
+  style?: string;
+  assets: { name?: string; reference_prompt_zh?: string; reference_prompt_en?: string }[];
+}
+export interface AssetGenerateResponse {
+  task_id?: string;
+  status?: string;
+  error?: string;
+  /** 200 时回显的本次覆盖影响范围 */
+  overwrite_scope?: OverwriteScope;
+  overwrite_warning?: string;
+}
+export const assetsApi = {
+  generate: (data: AssetGenerateRequest) =>
+    request<AssetGenerateResponse>('/assets/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+};
 
 // --- Projects ---
 export const projectsApi = {
@@ -184,8 +309,8 @@ export const novelsApi = {
       body: formData,
     });
     if (!response.ok) {
-      const { message, code } = await readErrorDetail(response);
-      throw new ApiError(message, { status: response.status, code });
+      const { message, code, body } = await readErrorDetail(response);
+      throw new ApiError(message, { status: response.status, code, body });
     }
     return response.json() as Promise<NovelUploadResponse>;
   },
@@ -1169,6 +1294,11 @@ export const characterSheetUpload = {
     file: File;
     outfit_key?: string;
     overwrite?: boolean;
+    /**
+     * 跨集覆盖二次确认：后端对「overwrite 且影响 > 1 集」先回 409，
+     * 用户点头后带本标志重发同一请求（见 asOverwriteConfirm）。
+     */
+    confirmOverwrite?: boolean;
   }) => {
     const fd = new FormData();
     fd.append('file', data.file);
@@ -1176,6 +1306,7 @@ export const characterSheetUpload = {
     fd.append('character', data.character);
     if (data.outfit_key) fd.append('outfit_key', data.outfit_key);
     if (data.overwrite) fd.append('overwrite', '1');
+    if (data.confirmOverwrite) fd.append('confirm_overwrite', '1');
     // 不手写 Content-Type：浏览器需自行补 multipart boundary
     return request<UploadSheetResponse>('/assets/character/upload-sheet', {
       method: 'POST',

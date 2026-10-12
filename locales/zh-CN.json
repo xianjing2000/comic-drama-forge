@@ -705,7 +705,12 @@
     "submit": "上传并切分",
     "ok": "已上传并切分 {n} 张视角图（零 GPU）",
     "skipped": "该角色已有设定图；如需替换请勾选「覆盖已有设定图」",
-    "failed": "上传失败"
+    "failed": "上传失败",
+    "overwriteConfirmTitle": "确认覆盖全部集数的形象基准？",
+    "overwriteConfirmBody": "这会改写该角色在所有已出现集数中的形象基准，且不可撤销。",
+    "overwriteConfirmRow": "影响范围",
+    "overwriteConfirmWarn": "警告：该操作会覆盖历史形象，建议先备份。",
+    "overwriteConfirmOk": "确认覆盖"
   },
   "precip": {
     "title": "资产沉淀过程",
@@ -1000,7 +1005,12 @@
     "screenplayHumanTag": "此为人审稿；下方为改写后的分镜剧本",
     "pauseAutopilot": "暂停托管",
     "resumeAutopilot": "恢复托管",
-    "failureResume": "处理并继续"
+    "failureResume": "处理并继续",
+    "overwriteConfirmTitle": "确认覆盖全部集数的形象基准？",
+    "overwriteConfirmBody": "这会改写该角色在所有已出现集数中的形象基准，且不可撤销。",
+    "overwriteConfirmRow": "影响范围",
+    "overwriteConfirmWarn": "警告：该操作会覆盖历史形象，建议先备份。",
+    "overwriteConfirmOk": "确认覆盖"
   },
   "settings": {
     "title": "设置",

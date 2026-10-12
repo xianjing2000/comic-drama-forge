@@ -705,7 +705,12 @@
     "submit": "Upload and split",
     "ok": "Uploaded and split into {n} view images (zero GPU)",
     "skipped": "This character already has a sheet; enable \"Overwrite existing sheet\" to replace it",
-    "failed": "Upload failed"
+    "failed": "Upload failed",
+    "overwriteConfirmTitle": "Overwrite character reference across ALL episodes?",
+    "overwriteConfirmBody": "This rewrites the character reference in every episode it appears in. It cannot be undone.",
+    "overwriteConfirmRow": "Affected episodes",
+    "overwriteConfirmWarn": "Warning: this overwrites historical references. Back up first.",
+    "overwriteConfirmOk": "Confirm overwrite"
   },
   "precip": {
     "title": "Asset buildup process",
@@ -1000,7 +1005,12 @@
     "screenplayHumanTag": "Human review draft; the storyboard script below is the rewritten version",
     "pauseAutopilot": "Pause autopilot",
     "resumeAutopilot": "Resume autopilot",
-    "failureResume": "Fix and continue"
+    "failureResume": "Fix and continue",
+    "overwriteConfirmTitle": "Overwrite character reference across ALL episodes?",
+    "overwriteConfirmBody": "This rewrites the character reference in every episode it appears in. It cannot be undone.",
+    "overwriteConfirmRow": "Affected episodes",
+    "overwriteConfirmWarn": "Warning: this overwrites historical references. Back up first.",
+    "overwriteConfirmOk": "Confirm overwrite"
   },
   "settings": {
     "title": "Settings",
