@@ -1574,7 +1574,13 @@
     "healthVisualsWholeTrack": "成片整轨",
     "healthVisualsHint": "顺序固定：第 1 张频谱图、第 2 张波形图（后端渲染）。镜号只说明该镜在成片上的时间槽，图仍是整轨的。",
     "healthVisualsEmpty": "该产物没有可用的频谱/波形图",
-    "healthVisualsFailed": "读取频谱/波形失败"
+    "healthVisualsFailed": "读取频谱/波形失败",
+    "voicePreviewCookingShort": "正在合成试听音频…",
+    "voicePreviewCooking": "正在合成试听音频…（克隆合成通常几秒到数十秒）",
+    "voicePreviewAutoplayBlocked": "浏览器阻止了自动播放：请点击播放器上的播放键，或再点一次「试听」",
+    "voicePreviewPlaying": "播放中…",
+    "voicePreviewPaused": "已暂停",
+    "voicePreviewPlaybackFailed": "试听音频加载失败，请再点一次「试听」"
   },
   "brand": {
     "mark": "漫",

@@ -759,7 +759,7 @@
     "motionPlaceholder": "[Camera] none; [In-frame] the lead extends his right index finger, pill held at his chest",
     "promptSave": "Save prompt",
     "regenShot": "Regenerate storyboard",
-    "killReasonManual": "Manual stop from the UI",
+    "killReasonManual": "Manual stop from the UI",
     "cm.voiceEnvTitle": "Voice environment check",
     "cm.voiceEnvProbing": "Probing… (walks the ComfyUI node tree, ~8s)",
     "cm.online": "Online",
@@ -1574,7 +1574,13 @@
     "healthVisualsWholeTrack": "final whole track",
     "healthVisualsHint": "Fixed order: image 1 is the spectrum, image 2 the waveform (rendered by the backend). The shot ID only marks that shot's time slot in the final cut; the images are whole-track.",
     "healthVisualsEmpty": "This artifact has no spectrum/waveform image available",
-    "healthVisualsFailed": "Failed to read the spectrum/waveform"
+    "healthVisualsFailed": "Failed to read the spectrum/waveform",
+    "voicePreviewCookingShort": "Synthesizing preview…",
+    "voicePreviewCooking": "Synthesizing preview… (voice cloning usually takes seconds to tens of seconds)",
+    "voicePreviewAutoplayBlocked": "The browser blocked autoplay: click the play button on the player, or press Preview again",
+    "voicePreviewPlaying": "Playing…",
+    "voicePreviewPaused": "Paused",
+    "voicePreviewPlaybackFailed": "Failed to load the preview audio, please press Preview again"
   },
   "brand": {
     "mark": "M",
