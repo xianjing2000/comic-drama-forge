@@ -2,6 +2,13 @@
 """音效提取（人声分离）—— 把 H3 原生音轨里的「说话声」去掉，只留音效/环境声
 （仅手动混音链路使用；mix 步骤已下线，自动流水线不再调用本模块）
 
+⚠️ 半成品状态（2026-10-12 t41/t57 结论）：本模块「分离」步骤 isolate_sfx 当前无触发点——
+唯一入口 sfx_helpers._isolate_shot_sfx 已是死代码（无调用者，t41 已删除为废弃占位）。
+mix 链路只调用了「装配」build_sfx_entries（读 H3_SFX_DIR 下「已分离好的」wav），而这些
+wav 从未被 isolate_sfx 生成过 → sfx_entries 恒为空、sfx 音效实际不可用（走「未找到分离
+音效轨」warning 分支）。启用前必须先接线：在 mix 后台 worker 里补「逐镜调用 isolate_sfx
+分离」的预处理步骤，再交给 build_sfx_entries 装配。不要误以为本模块当前在正常工作。
+
 背景（2026-09-17）
 ------------------
 H3 是**音视频联合生成**模型（主模型 ``minimax_h3_ref2va`` ＋ 专属音频 VAE
@@ -57,7 +64,7 @@ def resolve_stems(stems: Optional[Sequence] = None) -> Tuple[int, ...]:
                 continue
         if 0 <= idx <= 3 and idx != 3 and idx not in out:      # 3=Vocals，人声永远不要
             out.append(idx)
-    return tuple(out) or (2,)
+    return tuple(out) or (1, 2)  # 空时回落默认 Drums+Other，与 H3_SFX_STEMS 默认 (1,2) 一致
 
 
 def _client(client=None):

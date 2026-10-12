@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import contextlib
+import importlib
 import logging
 import os
 import sqlite3
@@ -226,7 +227,14 @@ def apply_to_runtime() -> int:
         for dotted in targets:
             try:
                 parts = dotted.split('.')
-                mod = __import__(parts[0])
+                # t61：owner 两种合法形态 —— module.ATTR（标量属性）与 module.DICT.key
+                # （字典内的键）。前者整体 setattr；后者改字典里的键，绝不整体替换字典
+                # （否则会静默丢掉字典里未登记的其它键）。
+                if len(parts) < 2:
+                    logger.warning('配置回写目标非法（需 module.attr 或 module.dict.key）：%s',
+                                   dotted)
+                    continue
+                mod = importlib.import_module(parts[0])
                 obj = mod
                 for p in parts[1:-1]:
                     obj = obj[p] if isinstance(obj, dict) else getattr(obj, p)

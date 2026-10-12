@@ -2,8 +2,11 @@
 音画对齐与混音合成（配音轨 × 成片视频 → 带配音成片）
 ====================================================
 
-⚠️ 2026-10-04 起 mix 步骤已下线，本模块仅服务 pipeline 回滚位（step_mix）与手动链路；
-现行成片口径是 H3 自带原生音轨（H3_EMIT_AUDIO=True）。
+⚠️ 半下线状态（2026-10-12 t41/t57 结论）：mix 步骤 2026-10-04 起「保留但仅服务」两个入口——
+  (1) 手动链路 /api/mix/plan 与 /api/mix/generate（用户显式触发音画对齐混音）；
+  (2) pipeline 回滚位 step_mix（自动流水线的兜底回退位）。
+  现行成片主口径是 H3 自带原生音轨（H3_EMIT_AUDIO=True），不走本模块。
+  保留原因：手动试听/补混音 + pipeline 回滚兜底仍需要；彻底下线需先迁移这两个入口。
 
 把 QwenTTS 产出的逐句配音音频，按「镜头时间轴」对齐叠合到 H3 无声成片上，
 产出一个带配音、仍不含原始音轨的最终成片。
@@ -75,6 +78,22 @@ def probe_audio_info(path: str) -> Dict:
     return probe_media(path)
 
 
+_probe_cache: Dict[str, Dict] = {}
+
+
+def _probe_cached(path: str) -> Dict:
+    """带缓存的媒体探测：同一路径只 ffprobe 一次。
+
+    P3（t6）：shot_timeline 对每个分段文件、build_entries 对每条配音音频各 ffprobe 一次，
+    镜头/条目多时 N 次串行 ffprobe 很慢。mix 半下线（手动链路），合成窗口内文件不会中途
+    变更，故模块级缓存安全。返回的 dict 只读，调用方不得改写。
+    """
+    key = os.path.abspath(path)
+    if key not in _probe_cache:
+        _probe_cache[key] = probe_media(path)
+    return _probe_cache[key]
+
+
 # =====================================================================
 # 时间轴
 # =====================================================================
@@ -117,7 +136,7 @@ def shot_timeline(script: Dict, videos_dir: str = "", segments: Optional[List[st
 
     real_durations: Dict[int, float] = {}
     for p in files:
-        info = probe_media(p)
+        info = _probe_cached(p)
         _d = round(float(info.get("duration") or 0), 3)
         # 把实测时长归到对应 shot 序号（或记到 full 上）
         _base = os.path.basename(p)
@@ -228,7 +247,7 @@ def build_entries(lines: List[Dict], timeline: Dict, params: Optional[Dict] = No
             logger.debug("gap_sec 解析失败（按 0 处理）：%s", e)
         if start < cursor:  # 同一镜头多句顺排，不倒挂
             start = cursor
-        info = probe_media(path)
+        info = _probe_cached(path)
         dur = round(float(info.get("duration") or 0), 3)
         if dur <= 0:
             warnings.append(f"配音文件无有效时长，已跳过：{os.path.basename(path)}")
@@ -259,7 +278,12 @@ def build_entries(lines: List[Dict], timeline: Dict, params: Optional[Dict] = No
 
 def _atempo_chain(ratio: float) -> List[str]:
     """把任意变速比拆成 atempo 可接受区间（0.5~2.0）的串联"""
-    chain, r = [], float(ratio)
+    r = float(ratio)
+    # P3（t6）：ratio<=0 或 NaN 会让 while 死循环（r/=0.5 对 0/NaN 不收敛），
+    # 防御：非法变速比不施加任何变速（返回空链 = 原速）。
+    if not (r > 0):
+        return []
+    chain = []
     while r > 2.0:
         chain.append("atempo=2.0")
         r /= 2.0

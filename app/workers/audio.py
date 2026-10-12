@@ -254,8 +254,10 @@ def _audio_qc_lines(project_name: str, lines: list, results: list, cfg: dict,
             # 前端与任务消息都在读这两个数，口径必须一致。
             if verdict.get("blocked") and retry_cb is not None:
                 try:
-                    stats["retried"] += 1
                     again = retry_cb(ln, r)
+                    # P3（t6）：retried 计数移到回调实际执行之后——回调抛异常时不计数，
+                    # 避免「计数虚高但实际没重配」。
+                    stats["retried"] += 1
                     if again:
                         verdict = again
                         if not verdict.get("blocked"):
