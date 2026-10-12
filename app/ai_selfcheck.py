@@ -2,7 +2,7 @@
 AI 可用性前置自检门禁（P0-5 密钥单源化 · 收尾件）
 
 职责：在「服务启动」与「任务开跑」两个时机，确定性地回答三个问题——
-  1. 三个 AI 模块（text / qc / chat）的 base_url / model / api_key 是否齐全？
+  1. 两个 AI 模块（text / qc）的 base_url / model / api_key 是否齐全？
   2. 已配置模块的端点是否可达、密钥是否被网关接受？
   3. 若不满足，用户具体该去哪里修？
 
@@ -40,13 +40,11 @@ from config import AI_MODULES as MODULES
 MODULE_LABELS = {
     "text": "文本分析模型",
     "qc": "质检模型",
-    "chat": "对话总控模型",
 }
 
 MODULE_USED_BY = {
-    "text": "小说转剧本 / 章节转剧本 / 提示词分析 / 剧本生成",
+    "text": "小说转剧本 / 章节转剧本 / 提示词分析 / 剧本生成 / AI 对话总控（创作设定）",
     "qc": "分镜图片质检 / 视频质检",
-    "chat": "AI 对话总控（创作设定）",
 }
 
 # 动作 → 必需模块。**只列「缺了就必然炸」的 LLM 动作**。
@@ -60,7 +58,7 @@ MODULE_USED_BY = {
 #     「接口不可用」要与「内容不合格」在链路内区分，不该在门口一刀切。
 ACTION_MODULES = {
     "script": ("text",),    # 小说转剧本 / 章节转剧本 / 提示词分析：直接驱动 LLM
-    "chat": ("chat",),      # AI 对话总控：直接驱动 LLM
+    "chat": ("text",),      # AI 对话总控：与文本分析共用同一纯文本模块（2026-10-12 合并）
     "episode": ("text",),   # 整集流水线：第一步就是章节转剧本，缺 key 必炸
 }
 
@@ -207,7 +205,7 @@ def _block_message(blocked: list, results: dict) -> str:
 
 def check_modules(modules=None, probe: bool = False, timeout: float = 6,
                   force_probe: bool = False) -> dict:
-    """批量体检（默认三个模块全查）。probe=True 时附带端点可达性探测。"""
+    """批量体检（默认全部模块全查）。probe=True 时附带端点可达性探测。"""
     mods = tuple(modules or MODULES)
     results = {}
     for m in mods:
@@ -262,7 +260,7 @@ def startup_report(probe: bool = False) -> dict:
     rep = check_modules(MODULES, probe=probe)
     try:
         if rep["ok"]:
-            logger.info("AI 前置自检：三个模块均已配置（未做网络探测）")
+            logger.info("AI 前置自检：各模块均已配置（未做网络探测）")
         else:
             logger.error("=" * 76)
             logger.error("【AI 前置自检】未通过 —— 相关任务会在开跑前被阻断，请补齐后重试：")

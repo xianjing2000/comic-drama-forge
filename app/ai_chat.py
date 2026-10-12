@@ -3,8 +3,10 @@ AI 对话（创作总控）：多轮对话敲定漫剧创作设定，并把确�
 
 - 会话历史：内存中按请求读写 + 落盘 output/ai_chat/chat_history.json
 - 创作设定：output/ai_chat/project_settings.json（按项目名归档，含 active 标记）
-- 模型调用：「AI 设置 · 对话总控模型」的独立 base_url / api_key / model（ai_config.json → modules.chat）
-- 与文本分析 / 质检模型完全独立：对话链路只读 chat 模块，不受另两个模块影响
+- 模型调用：复用「AI 设置 · 文本分析模型（=LLM 引擎）」的 base_url / api_key / model
+  （ai_config.json → modules.text；text 与 chat 已于 2026-10-12 合并为同一纯文本模块，
+   need_vision=False，对话总控不再有独立的 chat 模块）
+- 与质检模型相互独立：对话链路只读 text 模块，不受质检（视觉）配置影响
 """
 from __future__ import annotations
 

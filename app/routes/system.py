@@ -11,6 +11,9 @@ register_blueprint。endpoint 名会从 api_logs 变成 system.api_logs（Flask 
 import json
 import logging
 import os
+import threading
+import time
+from urllib.parse import urlparse
 
 from flask import Blueprint, current_app, jsonify, request
 
@@ -24,6 +27,184 @@ from config import COMFYUI_URL, PROJECT_ROOT_DIR
 logger = logging.getLogger(__name__)
 
 system_bp = Blueprint('system', __name__)
+
+# ===================== 提供商模型清单检测（2026-10-12） =====================
+# 用户口径「直接检测提供商模型清单让用户选主/备模型」：填 base_url + api_key →
+# 调 <base_url>/v1/models（OpenAI 兼容）返回模型清单，供前端做「选 provider → 选模型」下拉。
+# 参考 providers 的 TTL 缓存 + 可用性探测：默认 30s 内复用结果，refresh=true 绕过，
+# 避免前端刷新把列表接口拖慢。任何异常都收敛成结构化结果，绝不抛成裸 500。
+_MODELS_TTL = float(os.getenv("MJSCXT_AI_MODELS_TTL", "30") or 30)
+_MODELS_TIMEOUT = 8.0
+_MODELS_CACHE = {}
+_MODELS_LOCK = threading.RLock()
+
+
+def _build_models_url(base_url: str) -> str:
+    """把 base_url 规范化为 OpenAI 兼容的模型清单地址。
+
+    - https://api.deepseek.com        → https://api.deepseek.com/v1/models
+    - https://api.openai.com/v1       → https://api.openai.com/v1/models
+    - http://127.0.0.1:8899/v1        → http://127.0.0.1:8899/v1/models
+    - .../v1/models（已是清单地址）     → 原样返回
+    """
+    u = (base_url or "").strip().rstrip("/")
+    if not u:
+        return ""
+    path = urlparse(u).path.rstrip("/")
+    if path.endswith("/models"):
+        return u
+    if path in ("", "/"):
+        return u + "/v1/models"
+    return u + "/models"
+
+
+def _mask_key(key: str) -> str:
+    """api_key 脱敏（与 llm_client.mask_key 同口径；本地实现，避免跨模块依赖）。"""
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "*" * len(key)
+    return key[:4] + "******" + key[-4:]
+
+
+def _parse_models_payload(payload) -> list:
+    """解析各 provider 的模型清单返回体，归一成 id 列表。
+
+    兼容三种常见形态：顶层数组 / {"data":[{id|name}]} / {"models":[...]}。
+    """
+    out = []
+
+    def _pick(item) -> str:
+        if isinstance(item, str):
+            return item.strip()
+        if isinstance(item, dict):
+            return str(item.get("id") or item.get("name") or "").strip()
+        return ""
+
+    if isinstance(payload, list):
+        out = [_pick(x) for x in payload]
+    elif isinstance(payload, dict):
+        for key in ("data", "models"):
+            val = payload.get(key)
+            if isinstance(val, list):
+                out = [_pick(x) for x in val]
+                break
+    return [x for x in out if x]
+
+
+def _detect_provider_models(base_url: str, api_key: str, timeout: float) -> dict:
+    """真连网关取模型清单（不抛异常，任何失败收敛成结构化结果）。"""
+    import urllib.error
+    import urllib.request
+
+    url = _build_models_url(base_url)
+    if not url:
+        return {"success": False, "code": "invalid_url", "error": "base_url 非法", "models_url": ""}
+    req = urllib.request.Request(
+        url, headers={"Authorization": "Bearer " + api_key, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 固定 https/http 网关
+            code = getattr(resp, "status", 200) or 200
+            body = resp.read().decode("utf-8", "replace")
+            try:
+                payload = json.loads(body) if body.strip() else {}
+            except ValueError:
+                payload = {}
+            models = _parse_models_payload(payload)
+            if not models:
+                return {"success": False, "code": "empty", "models_url": url,
+                        "error": ("HTTP %d 但未解析到模型清单（该网关可能不是标准 "
+                                  "OpenAI 兼容格式）" % code)}
+            return {"success": True, "models_url": url, "models": models, "count": len(models)}
+    except urllib.error.HTTPError as e:
+        code = int(getattr(e, "code", 0) or 0)
+        if code in (401, 403):
+            return {"success": False, "code": "unauthorized", "models_url": url,
+                    "error": "密钥被拒绝（HTTP %d），请检查 api_key" % code}
+        if code in (404, 405):
+            return {"success": False, "code": "models_not_supported", "models_url": url,
+                    "error": ("该网关不提供模型清单接口（HTTP %d），请手动填写模型名" % code)}
+        return {"success": False, "code": "http_error", "models_url": url,
+                "error": "网关返回 HTTP %d" % code}
+    except Exception as e:  # noqa: BLE001  连接失败/超时/DNS/SSL 一律视为不可达
+        return {"success": False, "code": "unreachable", "models_url": url,
+                "error": "端点不可达：%s: %s" % (type(e).__name__, e)}
+
+
+def _list_provider_models(base_url: str, api_key: str, timeout: float = None,
+                          refresh: bool = False) -> dict:
+    """提供商模型清单检测（含超时/容错/脱敏 + TTL 缓存）。"""
+    import hashlib
+    url = _build_models_url(base_url)
+    key = (url, hashlib.sha256((api_key or "").encode("utf-8")).hexdigest()[:16])
+    now = time.time()
+    if not refresh:
+        with _MODELS_LOCK:
+            hit = _MODELS_CACHE.get(key)
+            if hit and (now - hit["ts"]) < _MODELS_TTL:
+                out = dict(hit["result"])
+                out["cached"] = True
+                out["api_key_masked"] = _mask_key(api_key)
+                out["base_url"] = (base_url or "").strip()
+                return out
+    started = time.time()
+    result = _detect_provider_models(base_url, api_key, timeout or _MODELS_TIMEOUT)
+    result["base_url"] = (base_url or "").strip()
+    result["api_key_masked"] = _mask_key(api_key)
+    result["cached"] = False
+    result["elapsed_ms"] = int((time.time() - started) * 1000)
+    with _MODELS_LOCK:
+        _MODELS_CACHE[key] = {"ts": time.time(), "result": result}
+    return dict(result)
+
+
+@system_bp.route('/api/ai/models', methods=['POST'])
+def api_ai_models():
+    """提供商模型清单检测：填 base_url + api_key → 自动列出可用模型（供前端选主/备模型）。
+
+    body: {base_url, api_key, module?, refresh?, timeout?}
+      - base_url / api_key：必填（若给 module 则可用该模块已保存的 base_url/key 补缺）；
+      - module：text / qc（可选；text 兼作对话总控，chat 旧名会透明归一为 text）；
+      - refresh：true 绕过缓存；timeout：秒（默认 8，上限 30）。
+
+    返回（成功）：{success, base_url, models_url, models[模型名清单], count,
+                   api_key_masked(脱敏，绝不明文回传), cached, elapsed_ms}
+    返回（失败，HTTP 400）：{success, error, code, models_url, base_url, api_key_masked,
+                            hint(友好提示)}
+    """
+    data = request.json or {}
+    if not isinstance(data, dict):
+        return jsonify({"success": False, "error": "body 必须是 JSON 对象"}), 400
+    base_url = str(data.get("base_url") or "").strip()
+    api_key = str(data.get("api_key") or "").strip()
+    module = str(data.get("module") or "").strip().lower()
+    refresh = bool(data.get("refresh"))
+    try:
+        timeout = float(data.get("timeout") or 0)
+    except (TypeError, ValueError):
+        timeout = 0.0
+    timeout = max(0.0, min(timeout, 30.0)) if timeout else 0.0
+    if module and (not base_url or not api_key):
+        try:
+            import ai_config
+            from config import AI_CONFIG_PATH, LLM_CONFIG_PATH
+            cfg = ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH)
+            ep = ai_config.get_module(cfg, module)
+            base_url = base_url or str(ep.get("base_url") or "").strip()
+            api_key = api_key or str(ep.get("api_key") or "").strip()
+        except Exception as e:  # noqa: BLE001
+            return jsonify({"success": False, "error": "读取模块配置失败：%s" % e}), 400
+    if not base_url:
+        return jsonify({"success": False, "error": "base_url 不能为空"}), 400
+    if not api_key:
+        return jsonify({"success": False, "error": "api_key 不能为空"}), 400
+    result = _list_provider_models(base_url, api_key, timeout=timeout or None, refresh=refresh)
+    if not result.get("success"):
+        result["hint"] = (
+            "请确认 base_url 是否为 OpenAI 兼容网关、api_key 是否正确；"
+            "若网关不提供 /models 清单接口，请手动填写模型名。")
+    status = 200 if result.get("success") else 400
+    return jsonify(result), status
 
 @system_bp.route('/api/deps/check', methods=['GET'])
 def api_deps_check():

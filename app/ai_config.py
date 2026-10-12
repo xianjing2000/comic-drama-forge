@@ -131,13 +131,28 @@ def _locked(fn):
 # 改一处即可，不再有「改了这本、漏了那本」。
 from config import AI_MODULES as MODULES
 
+# ⭐ 2026-10-12：text 与 chat 合并为一个纯文本模块。为「防漂移」保留 chat → text 的
+# 兼容别名：任何仍按旧名传 "chat" 的调用点（routes 层 get_module / save_module /
+# clear_module 的历史残留）都透明归一为 "text"，不抛错、不漂移。前端 UI（ui-dev 负责）
+# 已不再下发 "chat"。qc 视觉质检保留独立，不做任何别名。
+_LEGACY_MODULE_ALIASES = {"chat": "text"}
+
+
+def _canonical_module(module: str) -> str:
+    """模块名归一（兼容旧名 chat → text）；非法模块名抛 ValueError。"""
+    m = (module or "").strip().lower()
+    m = _LEGACY_MODULE_ALIASES.get(m, m)
+    if m not in MODULES:
+        raise ValueError(f"未知的 AI 模块：{module}")
+    return m
+
 MODULE_META = {
     "text": {
         "label": "文本分析模型（= LLM 引擎）",
-        "desc": "就是 LLM 引擎：小说转剧本、章节转剧本、提示词分析等所有纯文本任务都用这一份配置",
+        "desc": "就是 LLM 引擎：小说转剧本、章节转剧本、提示词分析、AI 对话总控等所有纯文本任务都用这一份配置（text 与 chat 已于 2026-10-12 合并）",
         "need_vision": False,
         "placeholder_model": "例如 deepseek-chat / qwen2.5:14b",
-        "used_by": ["小说转剧本", "章节转剧本", "提示词分析", "剧本生成"],
+        "used_by": ["小说转剧本", "章节转剧本", "提示词分析", "剧本生成", "AI 对话（创作总控）"],
     },
     "qc": {
         "label": "质检模型",
@@ -145,13 +160,6 @@ MODULE_META = {
         "need_vision": True,
         "placeholder_model": "例如 gpt-4o-mini / qwen-vl-max / glm-4v",
         "used_by": ["步骤5 分镜图片质检", "步骤6 视频质检"],
-    },
-    "chat": {
-        "label": "对话总控模型",
-        "desc": "AI 对话总控：通过多轮对话确定漫剧风格、题材、画风、角色等创作设定",
-        "need_vision": False,
-        "placeholder_model": "例如 deepseek-chat / gpt-4o",
-        "used_by": ["AI 对话（创作总控）", "创作设定落盘"],
     },
 }
 
@@ -306,6 +314,156 @@ def _legacy_migratable(legacy_path: str) -> dict:
     return {}
 
 
+# =====================================================================
+# text/chat 合并迁移（2026-10-12，幂等）
+# ---------------------------------------------------------------------
+# 用户口径「text 和 chat 都不需要图片功能」→ 合并为一个纯文本模块（text 优先）。
+# 迁移发生在 load_config 首次读到旧结构（modules 里含 chat）时，只做一次：
+#   - 迁移前自动备份 ai_config.json 与 secrets.enc（回滚依据）；
+#   - 字段合并：base_url / model / reasoning_effort 取 text 优先，text 空则取 chat；
+#   - fallbacks：text 优先，text 空则搬 chat（secret_ns 改 ai.text.fb.<i>）；
+#   - 密钥槽：ai.chat → ai.text（text 空时），ai.chat.fb.<i> → ai.text.fb.<i>（同理）；
+#   - 落盘删除 chat 键 → 下次读取无 chat，幂等跳过。
+# 回滚：用备份目录 output/ai_config_migration_backup/ 下 pre-merge-* 目录里的
+#   ai_config.json + secrets.enc 覆盖回原文件，再回滚本文件到合并前版本即可。
+# =====================================================================
+
+def _migration_backup_dir() -> str:
+    return os.path.join(_ROOT_DIR, "output", "ai_config_migration_backup")
+
+
+def _backup_for_migration(config_path: str) -> str:
+    """迁移前备份原 ai_config.json 与加密库（secrets.enc），返回备份目录。"""
+    import shutil as _shutil
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    dest_dir = os.path.join(_migration_backup_dir(), "pre-merge-" + stamp)
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+        for src, name in ((config_path, "ai_config.json"),
+                          (os.path.join(_ROOT_DIR, "output", "secrets.enc"), "secrets.enc")):
+            if src and os.path.isfile(src):
+                _shutil.copy2(src, os.path.join(dest_dir, name))
+        logger.info("text/chat 合并迁移前已备份原配置到 %s", dest_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("迁移前备份失败（不阻断迁移）：%s", e)
+        dest_dir = ""
+    return dest_dir
+
+
+def _migrate_chat_key_to_text() -> None:
+    """把旧加密库槽 ai.chat / ai.chat.fb.<i> 迁到 ai.text / ai.text.fb.<i>（text 优先）。
+
+    任何一条密钥迁移失败（加密不可用）都保留旧槽、只告警，绝不丢密钥。
+    """
+    store = _store()
+    text_key = store.get_api_key("ai.text")
+    chat_key = store.get_api_key("ai.chat")
+    if not text_key and chat_key:
+        if store.set_api_key("ai.text", chat_key):
+            store.clear_api_key("ai.chat")
+            logger.info("密钥槽迁移：ai.chat → ai.text")
+        else:
+            logger.warning("密钥槽迁移失败（加密不可用）：ai.chat 保留为回滚备份，text 未取得该密钥")
+    elif chat_key:
+        # text 已有密钥（text 优先）→ chat 的密钥被丢弃（已备份，可回滚）
+        store.clear_api_key("ai.chat")
+        logger.info("密钥槽合并：text 已有密钥，丢弃 chat 密钥（原文件已备份）")
+    # 备用密钥槽（加密库扁平、无前缀扫描 API，按上限 10 逐条迁）
+    for _i in range(10):
+        tk = store.get_api_key("ai.text.fb." + str(_i))
+        ck = store.get_api_key("ai.chat.fb." + str(_i))
+        if not tk and ck:
+            if store.set_api_key("ai.text.fb." + str(_i), ck):
+                store.clear_api_key("ai.chat.fb." + str(_i))
+                logger.info("密钥槽迁移：ai.chat.fb.%d → ai.text.fb.%d", _i, _i)
+        elif ck:
+            store.clear_api_key("ai.chat.fb." + str(_i))
+
+
+def _merge_fallback_items(text_raw, chat_raw) -> list:
+    """合并备用模型：text 优先（原样保留）；text 空则搬 chat 的（secret_ns 改 ai.text.fb.<i>）。"""
+    if isinstance(text_raw, list) and any(
+            isinstance(it, dict) and str(it.get("base_url") or "").strip()
+            and str(it.get("model") or "").strip() for it in text_raw):
+        return [dict(it) for it in text_raw if isinstance(it, dict)]
+    out = []
+    for i, item in enumerate(chat_raw or []):
+        if not isinstance(item, dict):
+            continue
+        base = str(item.get("base_url") or "").strip()
+        model = str(item.get("model") or "").strip()
+        if not (base and model):
+            continue
+        _pk = str(item.get("api_key") or "").strip()
+        out.append({
+            "base_url": base,
+            "model": model,
+            "reasoning_effort": normalize_reasoning_effort(item.get("reasoning_effort")),
+            "label": str(item.get("label") or "").strip() or ("备用" + str(i + 1)),
+            "api_key": "",
+            "secret_ns": "ai.text.fb." + str(i),
+            "has_api_key": bool(_pk) or bool(item.get("has_api_key")),
+            "api_key_masked": item.get("api_key_masked") or (mask_key(_pk) if _pk else ""),
+        })
+    return out
+
+
+def _migrate_merge_chat(raw: dict, config_path: str) -> tuple:
+    """把旧 ai_config.json 里的 chat 模块合并进 text（text 优先），幂等。
+
+    返回 (raw_after, migrated)。首次检测到旧结构时自动备份 + 合并 + 落盘删除 chat，
+    之后读取无 chat → 快速跳过。本函数须在 _CONFIG_LOCK 临界区内调用（由 load_config 保证）。
+    """
+    if not isinstance(raw, dict):
+        return raw, False
+    modules = raw.get("modules")
+    if not isinstance(modules, dict) or "chat" not in modules:
+        return raw, False
+    chat = modules.get("chat") if isinstance(modules.get("chat"), dict) else {}
+    text = modules.get("text") if isinstance(modules.get("text"), dict) else {}
+
+    has_fields = any(str(chat.get(k) or "").strip()
+                     for k in ("base_url", "model", "reasoning_effort"))
+    has_fb = bool(_normalize_fallbacks(chat.get("fallbacks"), "chat"))
+    store = _store()
+    chat_key = store.get_api_key("ai.chat")
+    has_fb_key = any(store.get_api_key("ai.chat.fb." + str(i)) for i in range(10))
+    if not (has_fields or has_fb or chat_key or has_fb_key):
+        # chat 完全为空 → 仅删除该键（收尾），无实质迁移
+        modules.pop("chat", None)
+        try:
+            _write_file(config_path, raw)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("清理空 chat 模块落盘失败（内存中已生效）：%s", e)
+        return raw, True
+
+    _backup_for_migration(config_path)
+
+    merged = dict(text)
+    for k in ("base_url", "model", "reasoning_effort"):
+        tv = str(merged.get(k) or "").strip()
+        cv = str(chat.get(k) or "").strip()
+        if not tv and cv:
+            merged[k] = cv
+    merged["updated_at"] = merged.get("updated_at") or chat.get("updated_at")
+    merged["fallbacks"] = _merge_fallback_items(text.get("fallbacks"), chat.get("fallbacks"))
+    _migrate_chat_key_to_text()
+
+    modules["text"] = merged
+    modules.pop("chat", None)
+    raw["modules"] = {m: modules[m] for m in MODULES if m in modules}
+    raw["version"] = int(raw.get("version") or 1)
+    raw["updated_at"] = _now()
+    try:
+        _write_file(config_path, raw)
+        logger.info("AI 设置迁移：chat 已合并进 text（text 优先；chat 字段 %s），原文件已备份到 %s",
+                    {k: (str(chat.get(k) or "") or "<空>") for k in ("base_url", "model", "reasoning_effort")},
+                    _migration_backup_dir())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("AI 设置迁移落盘失败（内存中已生效，下次会重试）：%s", e)
+    return raw, True
+
+
 @_locked
 def load_config(config_path: str, legacy_path: str = None) -> dict:
     """读取统一 AI 设置；首次读取且 text 模块为空时，自动从旧 llm_config.json 迁移并落盘。
@@ -313,6 +471,7 @@ def load_config(config_path: str, legacy_path: str = None) -> dict:
     注意：迁移只做一次（迁移后 ai_config.json 中的 text 模块已有值），不会覆盖用户后续修改。
     """
     raw = _read_file(config_path)
+    raw, _chat_migrated = _migrate_merge_chat(raw, config_path)
     cfg = _empty_config()
     modules = raw.get("modules") if isinstance(raw.get("modules"), dict) else {}
     for m in MODULES:
@@ -361,8 +520,7 @@ def get_module(cfg: dict, module: str) -> dict:
     密钥取值优先级：环境变量（MJSCXT_API_KEY_TEXT/QC/CHAT）> 本地加密库 > json 明文（遗留）。
     base_url / model 同样支持环境变量覆盖（MJSCXT_BASE_URL_* / MJSCXT_MODEL_*）。
     """
-    if module not in MODULES:
-        raise ValueError(f"未知的 AI 模块：{module}")
+    module = _canonical_module(module)
     modules = (cfg or {}).get("modules") or {}
     _raw_m = modules.get(module)
     ep = _normalize_module(_raw_m)
@@ -432,8 +590,7 @@ def save_module(config_path: str, module: str, base_url: str = None, model: str 
     - 非法值**不报错但会被归一化成 ""**，避免把笔误原样发给服务端（部分模型会把非法值
       静默解析成最高档，即最贵的那档）。
     """
-    if module not in MODULES:
-        raise ValueError(f"未知的 AI 模块：{module}")
+    module = _canonical_module(module)
     cfg = load_config(config_path, legacy_path)
     ep = cfg["modules"][module]
     if base_url is not None:
@@ -544,8 +701,7 @@ def clear_module(config_path: str, module: str = None, legacy_path: str = None) 
     """
     cfg = load_config(config_path, legacy_path)
     if module:
-        if module not in MODULES:
-            raise ValueError(f"未知的 AI 模块：{module}")
+        module = _canonical_module(module)
         cfg["modules"][module] = _empty_module()
         _store().clear_api_key(f"ai.{module}")
         # 备用模型密钥槽（ai.<module>.fb.<i>）一并清（加密库是扁平的，

@@ -215,9 +215,14 @@ TASKS_DB_PATH = os.path.join(PROJECT_OUTPUT_DIR, "tasks.db")
 TASK_QUEUE_CONCURRENCY = _env_int("TASK_QUEUE_CONCURRENCY", 1)   # 单 GPU 建议保持 1
 TASK_UNIT_MIN_BYTES = _env_int("TASK_UNIT_MIN_BYTES", 1024)      # 单元产物视为有效的最小字节数
 
-# 统一「AI 设置」：文本分析 / 质检 / 对话总控 三个相互独立的模型模块（各自 base_url / api_key / model）
+# 统一「AI 设置」：文本分析（=LLM 引擎，兼对话总控）/ 质检 两个相互独立的模型模块
+# （各自 base_url / api_key / model）。
+# ⭐ 2026-10-12：text 与 chat 合并为**一个纯文本模块**（用户口径「这 2 个都不需要图片功能」）。
+#   对话总控复用「文本分析模型」同一份 base_url / api_key / model（need_vision=False）；
+#   qc 视觉质检（need_vision=True）保留独立。旧 ai_config.json 的 chat 模块由
+#   ai_config.load_config 幂等合并进 text（text 优先），密钥槽 ai.chat.* 一并迁到 ai.text.*。
 AI_CONFIG_PATH = os.path.join(PROJECT_DATA_DIR, "ai_config.json")
-AI_MODULES = ("text", "qc", "chat")
+AI_MODULES = ("text", "qc")
 
 # 小说解析与转换参数
 # ⚠️ 2026-10-05：实际分块以 novel_to_script.CHUNK_CHARS=2400 为唯一事实源。
