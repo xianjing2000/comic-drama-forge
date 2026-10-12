@@ -251,3 +251,8 @@ t20_doc_*/
 _t*.py
 **/_t*.py
 *.tmp_test*
+
+# 测试运行时产生的临时目录（不入库）
+orrec_*
+orrep_*
+t6chain_*/
