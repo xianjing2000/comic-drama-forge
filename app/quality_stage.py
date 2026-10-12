@@ -317,7 +317,11 @@ def silence_intervals(path: str, *, timeout: int = 300, noise_db: float = -35.0,
     durs = [float(x) for x in _SILENCE_DUR_RE.findall(txt)]
     if not durs:
         return [] if p.returncode == 0 else None
-    pairs = list(zip(starts, durs)) if len(starts) >= len(durs) else list(zip(durs, durs))
+    # starts/durs 契约：ffmpeg silencedetect 每个静音段输出 silence_start 与 silence_duration 各一次；
+    # 文件末尾静音只输出 silence_start（无 silence_end/silence_duration），故 starts 可能比 durs 多 1。
+    # zip(starts, durs) 取较短一方，天然按「第 i 段 = (start_i, dur_i)」正确配对；
+    # 旧 else 分支 zip(durs, durs) 在 starts<durs 时把「时长」当「静音起点」，产出错误区间（t99 修复）。
+    pairs = list(zip(starts, durs))
     return [(float(a), float(d)) for (a, d) in pairs]
 
 
