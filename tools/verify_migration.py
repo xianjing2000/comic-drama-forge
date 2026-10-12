@@ -5,7 +5,12 @@
 因此验证必须包含：① 真实 __import__；② 函数体引用名扫描；③ app 可导入且路由数不变。
 """
 import os, sys, io, ast, builtins
-os.environ.setdefault('MJSCXT_DATA_DIR', os.path.join(os.environ['APPDATA'], 'mjscxt-desktop', 'mjscxt-data'))
+# t106：非 Windows 无 APPDATA → 直接索引会 KeyError。改为 get + 条件 setdefault：
+# 只在 APPDATA 存在时才设置数据根（避免空串拼出相对路径），否则让 config 回落源码根。
+_appdata = os.environ.get('APPDATA', '')
+if _appdata:
+    os.environ.setdefault('MJSCXT_DATA_DIR',
+                          os.path.join(_appdata, 'mjscxt-desktop', 'mjscxt-data'))
 # ⚠️ 2026-10-10：必须关掉托管 —— 本脚本会 __import__('app')，而 app 模块级会
 #    「检测到启用项目 → 自动恢复生产 → 启动托管守护线程」。实测运行本验证器时
 #    日志里多出两组「托管循环开始 / 守护线程已启动」，即**顺带拉起了一个真实的

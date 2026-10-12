@@ -86,9 +86,11 @@ def plan_deletions(entries, keep: int = 3, days: int = 0, now=None):
             else:
                 delete.append((item, "超出每组保留数 %d" % keep))
     if cutoff is not None:
-        kept_ids = {x[0] for x in delete}
+        # t106：删除 kept_ids 冗余检查——原 kept_ids={x[0] for x in delete} 存的是
+        # 元组 (path,base,tag,mtime)，却与 item[0]（Path）比较，恒 True 且无意义；
+        # 且「被保留(keep_set)」与「已超出保留数(delete)」本就互斥，无需去重。
         for item in entries:
-            if item[0] in keep_set and item[3] < cutoff and item[0] not in kept_ids:
+            if item[0] in keep_set and item[3] < cutoff:
                 delete.append((item, "早于 %d 天前" % days))
     return delete
 
