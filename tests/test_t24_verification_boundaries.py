@@ -419,6 +419,130 @@ class S3_PanelDupNegation(unittest.TestCase):
 
 
 # =========================================================================== #
+# S5（t31 验证门）：面板雷同判据的攻击面与回归基线
+# =========================================================================== #
+class S5_PanelDupAttackSurface(unittest.TestCase):
+    """t31 独立复核 ac27d91 / 44d3977 时构造的绕过输入与生产语料指标。
+
+    这个类**不代表现状是对的** —— 它把三类事实钉住：
+      ① 已知会被绕过（真缺陷被放过）的「语义反转」句式 —— 当前实现仍放过；
+      ② 新词根（同义族）引入的达标误判 —— 数量已超过它修掉的量；
+      ③ 生产语料上的双向指标，任何版本变动都拿这组数字对比。
+    任何一条被修好，对应断言都会变红并提醒收紧基线 —— 这正是它存在的意义。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import sb_helpers
+        cls.sb = sb_helpers
+
+    #: ① 语义反转：前缀里含「不/没有」，但整句是**肯定缺陷**。
+    #: 机制 —— 弱否定词「不/没有」落在 6 字窗口内 → 被当成达标结论 → **真缺陷被放过**。
+    #: 注意「不达标/不合格」这类生产高频措辞**不受影响**（已实测 26 条生产真缺陷 0 放过），
+    #: 会被放过的是「动词性反转」：不能排除 / 不能弥补 / 不足以说明 / 没有改善 …
+    SEMANTIC_INVERSION_CASES = [
+        "不能排除面板雷同",
+        "不能弥补面板雷同",
+        "不足以说明面板雷同",
+        "不足以否定面板雷同",
+        "没有改善面板雷同",
+        "不能就此认为面板雷同",
+    ]
+
+    def test_semantic_inversion_cases_are_currently_missed(self):
+        """① 当前实现把语义反转判成达标 → 真缺陷被放过（登记为**已知漏判**）。"""
+        missed = [t for t in self.SEMANTIC_INVERSION_CASES
+                  if not self.sb._panel_dup_hit(t)]
+        self.assertEqual(
+            set(missed), set(self.SEMANTIC_INVERSION_CASES),
+            "语义反转句式已被修复（不再漏判）—— 请把这条断言改成「必须全部命中」并更新注释：%s"
+            % sorted(set(self.SEMANTIC_INVERSION_CASES) - set(missed)))
+
+    def test_production_real_defects_are_never_missed(self):
+        """⭐ 反向护栏：**生产真实措辞**的真缺陷一条都不许放过（这是硬底线）。"""
+        prod_real = [
+            "判定为面板雷同，不合格",
+            "质检不达标｜原因=九宫格严重面板雷同",
+            "构成面板雷同，不满足可直接使用的分镜要求",
+            "第5格无主体，面板严重雷同",
+            "无论如何，第4-9格面板雷同",
+            "九宫格面板严重雷同（第3、4、6、7格动作构图几乎相同）",
+        ]
+        miss = [t for t in prod_real if not self.sb._panel_dup_hit(t)]
+        self.assertEqual(miss, [], "生产真实措辞的真缺陷被放过：%s" % miss)
+
+    #: ② 新词根（同义族：动作/构图/机位/景别/姿势/站位/运镜/画面/视觉/分镜 + 雷同/重复/趋同/单一）
+    #: 引入的**达标误判**。全部来自生产语料里 passed=True 的真实判语。
+    #: ⚠️ 本清单随实现演进更新；新增一条就意味着又多误伤一镜。
+    SYNONYM_FALSE_POSITIVES = [
+        "九宫格齐全、9格机位与景别基本区分明确（远景/全景、两处特写、俯视鸟瞰均具备），"
+        "画面清晰无畸变、无糊化撕裂，可判定通过；仅个别格构图略重复、光影冷暖不完全统一，属轻微问题。",
+        "九宫格角色/场景/光线一致性良好，动作推进连贯，无畸变、糊化或多手多脚等硬伤，可交付使用；"
+        "仅存在景别偏松与道具标签重复的轻微偏差。",
+        "九宫格整体画质、角色服化道与便利店场景一致性良好，「27」纸条数字清晰可读并与上一镜的水瓶"
+        "锚点衔接自然，无崩坏/畸变类关键缺陷；但存在两处构图近似重复的小瑕疵。",
+        "九宫格整体为同一场景同一角色的连续关键帧，角色造型、服装、光线色调与设定图一致，画面清晰"
+        "无畸变，动作推进（人群围观、指认、羡进下颌绷紧握拳）连贯；仅第2/4/7格构图相近存在轻微"
+        "面板重复倾向，不足以判为面板雷同。",
+    ]
+
+    def test_synonym_expansion_regression_count(self):
+        """② 同义族词根把它自己修掉的那类**达标结论**又判成缺陷 —— 钉住数量不恶化。"""
+        actual = [t for t in self.SYNONYM_FALSE_POSITIVES
+                  if self.sb._panel_dup_hit(t)]
+        # 记录基线：2026-10-12 工作树实测 4/4 全部误判（说明同义族**无条件**命中）。
+        # 2026-10-12 晚：sb_helpers 引入「否定语境按命中起点排序 + 跨子句不继承否定」后
+        #   误判降到 3/4 —— 「仅存在景别偏松与道具标签重复的轻微偏差」不再误判
+        #   （重复的是道具标签，不是构图，本就不该命中）。这是**改善**，不是回归：
+        #   本用例的 docstring 只钉「数量不恶化」，故基线取历史最差值 4 做上限，
+        #   允许实现变好；若哪天回升超过 4 才判失败。
+        SYNONYM_FP_BASELINE = 4
+        self.assertLessEqual(
+            len(actual), SYNONYM_FP_BASELINE,
+            "达标结论误判数回升超过历史基线：%d > %d" % (len(actual), SYNONYM_FP_BASELINE))
+        # 逐条留痕：哪几条仍被误判（实现继续变好时这里会自动变短，供人工核对）
+        self.assertTrue(
+            all(isinstance(t, str) for t in actual),
+            "命中清单应为判语原文，便于人工复核")
+
+    #: ③ 生产语料双向指标基线（output/qc/**/*.json，274 条 records / 113 条达标 / 161 条不通过）。
+    #: 实测三版对照：
+    #:   修复前 ac27d91^      误判 8/113（7.1%）  真缺陷命中 98/161
+    #:   修复后 44d3977       误判 5/113（4.4%）  真缺陷命中 97/161
+    #:   工作树(含同义族扩面)  误判 13/113（11.5%）真缺陷命中 131/161  ← 误判回升超过修复前
+    #: 本断言只钉「误判不回升」，不钉具体数（语料会随生产增长）。
+    PROD_FP_BASELINE = 13
+
+    @unittest.skipUnless(os.path.isdir(os.path.join(
+        os.environ.get("APPDATA", ""), "mjscxt-desktop", "mjscxt-data", "output", "qc")),
+        "无生产数据根，跳过语料回放")
+    def test_production_false_positive_rate_does_not_regress(self):
+        """③ 生产语料回放：达标结论的误判条数不得超过当前基线。"""
+        import json
+        qc = os.path.join(os.environ["APPDATA"], "mjscxt-desktop", "mjscxt-data",
+                          "output", "qc")
+        fp = 0
+        for dp, _dn, fns in os.walk(qc):
+            for fn in fns:
+                if not fn.endswith(".json"):
+                    continue
+                try:
+                    with io.open(os.path.join(dp, fn), encoding="utf-8") as fh:
+                        j = json.load(fh)
+                except (OSError, ValueError):
+                    continue
+                for r in (j.get("records") if isinstance(j, dict) else None) or []:
+                    if r.get("passed") is not True:
+                        continue
+                    if self.sb._panel_dup_hit(str(r.get("reason") or "")):
+                        fp += 1
+        self.assertLessEqual(
+            fp, self.PROD_FP_BASELINE,
+            "生产语料里「passed=True 却被判缺陷」的条数回升到 %d（基线 %d）—— "
+            "软放行会被无谓否决，白跑一轮" % (fp, self.PROD_FP_BASELINE))
+
+
+# =========================================================================== #
 # S4：export_mode 回退为 all 的残留影响
 # =========================================================================== #
 class S4_ExportModeReverted(unittest.TestCase):

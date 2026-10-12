@@ -14,6 +14,7 @@ import re
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(_HERE), 'app'))
@@ -104,6 +105,121 @@ class TestDoctor(unittest.TestCase):
     def test_doctor_never_raises(self):
         self.assertIsInstance(CD.doctor(), dict)
         self.assertIsInstance(CD.summary_line(), str)
+
+
+class TestAudioSilenceLockstep(unittest.TestCase):
+    """静音判据的跨模块等值（2026-10-12 T12/T14）。
+
+    为什么必须成对：quality_stage.py:262-263 的 A 层 near-silent 是一个 or 表达式 ——
+        mean_db < AUDIO_NEAR_SILENT_DB   or   ratio < AUDIO_HARD_SILENT_RATIO
+    两个字段各自在 quality_stage 与 audio_qc 各定义一份（同义、只有作用域是整轨/单段）。
+    只锁 ratio 不锁 dB，就会出现「dB 判死、ratio 判活」的自相矛盾。
+    两条 dB 常量还是 orphan 扫描的**盲区**（关键词表不认 DB 类后缀），只能人工声明。
+    """
+
+    #: (REGISTRY 键, owner, must_match 目标)
+    PAIRS = (('audio_hard_silent_ratio', 'quality_stage.AUDIO_HARD_SILENT_RATIO',
+              'audio_qc.HARD_SILENT_RATIO'),
+             ('audio_near_silent_db', 'quality_stage.AUDIO_NEAR_SILENT_DB',
+              'audio_qc.NEAR_SILENT_MEAN_DB'))
+
+    def test_both_halves_are_declared(self):
+        for key, owner, other in self.PAIRS:
+            meta = CD.REGISTRY.get(key) or {}
+            self.assertEqual(meta.get('owner'), owner, key)
+            self.assertIn(other, meta.get('must_match') or [],
+                          '%s 未声明 must_match=%s（只锁一半会自相矛盾）' % (key, other))
+        # audio_qc 侧的 owner 条目也必须登记（否则 orphan 扫描看不见 —— dB 因为命名盲区尤其危险）
+        for key, owner in (('hard_silent_ratio', 'audio_qc.HARD_SILENT_RATIO'),
+                           ('near_silent_mean_db', 'audio_qc.NEAR_SILENT_MEAN_DB')):
+            self.assertEqual((CD.REGISTRY.get(key) or {}).get('owner'), owner, key)
+
+    def test_values_unchanged(self):
+        """数值不动：ratio 仍 0.15、dB 仍 -50.0（登记值 == 代码值）。"""
+        import audio_qc
+        import quality_stage
+        self.assertEqual(CD.REGISTRY['hard_silent_ratio']['default'], 0.15)
+        self.assertEqual(CD.REGISTRY['audio_hard_silent_ratio']['default'], 0.15)
+        self.assertEqual(CD.REGISTRY['near_silent_mean_db']['default'], -50.0)
+        self.assertEqual(CD.REGISTRY['audio_near_silent_db']['default'], -50.0)
+        self.assertEqual(audio_qc.HARD_SILENT_RATIO, 0.15)
+        self.assertEqual(quality_stage.AUDIO_HARD_SILENT_RATIO, 0.15)
+        self.assertEqual(audio_qc.NEAR_SILENT_MEAN_DB, -50.0)
+        self.assertEqual(quality_stage.AUDIO_NEAR_SILENT_DB, -50.0)
+
+    def test_change_one_side_moves_both(self):
+        """apply_to_runtime 回写 owner 时会一并写到 must_match 目标 —— 改一处两处一起变。"""
+        import audio_qc
+        import quality_stage
+        before = (audio_qc.HARD_SILENT_RATIO, quality_stage.AUDIO_HARD_SILENT_RATIO,
+                  audio_qc.NEAR_SILENT_MEAN_DB, quality_stage.AUDIO_NEAR_SILENT_DB)
+        forced = {'audio_hard_silent_ratio': 0.25, 'audio_near_silent_db': -60.0}
+        resolved = {}
+        for k, v in forced.items():
+            meta = CD.REGISTRY[k]
+            resolved[k] = {'owner': meta['owner'],
+                           'must_match': meta.get('must_match') or [],
+                           'value': v, 'source': 'db'}
+        try:
+            with mock.patch.object(CC, 'resolve_all', lambda: dict(resolved)):
+                CC.apply_to_runtime()
+            self.assertEqual(audio_qc.HARD_SILENT_RATIO, 0.25)
+            self.assertEqual(quality_stage.AUDIO_HARD_SILENT_RATIO, 0.25,
+                             'ratio 两处未联动')
+            self.assertEqual(audio_qc.NEAR_SILENT_MEAN_DB, -60.0)
+            self.assertEqual(quality_stage.AUDIO_NEAR_SILENT_DB, -60.0,
+                             'dB 两处未联动')
+        finally:
+            (audio_qc.HARD_SILENT_RATIO, quality_stage.AUDIO_HARD_SILENT_RATIO,
+             audio_qc.NEAR_SILENT_MEAN_DB, quality_stage.AUDIO_NEAR_SILENT_DB) = before
+
+    def test_single_sided_change_is_detected(self):
+        """只改一处不改另一处 → doctor 必须报 duplicates 且 ok=False（护栏的意义）。"""
+        import audio_qc
+        old = audio_qc.HARD_SILENT_RATIO
+        try:
+            audio_qc.HARD_SILENT_RATIO = 0.99
+            rep = CD.doctor()
+            self.assertFalse(rep['ok'], '单边改动没有被体检拦下')
+            self.assertTrue(
+                any(d.get('other') == 'audio_qc.HARD_SILENT_RATIO'
+                    for d in (rep.get('duplicates') or [])),
+                'duplicates 未点名 audio_qc.HARD_SILENT_RATIO：%s' % rep.get('duplicates'))
+        finally:
+            audio_qc.HARD_SILENT_RATIO = old
+
+    def test_silence_thresholds_are_not_orphans(self):
+        """dB 是扫描盲区，登记后仍要确保它们不在孤儿名单里（防回退）。"""
+        names = {(x['module'], x['name']) for x in (CD.orphan_candidates().get('items') or [])}
+        self.assertNotIn(('audio_qc', 'NEAR_SILENT_MEAN_DB'), names)
+        self.assertNotIn(('quality_stage', 'AUDIO_NEAR_SILENT_DB'), names)
+
+
+class TestRegistrationMatchesCodeDefaults(unittest.TestCase):
+    """登记值必须与代码实际默认一致（2026-10-12 T14）。
+
+    背景：max_tokens_ceiling 的登记 default 长期是 32768，而 llm_client.py:99 的实际默认是 65536
+    （可被 MJSCXT_MAX_TOKENS_CEILING 覆盖）—— 于是**冷进程** doctor() 恒 ok=False；
+    只有在同进程里先跑过 config_center.apply_to_runtime()（把登记值回写进模块属性）才会变绿，
+    这正好**掩盖**了登记漂移。本任务按契约「以更新登记解决、不改 llm_client.py」。
+    """
+
+    def test_max_tokens_ceiling_registration_and_desc(self):
+        import llm_client
+        meta = CD.REGISTRY['max_tokens_ceiling']
+        self.assertEqual(meta['default'], 65536)
+        self.assertEqual(meta['default'], llm_client.MAX_TOKENS_CEILING,
+                         '登记 default 与 llm_client.MAX_TOKENS_CEILING 漂移')
+        self.assertIn('MJSCXT_MAX_TOKENS_CEILING', meta['desc'],
+                      'desc 未说明该上限可被环境变量覆盖')
+
+    def test_doctor_has_no_registration_mismatch(self):
+        """doctor 的「登记默认 vs 实际值」不符项必须为空（冷/热进程都成立）。"""
+        rep = CD.doctor()
+        bad = [(r['key'], r['expect'], r['actual'])
+               for r in (rep.get('params') or []) if not r.get('match')]
+        self.assertEqual(bad, [], '登记与代码实际值不符：%s' % bad)
+        self.assertTrue(rep.get('ok'), 'doctor 未通过：%s' % (rep.get('warnings') or [])[:3])
 
 
 if __name__ == '__main__':

@@ -281,5 +281,77 @@ class TestH3PromptWiring(unittest.TestCase):
         self.assertTrue(verdict['valid'], verdict)
 
 
+class TestH3CanonTextsDialogueForms(unittest.TestCase):
+    """t19：_h3_canon_texts 对 dialogue 的三种形态（list / str / None）。
+
+    verifier-2 在 t7 报的 O-1：只处理 list 形态；裸字符串会被 enumerate **逐字符拆分**
+    （'七层楼' → '七'/'层'/'楼'），于是「七层」这类禁写错形再也命中不到 → 纠错静默失效。
+    真实剧本 145 镜当前 str 形态 = 0（数据形态侥幸，不是代码正确），所以修它必须同时证明
+    ①list 形态零回归 ②str 形态真修复。
+    """
+
+    def test_list_form_unchanged(self):
+        """list 形态：字段名与文本必须与修复前逐字一致（零回归硬底线）。"""
+        shot = {'shot_id': 1, 'dialogue': [{'speaker': '羡进', 'text': '我们上到七层楼就到了'}]}
+        self.assertEqual([t for t in K._h3_canon_texts(shot) if t[0].startswith('dialogue')],
+                         [('dialogue[0].text', '我们上到七层楼就到了')])
+
+    def test_list_of_plain_strings_unchanged(self):
+        """list 里放裸字符串（非 dict）的既有分支也必须不变。"""
+        shot = {'shot_id': 1, 'dialogue': ['第一句', '第二句']}
+        self.assertEqual([t for t in K._h3_canon_texts(shot) if t[0].startswith('dialogue')],
+                         [('dialogue[0]', '第一句'), ('dialogue[1]', '第二句')])
+
+    def test_bare_string_is_one_text_not_chars(self):
+        """str 形态：整条文本，不得逐字符拆分 —— 本用例钉死这一点。"""
+        shot = {'shot_id': 3, 'dialogue': '七层楼'}
+        got = [t for t in K._h3_canon_texts(shot) if t[0].startswith('dialogue')]
+        self.assertEqual(got, [('dialogue', '七层楼')])
+        self.assertEqual(len(got), 1)
+        # 逐字符拆分的特征：每个文本长度为 1 —— 必须不成立
+        self.assertFalse(all(len(t[1]) == 1 for t in got))
+        self.assertEqual(''.join(t[1] for t in got), '七层楼')
+
+    def test_bare_string_conflict_is_detected(self):
+        """真修复：裸字符串里的错形现在能被检测并注入纠正。"""
+        shot = {'shot_id': 3, '_canon_project': BOOK, 'dialogue': '我们上到七层楼就到了'}
+        blk = K.canon_facts_block(shot)
+        self.assertIn('设定｜楼层数=四十七层', blk)
+        self.assertIn('必须写成「四十七层」', blk)
+
+    def test_bare_string_equals_list_form(self):
+        """同一句台词：str 形态与 list 形态必须产出同一个 block（形态不该影响结果）。"""
+        same = '我们上到七层楼就到了'
+        as_str = K.canon_facts_block({'shot_id': 3, '_canon_project': BOOK, 'dialogue': same})
+        as_list = K.canon_facts_block(
+            {'shot_id': 3, '_canon_project': BOOK,
+             'dialogue': [{'speaker': '羡进', 'text': same}]})
+        self.assertEqual(as_str, as_list)
+        self.assertNotEqual(as_str, '')
+
+    def test_empty_and_blank_string_skipped(self):
+        """空串 / 纯空白不产生条目（与 list 形态的空元素一致）。"""
+        self.assertEqual([t for t in K._h3_canon_texts({'dialogue': ''})
+                          if t[0].startswith('dialogue')], [])
+        self.assertEqual([t for t in K._h3_canon_texts({'dialogue': '   '})
+                          if t[0].startswith('dialogue')], [])
+
+    def test_none_and_missing_unchanged(self):
+        """None / 缺失：不产生任何 dialogue 条目（既有行为）。"""
+        self.assertEqual([t for t in K._h3_canon_texts({'dialogue': None})
+                          if t[0].startswith('dialogue')], [])
+        self.assertEqual([t for t in K._h3_canon_texts({})
+                          if t[0].startswith('dialogue')], [])
+
+    def test_non_dict_shot_still_empty(self):
+        self.assertEqual(K._h3_canon_texts(None), [])
+        self.assertEqual(K._h3_canon_texts('not a shot'), [])
+
+    def test_unrelated_bare_string_not_injected(self):
+        """不误命中：裸字符串里没有设定词时仍不注入。"""
+        shot = {'shot_id': 5, '_canon_project': BOOK, 'dialogue': '我不走。'}
+        self.assertEqual(K.canon_facts_block(shot), '')
+
+
 if __name__ == '__main__':
     unittest.main()
