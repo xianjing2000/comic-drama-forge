@@ -555,8 +555,8 @@ def align_script_assets(script: dict, bible: dict, episode_no: int) -> dict:
             old_app = str(c.get("appearance") or "").strip()
             c["appearance"] = row["appearance"]
             appearance_fixed.append({"name": canonical, "from": old_app, "to": row["appearance"]})
-        if not str(c.get("identity") or "").strip() and row.get("identity"):
-            c["identity"] = row["identity"]
+        # 设定库 identity 非空时统一覆盖（锁定身份锚点）；空值不覆盖。
+        # （原 522-523「剧本为空才补」被本行完全覆盖，属死代码，已删）
         if str(row.get("identity") or "").strip():
             c["identity"] = row["identity"]
         if str(row.get("personality") or "").strip() and c.get("personality") != row["personality"]:
@@ -686,7 +686,8 @@ def rule_dialogue_dedup(script: dict, episode_no: int, threshold: float = 0.5) -
     for sid, seg in lines:
         m = re.match(r"^([^：:]{1,10})[：:]", seg)
         name = m.group(1).strip() if m else ""
-        body = seg[len(name) + 1:] if name else seg
+        # 用 m.end() 定位冒号后正文起点，避免前导空格时 len(name)+1 算错位置带上冒号
+        body = seg[m.end():] if (m and name) else seg
         if len(_plain(body)) < 6:
             continue
         dup = None
@@ -2598,9 +2599,6 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
     validation["rewrite"] = rewrite_info
     validation["generated_at"] = _now()
     save_json(validation_path(continuity_dir, project_key, episode_no), validation)
-    if script_path:
-        save_episode_script(script, save_dir, project_key, episode_no, project_key)
-
     report("done", f"第{episode_no}集完成：连贯性评分 "
                    f"{validation.get('score') if validation.get('score') is not None else '—'}，"
                    f"原文覆盖率 情节级 {coverage_report.get('plot_coverage_percent')}% / "

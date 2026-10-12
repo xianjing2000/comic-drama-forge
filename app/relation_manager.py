@@ -100,6 +100,11 @@ class RelationManager:
         """添加角色关系（同一对角色允许多种关系，rel_id 同名时追加序号保证唯一）。"""
         if relation_type not in ALL_RELATION_TYPES:
             raise ValueError(f"无效的关系类型: {relation_type}")
+        # P3：无效强度 / 自环不再静默 —— 留痕告警（不抛，避免影响既有调用方）
+        if strength not in RELATION_STRENGTH:
+            logger.warning("无效的关系强度 %r（按 neutral 0.0 处理）", strength)
+        if char_id_a == char_id_b:
+            logger.warning("关系双方为同一角色（自环）：%r", char_id_a)
 
         # 关系ID格式: char_a_char_b（按字母序排序）；同一对角色可有多种关系
         # （如 亲属+师徒），故同名时追加序号保证唯一、不覆盖既有关系 —— 这样
@@ -224,7 +229,7 @@ class RelationManager:
             src = next((n for n in nodes if n["id"] == edge["source"]), None)
             tgt = next((n for n in nodes if n["id"] == edge["target"]), None)
             if src and tgt and src.get("x") and tgt.get("x"):
-                color = self._get_edge_color(edge["type"], edge["strength_value"])
+                color = self._get_edge_color(edge["type"])
                 sw = max(1, min(4, abs(edge["strength_value"]) * 4 + 1))
                 svg_parts.append(f'<line x1="{src["x"]}" y1="{src["y"]}" x2="{tgt["x"]}" y2="{tgt["y"]}" stroke="{color}" stroke-width="{sw}" opacity="0.7"/>')
 
@@ -306,8 +311,8 @@ class RelationManager:
 
         return nodes
 
-    def _get_edge_color(self, rel_type: str, strength: float) -> str:
-        """根据关系类型和强度返回颜色"""
+    def _get_edge_color(self, rel_type: str) -> str:
+        """根据关系类型返回颜色（强度不参与配色，未用参数已删）"""
         colors = {
             "family": "#10b981",    # 绿色
             "friend": "#3b82f6",    # 蓝色

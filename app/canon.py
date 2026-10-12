@@ -765,8 +765,10 @@ def inject_canon_into_prompt(prompt, book, *, label: str = "", events: list = No
         if not block:
             return prompt
         summary = facts_summary(book)
-        logger.info("[canon注入] %s：注入 %d 条硬事实（设定表：《%s》）—— %s",
-                    label or "prompt", len(facts_of(book)), book.get("key"),
+        n_facts = len(facts_of(book))
+        n_rendered = min(n_facts, max(1, _MAX_INJECT_FACTS))
+        logger.info("[canon注入] %s：注入 %d 条硬事实（共 %d 条，设定表：《%s》）—— %s",
+                    label or "prompt", n_rendered, n_facts, book.get("key"),
                     "；".join(summary))
         if events is not None:
             try:
@@ -1089,7 +1091,10 @@ def verify_sources(canon: dict = None, novel_dirs=None) -> dict:
                 except Exception:  # noqa: BLE001
                     skipped += 1
                     continue
-                n = int(ref.get("line") or 0)
+                try:
+                    n = int(ref.get("line") or 0)
+                except (TypeError, ValueError):
+                    n = 0
                 line = lines[n - 1] if 0 < n <= len(lines) else ""
                 if str(ref["quote"]) in line:
                     ok += 1

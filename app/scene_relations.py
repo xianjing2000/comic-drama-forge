@@ -41,6 +41,9 @@ _SYSTEM = (
     "严格输出 JSON，不要 markdown 代码块，不要解释文字。"
 )
 
+#: fixed_structure 长度上限（prompt 要求与解析截断共用同一口径，避免两端漂移）
+_FIXED_STRUCTURE_MAX = 40
+
 
 def build_relate_prompt(scenes: list) -> str:
     """构造关联分析提示词。scenes 为 bible.scenes[]（只读 name/appearance/location）。"""
@@ -78,7 +81,7 @@ def build_relate_prompt(scenes: list) -> str:
         "只列同组内确实能提供结构参考的；没有就给空数组 []。\n"
         "· anchor：true 表示它是该组的**结构基准**（通常是最外层的通道/入口），"
         "组内其他场景参考它。每组至多一个 anchor。\n"
-        "· fixed_structure：该场景**跨镜头不变**的固定结构，40 字以内，"
+        f"· fixed_structure：该场景**跨镜头不变**的固定结构，{_FIXED_STRUCTURE_MAX} 字以内，"
         "**必须具体到材质与颜色**（如「斑驳木质门框、水磨石地面、米黄色涂料墙面」），"
         "禁止「现代风格」「老旧」这类抽象词 —— 抽象词对出图模型没有约束力。\n\n"
         "【重要】只依据上面的场景名与环境描述判断；描述里没有的结构不要编造；"
@@ -122,7 +125,7 @@ def relate_scenes(client, scenes: list, temperature: float = 0.3) -> dict:
             "space_group": str(r.get("space_group") or "").strip(),
             "refs": refs,
             "anchor": bool(r.get("anchor")),
-            "fixed_structure": str(r.get("fixed_structure") or "").strip()[:80],
+            "fixed_structure": str(r.get("fixed_structure") or "").strip()[:_FIXED_STRUCTURE_MAX],
         }
     if out:
         logger.info("[场景关联] 已解析 %d 个场景的关联（组数 %d）",

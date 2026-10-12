@@ -125,7 +125,7 @@ def dhash(path: str, hash_size: int = 8) -> Optional[int]:
     return bits
 
 
-def _hamming(a: int, b: int, bits: int = 64) -> int:
+def _hamming(a: int, b: int) -> int:
     return bin(a ^ b).count("1")
 
 
