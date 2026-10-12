@@ -605,6 +605,9 @@ class VideoUpscaler:
         if (report["unknown_types"] or report["missing_required"]
                 or report["dangling_links"] or report.get("unexpected_inputs")):
             raise UpscaleError(f"超分工作流自检失败: {json.dumps(report, ensure_ascii=False)[:500]}")
+        # 节点 id "2" 是 build_te_workflow / build_upscale_workflow 的固定拓扑 key：
+        #   TE 链路 "2"=TEFlashVSRModelLoader（含 mode/precision/device），旧链路 "2"=FlashVSRInitPipe（含 mode）。
+        #   两个构建器都硬编码节点 id（"1"~"5"），此处按同一契约读取 mode。
         used_mode = (wf["2"]["inputs"].get("mode")
                      or wf["2"]["inputs"].get("mode_choice") or mode or "")
         chain = "→".join(dict.fromkeys(v["class_type"] for v in wf.values()))
@@ -678,6 +681,10 @@ class VideoUpscaler:
             "engine_chain": chain,
             "template_path": UPSCALE_TE_TEMPLATE_PATH if used_engine == "te-speed-flashvsr" else "",
             "accelerated": used_engine == "te-speed-flashvsr",
+            # 节点 id "3" 是 build_te_workflow 的固定拓扑 key：TE 链路 "3"=TEFlashVSRTuning，
+            #   attention_backend/spatial_strategy/memory_policy/max_tile_edge/blend_overlap/
+            #   attention_budget/kv_retention/local_radius/quality_profile/preprocess_batch 全在此节点。
+            #   仅 TE 链路回读参数（旧链路节点结构不同，else 返回 {}）。
             "params": {k: wf["3"]["inputs"].get(k) for k in (
                 "attention_backend", "spatial_strategy", "memory_policy", "max_tile_edge",
                 "blend_overlap", "attention_budget", "kv_retention", "local_radius",

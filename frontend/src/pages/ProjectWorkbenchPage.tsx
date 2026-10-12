@@ -951,6 +951,8 @@ function OverviewTab({
   const [episodeDetail, setEpisodeDetail] = useState<any>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState('');
+  /** 详情加载失败的 HTTP 状态码（404 = 剧本尚未生成；0 = 非 HTTP 失败/成功清空） */
+  const [detailStatus, setDetailStatus] = useState(0);
   /** 记下最近一次请求的集号：详情加载失败后 ErrorState 的「重试」要能定位回同一集 */
   const lastDetailEpRef = React.useRef<number | null>(null);
 
@@ -1280,6 +1282,7 @@ function OverviewTab({
     lastDetailEpRef.current = episodeNo;
     setDetailLoading(true);
     setDetailError('');
+    setDetailStatus(0);
     try {
       const detail = await episodesApi.get(novelId, episodeNo);
       const script = (detail as any).script || {};
@@ -1302,6 +1305,9 @@ function OverviewTab({
       setSelectedEpisode(episodeNo);
     } catch (err) {
       setDetailError(err instanceof Error ? err.message : t('wb.loadDetailFailed'));
+      // 结构化判定「尚未生成」：后端 EpisodeNotFoundError → HTTP 404，不再匹配中文文案
+      const st = (err as { status?: unknown } | null)?.status;
+      setDetailStatus(typeof st === 'number' ? st : 0);
     } finally {
       setDetailLoading(false);
     }
@@ -1312,6 +1318,7 @@ function OverviewTab({
     setSelectedEpisode(null);
     setEpisodeDetail(null);
     setDetailError('');
+    setDetailStatus(0);
   };
 
   const groups: { key: 'characters' | 'items' | 'scenes'; label: string; icon: React.ReactNode; type: 'character' | 'item' | 'scene' }[] = [
@@ -1442,7 +1449,9 @@ function OverviewTab({
     //   旧实现把它当成红色错误态（ErrorState）甩给用户，还把后端异常里的
     //   **绝对文件路径** 原样当描述显示（用户反馈：「这个界面需要优化现在太丑了」）。
     //   现在：尚未生成 → 友好空态 + 明确的下一步；其他才是错误态，且描述做脱敏。
-    const notGenerated = /尚未生成|不存在|No such file/i.test(detailError);
+    //   t46：判定改结构化 —— 后端 EpisodeNotFoundError 固定回 HTTP 404，用状态码判定，
+    //   不再正则匹配「尚未生成/不存在」等中文文案（后端文案一变就会失效）。
+    const notGenerated = detailStatus === 404;
     const epNo = lastDetailEpRef.current;
     if (notGenerated) {
       return (
@@ -5043,6 +5052,9 @@ function StoryboardTab({ projectKey, episodeNo, onGotoOutput,
 //
 // ⚠️ 可下载性取决于 URL 前缀：只有 /api/upscale/<project>/<name> 支持 ?download=1；
 // ComfyUI 侧来源走 /api/upscale/comfyview 是 302 重定向，不能直接当附件下载。
+/** 超分来源 kind 标签（后端 app/routes/upscale.py 的 dirs 标签即中文 label：成片/视频片段/超分产物，
+ *  无英文 key）。收敛成常量避免散落字面量；后端 label 变更时只需改这一处。 */
+const UPSCALE_KIND_FINAL = '成片';
 function UpscaleTab({ projectKey }: { projectKey: string }) {
   const { t } = useApp();
   const [env, setEnv] = useState<UpscaleEnv | null>(null);
@@ -5111,7 +5123,7 @@ function UpscaleTab({ projectKey }: { projectKey: string }) {
         const items = srcRes.value.items || [];
         setSources(items);
         // 默认优先选「成片」（自动生产刚出的成品），省掉一次手动选择
-        setSelected((prev) => prev || (items.find((i) => i.kind === '成片') || items[0])?.path || '');
+        setSelected((prev) => prev || (items.find((i) => i.kind === UPSCALE_KIND_FINAL) || items[0])?.path || '');
       } else {
         setError(srcRes.reason instanceof Error ? srcRes.reason.message : t('upscale.loadFailed'));
         setSources([]);
@@ -5887,7 +5899,7 @@ function ChatPanel({ projectKey, onClose }: { projectKey: string; onClose: () =>
       s.messages = (d.messages || []) as ChatMsg[];
       setMessages(s.messages);
     } catch (err) {
-      console.error('加载对话历史失败:', err);
+      console.error('Failed to load chat history:', err);
     }
   };
 

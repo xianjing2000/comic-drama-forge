@@ -143,6 +143,10 @@ def camera_key(camera) -> str:
     """
     s = str(camera or "").strip()
     if not s:
+        # 空 camera（None / ''）= 镜头连 camera 字段都没写，按历史默认「中景」。
+        # ⚠️ 与下方「只有机位/运镜词返回空串」是**两回事**：后者是「写了但没写景别」
+        # （不猜），前者是「什么都没写」（空值取默认）。「空值取默认中景」是刻意行为，
+        # 被 verify_camera_framing.py / tests/test_pure_functions.py 锁定，勿改回空串。
         return "中景"
     if s in SHOT_CAMERA_SPECS:
         return s

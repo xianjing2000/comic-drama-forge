@@ -560,18 +560,19 @@ class AISemorySystem:
         return score
 
     def _days_since(self, iso_str: str) -> int:
-        """计算距离今天的天数"""
+        """计算距离今天的天数（解析失败按「很久以前」处理，带日志的 fail-open）。"""
         try:
             dt = self._parse_time(iso_str)
             return (datetime.now() - dt).days
-        except:
+        except (ValueError, TypeError) as e:
+            logger.debug("记忆时间解析失败（按 999 天处理）：%s", e)
             return 999
 
     def _parse_time(self, iso_str: str) -> datetime:
-        """解析 ISO 时间字符串"""
+        """解析 ISO 时间字符串（t42：裸 except → 精确异常；空/坏值回落 now）。"""
         try:
-            return datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-        except:
+            return datetime.fromisoformat(str(iso_str or "").replace("Z", "+00:00"))
+        except (ValueError, TypeError):
             return datetime.now()
 
 

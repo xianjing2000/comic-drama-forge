@@ -54,6 +54,8 @@ import prompt_templates
 # 把 prompt_qc 的统计取出来、按统一措辞落一行日志（这正是此前缺失的调用点）。
 import prompt_protocol
 
+from fs_atomic import atomic_write_json
+
 from common_util import mask_key as mask_key
 logger = logging.getLogger(__name__)
 
@@ -2193,18 +2195,20 @@ def _image_verdict_accepted(verdict: dict) -> bool:
 
 def _recheck_image_verdict(ep: dict, prompt: str, image_paths: list, cfg: dict,
                            first: dict, image_path: str, style_norm: str) -> dict:
-    """图片质检「二次复核」：同一张图再判一次，任一判过即放行。
+    """图片质检「二次复核」（双向对称）：首次与复核**都判过才放行**。
 
     背景（实测）：同一张分镜图 + 同一组设定图 + temperature=0，重复 4 次送检得到
     score = 85 / 78 / 45 / 92（通过率 2/4）；同一轮还会出现「景别完美符合」
     与「景别严重不符（接近全景）」两个互斥结论。判官抖动**会直接变成一次 GPU 重画**
     （1-2 分钟），而复核只用 2-5 秒 —— 交换比约 1:20，故默认开启。
 
-    决策（单向放宽，只在「首次判不过」时触发）：
-      · 客观层致命（黑图/纯色）→ **不复核**（确定性证据，复核无意义）；
-      · 复核调用抛异常 → 沿用首次结论（绝不把接口抖动变成放行）；
-      · 复核判过 → 返回复核结论（并在 recheck 里留档首次结论，便于复盘）；
-      · 两次都判不过 → 返回首次结论（保持「只有一处结论」的原有行为）。
+    双向对称（2026-10-12 t47 **收紧**）：旧「单向乐观」只在首次判不过时复核、且复核
+    判过即放行 —— 判官抖动下两次至少一次判过会系统性抬高真缺陷放过率。现改为：
+      · 首次判过 + 复核判过   → 放行（保留首次结论）；
+      · 首次判不过 + 复核判过 → 放行（判官抖动，留档首次结论）；
+      · 首次判过 + 复核判不过 → 判不过（收紧，留档首次结论）；
+      · 两次都判不过         → 判不过（返回首次结论）。
+    客观层致命（黑图/纯色）→ 不复核（确定性证据）；复核调用抛异常 → 沿用首次结论。
     """
     info = {"used": True, "first_score": first.get("score"),
             "first_accepted": bool(first.get("accepted"))}
@@ -2225,7 +2229,17 @@ def _recheck_image_verdict(ep: dict, prompt: str, image_paths: list, cfg: dict,
     info["second_score"] = second.get("score")
     info["second_accepted"] = bool(second.get("accepted"))
     info["disagreed"] = bool(first.get("accepted")) != bool(second.get("accepted"))
-    if _image_verdict_accepted(second):
+
+    first_ok = _image_verdict_accepted(first)
+    second_ok = _image_verdict_accepted(second)
+
+    if first_ok and second_ok:
+        # 两次都判过 → 放行（保留首次结论，稳定）
+        info["outcome"] = "两次均判过（放行）"
+        first["recheck"] = info
+        return first
+    if (not first_ok) and second_ok:
+        # 首次判不过、复核判过 → 放行（判官抖动）
         info["outcome"] = "复核放行（首次判不过判定为判官抖动）"
         logger.info("图片质检二次复核放行：首次 score=%s(%s) → 复核 score=%s(%s)",
                     first.get("score"), first.get("reason"),
@@ -2238,6 +2252,20 @@ def _recheck_image_verdict(ep: dict, prompt: str, image_paths: list, cfg: dict,
         }
         second["recheck"] = info
         return second
+    if first_ok and (not second_ok):
+        # 首次判过、复核判不过 → 判不过（收紧，避免判官抖动放过真缺陷）
+        info["outcome"] = "复核推翻通过（首次判过判定为判官抖动，收紧）"
+        logger.warning("图片质检二次复核推翻通过：首次 score=%s(%s) → 复核 score=%s(%s)",
+                       first.get("score"), first.get("reason"),
+                       second.get("score"), second.get("reason"))
+        second["recheck_first"] = {
+            "score": first.get("score"), "reason": first.get("reason"),
+            "issues": (first.get("issues") or [])[:3],
+            "critical_issues": (first.get("critical_issues") or [])[:3],
+        }
+        second["recheck"] = info
+        return second
+    # 两次都判不过 → 判不过（返回首次结论）
     info["outcome"] = "两次均判不通过"
     first["recheck"] = info
     return first
@@ -2420,10 +2448,12 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
     # 全黑/全白/纯色（像素 stddev < 阈值）→ fatal 计入 critical_issues、blocked=True；
     # 长宽比异常 → 非 fatal 计入 issues。AI 层失败也会透出（不因 AI 不可用漏掉黑图）。
     verdict = _apply_image_objective(verdict, image_path, cfg)
-    # ★ 二次复核（判官自洽性检查）：首次判不过时用**同一张图**再判一次，任一判过即放行。
-    #   实测判官自身抖动极大（同一张图 score 45/78/85/92），而每次「判不过」都会触发
-    #   一次 GPU 重画 —— 复核成本 2-5 秒 vs 重画 1-2 分钟。开关 cfg["image_qc_recheck"]。
-    if not _image_verdict_accepted(verdict) and cfg.get("image_qc_recheck", True):
+    # ★ 二次复核（判官自洽性检查，双向对称）：首次与复核都判过才放行（2026-10-12 t47 收紧）。
+    #   实测判官自身抖动极大（同一张图 score 45/78/85/92），每次「判不过」都会触发
+    #   一次 GPU 重画 —— 复核成本 2-5 秒 vs 重画 1-2 分钟。旧「单向乐观」只在首次判不过
+    #   时复核、复核判过即放行，会系统性抬高真缺陷放过率；现改为双向对称（首次判过也复核）。
+    #   开关 cfg["image_qc_recheck"]。
+    if cfg.get("image_qc_recheck", True):
         verdict = _recheck_image_verdict(ep, prompt, image_paths, cfg, verdict,
                                          image_path, style_norm)
     # 提示词预检缓存的统计出口在函数入口（含 cfg 的跨模式隔离检查），此处不再重复调用。
@@ -3407,9 +3437,12 @@ def safe_token(raw, fallback: str = "0") -> str:
 
 
 def history_path(qc_root: str, project: str, kind: str, shot_key) -> str:
+    # ④ project 同样做 safe_token 脱敏（旧实现直接 join 原始 project，
+    #    依赖调用方先 _safe_project，含 ../ 或绝对路径时会路径穿越）。
+    safe_project = safe_token(project, "project")
     safe_kind = safe_token(kind, "asset")
     safe_shot = safe_token(shot_key, "0")
-    return os.path.join(qc_root, project, f"{safe_kind}_{safe_shot}.json")
+    return os.path.join(qc_root, safe_project, f"{safe_kind}_{safe_shot}.json")
 
 
 def append_history(qc_root: str, project: str, kind: str, shot_key,
@@ -3431,10 +3464,15 @@ def append_history(qc_root: str, project: str, kind: str, shot_key,
     entry.setdefault("time", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     data["records"].append(entry)
     data["total_attempts"] = len(data["records"])
-    data["last_passed"] = bool(entry.get("passed"))
+    # ② last_passed 语义统一为「曾经通过」（任一记录 passed=True）——
+    #    旧实现写「最后一次 passed」，与 routes/qc project-summary 的 or 消费口径、
+    #    _qc_summary 的 passed_rec 口径不一致，导致「曾通过但最后一次失败」被误判为 fail。
+    data["last_passed"] = any(bool(r.get("passed")) for r in data["records"])
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    # ① 原子写（fs_atomic）：唯一临时名 + fsync + os.replace，崩溃不留半截 JSON、
+    #    并发写者不互相覆盖（旧实现 open(path,"w") 直写非原子）。失败原样抛出，
+    #    由调用方 shared_qc._qc_record 捕获忽略。
+    atomic_write_json(path, data, indent=2)
     return os.path.abspath(path)
 
 

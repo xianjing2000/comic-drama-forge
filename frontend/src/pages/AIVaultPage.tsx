@@ -874,7 +874,7 @@ export function AIVaultPage() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="md:col-span-2">
                   <Input
-                    label="Base URL"
+                    label={t('settings.baseUrl')}
                     value={state.base_url}
                     onChange={v => updateField(moduleKey, 'base_url', v)}
                     placeholder={meta.placeholderUrl}
@@ -884,7 +884,7 @@ export function AIVaultPage() {
                 <div>
                   <Input
                     type={visibleKeys[moduleKey] ? 'text' : 'password'}
-                    label="API Key"
+                    label={t('settings.apiKeyLabel')}
                     value={state.api_key}
                     onChange={v => updateField(moduleKey, 'api_key', v)}
                     placeholder={state.has_api_key ? '••••••••' : 'sk-...'}
@@ -921,7 +921,7 @@ export function AIVaultPage() {
                 {/* 模型：手填兜底 + 模型清单下拉（t3） */}
                 <div className="md:col-span-2">
                   <ModelPicker
-                    label="Model"
+                    label={t('settings.modelLabel')}
                     value={state.model}
                     onChange={v => updateField(moduleKey, 'model', v)}
                     placeholder={meta.placeholderModel}
@@ -1079,21 +1079,21 @@ export function AIVaultPage() {
                     {editingFb && editingFb.module === moduleKey && (
                       <div className="text-xs text-ink-2">{t('vault.fallbackEditTitle')}</div>
                     )}
-                    <Input label="Label" placeholder={t('vault.fallbackLabelPh')} value={fbDraft.label || ''}
+                    <Input label={t('vault.fallbackLabel')} placeholder={t('vault.fallbackLabelPh')} value={fbDraft.label || ''}
                       onChange={v => setFbDraft(d => ({ ...d, label: v }))} className="text-sm" />
-                    <Input label="Base URL" placeholder={t('vault.fallbackUrlPh')} value={fbDraft.base_url || ''}
+                    <Input label={t('settings.baseUrl')} placeholder={t('vault.fallbackUrlPh')} value={fbDraft.base_url || ''}
                       onChange={v => setFbDraft(d => ({ ...d, base_url: v }))} className="font-mono text-sm" />
                     <div className="grid grid-cols-2 gap-2">
                       <div>
                         <ModelPicker
-                          label="Model"
+                          label={t('settings.modelLabel')}
                           placeholder={t('vault.fallbackModelPh')}
                           value={fbDraft.model || ''}
                           onChange={v => setFbDraft(d => ({ ...d, model: v }))}
                           models={fbModelsState.models}
                         />
                       </div>
-                      <Input label="API Key" type="password" placeholder={t('vault.fallbackKeyPh')}
+                      <Input label={t('settings.apiKeyLabel')} type="password" placeholder={t('vault.fallbackKeyPh')}
                         value={fbDraft.api_key || ''}
                         onChange={v => setFbDraft(d => ({ ...d, api_key: v }))} className="font-mono text-sm" />
                     </div>

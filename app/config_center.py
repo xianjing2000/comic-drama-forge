@@ -33,8 +33,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-#: 数据库文件名（复用任务库，避免再引入一个 sqlite 文件）
-_DB_FILENAME = 'tasks.db'
 
 #: 键 → 环境变量名（沿用历史 env 口径，保持向后兼容）
 ENV_MAP: Dict[str, str] = {
@@ -132,9 +130,17 @@ def _coerce(raw: Any, t: str) -> Tuple[bool, Any]:
         if t == 'bool':
             if isinstance(raw, bool):
                 return True, raw
-            return True, str(raw).strip().lower() in ('1', 'true', 'yes', 'on')
+            s = str(raw).strip().lower()
+            if s in ('1', 'true', 'yes', 'on'):
+                return True, True
+            if s in ('0', 'false', 'no', 'off'):
+                return True, False
+            return False, raw
         if t == 'int':
-            return True, int(float(str(raw).strip()))
+            f = float(str(raw).strip())
+            if f != int(f):
+                return False, raw
+            return True, int(f)
         if t == 'float':
             return True, float(str(raw).strip())
         return True, str(raw)

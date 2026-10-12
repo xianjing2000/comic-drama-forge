@@ -77,6 +77,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 import time
 from typing import Optional
 
@@ -121,6 +122,9 @@ _SKIP_KEYS = ("recent", "no_copy", "hardlink", "unreadable")
 #: 而回收是在任务收尾的**同步**路径上跑的。缓存让「内容未变」的文件不再重复读盘。
 _FP_CACHE: dict = {}
 _FP_CACHE_MAX = 200_000
+#: 保护 _FP_CACHE 的锁（t43：此前无锁，并发回收时 clear/写会互相覆盖，虽只影响性能，
+#: 但「交付库越大、回收越慢」的并发场景下值得加锁）。
+_FP_CACHE_LOCK = threading.Lock()
 
 
 def _sha256(path: str) -> str:
@@ -266,16 +270,18 @@ def _fingerprint_cached(path: str, size: int, st) -> Optional[str]:
         key = (_norm(path), int(size), int(getattr(st, "st_mtime_ns", 0)))
     except (OSError, ValueError, TypeError):
         return None
-    hit = _FP_CACHE.get(key)
-    if hit is not None:
-        return hit
+    with _FP_CACHE_LOCK:
+        hit = _FP_CACHE.get(key)
+        if hit is not None:
+            return hit
     try:
-        digest = _sha256(path)
+        digest = _sha256(path)   # 耗时哈希在锁外执行，锁只护缓存读写
     except OSError:
         return None
-    if len(_FP_CACHE) >= _FP_CACHE_MAX:
-        _FP_CACHE.clear()          # 简单的容量兜底：不做 LRU，直接整体失效
-    _FP_CACHE[key] = digest
+    with _FP_CACHE_LOCK:
+        if len(_FP_CACHE) >= _FP_CACHE_MAX:
+            _FP_CACHE.clear()          # 简单的容量兜底：不做 LRU，直接整体失效
+        _FP_CACHE[key] = digest
     return digest
 
 

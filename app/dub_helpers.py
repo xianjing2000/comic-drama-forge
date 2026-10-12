@@ -17,10 +17,43 @@ import re
 # 2026-10-11 补齐搬迁时遗漏的模块级名字（自动扫描发现）
 from config import PROJECT_OUTPUT_DIR
 from config import SCRIPT_DIR
+from config import DUB_DIR
 from tts_client import TTSError
 import project_store
 
 logger = logging.getLogger(__name__)
+
+
+def _script_path_in_project(path: str, key: str) -> bool:
+    """剧本路径是否属于该项目键（精确段匹配，拒绝子串误匹配）。
+
+    修复 t6 P2：旧写法是「project_name 子串 in path」，项目名存在包含关系时
+    （如「张三」命中「张三丰」）会串项目。这里按 project_store.safe_key 归一后的
+    项目键做精确边界匹配：
+      - 目录形态   output/scripts/<key>/xxx.json        -> 路径段精确命中 key
+      - 历史单文件 output/scripts/<key>_<时间戳>.json    -> 文件名以 key_ 开头
+    """
+    if not key or not path:
+        return False
+    norm = os.path.normpath(path)
+    base = os.path.basename(norm)
+    if base.startswith(key + "_") or base.startswith(key + "-"):
+        return True
+    return key in norm.split(os.sep)
+
+
+def _dub_project_dir(project_name: str) -> str:
+    """项目配音目录（从 routes/_shared 下沉到助手层，消除 worker→routes 反向依赖）。"""
+    d = os.path.join(DUB_DIR, project_name)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _dub_audio_url(project_name: str, rel_path: str) -> str:
+    """配音产物可播放 URL（从 routes/_shared._dub_audio_url 下沉，行为逐字一致）。"""
+    rel = os.path.relpath(rel_path, _dub_project_dir(project_name)).replace(os.sep, "/")
+    return f"/api/tts/file/{project_name}/{rel}" if not rel.startswith("..") else ""
+
 
 def _dub_resolve_script(data: dict) -> dict:
     """解析配音所用剧本：优先 body.script，其次 script_path（限项目输出目录内），最后自动匹配"""
@@ -63,7 +96,8 @@ def _dub_resolve_script(data: dict) -> dict:
 
     # 严格匹配：有 project_name 时必须属于该项目，禁止跨项目回退
     if project_name:
-        project_cands = [c for c in cands if project_name in c["path"]]
+        _key = project_store.safe_key(project_name)
+        project_cands = [c for c in cands if _script_path_in_project(c["path"], _key)]
         if not project_cands:
             raise TTSError(f"项目 '{project_name}' 暂无剧本，请先生成剧本后再使用 TTS 功能")
         hit = project_cands

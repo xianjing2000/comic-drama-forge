@@ -86,5 +86,5 @@ def api_status():
         },
         "task_queue": _task_queue_status(),
         "gpu_gate": gpu_task_gate.status(),
-        "interrupted_tasks": job_state.interrupted_tasks,
+        "interrupted_tasks": job_state.get_interrupted_tasks(),
     })

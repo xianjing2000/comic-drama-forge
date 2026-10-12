@@ -118,7 +118,11 @@ def api_generate_videos():
     # 2026-10-01 起只保留整集一次生成（per_shot/keyframe 废弃，2026-10-05 移除分支）：
     # 请求传 mode 不再生效，恒按 episode 处理（旧的项目级 video_mode 设定同样只归一为 episode）。
     mode = 'episode'
-    timeout_per_segment = int(data.get('timeout_per_segment') or 900)
+    # t44：timeout_per_segment 脏值（非数字）不应裸 500，统一 400 提示
+    try:
+        timeout_per_segment = int(data.get('timeout_per_segment') or 900)
+    except (TypeError, ValueError):
+        return jsonify({"error": "timeout_per_segment 参数非法，须为正整数（秒）"}), 400
     episode_tag = str(data.get('episode_tag') or '').strip()
     # 跨镜链式：上一镜尾帧 = 下一镜首帧（auto / always / off，默认取 KEYFRAME_CHAIN_MODE）
     chain_mode = keyframe.norm_chain_mode(

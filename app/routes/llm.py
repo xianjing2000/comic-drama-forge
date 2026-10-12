@@ -21,7 +21,7 @@ LLM_NOT_CONFIGURED_GUIDE = (
     "① base_url：OpenAI 兼容接口地址，例如 https://api.deepseek.com/v1\n"
     "② api_key：接口密钥（保存后页面只显示脱敏结果）\n"
     "③ model：模型名，例如 deepseek-chat / gpt-4o-mini\n"
-    "填写后先点「测试连接」，成功再点「保存配置」。文本分析 / 质检 / 对话总控 三个模型相互独立。"
+    "填写后先点「测试连接」，成功再点「保存配置」。文本分析（=LLM 引擎，兼对话总控）/ 质检 两个模型相互独立。"
 )
 @llm_bp.route('/api/llm/config', methods=['GET'])
 def api_llm_config_get():

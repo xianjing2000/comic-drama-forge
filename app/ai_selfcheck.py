@@ -116,16 +116,23 @@ def _probe_endpoint(base_url: str, api_key: str, timeout: float = 6.0) -> tuple:
 
 def _cached_probe(module: str, base_url: str, api_key: str,
                   timeout: float, force: bool = False) -> dict:
+    # ⭐ 2026-10-12（t50）：缓存 key 必须含 base_url / api_key（防串味）。
+    # 原 key 只含 module —— 换 base_url 或 api_key 后（尤其绕过保存路径直接改
+    # ai_config.json / tasks.db / env），60s TTL 内会命中旧探测结论。
+    # 现改为 (module, base_url, sha256(api_key)[:16])：配置一变 key 即变，不会拿旧结论。
+    import hashlib
+    _key = (module, (base_url or "").strip(),
+            hashlib.sha256((api_key or "").encode("utf-8")).hexdigest()[:16])
     now = time.time()
     if not force:
         with _PROBE_LOCK:
-            hit = _PROBE_CACHE.get(module)
+            hit = _PROBE_CACHE.get(_key)
             if hit and (now - hit["ts"]) < _PROBE_TTL:
                 return dict(hit)
     reachable, detail = _probe_endpoint(base_url, api_key, timeout)
     rec = {"ts": time.time(), "reachable": reachable, "detail": detail}
     with _PROBE_LOCK:
-        _PROBE_CACHE[module] = rec
+        _PROBE_CACHE[_key] = rec
     return dict(rec)
 
 

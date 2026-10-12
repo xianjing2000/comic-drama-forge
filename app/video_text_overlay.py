@@ -230,14 +230,22 @@ def shot_time_spans(shots, total_sec) -> list:
     返回 [{"shot_id", "index", "start", "end", "duration", "script_duration"}]
     """
     shots = [s for s in (shots or []) if isinstance(s, dict)]
-    script_total = sum(float(s.get("duration") or 5) for s in shots) or 1.0
+
+    def _dur(s):
+        # 剧本 duration 兜底 5.0；脏数据（非数字字符串）不崩，按 5.0 处理（t44）
+        try:
+            return float(s.get("duration") or 5)
+        except (TypeError, ValueError):
+            return 5.0
+
+    script_total = sum(_dur(s) for s in shots) or 1.0
     try:
         total = float(total_sec or 0)
     except (TypeError, ValueError):
         total = 0.0
     spans, cur = [], 0.0
     for idx, s in enumerate(shots):
-        sd = float(s.get("duration") or 5)
+        sd = _dur(s)
         dur = (sd / script_total * total) if total > 0 else sd
         spans.append({"shot_id": s.get("shot_id"), "index": idx,
                       "start": round(cur, 3), "end": round(cur + dur, 3),

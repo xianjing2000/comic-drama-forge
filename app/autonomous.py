@@ -243,7 +243,9 @@ def status(project: str = "") -> dict:
         "projects": []
     }
 
-    projects = project_store.list_projects() if project else []
+    # t43：原先 `list_projects() if project else []` 条件写反——无参时返回空列表而非
+    # 全部项目。改为总是 list_projects()，有 project 再过滤，使 status() 无参=全部项目。
+    projects = project_store.list_projects()
     if project:
         projects = [p for p in projects if p.get("dir_key") == project]
 

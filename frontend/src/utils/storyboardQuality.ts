@@ -26,6 +26,12 @@ export interface SbStoryboardLike {
   qc?: unknown;
   qc_gate?: unknown;
   qc_soft_accepted?: unknown;
+  /** T25：canvas 自 2026-10-12 起在卡片顶层显式给出软放行事实（扁平布尔） */
+  soft_accepted?: boolean;
+  /** T25：产物是否已进正式目录（真通过 + 软放行） */
+  delivered?: boolean;
+  /** T25：卡片顶层严重问题清单（与 qc.critical_issues 同值） */
+  critical_issues?: unknown;
   [k: string]: unknown;
 }
 
@@ -46,10 +52,16 @@ const asTextList = (v: unknown): string[] => {
   return [];
 };
 
-/** 该镜是否为「软放行」（三处证据，与后端 _sb_soft_accepted 同序）。 */
+/**
+ * 该镜是否为「软放行」（四处证据，与后端 _sb_soft_accepted / _sb_canvas_qc 同序）。
+ *
+ * T25：canvas 现在会在卡片**顶层**给出 `soft_accepted` / `qc_soft_accepted`
+ * （修复前只透出 item["qc"] 原样，顶层字段全丢 → 实测「manifest 17 条、canvas 0 条」）。
+ */
 export function isSoftAccepted(sb?: SbStoryboardLike | null): boolean {
   const s = asDict(sb);
   if (!s) return false;
+  if (s.soft_accepted === true) return true;        // T25 扁平字段（后端规范化投影）
   if (s.qc_soft_accepted === true) return true;
   const g = asDict(s.qc_gate);
   if (g?.soft_accepted === true) return true;
@@ -61,6 +73,9 @@ export function isSoftAccepted(sb?: SbStoryboardLike | null): boolean {
 export function criticalIssuesOf(sb?: SbStoryboardLike | null): string[] {
   const s = asDict(sb);
   if (!s) return [];
+  // T25：canvas 顶层的 critical_issues 优先（与 qc 内同值，但旧后端可能只给前者）
+  const top = asTextList(s.critical_issues);
+  if (top.length) return top;
   for (const src of [asDict(s.qc_gate), asDict(s.qc)]) {
     if (!src) continue;
     for (const key of ['critical_issues', 'critical_issue', 'critical_defects']) {
@@ -122,6 +137,8 @@ export interface SbQualitySummary {
   hasSoft: boolean;
   /** 软放行占比（0-1，保留调用方格式化） */
   softRatio: number;
+  /** T25：计数是否取自后端 summary（true = 与 manifest 同源同值，不再是前端自算） */
+  countsFromBackend?: boolean;
 }
 
 const seqOf = (c: SbCardLike, i: number): number => {
@@ -172,5 +189,52 @@ export function summarizeStoryboardQuality(cards?: SbCardLike[] | null): SbQuali
     criticalShots: softShots.filter((s) => s.critical.length > 0),
     hasSoft: soft > 0,
     softRatio: total > 0 ? soft / total : 0,
+  };
+}
+
+/** canvas summary 里的后端三类计数（T25 起由 /api/storyboard/canvas 提供）。 */
+export interface SbBackendQualityCounts {
+  success_count?: number;
+  soft_accepted_count?: number;
+  critical_issue_count?: number;
+  qc_blocked_count?: number;
+  delivered_count?: number;
+}
+
+/** 后端是否给出了三类计数（旧后端没有这些字段 → 前端回落自算，保持向后兼容）。 */
+export function hasBackendQuality(summary?: SbBackendQualityCounts | null): boolean {
+  const s = asDict(summary);
+  if (!s) return false;
+  return typeof s.soft_accepted_count === 'number' && typeof s.success_count === 'number';
+}
+
+/**
+ * 以**后端 summary 的计数为准**（T25：canvas 与 manifest 顶层字段同源同值 ——
+ * 这是「canvas soft 计数 == manifest soft_accepted_count」这条不变式的落点），
+ * 明细（softShots / criticalShots）仍来自卡片，供清单展示。
+ *
+ * 后端没给（旧后端 / 老数据）时原样返回前端自算结果。
+ */
+export function mergeBackendQuality(
+  local: SbQualitySummary,
+  summary?: SbBackendQualityCounts | null,
+): SbQualitySummary {
+  if (!hasBackendQuality(summary)) return local;
+  const b = summary as SbBackendQualityCounts;
+  const success = Number(b.success_count ?? local.success);
+  const soft = Number(b.soft_accepted_count ?? local.soft);
+  const blocked = Number(b.qc_blocked_count ?? local.blocked);
+  const critical = Number(b.critical_issue_count ?? local.critical);
+  const total = local.total || success + soft + blocked;
+  return {
+    ...local,
+    success,
+    soft,
+    blocked,
+    critical,
+    pending: Math.max(total - success - soft - blocked, 0),
+    hasSoft: soft > 0,
+    softRatio: total > 0 ? soft / total : 0,
+    countsFromBackend: true,
   };
 }

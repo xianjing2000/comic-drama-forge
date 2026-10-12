@@ -32,4 +32,20 @@ dub_lock = threading.Lock()
 mix_tasks = {}
 mix_lock = threading.Lock()
 
+#: 进程重启回收的中断任务计数（启动时写一次、状态接口轮询读）。t43（2026-10-12）：
+#: 此前是无锁裸 int，绕过本模块「每个状态配一把锁」的约定；补锁 + 原子访问器。
 interrupted_tasks = 0
+interrupted_tasks_lock = threading.Lock()
+
+
+def set_interrupted_tasks(n: int) -> None:
+    """线程安全写入中断任务计数（锁保护；状态访问器，非业务函数）。"""
+    global interrupted_tasks
+    with interrupted_tasks_lock:
+        interrupted_tasks = int(n)
+
+
+def get_interrupted_tasks() -> int:
+    """线程安全读取中断任务计数（锁保护；状态访问器，非业务函数）。"""
+    with interrupted_tasks_lock:
+        return interrupted_tasks

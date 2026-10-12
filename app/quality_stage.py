@@ -45,6 +45,10 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from fs_atomic import atomic_write_json, read_json_strict
+# 音频硬阈值单一来源（2026-10-12 t41）：由 audio_qc 定义，这里只做别名导入，
+# 不再重复定义常量（消除「两处赋值、靠 config_doctor 锁值兜底」的单一来源违反）。
+from audio_qc import NEAR_SILENT_MEAN_DB as AUDIO_NEAR_SILENT_DB
+from audio_qc import HARD_SILENT_RATIO as AUDIO_HARD_SILENT_RATIO
 
 logger = logging.getLogger(__name__)
 
@@ -183,14 +187,10 @@ def evaluate_technical(path: str, *, probe=None,
 #   ③ 面板音频体检只扫 <dub>/<项目>/*_lines/，而 tts_pre 产的是 voice_bank → audio_checked 恒 0。
 # 本段提供三件东西：电平探针（A 层判据用）、整轨结论（final 门禁用）、
 # 静音区间 → 镜级定位（交付清单里按镜号追责）。
-# ⚠️ 下面两个常量与 audio_qc 的同义常量**必须同值**（作用域：整轨 / 单段），已在
-#    config_doctor.REGISTRY 显式声明：audio_near_silent_db.must_match → audio_qc.NEAR_SILENT_MEAN_DB、
-#    audio_hard_silent_ratio.must_match → audio_qc.HARD_SILENT_RATIO（2026-10-12 T12/T14 补齐）。
-#    改 audio_qc 侧会一并回写这里；只改这里不改那边 → doctor 报 duplicates 且 ok=False。
-#    另：下面 :262-263 的 A 层判定是 or 表达式（dB 或 ratio 命中即判），**两半必须成对锁**，
-#    只锁 ratio 不锁 dB 会退化成「dB 判死、ratio 判活」的自相矛盾。
-AUDIO_NEAR_SILENT_DB = -50.0      # 与 audio_qc.NEAR_SILENT_MEAN_DB 同口径
-AUDIO_HARD_SILENT_RATIO = 0.15    # 与 audio_qc.HARD_SILENT_RATIO 同口径
+# 音频硬阈值**单一来源**（2026-10-12 t41）：值只在 audio_qc 定义，本模块顶部按别名导入
+#   （NEAR_SILENT_MEAN_DB → AUDIO_NEAR_SILENT_DB、HARD_SILENT_RATIO → AUDIO_HARD_SILENT_RATIO），
+#   此处不再重复定义常量。config_doctor.REGISTRY 仍以本模块 AUDIO_* 名为 owner、must_match
+#   指回 audio_qc —— 别名导入后两处天然同值，不再依赖「锁值兜底」防漂移。
 
 
 def _audio_qc_module():

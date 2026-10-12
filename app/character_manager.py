@@ -20,6 +20,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from fs_atomic import read_json_strict
+
 logger = logging.getLogger(__name__)
 
 # 角色状态常量
@@ -47,20 +49,26 @@ class CharacterManager:
         self._load_data()
 
     def _load_data(self):
-        """加载角色数据"""
+        """加载角色数据（P2/t45：fail-open + .bak 恢复）。
+
+        读盘走 fs_atomic.read_json_strict（缺失返默认 / 正常返内容 / 损坏优先从 .bak
+        恢复，无可用 .bak 时 fail-loud）；本方法把它包成 fail-open：任何读失败都回落
+        空注册表，绝不让角色管理因一份损坏的 characters.json 而整体不可用。
+        """
         data_file = self.character_dir / "characters.json"
-        if data_file.exists():
-            with open(data_file, 'r', encoding='utf-8') as f:
-                self.data = json.load(f)
-        else:
-            self.data = {
-                "project_key": self.project_key,
-                "characters": {},
-                "metadata": {
-                    "created_at": datetime.now().isoformat(),
-                    "version": "1.0"
-                }
-            }
+        try:
+            loaded = read_json_strict(str(data_file), {})
+        except Exception as e:  # noqa: BLE001  损坏且无 .bak → 回落空注册表
+            logger.warning("角色注册表读取失败（回落空注册表，不阻断）：%s", e)
+            loaded = {}
+        if not isinstance(loaded, dict) or not isinstance(loaded.get("characters"), dict):
+            # 合法 JSON 但结构不对（characters 不是字典）同样按空注册表处理，
+            # 避免后续 add_character/get_all_characters 撞 KeyError。
+            loaded = {}
+        self.data = loaded
+        self.data.setdefault("project_key", self.project_key)
+        self.data.setdefault("characters", {})
+        self.data.setdefault("metadata", {})
 
     def save(self):
         """保存角色数据"""

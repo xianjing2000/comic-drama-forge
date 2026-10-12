@@ -108,7 +108,11 @@ _MAX_AGE_DAYS = 120
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    # t42：timespec 从 seconds 提升到 microseconds —— 同秒同 kind 同 phash 会派生出
+    # 相同 lesson_id（主键冲突，delete/mark_used 按 lesson_id 会误删/误标多条）。
+    # 微秒精度让 (kind,phash,ts) 主键几乎不可能碰撞；ISO 字符串仍是字典序=时间序，
+    # since/until/cutoff 等字符串比较不受影响，旧库秒级 ts 派生 id 亦保持不变。
+    return datetime.now().isoformat(timespec="microseconds")
 
 
 def _norm(text: str) -> str:
@@ -218,33 +222,15 @@ def categorize_issue(issue: str) -> str:
 
 
 def assess_priority(issues: List[str], score: int = 100) -> str:
-    """评估问题优先级"""
-    if not issues:
-        return "low"
+    """评估问题优先级 —— 收敛到 ai_qc_judge.assess_severity 单一来源（t42）。
 
-    # 计算严重程度
-    critical_count = 0
-    high_count = 0
-
-    critical_keywords = ["结构", "逻辑矛盾", "角色缺失", "物品缺失", "严重畸变", "崩坏"]
-    high_keywords = ["风格不符", "时长偏差", "描述过短"]
-
-    for issue in issues:
-        issue_lower = issue.lower()
-        if any(kw in issue_lower for kw in critical_keywords):
-            critical_count += 1
-        elif any(kw in issue_lower for kw in high_keywords):
-            high_count += 1
-
-    # 根据分数和问题严重程度判断优先级
-    if critical_count > 0 or score < 50:
-        return "critical"
-    elif high_count > 0 or score < 70:
-        return "high"
-    elif len(issues) > 3 or score < 80:
-        return "medium"
-    else:
-        return "low"
+    原实现自带一套简化关键词与「len(issues)>3」判据，与质检侧
+    ai_qc_judge.assess_severity 口径不一致（第三处简化的严重度判据）。
+    现构造等价 verdict 交给权威判据，返回 critical/high/medium/low（与 PRIORITY_LEVELS 对齐）。
+    """
+    from ai_qc_judge import assess_severity
+    return assess_severity({"issues": list(issues or []),
+                            "score": score, "critical_issues": []})
 
 
 def _calculate_decay_weight(lesson: dict) -> float:
@@ -356,6 +342,7 @@ class PromptMemory:
         self._lock = threading.RLock()
         os.makedirs(self._dir, exist_ok=True)
         self._lessons: list = self._load()
+        self._dirty_usage = False          # t42：召回命中后 use_count 已改内存但未落盘
 
     # ---------- 落盘 ----------
     def _load(self) -> list:
@@ -382,13 +369,22 @@ class PromptMemory:
             return out
         try:
             with handle:
-                for line in handle:
+                for lineno, line in enumerate(handle, 1):
                     line = line.strip()
                     if not line:
                         continue
                     try:
                         obj = json.loads(line)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        # t42：损坏行不再静默丢弃 —— 记 warning 并把原文备份到 .corrupt 旁路文件，
+                        # 否则下次 _flush 全量重写会把这条损坏记录永久删掉。
+                        logger.warning("提示词记忆第 %d 行损坏（已备份到 %s，本次跳过不丢原文）：%s",
+                                       lineno, os.path.basename(self._path) + ".corrupt", e)
+                        try:
+                            with open(self._path + ".corrupt", "a", encoding="utf-8") as cf:
+                                cf.write(line + "\n")
+                        except OSError as ce:
+                            logger.debug("备份损坏行失败（忽略）：%s", ce)
                         continue
                     if isinstance(obj, dict):
                         out.append(_normalize_lesson(obj))
@@ -556,8 +552,11 @@ class PromptMemory:
         """
         ph = prompt_hash(prompt)
         qp = _norm(prompt or "")
+        # t42：遍历前持锁取快照，避免与 _commit_lesson 的整表替换交错读到不一致列表
+        with self._lock:
+            lessons = list(self._lessons)
         scored: List[tuple] = []
-        for l in self._lessons:
+        for l in lessons:
             if l.get("kind") and l.get("kind") != kind:
                 continue
             # 空教训（无缺陷也无结论）不参与召回 —— 历史脏数据里有整批这种记录
@@ -625,9 +624,12 @@ class PromptMemory:
                                   context: dict = None, max_hints: int = 5) -> List[dict]:
         """带优先级和上下文的召回"""
         ph = prompt_hash(prompt)
+        # t42：遍历前持锁取快照，避免与 _commit_lesson 的整表替换交错读到不一致列表
+        with self._lock:
+            lessons = list(self._lessons)
         scored: List[tuple] = []
 
-        for l in self._lessons:
+        for l in lessons:
             if l.get("kind") and l.get("kind") != kind:
                 continue
 
@@ -1179,9 +1181,16 @@ class PromptMemory:
                     l["use_count"] = int(l.get("use_count") or 0) + 1
                     l["last_used"] = now
                     hit += 1
+            # t42：召回命中只改内存，不立即全量写盘（每次生成提示词都 flush 整库是性能
+            # 问题）。use_count 的持久化顺延到下一次写操作或显式 flush()。
             if hit:
-                self._flush()
+                self._dirty_usage = True
         return hit
+
+    def flush(self) -> None:
+        """显式落盘（含召回累积的 use_count / last_used 脏数据）。"""
+        with self._lock:
+            self._flush()
 
     def prune_empty(self) -> int:
         """清掉「无缺陷也无结论」的空教训，返回清理条数。

@@ -76,6 +76,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from h3_segment_loras import MAX_SEGMENT_LORAS  # 单一来源：段级 LoRA 条数上限（=8）
+
 logger = logging.getLogger(__name__)
 
 #: 视频帧率（H3 按 24 训练；插件默认亦为 24）
@@ -86,8 +88,7 @@ MIN_SEGMENT_FRAMES = 5
 MAX_REFERENCE_IMAGES = 9
 #: 参考音频槽位上限（官方 Reference to Video autogrow：ref_audio_0..2，``<Audio N>``）
 MAX_REFERENCE_AUDIOS = 3
-#: 段级 LoRA 条数上限（与插件 ``segment_loras.normalize_lora_rows`` 一致，=8）
-MAX_SEGMENT_LORAS = 8
+#: 段级 LoRA 条数上限 —— 单一来源见顶部 from h3_segment_loras import MAX_SEGMENT_LORAS（=8）
 #: 段间引导可承接的帧数（插件 ``snap_context_frames`` 只认这四档）
 CONTINUITY_OVERLAP_CHOICES = (5, 22, 39, 56)
 CONTINUITY_OVERLAP_DEFAULT = 22

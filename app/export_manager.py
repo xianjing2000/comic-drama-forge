@@ -2,6 +2,13 @@
 """专业导出系统 - 支持 FCPXML、EDL、JSON 等格式
 
 对标 openframe 的导出能力，支持接入 Premiere/达芬奇等专业后期软件
+
+.. deprecated:: 2026-10-12 (t44)
+
+    本模块已被 ``nle_export`` 取代（剪映草稿 / FCPXML / SRT / 帧导出等更完整），
+    当前活跃代码（app/ 目录）零引用。仅因历史打包副本
+    （packaging/_dist/…/app.py）与测试备份（.workbuddy/test/_bl/app.py）仍
+    ``import export_manager`` 而保留；新代码请改用 nle_export，勿再 import 本模块。
 """
 import json
 import xml.etree.ElementTree as ET

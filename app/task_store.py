@@ -144,7 +144,7 @@ class TaskStore:
                     "progress, total, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(id) DO UPDATE SET "
                     "project=excluded.project, kind=excluded.kind, label=excluded.label, "
-                    "payload=excluded.payload, status=excluded.status, progress=excluded.progress, "
+                    "payload=excluded.payload, "
                     "total=excluded.total, updated_at=excluded.updated_at",
                     (tid, project, kind, label,
                      json.dumps(payload or {}, ensure_ascii=False),

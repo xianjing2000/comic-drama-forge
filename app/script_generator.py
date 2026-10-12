@@ -76,184 +76,6 @@ class ScriptGenerator:
                 return fallback
             raise
 
-    def generate_script_with_qc(self, theme: str, episodes: int = 1,
-                                 duration_per_episode: int = 60,
-                                 style: str = "国漫古风",
-                                 target_audience: str = "年轻观众",
-                                 project_name: str = "",
-                                 enable_qc: bool = True,
-                                 max_qc_retries: int = 3) -> Dict:
-        """生成剧本并进行质检，质检失败由主AI判断如何处理
-        
-        参数:
-            theme: 主题
-            episodes: 集数
-            duration_per_episode: 每集时长（秒）
-            style: 创作风格
-            target_audience: 目标观众
-            project_name: 项目名称
-            enable_qc: 是否启用水印质检
-            max_qc_retries: 最大质检重试次数
-        
-        返回:
-            dict: {
-                "script": dict,           # 剧本数据
-                "qc_result": dict,        # 质检结果
-                "judgment": dict,         # 主AI判断结果
-                "attempts": int,          # 尝试次数
-                "passed": bool,           # 是否通过质检
-            }
-        """
-        # 延迟导入，避免循环依赖
-        import qc_client
-        import ai_qc_judge
-        import prompt_memory
-        
-        # 获取质检配置
-        qc_config_path = QC_CONFIG_PATH
-        qc_cfg = qc_client.load_config(qc_config_path)
-        
-        attempts = []
-        last_script = None
-        last_qc_result = None
-        last_judgment = None
-        
-        for attempt in range(max_qc_retries):
-            logger.info(f"剧本生成尝试 {attempt + 1}/{max_qc_retries}")
-
-            # 重试前召回历史教训（首版 attempt==0 不必召回）。
-            # 用上一版剧本的 JSON 串作稳定 phash 键（与下方 record_with_context 同键）。
-            lessons_hint = ""
-            if attempt > 0:
-                try:
-                    lessons_hint = prompt_memory.learned_prompt(
-                        kind="script",
-                        prompt=json.dumps(last_script, ensure_ascii=False)[:2000],
-                        project=project_name or "unknown",
-                        root_dir=PROJECT_OUTPUT_DIR,
-                    )
-                except Exception:
-                    lessons_hint = ""
-
-            # 生成剧本
-            try:
-                script = self.generate_script(theme, episodes, duration_per_episode,
-                                              style, target_audience,
-                                              lessons_hint=lessons_hint)
-                last_script = script
-            except Exception as e:
-                logger.error(f"剧本生成失败: {e}")
-                attempts.append({"attempt": attempt + 1, "error": str(e)})
-                continue
-            
-            # 如果未启用水印质检，直接返回
-            if not enable_qc:
-                return {
-                    "script": script,
-                    "qc_result": {"skipped": True, "reason": "水印质检未启用"},
-                    "judgment": None,
-                    "attempts": attempt + 1,
-                    "passed": True,
-                }
-            
-            # 执行剧本质检
-            qc_result = qc_client.check_script(
-                script_data=script,
-                style=style,
-                target_duration=duration_per_episode,
-                cfg=qc_cfg,
-            )
-            last_qc_result = qc_result
-            
-            attempts.append({
-                "attempt": attempt + 1,
-                "score": qc_result.get("score"),
-                "passed": qc_result.get("passed"),
-                "issues_count": len(qc_result.get("issues", [])),
-            })
-            
-            # 如果质检通过，直接返回
-            if qc_result.get("passed"):
-                logger.info(f"剧本质检通过 (得分: {qc_result.get('score')})")
-                return {
-                    "script": script,
-                    "qc_result": qc_result,
-                    "judgment": None,
-                    "attempts": attempt + 1,
-                    "passed": True,
-                }
-            
-            # 质检未通过，由主AI判断如何处理
-            logger.warning(f"剧本质检未通过 (得分: {qc_result.get('score')}), 由主AI判断处理方式")
-            
-            # 调用主AI判断模块
-            context = {
-                "attempt": attempt + 1,
-                "max_retries": max_qc_retries,
-                "project_name": project_name,
-                "style": style,
-                "target_audience": target_audience,
-                "duration_per_episode": duration_per_episode,
-                "is_final": False,
-            }
-            
-            judgment = ai_qc_judge.judge_qc_result(qc_result, context)
-            last_judgment = judgment
-            
-            # 记录到记忆模块
-            try:
-                prompt_memory.record_with_context(
-                    project=project_name or "unknown",
-                    kind="script",
-                    category=ai_qc_judge.assess_severity(qc_result),
-                    priority=judgment.get("severity", "medium"),
-                    context=context,
-                    prompt=json.dumps(script, ensure_ascii=False)[:2000],
-                    issues=qc_result.get("issues", []),
-                    reason=qc_result.get("reason", ""),
-                    score=qc_result.get("score"),
-                    root_dir=PROJECT_OUTPUT_DIR,
-                )
-            except Exception as e:
-                logger.warning(f"记录质检问题到记忆模块失败: {e}")
-            
-            # 根据主AI判断执行 - 24小时自动执行模式，无需人工干预
-            logger.info(f"主AI判断: 严重程度={judgment.get('severity')}, 策略={judgment.get('strategy')}")
-            
-            # 记录判断结果
-            if judgment.get("requires_human"):
-                # 在24小时自动执行模式下，不转人工，而是记录警告并继续
-                logger.warning(f"主AI判断原本需要人工处理，但在自动执行模式下继续: {judgment.get('strategy')}")
-            
-            if judgment.get("should_continue"):
-                # 可以继续流程（仅记录问题）
-                logger.info("主AI判断可以继续流程")
-                return {
-                    "script": script,
-                    "qc_result": qc_result,
-                    "judgment": judgment,
-                    "attempts": attempt + 1,
-                    "passed": True,  # 虽然质检未通过，但主AI允许继续
-                    "with_warnings": True,
-                }
-            
-            # 需要重试，继续循环
-            logger.info(f"主AI判断需要重试: {judgment.get('strategy')}")
-        
-        # 达到最大重试次数
-        logger.warning(f"达到最大质检重试次数 ({max_qc_retries})")
-        
-        # 最后一次尝试的结果
-        return {
-            "script": last_script,
-            "qc_result": last_qc_result,
-            "judgment": last_judgment,
-            "attempts": max_qc_retries,
-            "passed": False,
-            "max_retries_reached": True,
-            "attempts_history": attempts,
-        }
-
     def load_fallback_script(self) -> Optional[Dict]:
         """加载本地兜底剧本（A 版 Schema，含 shots[] / prompt_h3）"""
         if not os.path.isdir(SCRIPT_DIR):
@@ -438,14 +260,11 @@ class ScriptGenerator:
                 return json.loads(content[start:end+1])
         except Exception as e:
             logger.debug("JSON 切片解析失败（试下一个候选）：%s", e)
-        return {
-            "title": "未命名剧本",
-            "characters": [],
-            "items": [],
-            "scenes": [],
-            "shots": [],
-            "production_notes": {}
-        }
+        # 2026-10-12 t40：不再静默返回空 shots 剧本（会落盘一个 0 镜头的「剧本」）。
+        # 抛 ValueError 让 _generate_with_claude 的调用方（generate_script）走 except 回退
+        # 到本地兜底剧本，失败可见。
+        raise ValueError(
+            f"剧本 JSON 解析失败：模型输出既非合法 JSON，也无法切片提取（前 200 字：{content[:200]!r}）")
 
     def save_script(self, script: Dict, project_name: str, provider: str = None) -> str:
         """保存剧本到文件；provider 缺省时用 self.provider（CLI 链路），
@@ -455,11 +274,14 @@ class ScriptGenerator:
         filename = f"{project_name}_{timestamp}.json"
         filepath = os.path.join(SCRIPT_DIR, filename)
 
-        script["metadata"] = {
+        # 2026-10-12 t40：合并而非覆盖 —— 兜底剧本等自带 metadata（如 fallback_reason）
+        # 的字段不应被抹掉，只更新/新增生成元信息。
+        _meta = script.setdefault("metadata", {})
+        _meta.update({
             "generated_at": datetime.now().isoformat(),
             "project_name": project_name,
-            "provider": provider if provider else self.provider
-        }
+            "provider": provider if provider else self.provider,
+        })
 
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(script, f, ensure_ascii=False, indent=2)

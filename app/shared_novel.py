@@ -64,7 +64,16 @@ def _episode_units_for_chapters(novel_meta: dict, chapters: list) -> list:
     不能用传入的子集 —— 否则同一章在「手动选集生成」与「托管」两条链路上会拿到
     不同的集号，产物（``第N集.json`` / 成片 / 验收记录）互相错位。
     """
-    selected = [int(c.get("index") or 0) for c in (chapters or [])]
+    # P3 集号边界：章节号从 1 起；index 缺失 / 为 0 / 负数统一 clamp 到 >=1，
+    # 避免产出 episode 0（旧口径下 index=0 或 "0" 会静默得到第 0 集）。
+    def _idx(c, i):
+        try:
+            v = int(c.get("index") or (i + 1))
+        except (TypeError, ValueError):
+            v = i + 1
+        return max(1, v)
+
+    selected = [_idx(c, i) for i, c in enumerate(chapters or [])]
     if not selected:
         return []
     import autopilot  # noqa: E402  延迟导入：消除 shared_novel→autopilot 隐性分层环
@@ -81,8 +90,8 @@ def _episode_units_for_chapters(novel_meta: dict, chapters: list) -> list:
         except Exception as e:  # noqa: BLE001
             _app_logger().warning("拆章失败（按一章一集处理）：%s", e)
     # 兜底：拿不到全量章节时退回「一章一集」（与历史行为一致）
-    return [{"episode_no": int(c.get("index") or i + 1),
-             "chapter_index": int(c.get("index") or i + 1),
+    return [{"episode_no": _idx(c, i),
+             "chapter_index": _idx(c, i),
              "part": 1, "parts": 1, "chapter": c}
             for i, c in enumerate(chapters or [])]
 

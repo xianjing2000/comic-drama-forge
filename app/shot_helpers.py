@@ -48,7 +48,13 @@ def _chapter_text_for_script(script: dict) -> str:
     novel_id = meta.get("novel_id")
     if not novel_id:
         return ""
-    ch_index = meta.get("chapter_index") or (script or {}).get("episode_no") or 1
+    # P2（t45）：改用显式 None 判断 —— 原 `x or default` 会在 chapter_index=0
+    # （第 0 章）时误吞 0、错误回落到 episode_no/1，导致取错章节文本。
+    ch_index = meta.get("chapter_index")
+    if ch_index is None:
+        ch_index = (script or {}).get("episode_no")
+    if ch_index is None:
+        ch_index = 1
     try:
         text = read_novel_text(NOVELS_DIR, str(novel_id))
     except Exception as e:  # noqa: BLE001

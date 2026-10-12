@@ -1462,7 +1462,9 @@ def _fallback_shots_for_chunk(chunk: dict, shots_target: int = 1, bible: dict = 
     for g in groups:
         out.append({
             "camera": "中景", "location": (scenes[0] if scenes else ""),
-            "description": g[:200], "dialogue": [], "emotion": "平静", "audio_cues": "",
+            # 不提前截断：写完整原文 g，由 _norm_shots 把 description 截到 200 字、
+            # 并把溢出部分经 _overflow_detail 拆进 visual_detail（正文不因 200 字截断而丢）。
+            "description": g, "dialogue": [], "emotion": "平静", "audio_cues": "",
             "characters_in_shot": chars[:1], "items_in_shot": [], "prompt_h3": "",
             "fallback": True,
             "fallback_reason": f"第 {chunk.get('index')} 段模型分镜失败，按原文逐句承载",
@@ -1937,7 +1939,7 @@ def merge_underfilled_shots(shots: list) -> dict:
                     # 合并侧的高价值字段：高潮节拍 / 角色 / 物品取并集
                     if str(s.get("beat") or "").strip() == "高潮":
                         prev["beat"] = s.get("beat")
-                    for _k in ("characters", "items", "props"):
+                    for _k in ("characters_in_shot", "items_in_shot"):
                         _a = list(prev.get(_k) or [])
                         for _v in (s.get(_k) or []):
                             if _v not in _a:
@@ -4212,9 +4214,15 @@ def episode_script_path(script_dir: str, novel_name: str, episode_no, project_ke
     project_key 由项目注册表（project_store）统一分配，保证「一部小说一个独立目录」；
     未提供时退回按小说名安全化，兼容旧行为。
     """
+    root = os.path.realpath(script_dir)
     folder = project_key or safe_project_name(novel_name)
-    return os.path.abspath(os.path.join(
+    p = os.path.realpath(os.path.join(
         script_dir, folder, f"第{int(episode_no)}集.json"))
+    # 2026-10-12 t40：补 commonpath 包含校验（与 novel_screenplay.screenplay_path 同口径），
+    # project_key 若含 .. 等越界片段直接抛 ValueError，不再静默落到数据根之外。
+    if os.path.commonpath([p, root]) != root:
+        raise ValueError(f"剧集路径越出剧本数据根：{p}")
+    return p
 
 
 def save_episode_script(script: dict, script_dir: str, novel_name: str, episode_no,
@@ -4227,8 +4235,7 @@ def save_episode_script(script: dict, script_dir: str, novel_name: str, episode_
     meta["project_name"] = meta.get("project_name") or episode_project_name(novel_name, episode_no)
     meta["project_key"] = project_key or safe_project_name(novel_name)
     meta["episode_no"] = int(episode_no)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(script, f, ensure_ascii=False, indent=2)
+    fs_atomic.atomic_write_json(path, script)
     logger.info(f"第{episode_no}集剧本已落盘：{path}")
     return path
 

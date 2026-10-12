@@ -351,16 +351,20 @@ class SecretStore:
 
 _STORE: Optional[SecretStore] = None
 _STORE_ROOT: Optional[str] = None
+# t42：单例锁。此前 get_store 无锁，两个线程并发首调时 _STORE / _STORE_ROOT 两条赋值
+# 可能交错，拿到「root 与实例不匹配」的 store。用 RLock 串行化首次创建。
+_SINGLETON_LOCK = threading.RLock()
 
 
 def get_store(root_dir: str) -> SecretStore:
-    """按根目录取（缓存）密钥保管器"""
+    """按根目录取（缓存）密钥保管器（线程安全）。"""
     global _STORE, _STORE_ROOT
     root_dir = os.path.abspath(root_dir)
-    if _STORE is None or _STORE_ROOT != root_dir:
-        _STORE = SecretStore(root_dir)
-        _STORE_ROOT = root_dir
-    return _STORE
+    with _SINGLETON_LOCK:
+        if _STORE is None or _STORE_ROOT != root_dir:
+            _STORE = SecretStore(root_dir)
+            _STORE_ROOT = root_dir
+        return _STORE
 
 
 def mask_key(key: str) -> str:

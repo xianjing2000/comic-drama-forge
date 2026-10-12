@@ -27,6 +27,11 @@ import time
 from flask import current_app
 
 
+# 搬移重试的具名常量（收敛魔法数，P3）：重试次数与基础退避间隔
+_MOVE_RETRY_ATTEMPTS = 5
+_MOVE_RETRY_DELAY_SEC = 0.4
+
+
 def _app_logger():
     """上下文安全的日志器：请求内用 Flask 的 app.logger（保留其 handler/格式），
     请求外（后台线程、离线守卫、单测）回落到标准 logging —— 直接写 current_app.logger
@@ -44,7 +49,8 @@ def _app_logger():
         return logging.getLogger("app")
 
 
-def _move_with_retry(src, dst, attempts: int = 5, delay: float = 0.4):
+def _move_with_retry(src, dst, attempts: int = _MOVE_RETRY_ATTEMPTS,
+                       delay: float = _MOVE_RETRY_DELAY_SEC):
     """把产物从 ComfyUI output 搬进项目目录，**容忍 Windows 文件占用**（幂等）。
 
     背景（2026-10-07 实测真缺陷）：资产链路出现过
@@ -88,8 +94,18 @@ def _trash_move(src, category, trash_root, cleared, skipped):
     if not src or not os.path.exists(src):
         return
     try:
-        dst = os.path.join(trash_root, category,
-                           os.path.basename(src.rstrip('\\/')) or category)
+        base = os.path.basename(src.rstrip('\\/')) or category
+        dst = os.path.join(trash_root, category, base)
+        # 同名防覆盖（P3）：不同目录的同名文件落进同一回收站桶会互相覆盖。
+        # 目标已存在时追加毫秒时间戳；同毫秒仍冲突则递增序号兜底。
+        if os.path.exists(dst):
+            stem, ext = os.path.splitext(base)
+            ts = int(time.time() * 1000)
+            dst = os.path.join(trash_root, category, f"{stem}_{ts}{ext}")
+            n = 1
+            while os.path.exists(dst):
+                dst = os.path.join(trash_root, category, f"{stem}_{ts}_{n}{ext}")
+                n += 1
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         _move_with_retry(src, dst)
         cleared.append({"category": category, "path": src})

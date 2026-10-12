@@ -716,6 +716,16 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
         except (OSError, shutil.Error) as e:  # 单个目录失败不影响其余
             skipped.append({"kind": kind, "path": src, "error": str(e)})
 
+    if skipped:
+        # t42：有产物移动失败 → 不删注册表、不清理关联数据（否则项目记录还在、
+        # 关联会话/任务/记忆/租约却被清，且产物残留原地成孤儿）。中止后续，返回未完成标记。
+        logger.error("删除项目 %s 有 %d 个产物移动失败，中止后续清理（保留注册表与关联数据）：%s",
+                     key, len(skipped), [s.get("path") for s in skipped][:5])
+        return {"project": rec, "trash_dir": trash_root, "moved": moved,
+                "skipped": skipped, "recoverable": True, "cleaned": [],
+                "index_removed": False, "aborted": True,
+                "abort_reason": "部分产物移动失败，已保留注册表与关联数据"}
+
     index = load_index()
     index["projects"] = [x for x in index.get("projects", []) if x.get("id") != rec["id"]]
     save_index(index)
@@ -949,6 +959,7 @@ def delete_project(ref: str, confirm: bool = False) -> dict:
 
     return {"project": rec, "trash_dir": trash_root, "moved": moved,
             "skipped": skipped, "recoverable": True, "cleaned": cleaned,
+            "index_removed": True,
             "ai_chat_purge": ai_purge, "tasks_db_purge": db_purge,
             "autopilot_purge": autopilot_purge,
             "continuity_purge": continuity_purge,
@@ -993,8 +1004,11 @@ def script_stats(script_path: str) -> dict:
     duration = data.get("episode_duration_sec") or ep.get("duration_sec")
     if not duration:
         try:
-            duration = sum(float(s.get("duration") or 0) for s in shots) or shot_count * 5
-        except (TypeError, ValueError):
+            # t42：shots 元素若非 dict（脏剧本），s.get 会抛 AttributeError，原实现未捕获。
+            # 加 isinstance 过滤 + 补 AttributeError 兜底，脏数据绝不打断统计。
+            duration = sum(float(s.get("duration") or 0) for s in shots
+                           if isinstance(s, dict)) or shot_count * 5
+        except (TypeError, ValueError, AttributeError):
             duration = shot_count * 5
     return {
         "episode_no": data.get("episode_no") or (data.get("metadata") or {}).get("episode_no"),

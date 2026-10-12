@@ -453,9 +453,9 @@ from job_state import generation_state, lock  # noqa: E402,F401
 
 try:
     # 启动时把上次残留的 running 任务标记为 interrupted（可供前端提示「可继续」）
-    job_state.interrupted_tasks = task_db.recycle_interrupted()
+    job_state.set_interrupted_tasks(task_db.recycle_interrupted())
 except Exception as _e:  # noqa: BLE001  不得因任务库异常导致启动失败
-    job_state.interrupted_tasks = 0
+    job_state.set_interrupted_tasks(0)
     app.logger.warning(f"任务库中断恢复失败（不影响启动）：{_e}")
 
 # ⭐ AI 凭证单一事实源（tasks.db · ai_credentials 表）：启动时一次性把旧
@@ -602,18 +602,10 @@ except Exception as _e:  # noqa: BLE001
 
 
 # ===================== 质检不合格产物：统一移入回收站（可恢复） =====================
-# 需求（用户原话）：「质检不合格的图片、提示词或视频要删除，不要留存在本地（包括
-# ComfyUI 目录下的）」。这里统一收敛为**移入回收站**而非硬删 —— 误删好图好片是不可逆
-# 事故，移入 `output/projects/_trash/qc_reject/<时间戳>_<项目>/` 可人工恢复/复核。
-#
-# ⚠️ 红线（缺一不可）：
-#   1) 调用方必须用 `verdict.get("ok") is True and not gate["accept"]` 作为删除条件。
-#      `ok=False`（接口故障/超时/鉴权失败）、`skipped=True`（质检未开启）、
-#      `qc_declared 但 qc_on=False`（接口未就绪）**都不是产物不合格** —— 那些删下去会
-#      把好图好片删光。本工具只负责「安全地移」，判定由调用方提供，工具内不再猜。
-#   2) 路径必须落在 PROJECT_OUTPUT_DIR / COMFYUI_OUTPUT_DIR 之内；
-#   3) 显式排除 PROJECT_TRASH_DIR（避免把自己的回收站再搬一层）；
-#   4) 硬链接（st_nlink > 1）不释放空间、且可能被他处引用 → 拒绝移动。
+# ⚠️ 实现已下沉至 app/artifact_helpers.py（_reject_artifact / _purge_rejected_artifacts /
+#   _purge_prompt_records / _purge_sb_refs），判定红线（ok=True 且 gate 拒绝 / 路径限界 /
+#   排除回收站自身 / 硬链接拒绝）见该模块注释。此处仅保留需求背景：质检不合格产物移入
+#   回收站而非硬删（可人工恢复），本文件不再落地实现。
 
 
 #: 「物品上的主人照片」参考图取图优先级（2026-10-06 T02「物品主人形象」链路）。
@@ -708,44 +700,19 @@ from routes._shared import _app_logger  # noqa: F401, E402
 
 
 # ==========================================================================
-# P2-1 / P2-2  NLE 导出（剪映草稿 / FCPXML / SRT / 帧序列）
+# P2-1 / P2-2 NLE 导出（剪映草稿 / FCPXML / SRT / 帧序列）—— 实现见 app/nle_export.py
+# ComfyUI 模型 / 插件扫描 + 手选模型 —— 实现见 app/comfyui_models.py
+#   （以 ComfyUI object_info 为唯一权威来源给出候选，供用户手选，避免模板写死的
+#    裸文件名与磁盘目录布局不符导致节点产出被丢弃）
 # ==========================================================================
 
 
-# ==========================================================================
-# ComfyUI 模型 / 插件扫描 + 手选模型
-#
-#  为什么要"扫描"而不是直接读模板：ComfyUI 某节点 combo 的合法值取决于模型在
-#  磁盘上的**目录布局**（放进 diffusion_models/minimax-h3/ 后名字会带
-#  `minimax-h3\` 前缀），而工作流模板里通常写死的是裸文件名。两边一旦不符，
-#  ComfyUI 校验失败 → 该节点产出被丢弃（H3 视频就曾因此整段静默失败）。
-#  所以这里以 ComfyUI 的 object_info 为**唯一权威来源**给出候选，由用户手选。
-# ==========================================================================
-
-
-# ===================== 清空重做单个镜头 / 单个资产（总控 AI 工具后端） =====================
-# 与 reset-episode 同一套安全原则：移入回收站（可恢复）、逐项容错、按镜号/资产名精确圈定。
-
-
-# ===================== 场景九宫格机位预览（2026-10-01，对标 BigBanana 候选构图） =====================
-# 场景 base 图 → 9 个机位各一张同场景变体 + 3x3 拼接预览（scene_grid.py）。
-# 「应用」= 选中机位图升级为该场景新 base（旧 base 移入回收站），分镜参考图与
-# 按机位出图自动沿用新视角。GPU 任务走统一闸门（与生产串行，不抢卡）。
-
-
-# ===================== 分镜九宫格候选构图（2026-10-01，对标 BigBanana） =====================
-# 一镜一次生成「3x3 九候选构图联系表」→ 选格裁切为正式分镜图。与 best-of-N 相比：
-# 一次生成出 9 个机位变体，省时省卡；选格可由 QC 模型打分或用户手动指定。
-
-
-# ===================== 角色服装变体（衣柜，2026-10-02） =====================
-# 目录约定：output/assets/characters/<项目>/<角色名>/outfits/<outfit_key>/，
-# 内部文件布局与主设定目录相同（base.png + front/left/back/half.png，由整图本地
-# 切分派生 —— 复用 _generate_asset_task 的「生成→质检→重试→切分」全链路，见其
-# sub_dir 参数）。端点加在 api_generate_assets 旁边：同为「消费已产出提示词 +
-# ComfyUI 出图 + 质检」链路，不读 AI 凭证，故同样不挂 AI 前置门禁。
-# ⚠️ 零回归约束：所有新行为都以「服装变体目录存在」为前提 —— 目录不存在时查询
-# 返回空数组、取图回落主设定图（fail-open，任何异常只 log 不抛）。
+# ===================== 清空重做 · 场景九宫格 · 分镜九宫格 · 角色服装变体 =====================
+# ⚠️ 上述功能实现均已下沉到对应模块（见上方 re-export）：
+#   清空重做单个镜头/资产 → routes/scripts & routes/assets_api（reset-*）；
+#   场景九宫格机位预览 → app/scene_grid.py；分镜九宫格候选构图 → routes/storyboard_api；
+#   角色服装变体（衣柜）→ routes/assets_api（api_character_outfit_generate 等）。
+#   统一安全原则：移入回收站（可恢复）、逐项容错、GPU 走统一闸门。
 
 #: 服装变体子目录名（挂在角色主设定目录下）
 #: 服装描述追加进提示词的标记（幂等判据，见 _append_outfit_prompt）
@@ -754,22 +721,9 @@ from routes._shared import _app_logger  # noqa: F401, E402
 
 
 # ===================== 上传角色形象图 → 三视图（2026-10-06） =====================
-# 需求：用户手里已有角色画稿（自己画的 / 外包出的 / 别处满意的一张），希望直接
-# 用这张图当角色的「设定图基准」，而不是让模型按提示词重新抽一次外形。
-#
-# 关键取舍（**本地切分，不是参考图重绘**）：
-#   · 上传图直接落 `base.png`（= 角色设定整图），再走 `sheet_split` 现有链路切出
-#     front/left/back/half —— 零 GPU、零质检、秒出，且**人物外形 100% 保留**
-#     （模型重绘一定会改写脸/发型，这正是用户上传画稿要避免的）。
-#   · 因此上传图必须**本身就已按分档版式排好**（上排正面/左侧/背面三全身，
-#     下排一格正面半身）。版式不符 → `SheetSplitError` → 明确报错并回滚，
-#     绝不落一张切不动的 base.png 污染下游（下游会拿它当参考图）。
-#   · 上传即视为**已定稿**，不做图片质检（`view_gate` 记 skipped）：用户上传
-#     自己的画稿，质检判「不合格」既无意义又会把用户的东西删掉。
-#
-# 与服装变体（outfits/<key>）的关系：同一张上传图可以挂到主设定，也可以挂到
-# 某个服装变体档；由 `outfit_key` 决定落位（空 = 主设定）。
-# 幂等：默认已存在 base.png 即跳过；overwrite=true 强制覆盖。
+# ⚠️ 实现已下沉至 routes/assets_api.py（api_character_upload_sheet 等，见上方 re-export）。
+#   要点：上传图落 base.png 后走 sheet_split 本地切分（非参考图重绘，外形 100% 保留）；
+#   版式不符报错回滚、绝不落切不动的 base.png；上传即定稿不做图片质检；overwrite 强制覆盖。
 
 #: 上传形象图允许的扩展名（与 project_store._views_of 的图片白名单同口径）
 
@@ -836,21 +790,10 @@ _SCENE_DECOR_CHARS = ("《", "》", "「", "」", "『", "』", "\"", "'",
 #:    直接命中不重渲，串行化不损失流水线收益（渲染与 GPU 出图本就并行）。
 
 
-# ===================== 九宫格「逐格写死」规划（2026-10-07，用户范本范式） =====================
-# 两段式第一步：文本 LLM 按 storyboard_grid_plan 模板把一个镜头拆成 9 个关键帧分镜；
-# 第二步（渲染）在 comfyui_client.build_shot_grid_keyframes_prompt 里走 storyboard_grid_main
-# 模板产出中文逐格版九宫格提示词。规划拿不到 → 调用方传 panel_plans=None → 回落英文版路径。
-
-
-#: 分镜「结构性缺陷」词表（2026-10-08）。
-#: 这几类缺陷意味着**九宫格拆解本身失败** —— 同一格重复、中途换场景、左右手镜像 ——
-#: 图不可用，**不参与 storyboard_soft_qc 软放行**，必须按硬阻断重跑。
-#: 实测：shot_04 格3/4/6/9 四格近乎相同，质检已判「九宫格面板雷同」，却被软放行入库。
-#: ⚠️ 与 qc_client.IMAGE_CRITICAL_KEYWORDS 里同名字段刻意保持一致（同一套判据）。
-
-
-# ===== 视频水印（C 项：可配置、默认关闭、支持「全视频移动」） =====
-# 说明：图片生成链路不添加任何水印（C 项⑧）；本区块只处理视频后处理，不改 ComfyUI 工作流。
+# ===================== 九宫格逐格写死规划 · 结构性缺陷词表 · 视频水印 =====================
+# ⚠️ 实现均已下沉：九宫格逐格规划 → storyboard_helpers（_GRID_PLAN_TPL_FP）；结构性缺陷
+#   词表 → prompt_protocol.STRUCTURAL_DEFECT_KEYWORDS（t34 已单一来源）；视频水印 →
+#   app/video_watermark.py。图片链路不加任何水印，仅视频后处理加水印。
 
 # ---- AI 助手已下沉到 routes/ai.py（2026-10-08 第六批）----
 from routes.ai import LLM_NOT_CONFIGURED_GUIDE_MAP, _ai_config_view, _ai_credentials_verify, _chat_project, _chat_state, _save_ai_module, _wm_load_cfg  # noqa: F401  再导出

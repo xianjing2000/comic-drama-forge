@@ -21,6 +21,10 @@ from config import (COMFYUI_OUTPUT_DIR, FINAL_DIR, PROJECT_OUTPUT_DIR,
 from upscale_client import UpscaleError
 
 
+# 注意（P3 澄清）：这是「优选前缀」列表（video/upscale 两目录有明确中文 label），
+# **不是** ComfyUI 输出目录的完整枚举 —— v5video 等其它子目录由
+# _upscale_url_for_path 末尾「任意 ComfyUI 子目录走 comfyview」兜底覆盖，
+# 只是拿不到中文 label 而已。切勿据此误判「只支持这两个子目录」。
 COMFY_VIDEO_DIRS = [("ComfyUI片段", os.path.join(COMFYUI_OUTPUT_DIR, "video")),
                     ("ComfyUI超分", os.path.join(COMFYUI_OUTPUT_DIR, "upscale"))]
 

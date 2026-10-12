@@ -254,6 +254,19 @@ def _client_for(module: str) -> Optional[LLMClient]:
     return client if client.configured else None
 
 
+def _module_model(module: str) -> str:
+    """取某模块当前生效的 model 名（用于缓存 key 防串味；读失败返回空串）。
+
+    ⭐ 2026-10-12（t50）：缓存 key 原不含 model —— 换模型后同一条 prompt 会命中
+    旧增强/复审结果（进程内 FIFO 长期有效）。现把 model 并入 key。
+    """
+    try:
+        cfg = ai_config.get_module(ai_config.load_config(AI_CONFIG_PATH, LLM_CONFIG_PATH), module)
+        return str((cfg or {}).get("model") or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def _ctx_brief(ctx) -> str:
     """把镜头上下文压成一段简短文本（给模型当语义依据）"""
     parts: List[str] = []
@@ -405,8 +418,9 @@ def _cache_put_fail(key: str) -> None:
         _FAIL_CACHE[key] = time.time()
 
 
-def _cache_key(kind: str, style: str, prompt: str, salt: str = "") -> str:
-    basis = f"{kind}|{style}|{salt}|{prompt}"
+def _cache_key(kind: str, style: str, prompt: str, salt: str = "", model: str = "") -> str:
+    # ⭐ 2026-10-12（t50）：model 并入键 —— 换模型后不命中旧增强/复审结果。
+    basis = f"{kind}|{style}|{salt}|{model}|{prompt}"
     return hashlib.sha1(basis.encode("utf-8", "ignore")).hexdigest()
 
 
@@ -471,7 +485,7 @@ def enhance_prompt(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
         out["note"] = "增强未启用"
         return out
 
-    key = _cache_key(kind, style, prompt, salt="enhance")
+    key = _cache_key(kind, style, prompt, salt="enhance", model=_module_model("text"))
     hit = _cache_get(key)
     if hit is not None:
         out.update(prompt=hit, applied=True, note="缓存命中")
@@ -596,7 +610,7 @@ def model_review(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
         out["note"] = "复审未启用"
         return out
 
-    key = _cache_key(kind, style, prompt, salt="review")
+    key = _cache_key(kind, style, prompt, salt="review", model=_module_model("qc"))
     hit = _cache_get(key)
     if hit is not None:
         try:
