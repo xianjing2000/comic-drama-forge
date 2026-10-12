@@ -16,8 +16,8 @@ import project_store
 from config import CHARACTERS_DIR, SCRIPT_DIR, STORYBOARDS_DIR
 # 2026-10-09 修复遗漏：本模块 3 处使用 _shot_num_key（L61/70/86，_shared.py:1063 = shot_key.norm_shot_key），
 # 原先未导入 → 一致性校验接口一旦执行就 NameError → 500。
-from routes._shared import (_app_logger, _ep_read_dir, _first_existing, _qc_load_cfg,
-                            _safe_project, _shot_num_key, comfyui_client)
+from routes._shared import (_app_logger, _ep_read_dir, _first_existing, _friendly_error,
+                            _qc_load_cfg, _safe_project, _shot_num_key, comfyui_client)
 
 consistency_bp = Blueprint('consistency', __name__)
 
@@ -118,7 +118,9 @@ def api_consistency_run():
         )
     except Exception as e:  # noqa: BLE001
         _app_logger().exception("一致性校验失败")
-        return jsonify({"success": False, "error": f"一致性校验失败：{e}"}), 500
+        return jsonify({"success": False,
+                        "error": _friendly_error(f"一致性校验失败：{e}",
+                                                 "一致性校验失败，请稍后重试（详情见后端日志）")}), 500
     return jsonify({"success": True, "project": project_name,
                     "summary": report.get("summary"),
                     "report": report, "report_path": report.get("report_path")})
