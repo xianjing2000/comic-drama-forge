@@ -180,7 +180,13 @@ def _seg_sort_key(path: str):
       取不到数字的（异常命名）排到最后，保持相对稳定，绝不抛异常。
     """
     import re as _re
-    base = os.path.basename(str(path or ""))
+    # ⚠️ 必须先去扩展名再抽数字（2026-10-12 实测的坑）：
+    #    mp4 这个扩展名**自带数字 4**，直接 findall 会得到
+    #      re.findall(r"(\d+)", "a_00010_.mp4") -> ['00010', '4']
+    #    取 nums[-1] 就恒等于 '4' —— 所有文件排序键都变成 4，等于没排序，
+    #    concat 出来的成片**画面乱序**（既然后端自己拼，错了没人兜底）。
+    #    实测：修复前 5 个不同文件名全部返回 (0, 4)。
+    base = os.path.splitext(os.path.basename(str(path or "")))[0]
     nums = _re.findall(r"(\d+)", base)
     if not nums:
         return (1, 0)
