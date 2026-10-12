@@ -92,71 +92,294 @@ import cancellation
 import comfyui_job_store  # 崩溃免重渲检查点（2026-09-29）：种子沿用判据 + 台账查询
 
 
+_SEG_MAP_NAME = "seg_map.json"
+
+
+def _seg_map_path(videos_dir: str) -> str:
+    """本集映射表路径（段布局 / 场次布局共用一张表）。"""
+    return os.path.join(videos_dir, _SEG_MAP_NAME)
+
+
+def _load_seg_map(videos_dir: str) -> dict:
+    """读 seg_map.json；缺失/损坏一律返回 {}（fail-open，调用方按「无映射」处理）。
+
+    ⚠️ read_json_strict(path, default) 是**两个必填参数**（tests/test_recompose_closure.py
+       的 AST 门禁扫全库）：少传 default 会 TypeError，再被宽 except 吞成「功能静默失效」。
+    """
+    try:
+        _m = read_json_strict(_seg_map_path(videos_dir), {})
+        return _m if isinstance(_m, dict) else {}
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[分段导出] seg_map.json 读取失败（按无映射处理）：%s", _e)
+        return {}
+
+
+def _write_seg_map(videos_dir: str, payload: dict) -> None:
+    """原子写映射表（失败只告警：映射是增强能力，绝不阻断出片）。
+
+    ⚠️ 2026-10-12（t2）实测：原实现在函数里裸用 time.strftime，而本模块**从未
+       import time → NameError 被宽 except 吞成「映射落盘失败」→ 映射表**永远
+       写不出来**（默认配置下返工闭环因此彻底不可达）。这里统一走本助手，
+       模块级不再依赖 time。
+    """
+    try:
+        atomic_write_json(_seg_map_path(videos_dir), payload)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[分段导出] 映射落盘失败（不影响成片）：%s", _e)
+
+
+def _stamp() -> str:
+    """本地时间戳（YYYY-mm-dd HH:MM:SS）；只为报表可读，失败返回空串。"""
+    try:
+        import time as _t
+        return _t.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _scene_index(videos_dir: str) -> dict:
+    """扫磁盘上的场次成片 → {场号: 路径}（命名见按场次生成：scene_NN.mp4）。"""
+    import re as _re_c
+    _out = {}
+    try:
+        for _f in os.listdir(videos_dir):
+            _m = _re_c.match(r"scene_(\d{2})\.mp4$", _f)
+            if _m:
+                _out[int(_m.group(1))] = os.path.join(videos_dir, _f)
+    except OSError as _le:
+        logger.warning("[重新合成] 场次目录扫描失败：%s", _le)
+        return {}
+    return _out
+
+
+def _video_duration(path: str) -> float:
+    """ffprobe 时长（秒）；不可得 → 0.0 = 「未知」（调用方必须按未知保守处理）。"""
+    try:
+        import video_probe as _vpb
+        _r = _vpb.probe_video(path) or {}
+        if not _r.get("ok"):
+            return 0.0
+        return float(_r.get("duration") or 0)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _mark_scene_rerun(videos_dir: str, scenes) -> list:
+    """登记「待重跑场次」（写进 seg_map.json.needs_scene_rerun），返回登记后的清单。
+
+    为什么需要：场次布局下「一场 = 一次 H3 提交 = 一条连续视频」，没有镜头级边界，
+    单镜返工产物**无法只替换其中一镜**（硬替换会丢掉该场其它镜头 = 内容损失）。
+    唯一正确的收尾是整场重画 —— 这里只登记，由按场次生成流程读取后强制重画该场
+    （其余场次照旧复用），代价从「整集」降到「一场」。
+    """
+    try:
+        _sm = _load_seg_map(videos_dir)
+        _cur = []
+        for _x in (_sm.get("needs_scene_rerun") or []):
+            try:
+                _cur.append(int(_x))
+            except (TypeError, ValueError):
+                continue
+        for _x in (scenes or []):
+            try:
+                _n = int(_x)
+            except (TypeError, ValueError):
+                continue
+            if _n not in _cur:
+                _cur.append(_n)
+        _sm["needs_scene_rerun"] = sorted(_cur)
+        _sm["updated_at"] = _stamp()
+        _write_seg_map(videos_dir, _sm)
+        return list(_sm["needs_scene_rerun"])
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[重新合成] 登记待重跑场次失败（忽略）：%s", _e)
+        return []
+
+
 def _recompose_episode_video(videos_dir: str, episode_tag: str) -> str:
-    """用当前 seg_*.mp4 重新拼接本集成片（返回成片路径；失败返回 ""）。
+    """用当前素材重新拼接本集成片（返回成片路径；失败返回 ""）。
 
     用途（2026-10-12 用户需求「只重生成有问题的分镜，再拼回去」）：
-      1. 整集生成时导出了 seg_0000.mp4..seg_NNNN.mp4 与 seg_map.json；
-      2. 某镜有问题 → 单镜重跑 → 产出新的 shot_NN.mp4，落到 rework/shot_NN.mp4；
-      3. 调本函数：按 seg_map.json 把该镜原本占用的段位替换成返工段，
-         再 concat 全部段 → 覆盖 <episode_tag>_full.mp4。
+      A. **段布局**（MJSCXT_VIDEO_PER_SCENE=0 + export_mode=segments）：
+         整集生成时导出 seg_0000.mp4..seg_NNNN.mp4 与 seg_map.json；
+         某镜返工 → rework/shot_NN.mp4 → 按 shot_to_seg 顶掉它占的段位 → concat。
+      B. **场次布局**（默认配置：MJSCXT_VIDEO_PER_SCENE=1，一场一个 mp4）：
+         按场次生成时落盘 shot_to_scene / scene_to_shots 映射；单镜场可直接把
+         rework/shot_NN.mp4 **回灌成 scene_NN.mp4**；多镜场登记待重跑（整场重画）。
+         ⚠️ 修复前默认配置下这里恒走「无 seg_map.json，跳过」，而且没有任何
+         shot_NN.mp4 ↔ scene_NN.mp4 的回灌代码 —— 用户点名单镜返工永不成片
+         （日志恒 [分段导出]=0 / [重新合成]=0 / [单镜重跑]=0）。
 
     设计要点：
-      · **不改动 sed 序列长度**：返工段只在原「第一个段位」落位，原其余段位置空
-        （用同一个返工文件占位会导致画面重复，故宁可少段也不重复）；
-      · 任何异常都返回 ""，由调用方 fail-open 保留旧成片，绝不阻断生产；
-      · 没有 seg_map.json（旧数据 / 未开分段导出）→ 返回 ""，行为与改动前一致。
+      · **时长校验**（t2）：段位替换与 concat 产物都核对时长，任何「明显变短」
+        一律判截断、保留旧成片 —— 绝不静默交付残缺成片；
+      · **回滚点**：回灌场片前把原场备份到 rework/scene_NN.pre_recompose.mp4；
+      · **fail-open**：任何异常返回 ""，旧成片原地保留，绝不阻断生产。
     """
     try:
         import re as _re3
         import video_postprocess as _vp
-        _mapf = os.path.join(videos_dir, "seg_map.json")
-        if not os.path.isfile(_mapf):
-            logger.warning("[重新合成] 无 seg_map.json，跳过（退回旧成片）")
+        if not os.path.isdir(videos_dir):
+            logger.warning("[重新合成] 视频目录不存在：%s", videos_dir)
             return ""
-        # ⚠️ 2026-10-12（t17 实测）：read_json_strict 的签名是 (path, default)，少传 default
-        #    会 TypeError → 被本函数的宽 except 吞成「[重新合成] 异常（保留旧成片）」→
-        #    整个「返工后自动重拼」**从来没生效过**（成片永远停留在返工前）。
-        _sm = read_json_strict(_mapf, {}) or {}
+        # ⚠️ 就地两参调用 read_json_strict(path, default)：契约门禁（AST）要求本函数体内
+        #    必须存在这个调用点，且两参齐全 —— 少传 default 会 TypeError 并被下方宽
+        #    except 吞成「功能静默失效」（t17 的历史缺陷形态）。
+        _sm = {}
+        try:
+            _sm_raw = read_json_strict(_seg_map_path(videos_dir), {})
+            _sm = _sm_raw if isinstance(_sm_raw, dict) else {}
+        except Exception as _mre:  # noqa: BLE001
+            logger.warning("[重新合成] seg_map.json 读取失败（按无映射处理）：%s", _mre)
+            _sm = {}
+        if not _sm:
+            logger.warning("[重新合成] 无 seg_map.json，跳过（退回旧成片）—— "
+                           "按场次布局的旧数据需重跑一次该集视频生成才会建立场次映射")
+            return ""
         # ⚠️ 集 tag 以 seg_map.json 为准：调用方推导的名字未必与生成时一致
         #    （ep01 / episode 等历史命名兼容），写错会覆盖到错误的成片。
         _tag_from_map = str(_sm.get("episode_tag") or "").strip()
         if _tag_from_map:
             episode_tag = _tag_from_map
-        _s2s = _sm.get("shot_to_seg") or {}
-        if not _s2s:
-            logger.warning("[重新合成] seg_map 为空，跳过")
-            return ""
+        _rework_dir = os.path.join(videos_dir, "rework")
         # 现有段文件（按序号排序）
         _present = {}
         for _f in os.listdir(videos_dir):
             _m = _re3.match(r"seg_(\d{4})\.mp4$", _f)
             if _m:
                 _present[int(_m.group(1))] = os.path.join(videos_dir, _f)
-        if not _present:
-            logger.warning("[重新合成] 目录里没有 seg_*.mp4，跳过")
-            return ""
-        _rework_dir = os.path.join(videos_dir, "rework")
-        _replaced = []
-        for _shot, _idxs in _s2s.items():
-            if not _idxs:
-                continue
-            _rw = os.path.join(_rework_dir, "shot_%s.mp4" % str(_shot).zfill(2))
-            if not os.path.isfile(_rw):
-                continue
-            _first = min(int(x) for x in _idxs)
-            if _first in _present:
-                _present[_first] = _rw
+        _s2s = _sm.get("shot_to_seg") or {}
+        _s2c = _sm.get("shot_to_scene") or {}
+        _layout = ""
+        _ordered = []
+        if _s2s and _present:
+            # ---------- 段布局（整集一次提交 + export_mode=segments） ----------
+            _layout = "seg"
+            _replaced = []
+            _pruned = []
+            for _shot, _idxs in _s2s.items():
+                if not _idxs:
+                    continue
+                _rw = os.path.join(_rework_dir, "shot_%s.mp4" % str(_shot).zfill(2))
+                if not os.path.isfile(_rw):
+                    continue
+                _slots = sorted(int(x) for x in _idxs)
+                if _slots[0] not in _present:
+                    continue
+                # ⭐ t2：返工产物是**整镜**（单镜重跑已把子段 concat 成一个 shot_NN.mp4）。
+                #    该镜占多个段位时，只顶第一个段位会残留旧子段（新旧混拼 + 时长翻倍）；
+                #    但「顶掉其余段位」必须确认返工文件覆盖了整镜时长，否则会把成片
+                #    **截短**（单镜重跑的子段 concat 失败时会回退首个子段 = 只有一部分）。
+                #    故先做时长核对，通不过就退回「只顶第一个段位」的老行为（不截短优先）。
+                _old_dur = sum(_video_duration(_present[_x]) for _x in _slots if _x in _present)
+                _new_dur = _video_duration(_rw)
+                if len(_slots) > 1 and _old_dur > 0 and _new_dur >= _old_dur * 0.85:
+                    for _x in _slots[1:]:
+                        _present.pop(_x, None)
+                    _pruned.append(_shot)
+                elif len(_slots) > 1:
+                    logger.warning(
+                        "[重新合成] shot=%s 返工段时长未核实（新 %.1fs / 原段合计 %.1fs）→ "
+                        "只顶第一个段位、保留原子段（宁可有旧画面，也不把成片截短）",
+                        _shot, _new_dur, _old_dur)
+                _present[_slots[0]] = _rw
                 _replaced.append(_shot)
-        if not _replaced:
-            logger.info("[重新合成] 无返工段，直接按现有段拼接")
-        _ordered = [_present[k] for k in sorted(_present)]
+            if not _replaced:
+                logger.info("[重新合成] 无返工段，直接按现有段拼接")
+            _ordered = [_present[k] for k in sorted(_present)]
+            logger.info("[重新合成] 段布局：%d 段素材，返工 %d 镜（%s）%s",
+                        len(_ordered), len(_replaced), sorted(_replaced),
+                        ("；%s 的子段已合并" % sorted(_pruned)) if _pruned else "")
+        elif _s2c:
+            # ---------- 场次布局（默认配置：一场一个 mp4） ----------
+            _layout = "scene"
+            _c2s = _sm.get("scene_to_shots") or {}
+            _scenes_on_disk = _scene_index(videos_dir)
+            if not _scenes_on_disk:
+                logger.warning("[重新合成] 场次布局但目录里没有 scene_*.mp4，跳过")
+                return ""
+            _declared = []
+            for _f in (_sm.get("scene_files") or []):
+                _m2 = _re3.match(r"scene_(\d{2})\.mp4$", str(_f))
+                if _m2:
+                    _declared.append(int(_m2.group(1)))
+            if not _declared:
+                _declared = sorted(_scenes_on_disk)
+            _missing = []
+            for _n in sorted(set(_declared)):
+                if _n in _scenes_on_disk:
+                    _ordered.append(_scenes_on_disk[_n])
+                else:
+                    _missing.append(_n)
+            if _missing or not _ordered:
+                # 少一场 = 成片少一段 = 截断 → 拒绝重拼（旧成片原地保留）
+                logger.error("[重新合成] 场次素材缺失 %s（声明 %s）→ 拒绝重拼，保留旧成片",
+                             _missing, sorted(set(_declared)))
+                return ""
+            _replaced = []
+            _need_rerun = []
+            for _shot, _sn in _s2c.items():
+                _rw = os.path.join(_rework_dir, "shot_%s.mp4" % str(_shot).zfill(2))
+                if not os.path.isfile(_rw):
+                    continue
+                try:
+                    _sni = int(_sn)
+                except (TypeError, ValueError):
+                    continue
+                _sp = _scenes_on_disk.get(_sni)
+                _shots_here = list(_c2s.get(str(_sn)) or _c2s.get(str(_sni)) or [])
+                if not _sp or len(_shots_here) != 1:
+                    # ⚠️ 多镜场：场是原子单位（一次提交 = 一条连续视频，没有镜头级
+                    #    边界）。整场覆盖会**丢掉该场其它镜头**（内容损失），一律拒绝，
+                    #    改为登记待重跑 → 生成流程整场重画（代价：整集 → 一场）。
+                    logger.warning("[重新合成] shot=%s 无法单镜替换场 scene_%02d"
+                                   "（该场 %d 镜）→ 登记待重跑（生成时自动重画该场）",
+                                   _shot, _sni, len(_shots_here))
+                    if _sni not in _need_rerun:
+                        _need_rerun.append(_sni)
+                    continue
+                _bak = os.path.join(_rework_dir, "scene_%02d.pre_recompose.mp4" % _sni)
+                try:
+                    import shutil as _sh2
+                    if not os.path.isfile(_bak):
+                        _sh2.copy2(_sp, _bak)   # 回滚点：原场留一份（可逆）
+                    _sh2.copy2(_rw, _sp)        # shot_NN.mp4 → scene_NN.mp4（回灌）
+                except OSError as _ce2:
+                    logger.error("[重新合成] scene_%02d 回灌失败（跳过该场）：%s", _sni, _ce2)
+                    continue
+                _replaced.append(_shot)
+            if _need_rerun:
+                _mark_scene_rerun(videos_dir, _need_rerun)
+            if not _replaced:
+                logger.warning("[重新合成] 场次布局下没有可回灌的单镜场"
+                               "（待重跑场次 %s）→ 保留旧成片", sorted(set(_need_rerun)))
+                return ""
+            logger.info("[重新合成] 场次布局：%d 镜回灌（%s）→ 重拼 %d 场%s",
+                        len(_replaced), sorted(_replaced), len(_ordered),
+                        ("；待重跑 %s" % sorted(set(_need_rerun))) if _need_rerun else "")
+        else:
+            logger.warning("[重新合成] 无可重拼素材（shot_to_seg=%d / 段素材=%d / "
+                           "shot_to_scene=%d），跳过",
+                           len(_s2s), len(_present), len(_s2c))
+            return ""
         _out = os.path.join(videos_dir, "%s_full.mp4" % (episode_tag or "episode"))
         _tmp = _out + ".recompose.mp4"
+        _expect = sum(_video_duration(p) for p in _ordered)
         _ret = _vp.VideoPostProcessor().concat_videos(
             _ordered, _tmp, caller="video_helpers._recompose_episode_video")
         if not _ret or not os.path.isfile(_ret):
             logger.error("[重新合成] concat 失败（保留旧成片）")
+            return ""
+        # ⭐ t2：成片时长校验 —— concat 走流复制，正常应≈素材合计；明显偏短说明
+        #    有素材丢段 / 流被截断（宁可保留旧成片，也不交付残缺成片）。
+        _got = _video_duration(_ret)
+        if _expect > 0 and _got > 0 and _got < _expect * 0.85:
+            logger.error("[重新合成] 成片时长异常（%.1fs < 素材合计 %.1fs）→ 判为截断，"
+                         "保留旧成片", _got, _expect)
+            try:
+                os.remove(_ret)
+            except OSError as _re_del:
+                logger.warning("[重新合成] 截断产物清理失败（忽略）：%s", _re_del)
             return ""
         try:
             if os.path.isfile(_out):
@@ -164,8 +387,8 @@ def _recompose_episode_video(videos_dir: str, episode_tag: str) -> str:
         except Exception:  # noqa: BLE001
             pass
         _move_with_retry(_ret, _out)
-        logger.info("[重新合成] 完成：%d 段（返工 %d 镜：%s）-> %s",
-                    len(_ordered), len(_replaced), _replaced, os.path.basename(_out))
+        logger.info("[重新合成] 完成：%s 布局 %d 段素材 -> %s",
+                    _layout, len(_ordered), os.path.basename(_out))
         return _out
     except Exception as _e:  # noqa: BLE001
         logger.error("[重新合成] 异常（保留旧成片）：%s", _e)
@@ -478,6 +701,27 @@ def _video_retry_shot_impl():
             vid_dir, (f"ep{int(_rs_ep):02d}" if _rs_ep else "episode"))
     except Exception as _rc_e:  # noqa: BLE001
         logger.warning(f"[单镜重跑] 自动重新合成失败（保留旧成片）：{_rc_e}")
+    # ⭐ t2（P0 闭环）：该镜所属场次若为**多镜场**，单镜产物无法只替换其中一镜 ——
+    #   场次布局下「一场 = 一次 H3 提交 = 一条连续视频」，没有镜头级边界，硬替换会
+    #   丢掉该场其它镜头（内容损失）。唯一正确的收尾是**整场重画**：这里登记
+    #   待重跑场次（seg_map.json.needs_scene_rerun），下次「生成成片」时该场被强制
+    #   重画（其余场次复用）→ concat 成整集（代价从「整集」降到「一场」）。
+    _scene_rerun = []
+    try:
+        _sm_r = _load_seg_map(vid_dir)
+        _s2c_r = _sm_r.get("shot_to_scene") or {}
+        _sn_hit = _s2c_r.get(f"{seq:02d}") or _s2c_r.get(str(seq))
+        if _sn_hit is not None:
+            _c2s_r = _sm_r.get("scene_to_shots") or {}
+            _cnt_r = len(_c2s_r.get(str(_sn_hit)) or [])
+            if _cnt_r > 1:
+                _scene_rerun = _mark_scene_rerun(vid_dir, [int(_sn_hit)])
+                logger.warning(
+                    "[单镜重跑] shot=%s 属于多镜场 scene_%02d（该场 %d 镜）：场是原子单位，"
+                    "单镜产物无法只替换其中一镜 → 已登记待重跑；下次「生成成片」会自动"
+                    "只重画该场并重拼整集", seq, int(_sn_hit), _cnt_r)
+    except Exception as _sr_e:  # noqa: BLE001
+        logger.warning(f"[单镜重跑] 登记待重跑场次失败（忽略）：{_sr_e}")
     # ⭐ 2026-10-12（t17）：让 final / 超分产物**失效** —— 这是返工闭环的关键一步。
     #   不标记的话：① step_final 优先 copy 超分产物（pipeline 里 src = upscale_path(ctx)），
     #   而 probe_final 只看「文件可播」→ 幂等短路跳过 → 用户**永远**看到返工前的画面；
@@ -498,6 +742,8 @@ def _video_retry_shot_impl():
                     "deliverable_marked_stale": bool(stale),
                     "recomposed": bool(_recomposed),
                     "recomposed_file": os.path.basename(_recomposed) if _recomposed else "",
+                    # t2：待重跑场次（多镜场无法单镜替换 → 生成时整场重画后重拼）
+                    "scene_rerun_required": list(_scene_rerun or []),
                     # t17：本次被标记失效的产物（final / upscale）——前端/排障据此提示
                     "outputs_invalidated": list((_invalidated or {}).get("marked") or [])})
 
@@ -1641,6 +1887,52 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
 
                 _scene_files = []
                 _scene_reports = []
+                # ⭐ t2（P0 修复）：为本集建立「场次 → 镜头」映射并落盘 seg_map.json。
+                #   修复前默认配置（MJSCXT_VIDEO_PER_SCENE=1）**从不写任何映射**，
+                #   而 _recompose_episode_video 又只认 seg_map.json → 单镜返工产物
+                #   没有任何回灌路径（日志恒 [分段导出]=0 / [重新合成]=0）。
+                #   这里落盘的映射 + 待重跑场次，是「单镜返工 → 替换 → 重新合成」
+                #   在默认配置下可达的最小基础设施。
+                _sm_ctx = _load_seg_map(videos_dir)
+                _shot_to_scene = dict(_sm_ctx.get("shot_to_scene") or {})
+                _scene_to_shots = dict(_sm_ctx.get("scene_to_shots") or {})
+                _pending_sn = set()
+                for _px in (_sm_ctx.get("needs_scene_rerun") or []):
+                    try:
+                        _pending_sn.add(int(_px))
+                    except (TypeError, ValueError):
+                        continue
+                if _pending_sn:
+                    logger.info("[episode][per-scene] 待重跑场次（单镜返工遗留）：%s",
+                                sorted(_pending_sn))
+
+                def _record_scene_map(_sn_rec, _ssegs_rec):
+                    """登记本场 → 镜头映射（长镜切段的 shot_07a/b 归一到 shot_07）。"""
+                    import re as _re_sm
+                    _ids = []
+                    for _srec in (_ssegs_rec or []):
+                        _mm = _re_sm.match(r"shot_(\d+)",
+                                           str((_srec or {}).get("name") or ""))
+                        if not _mm:
+                            continue
+                        _k = _mm.group(1).zfill(2)
+                        if _k not in _ids:
+                            _ids.append(_k)
+                        _shot_to_scene[_k] = _sn_rec
+                    _scene_to_shots[str(_sn_rec)] = _ids
+
+                def _flush_scene_map():
+                    """原子落盘映射（fail-open：映射写不出也绝不影响出片）。"""
+                    _write_seg_map(videos_dir, {
+                        "layout": "per_scene",
+                        "episode_tag": episode_tag or "episode",
+                        "scene_files": [os.path.basename(str(_p)) for _p in _scene_files],
+                        "shot_to_scene": dict(_shot_to_scene),
+                        "scene_to_shots": dict(_scene_to_shots),
+                        "needs_scene_rerun": sorted(_pending_sn),
+                        "updated_at": _stamp(),
+                    })
+
                 import secrets as _secrets
                 for _gi, (_sn, _ssegs) in enumerate(_scene_groups):
                     # ⭐ 2026-10-08：流水线模式 —— 等本场提示词构建完成（后台线程发布），
@@ -1671,14 +1963,23 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     except Exception:  # noqa: BLE001
                         pass
                     _sdst = os.path.join(videos_dir, f"scene_{_sn:02d}.mp4")
-                    if (not _ovw_ps) and os.path.isfile(_sdst) and os.path.getsize(_sdst) > 0:
+                    # ⭐ t2：该场被「单镜返工」登记为待重跑（多镜场无法只替换其中一镜）
+                    #   → 不吃断点续跑复用，强制重画本场（其余场次照旧复用）。
+                    _force_scene = _sn in _pending_sn
+                    if (not _ovw_ps) and not _force_scene \
+                            and os.path.isfile(_sdst) and os.path.getsize(_sdst) > 0:
                         # 断点续跑：该场已有成片直接复用（overwrite=true 时强制重画）
                         logger.info("[episode][per-scene] 第 %d 场已有成片，复用：%s",
                                         _sn, _sdst)
                         _scene_files.append(_sdst)
                         _scene_reports.append({"scene_no": _sn, "success": True,
                                                "skipped": True, "path": _sdst})
+                        _record_scene_map(_sn, _ssegs)
+                        _flush_scene_map()
                         continue
+                    if _force_scene and os.path.isfile(_sdst):
+                        logger.info("[episode][per-scene] 第 %d 场被登记为「待重跑」"
+                                    "（单镜返工的多镜场）→ 强制重画本场", _sn)
                     _sres = comfyui_client.generate_h3_sequence_sequential(
                         segments=_ssegs,
                         filename_prefix=(f"comic_drama/{project_name}_"
@@ -1717,6 +2018,14 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     _scene_reports.append({"scene_no": _sn, "success": True,
                                            "path": _sdst,
                                            "qc_results": (_sres or {}).get("qc_results") or []})
+                    # ⭐ t2：本场已按最新素材重画 → 清除「待重跑」标记并刷新映射
+                    _record_scene_map(_sn, _ssegs)
+                    _pending_sn.discard(_sn)
+                    _flush_scene_map()
+
+                # ⭐ t2：全部场次就绪 → 落盘终版映射（含完整 scene_files 清单，
+                #   下游 _recompose_episode_video 靠它判断「场次是否齐全」= 防截断）
+                _flush_scene_map()
 
                 # 全部场次完成 → ffmpeg concat 拼接成整集（流复制，无重编码）
                 import subprocess as _sp_sub
@@ -1899,57 +2208,88 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
             #   段顺序 = segs 顺序（插件按 timeline_data.segments 顺序导出），
             #   与 _seg_sort_key 的数字升序一致，故索引可直接对应 seg_%04d.mp4。
             #   name 形如 shot_07 / shot_07a / shot_07b（长镜切段的子段后缀）。
-            try:
-                import re as _re2
-                _seg_map = {}
-                for _mi, _ms in enumerate(segs or []):
-                    _mname = str((_ms or {}).get("name") or "")
-                    _mm = _re2.match(r"shot_(\d+)", _mname)
-                    if _mm:
-                        _seg_map.setdefault(_mm.group(1), []).append(_mi)
-                if _seg_map:
-                    atomic_write_json(os.path.join(videos_dir, "seg_map.json"), {
-                        "episode_tag": episode_tag or "episode",
-                        "total_segments": len(_seg_files),
-                        "shot_to_seg": _seg_map,
-                        "order": [os.path.basename(p) for p in _seg_files],
-                        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    })
-                    logger.info("[分段导出] shot->seg 映射已落盘：%d 镜 / %d 段",
-                                len(_seg_map), len(_seg_files))
-            except Exception as _me:  # noqa: BLE001
-                logger.warning("[分段导出] 映射落盘失败（不影响成片）：%s", _me)
             if len(_seg_files) > 1:
-                _seg_paths = []
+                # ⭐ t2：段位落盘必须**保持 index 一一对应**（此前用 append，一旦某段落盘
+                #    失败，后续段整体前移 → 映射与素材错位 + 成片缺段）。按固定下标填充。
+                _seg_paths = [None] * len(_seg_files)
+                _seg_failed = []
                 for _si, _sf in enumerate(_seg_files):
                     _sp = os.path.join(videos_dir, "seg_%04d.mp4" % _si)
                     try:
                         if os.path.abspath(_sf) != os.path.abspath(_sp):
                             _move_with_retry(_sf, _sp)
-                        _seg_paths.append(_sp)
+                        _seg_paths[_si] = _sp
                     except Exception as _se:  # noqa: BLE001
+                        _seg_failed.append(_si)
                         logger.warning("[分段导出] 第 %d 段落盘失败（跳过该段）：%s", _si, _se)
+                _seg_ok = [p for p in _seg_paths if p]
+                # ⭐ t2：映射表**在段落盘之后**写，且只登记真正落盘成功的段 —— 写早了会
+                #    出现「映射指向不存在的段」，_recompose 找不到段位只能整体跳过。
+                #    另一个既存缺陷：此处原本裸用 time.strftime，而本模块从未 import time
+                #    → NameError 被宽 except 吞成「映射落盘失败」→ 映射**从来没写成功过**。
+                if _seg_ok and not _seg_failed:
+                    try:
+                        import re as _re2
+                        _seg_map = {}
+                        for _mi, _ms in enumerate(segs or []):
+                            _mname = str((_ms or {}).get("name") or "")
+                            _mm = _re2.match(r"shot_(\d+)", _mname)
+                            if _mm:
+                                _seg_map.setdefault(_mm.group(1), []).append(_mi)
+                        if _seg_map:
+                            _write_seg_map(videos_dir, {
+                                "layout": "seg",
+                                "episode_tag": episode_tag or "episode",
+                                "total_segments": len(_seg_ok),
+                                "shot_to_seg": _seg_map,
+                                "order": [os.path.basename(p) for p in _seg_ok],
+                                "updated_at": _stamp(),
+                            })
+                            logger.info("[分段导出] shot->seg 映射已落盘：%d 镜 / %d 段",
+                                        len(_seg_map), len(_seg_ok))
+                    except Exception as _me:  # noqa: BLE001
+                        logger.warning("[分段导出] 映射落盘失败（不影响成片）：%s", _me)
+                elif _seg_failed:
+                    logger.warning("[分段导出] %d/%d 段落盘失败 → 不写映射表"
+                                   "（避免映射指向不存在的段）",
+                                   len(_seg_failed), len(_seg_files))
                 _concat_ok = False
-                if _seg_paths:
+                if _seg_ok:
                     try:
                         import video_postprocess as _vp_mod
                         _cat = _vp_mod.VideoPostProcessor().concat_videos(
-                            _seg_paths, dst, caller="video_helpers.episode")
+                            _seg_ok, dst, caller="video_helpers.episode")
                     except Exception as _ce:  # noqa: BLE001
                         _cat = ""
                         logger.error("[分段导出] concat 异常：%s", _ce)
                     if _cat and os.path.isfile(_cat):
                         _concat_ok = True
                         logger.info("[分段导出] %d 段已落盘 + concat 成 %s",
-                                    len(_seg_paths), os.path.basename(dst))
+                                    len(_seg_ok), os.path.basename(dst))
                     else:
                         logger.error("[分段导出] concat 失败，回退首段作为成片：%s",
                                      os.path.basename(dst))
-                if not _concat_ok and _seg_files:
-                    src = _seg_files[0]
+                if not _concat_ok and _seg_ok:
+                    # ⚠️ 回退必须用**落盘后**的路径：原 _seg_files[0] 已被 move 走，
+                    #    再 move 它只会失败并把 dst 留空（成片丢失）。
+                    src = _seg_ok[0]
                     if os.path.abspath(src) != os.path.abspath(dst):
                         _move_with_retry(src, dst)
             else:
+                # ⭐ t2：单文件导出（export_mode=all）没有段素材 → 清掉可能残留的旧映射，
+                #   否则 _recompose 会拿**上一版**的 seg_*.mp4 重拼，产出与新素材不一致的成片。
+                _stale_map = _load_seg_map(videos_dir)
+                if _stale_map.get("shot_to_seg") or _stale_map.get("shot_to_scene"):
+                    logger.warning("[分段导出] 本次为单文件导出，清除旧映射表"
+                                   "（避免拿旧段重拼）")
+                _write_seg_map(videos_dir, {
+                    "layout": "seg",
+                    "episode_tag": episode_tag or "episode",
+                    "total_segments": 0,
+                    "shot_to_seg": {},
+                    "order": [],
+                    "updated_at": _stamp(),
+                })
                 src = _seg_files[0] if _seg_files else files[0]
                 if os.path.abspath(src) != os.path.abspath(dst):
                     _move_with_retry(src, dst)
