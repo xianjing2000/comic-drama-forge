@@ -2450,10 +2450,23 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
         # P0-2：显式标注「接口级故障」——调用根本没拿到模型判定（鉴权 401/403/404、
         # 超时、网络抖动等），**不是**「图片内容不合格」。上层闸门据此 fail-open
         # （放行已出图资产 + 响亮告警），而不是把 ComfyUI 已出好的图按内容不合格丢弃。
+        # ⚠️ 2026-10-12（t22 P1）：接口故障也要跑客观层（全黑/纯色确定性检测），并把
+        #   致命缺陷透出到 critical_issues/blocked —— 与 check_video 的接口故障分支口径
+        #   对齐：客观层命中致命缺陷仍会阻断，接口故障期间全黑图不再被 fail-open 放行。
+        obj = _apply_image_objective({}, image_path, cfg)
         return {"ok": False, "skipped": False, "error": str(e),
                 "api_attempts": getattr(e, "attempts", 1),
                 "retryable": getattr(e, "retryable", None),
-                "interface_fault": True}
+                "interface_fault": True,
+                "issues": list(obj.get("issues") or []),
+                "critical_issues": list(obj.get("critical_issues") or []),
+                "blocked": bool(obj.get("blocked")),
+                "passed": bool(obj.get("passed")),
+                "score": obj.get("score"),
+                "objective": obj.get("objective"),
+                "objective_fatal": list(obj.get("objective_fatal") or []),
+                "objective_issues": list(obj.get("objective_issues") or []),
+                "objective_only": True}
     verdict = _apply_style_gate(verdict, style_norm)
     # 把「带了几张设定图」透出来，便于前端/体检确认该能力真的生效（而不是静默没带）
     verdict["ref_images_used"] = len(ref_list)
