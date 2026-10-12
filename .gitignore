@@ -237,3 +237,17 @@ comfyui_dir.json
 #   —— 即它们全靠「没人手滑 add」侥幸没进仓库。此处补齐下划线形态防复发。
 *.bak_*
 *.orig
+# 运行时/临时产物（2026-10-12 加）
+.agent-teams/
+.frontend_build_tmp/
+_t2_rework_e2e.py
+_t13_scan_silent_truthy.py
+monitor_state.json
+.monitor_state.json
+# ===== 测试残留 / 临时产物（2026-10-12 清理）=====
+t2api_*/
+t2dedup_*/
+t20_doc_*/
+_t*.py
+**/_t*.py
+*.tmp_test*
