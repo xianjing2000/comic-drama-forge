@@ -55,6 +55,12 @@ _BUSY: set = set()
 _KILL = {"on": False, "reason": "", "at": 0.0}
 _COOLDOWN: dict = {}
 
+#: 后台清理循环（daemon）与触发间隔 —— t29（2026-10-12）：cleanup_jobs 原先全项目
+#: 零调用，_JOBS/_COOLDOWN 永不回收。这里补一个懒启动的守护线程做周期性兜底回收，
+#: 加上 start_job / get_job 的惰性触发，保证「内存护栏」真正生效。
+_CLEANUP_THREAD = None
+_CLEANUP_INTERVAL_SEC = 300.0
+
 
 def bind_app(flask_app):
     """由 app.py 在启动时注入 Flask 实例（避免循环 import）"""
@@ -976,6 +982,9 @@ def _new_job(project: str, message: str) -> dict:
 
 
 def get_job(jid: str):
+    # t29：查询前顺手回收超 TTL 任务（内存护栏）。cleanup_jobs 内部自带 _LOCK，
+    # 与下面 with _LOCK 不嵌套，安全。
+    cleanup_jobs()
     with _LOCK:
         job = _JOBS.get(jid)
         return dict(job) if job else None
@@ -1238,6 +1247,9 @@ def start_job(message: str, project: str, ep: dict, history: list, timeout: int 
     proj_key = project or "__global__"
     if _KILL["on"]:
         return {"ok": False, "error": "急停开关处于开启状态，请先关闭后再下发指令"}
+    # t29：提交前先回收超 TTL 历史任务，并确保后台兜底清理线程在跑（内存护栏）。
+    cleanup_jobs()
+    _ensure_cleanup_loop()
     with _LOCK:
         if proj_key in _BUSY:
             return {"ok": False, "error": "该项目已有一个 AI 任务在执行，请等它结束"}
@@ -1275,11 +1287,65 @@ def tool_index():
              "risk": t["risk"], "expensive": bool(t["expensive"])} for t in TOOLS]
 
 
-def cleanup_jobs():
-    now = time.time()
+def _cooldown_ts(v) -> float:
+    """从 _COOLDOWN 条目取写入时间戳（v 形如 ``(ts, result[, project])``，兼容旧 2 元组）。"""
+    try:
+        if isinstance(v, (tuple, list)) and len(v) >= 1 and v[0] is not None:
+            return float(v[0])
+    except (TypeError, ValueError):
+        pass
+    return 0.0
+
+
+def cleanup_jobs(now: float = None) -> int:
+    """回收超 TTL 的任务表条目与超冷却窗口的冷却缓存（内存护栏）。
+
+    t29（2026-10-12）之前本函数**全项目零调用**：_JOBS（JOB_TTL_SEC=1h）与
+    _COOLDOWN 永不回收 → 24h 挂机内存持续增长。现在有三处触发：
+      · start_job() 每次提交前惰性调用（随任务提交触发）；
+      · get_job() 查询时顺手调用（返回快照不含过期条目）；
+      · _ensure_cleanup_loop() 挂后台 daemon 周期兜底（空闲期也回收）。
+
+    返回本次回收的 _JOBS 条目数（可观测：日志 / 测试断言）。fail-open：清理本身
+    最轻量，这里仍做防御。
+    """
+    now = time.time() if now is None else now
+    removed = 0
     with _LOCK:
-        for jid in [k for k, v in _JOBS.items() if now - v.get("updated", now) > JOB_TTL_SEC]:
+        for jid in [k for k, v in _JOBS.items()
+                    if now - v.get("updated", now) > JOB_TTL_SEC]:
             _JOBS.pop(jid, None)
+            removed += 1
+        # _COOLDOWN 此前只「逻辑过期」（execute_tool 读取侧判 < COOLDOWN_SEC 才命中），
+        # 物理条目永不删除（仅 purge_project 按项目清）。这里回收已过冷却窗口的条目，
+        # 使冷却缓存同样有界，不再随「不同参数组合」线性累积。
+        for k in [k for k, v in _COOLDOWN.items()
+                  if now - _cooldown_ts(v) >= COOLDOWN_SEC]:
+            _COOLDOWN.pop(k, None)
+    return removed
+
+
+def _cleanup_loop() -> None:
+    """后台清理循环体（daemon 线程跑）；周期调用 cleanup_jobs，自身异常只记日志。"""
+    while True:
+        time.sleep(_CLEANUP_INTERVAL_SEC)
+        try:
+            cleanup_jobs()
+        except Exception as e:  # noqa: BLE001  清理线程自身绝不能影响业务
+            logger.debug("后台清理循环异常（忽略）：%s", e)
+
+
+def _ensure_cleanup_loop() -> None:
+    """幂等启动后台清理线程（懒启动：首次 start_job 时创建，import 无副作用）。"""
+    global _CLEANUP_THREAD
+    if _CLEANUP_THREAD is not None and _CLEANUP_THREAD.is_alive():
+        return
+    with _LOCK:
+        if _CLEANUP_THREAD is not None and _CLEANUP_THREAD.is_alive():
+            return
+        _CLEANUP_THREAD = threading.Thread(target=_cleanup_loop,
+                                           name="agent-core-cleanup", daemon=True)
+        _CLEANUP_THREAD.start()
 
 
 def purge_project(names: list) -> dict:

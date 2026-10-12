@@ -52,7 +52,19 @@ def api_llm_config_clear():
                     "message": "文本分析模型配置已清除"})
 @llm_bp.route('/api/llm/test', methods=['POST'])
 def api_llm_test():
-    data = request.json or {}
+    """兼容旧前端：强制测试 text 模块（= 文本分析模型 = LLM 引擎），probe 固定 text。
+
+    ⚠️ 与 api_llm_config_save 同类修法（t14 发现的 P1，本接口漏修）：不能「改本地
+    dict 后调用 api_ai_test()」—— api_ai_test 内部重新从 request.json 取值，本地
+    dict 的修改不保证生效（body 为空 dict 时 request.json or {} 会新建一份空 dict，
+    注入丢失 → 400 unknown module）。routes/ai.py 的测试逻辑没有抽出「接受 data 的
+    实现函数」，本文件在只改自身的前提下，通过覆盖 Flask 的 JSON 缓存让 api_ai_test
+    读到注入后的 module/probe（对齐 config_save「复制 + 显式注入」的稳健口径）。
+    """
+    data = dict(request.json or {})
     data["module"] = "text"
     data.setdefault("probe", "text")
+    # 覆盖 Flask 的 JSON 缓存：_cached_json 是 (normal, silent) 二元组（Flask 2.x/3.x
+    # 稳定），覆盖后 api_ai_test 内 request.json 会读到这份注入后的 data。
+    request._cached_json = (data, data)
     return api_ai_test()
