@@ -19,7 +19,7 @@ import type {
   AutopilotStatus, AutopilotProgress,
   Deliverable, DeliverablesResponse,
   Provider, ProvidersResponse,
-  AIConfigResponse, AITestResult, AIProviderModelsResponse,
+  AIConfigResponse, AITestResult, AIProviderModelsResponse, ModelFallback,
   UpscaleEnv, UpscaleSource, UpscaleSubmitResponse, UpscaleTask, UpscaleArtifact,
   AgentJob, AgentTool, AgentGuards, AgentKillState,
   CharacterOutfitsResponse, CharacterOutfitGenerateResponse,
@@ -1312,10 +1312,11 @@ export const aiConfigApi = {
    * 用 undefined 表示「不改动」，用空串表示「清空」——两者语义不同，别合并。
    */
   save: (module: string, base_url: string, model: string, api_key?: string, reasoning_effort?: string,
-        fallbacks?: { base_url: string; model: string; api_key?: string; label?: string; reasoning_effort?: string }[]) =>
+        fallbacks?: { base_url: string; model: string; api_key?: string; label?: string; reasoning_effort?: string }[],
+        model_fallbacks?: ModelFallback[]) =>
     request<{ success: boolean; module_config: any; config: AIConfigResponse['config']; message: string }>(
       '/ai/config',
-      { method: 'POST', body: JSON.stringify({ module, base_url, model, api_key, reasoning_effort, fallbacks }) }
+      { method: 'POST', body: JSON.stringify({ module, base_url, model, api_key, reasoning_effort, fallbacks, model_fallbacks }) }
     ),
   clear: (module?: string) =>
     request<{ success: boolean; config: AIConfigResponse['config']; message: string }>(

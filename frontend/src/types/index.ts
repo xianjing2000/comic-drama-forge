@@ -854,6 +854,13 @@ export interface AIFallbackModel {
   index?: number;
 }
 
+/** 同提供商备用模型（复用主模型 base_url + api_key，后端字段 model_fallbacks，t74） */
+export interface ModelFallback {
+  model: string;
+  reasoning_effort?: string;
+  label?: string;
+}
+
 export interface AIConfigModule {
   base_url: string;
   api_key: string;    // masked on read
@@ -862,6 +869,8 @@ export interface AIConfigModule {
   reasoning_effort?: string;
   /** 备用模型故障转移链（顺序即优先级），主模型挂 3 次自动切下一个 */
   fallbacks?: AIFallbackModel[];
+  /** 同提供商备用模型（复用主模型 api_key，顺序即优先级，t74） */
+  model_fallbacks?: ModelFallback[];
   updated_at: string | null;
   has_api_key?: boolean;  // whether a real key is stored
   key?: string;       // module key

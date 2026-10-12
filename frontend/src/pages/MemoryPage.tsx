@@ -102,7 +102,9 @@ export function MemoryPage() {
   const [clearingOld, setClearingOld] = useState(false);
 
   const loadLessonStats = () => {
-    memoryApi.lessonStats().then(setLessonStats).catch(() => {});
+    memoryApi.lessonStats().then(setLessonStats).catch((err) => {
+      console.warn('[memory] failed to load lesson stats:', err);
+    });
   };
 
   // C2（2026-09-23 收口）：原实现只有 `.finally` 没有 `.catch` —— memories/stats 任一
@@ -135,7 +137,7 @@ export function MemoryPage() {
         const list = Array.isArray(d?.insights) ? d.insights : [];
         setInsights(list.map((x: unknown) => typeof x === 'string' ? x : JSON.stringify(x)));
       })
-      .catch(() => {})
+      .catch((err) => { console.warn('[memory] failed to load insights:', err); })
       .finally(() => setInsightsLoading(false));
 
     // 项目下拉（失败静默降级为空列表，不影响教训列表）

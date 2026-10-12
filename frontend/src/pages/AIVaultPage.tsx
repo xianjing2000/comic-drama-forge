@@ -4,7 +4,7 @@ import { aiConfigApi, watermarkApi, promptEnhanceApi } from '@/api/client';
 import { Badge, Button, Card, ConfirmDialog, Input, Select, Skeleton } from '@/components/ui';
 import { AlertTriangle, Brain, CheckCircle2, ChevronDown, Eye, EyeOff, Pencil, RefreshCw, Search, X } from '@/components/ui/icons';
 import type { IconProps } from '@/components/ui/icons';
-import type { AIConfigModule, AIConfigResponse, AITestResult, AIFallbackModel, AIProviderModelsResponse } from '@/types';
+import type { AIConfigModule, AIConfigResponse, AITestResult, AIFallbackModel, AIProviderModelsResponse, ModelFallback } from '@/types';
 import { PromptManagerTab } from '@/components/PromptManagerTab';
 import { sanitizeErrorMessage } from '@/utils/errorText';
 
@@ -197,7 +197,7 @@ export function AIVaultPage() {
   /** 备用草稿表单的「提供商模型清单检测」状态（t3） */
   const [fbModelsState, setFbModelsState] = useState<ProviderModelsState>({ ...EMPTY_MODELS });
   /** 层级1：本提供商的备用模型（复用主模型 base_url + api_key，后端字段 model_fallbacks，t74 契约） */
-  const [modelFallbacks, setModelFallbacks] = useState<Record<ModuleKey, { model: string; label: string; reasoning_effort: string }[]>>({ text: [], qc: [] });
+  const [modelFallbacks, setModelFallbacks] = useState<Record<ModuleKey, ModelFallback[]>>({ text: [], qc: [] });
   const [mfDraft, setMfDraft] = useState<{ model: string }>({ model: '' });
   const [showAddMf, setShowAddMf] = useState<ModuleKey | null>(null);
   const [mfSaving, setMfSaving] = useState<ModuleKey | null>(null);
@@ -248,8 +248,8 @@ export function AIVaultPage() {
             qc: Array.isArray(qcCfg?.fallbacks) ? qcCfg!.fallbacks!.map(f => ({ ...f })) : [],
           });
           // 层级1：本提供商备用模型（model_fallbacks，t74）
-          const _mf = (m: any) => Array.isArray(m?.model_fallbacks)
-            ? m.model_fallbacks.map((f: any) => ({ model: f.model || '', label: f.label || '', reasoning_effort: f.reasoning_effort || '' }))
+          const _mf = (m?: AIConfigModule) => Array.isArray(m?.model_fallbacks)
+            ? m!.model_fallbacks!.map(f => ({ model: f.model || '', label: f.label || '', reasoning_effort: f.reasoning_effort || '' }))
             : [];
           setModelFallbacks({ text: _mf(textCfg), qc: _mf(qcCfg) });
           setFbDirty({ text: false, qc: false });
@@ -281,7 +281,7 @@ export function AIVaultPage() {
             watermark_text: String(w.text || ''),
           }));
         })
-        .catch(() => {}),
+        .catch((err) => { console.warn('[vault] failed to load watermark config:', err); }),
       // 加载提示词增强开关
       promptEnhanceApi.get()
         .then(d => {
@@ -292,7 +292,7 @@ export function AIVaultPage() {
             envOverridden: Boolean((d.env_overridden || {}).enhance || (d.env_overridden || {}).review),
           });
         })
-        .catch(() => {}),
+        .catch((err) => { console.warn('[vault] failed to load prompt-enhance config:', err); }),
     ]).finally(() => setLoading(false));
   }, []);
 
@@ -620,17 +620,16 @@ export function AIVaultPage() {
   const refreshModelFallbacks = async (module: ModuleKey) => {
     try {
       const d = await aiConfigApi.get();
-      const raw2 = (d.config || {}) as any;
-      const c2 = (raw2.modules || raw2) as Record<string, any>;
+      const c2 = d.config?.modules || {};
       const mfs = c2[module]?.model_fallbacks;
       setModelFallbacks(prev => ({
         ...prev,
-        [module]: Array.isArray(mfs) ? mfs.map((f: any) => ({ model: f.model || '', label: f.label || '', reasoning_effort: f.reasoning_effort || '' })) : [],
+        [module]: Array.isArray(mfs) ? mfs.map(f => ({ model: f.model || '', label: f.label || '', reasoning_effort: f.reasoning_effort || '' })) : [],
       }));
     } catch { /* 回读失败不影响已保存结果 */ }
   };
 
-  const persistModelFallbacks = async (module: ModuleKey, list: { model: string; label: string; reasoning_effort: string }[], okText?: string) => {
+  const persistModelFallbacks = async (module: ModuleKey, list: ModelFallback[], okText?: string) => {
     const state = config[module];
     if (!state.base_url.trim() || !state.model.trim()) {
       showMessage('error', t('vault.fallbackNeedMainFirst'));
@@ -638,25 +637,22 @@ export function AIVaultPage() {
     }
     setMfSaving(module);
     try {
-      // client.ts save 暂不支持 model_fallbacks（out-of-scope），此处按契约直接 POST /api/ai/config
-      const res = await fetch('/api/ai/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          module,
-          base_url: state.base_url.trim(),
-          model: state.model.trim(),
-          api_key: state.api_key.trim() || undefined,
-          reasoning_effort: state.reasoning_effort,
-          model_fallbacks: list,
-          fallbacks: (fallbacks[module] || []).map(f => ({
-            base_url: f.base_url?.trim(), model: f.model?.trim(),
-            api_key: f.api_key?.trim() || undefined, label: f.label?.trim() || undefined,
-            reasoning_effort: f.reasoning_effort,
-          })),
-        }),
-      });
-      const result = await res.json();
+      // 复用标准 aiConfigApi.save（t108 已补 model_fallbacks 参数），错误统一走 client 封装
+      const result = await aiConfigApi.save(
+        module,
+        state.base_url.trim(),
+        state.model.trim(),
+        state.api_key.trim() || undefined,
+        state.reasoning_effort,
+        (fallbacks[module] || []).map(f => ({
+          base_url: f.base_url?.trim() || '',
+          model: f.model?.trim() || '',
+          api_key: f.api_key?.trim() || undefined,
+          label: f.label?.trim() || undefined,
+          reasoning_effort: f.reasoning_effort,
+        })),
+        list,
+      );
       if (result.success) {
         await refreshModelFallbacks(module);
         showMessage('success', okText || t('vault.modelFallbackSaved'));
@@ -664,7 +660,8 @@ export function AIVaultPage() {
         showMessage('error', t('settings.saveFailed'));
       }
     } catch (err) {
-      showMessage('error', t('vault.saveFailedDetail', { err: err instanceof Error ? err.message : t('error.unknown') }));
+      const msg = err instanceof Error ? err.message : t('error.unknown');
+      showMessage('error', t('vault.saveFailedDetail', { err: sanitizeErrorMessage(msg) }));
     } finally {
       setMfSaving(null);
     }
