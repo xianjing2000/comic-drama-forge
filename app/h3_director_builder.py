@@ -86,6 +86,9 @@ FPS_DEFAULT = 24
 MIN_SEGMENT_FRAMES = 5
 #: 参考图槽位上限（equal 官方 Reference to Video autogrow：ref_image_0..8）
 MAX_REFERENCE_IMAGES = 9
+#: 兼容别名（t58 统一命名）：与 h3_common_refs 旧用的 LIMIT_REFERENCE_IMAGES 同义，
+#: 单一来源 = 本文件 MAX_REFERENCE_IMAGES（=9）；供既有引用方按此名取用，避免两处各定义一份。
+LIMIT_REFERENCE_IMAGES = MAX_REFERENCE_IMAGES
 #: 参考音频槽位上限（官方 Reference to Video autogrow：ref_audio_0..2，``<Audio N>``）
 MAX_REFERENCE_AUDIOS = 3
 #: 段级 LoRA 条数上限 —— 单一来源见顶部 from h3_segment_loras import MAX_SEGMENT_LORAS（=8）
