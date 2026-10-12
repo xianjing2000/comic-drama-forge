@@ -880,11 +880,11 @@ CONFIG_KEYS = (
     "image_qc_recheck",
     # G9/O1 图片/视频客观层阈值（2026-09-20 新增）
     "image_pixel_std_min", "video_max_drift",
-    # ⭐ 分镜链路**专用**重试轮数（2026-10-07 用户指定「分镜重试 2→1」）。
-    #    为什么单独开一个键而不直接改 max_retries：分镜单镜最坏开销 =
-    #    (1 + 重试) × (一次 GPU 出图 + 一次质检)，而分镜每集 20~30 镜**逐镜串行** ——
-    #    2 轮把最坏开销从 3 倍砍到 2 倍，收益全在分镜；而资产/视频链路不受影响
-    #    （它们重试的性价比不同，用户没要求改）。
+    # ⭐ 分镜链路**专用**重试轮数。沿革：2026-10-07 用户指定 2→1（分镜每集 20~30 镜逐镜
+    #    串行，单镜最坏开销 (1+重试) 倍，砍 1 轮收益全在分镜）；2026-10-13 T15 **恢复 2** ——
+    #    同日落地「critical_issues 非空 → 禁止软放行、落硬阻断」，重试成了带严重问题的镜
+    #    **唯一**的救回机制，1 轮会让它们直接硬阻断（缺镜 → 出片不完整）。
+    #    为什么单独开一个键而不直接改 max_retries：资产/视频链路重试的性价比不同，用户没要求改。
     #    ⚠️ 消费侧以通用 max_retries 作**上限**：用户把 max_retries 调到 0（全局不重试）时，
     #       分镜也随之 0，尊重更严的总开关。
     "storyboard_max_retries",
@@ -1312,10 +1312,13 @@ def _normalize(cfg: dict) -> dict:
     except Exception:  # noqa: BLE001
         cfg["video_max_drift"] = 0.60   # 2026-10-08：见 _DEFAULT_QC 上方说明（H3 对齐膨胀）
     for key, default, lo, hi in (("pass_score", 70, 0, 100), ("max_retries", 2, 0, 10),
-                                 # ⭐ 分镜专用重试（2026-10-07）：必须在此归一化，否则又是
-                                 #    「伪配置键」——CONFIG_KEYS 有、_empty_config 有，但字符串
-                                 #    "3" 或越界值原样生效（项目反复踩的坑）。范围与 max_retries 同。
-                                 ("storyboard_max_retries", 1, 0, 10),
+                                 # ⭐ 分镜专用重试：必须在此归一化，否则又是「伪配置键」——
+                                 #    CONFIG_KEYS 有、_empty_config 有，但字符串 "3" 或越界值
+                                 #    原样生效（项目反复踩的坑）。范围与 max_retries 同。
+                                 #    ⚠️ T15（2026-10-13）：默认 1 → 2，必须与 QC_CONFIG_DEFAULTS
+                                 #    的同名项**保持一致**；两处不一致时，「缺键」路径会在这里
+                                 #    被压回旧默认，表现为「改了默认值却不生效」。
+                                 ("storyboard_max_retries", 2, 0, 10),
                                  ("video_frame_count", 3, 1, 6), ("image_max_side", 1024, 256, 2048),
                                  ("image_max_tokens", 8192, 256, 131072),
                                  ("timeout", 180, 10, 900),
@@ -4371,9 +4374,20 @@ QC_CONFIG_DEFAULTS = {
         "audio_max_drift": 0.50,          # 与预期时长偏差上限（比例，超限扣分）
         "pass_score": 70,            # 合格线（0-100），score >= pass_score 且 pass != false 视为达标
         "max_retries": 2,            # 不达标最大重试次数
-        # ⭐ 分镜链路专用重试轮数（2026-10-07 用户指定 2→1）。未配置时取本默认值 1
-        #    （存量配置没有这个键 → 自然读到 1，无需迁移）；消费侧再与 max_retries 取 min。
-        "storyboard_max_retries": 1,
+        # ⭐ 分镜链路专用重试轮数（T15 2026-10-13：1 → 2；沿革见上方 CONFIG_KEYS 注释）。
+        #    为什么改回 2：同日落地「critical_issues 非空 → 禁止软放行、落硬阻断」
+        #    （sb_helpers._sb_soft_release_blocked / storyboard_helpers 软放行判据），
+        #    重试成了这类镜**唯一**的救回机制；只有 1 轮时一次不达标即硬阻断 → 缺镜 →
+        #    出片不完整（实测逆天系统_全书 46 镜里 6 镜带 critical_issues：11/13/18/25/28/44）。
+        #    消费侧实际轮数：storyboard_helpers 里 max_retries = min(通用 max_retries, 本键)，
+        #    通用 max_retries 默认 2 → min(2, 2) = 2，**不会被压回 1**（T15 已实测）。
+        #    ⚠️ 本默认值只覆盖「配置里缺这个键」的情形；存量 qc_config.json 若**显式**写了 1，
+        #       load_config 是文件优先 → 仍读到 1。要真正生效需一次性把该键同步为 2。
+        #    ⚠️ 读日志别被字面误导（T13 踩过）：storyboard_helpers 的重试日志是
+        #       「第 %d 次重试」= attempt + 1（attempt 从 0 起），所以 max_retries=1 时
+        #       日志会打印「第 2 次重试」——**实际只重试了 1 次**。真实轮数看
+        #       「[分镜重试] 本批分镜重试轮数 N」那一行。
+        "storyboard_max_retries": 2,
         # ⭐ 2026-10-08（用户拍板 A 方案）：分镜图质检「软放行」—— 质检不达标只记录、
         #    仍写入正式目录。动机（实测）：同一项目内已通过的镜3 九宫格雷同度 0.831，
         #    而信息量更大的镜4/28/37（边缘密度 8.29/11.83/8.55，均高于已通过镜1 的
