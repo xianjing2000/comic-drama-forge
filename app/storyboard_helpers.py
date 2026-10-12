@@ -379,6 +379,19 @@ def _storyboard_retry_shot_impl():
                                }, style=(shot.get("style") or _rs_style))
         except Exception as e:  # noqa: BLE001
             logger.warning(f"提示词预检记录落盘失败：{e}")
+    # ⭐ T25（2026-10-12）：单镜重跑**真通过**后必须同步刷新产物旁 `<shot>.meta.json` ——
+    #   meta 是软放行事实的**耐久源**（manifest 被后续重跑重写、断点续跑只回填精简信息时，
+    #   画布会回落到 meta 读软放行）。若只清 manifest 标记而不更新 meta，这一镜会因
+    #   **陈旧 meta** 继续在画布上显示为「软放行」（假警示，用户以为没修好）。
+    #   ⚠️ _write_artifact_meta 是**整份覆盖写**：必须带上 seed/prompt，不能只写 extra。
+    try:
+        _write_artifact_meta(
+            dst, kind="storyboard", project_name=project, seed=seed, prompt=prompt,
+            workflow_key="storyboard_gen",
+            qc={**(gate or {}), "soft_accepted": False, "delivered": True, "passed": True},
+            shot_id=shot_id, extra={"qc_soft_accepted": False})
+    except Exception as _me:  # noqa: BLE001
+        logger.warning("单镜重跑：产物 meta.json 刷新失败（忽略，不影响入库）：%s", _me)
     _sub = f"ep{int(_ep):02d}/" if _ep and int(_ep) > 1 else ""
     return jsonify({"success": True, "project": project, "shot_id": shot_id, "seq": seq,
                     "path": dst,
@@ -687,6 +700,124 @@ def restat_storyboard_manifest(project: str, episode_no=None, write: bool = Fals
         out["error"] = f"{type(e).__name__}: {e}"
         logger.warning("分镜 manifest 重统计失败（%s 第%s集）：%s", project, episode_no, e)
     return out
+
+
+def _sb_canvas_qc(sb_item, sb_file="", base_dir="", seq=None) -> dict:
+    """canvas 卡片 storyboard.qc 的**规范化投影**（T25，2026-10-12）。
+
+    用户实测（生产 API）：manifest 里 shots[].qc_soft_accepted 有 17 条、顶层
+    soft_accepted_count=17，但 canvas 卡片的 storyboard 里**根本没有**这些字段
+    （键集合只有 exists/url/path/qc/success/...），真通过卡的 qc 又只剩
+    `{status:"skipped",...}` 这类旧字段；manifest 缺该镜时更是空对象 `{}` ——
+    前端拿不到任何质量信号，「界面不再全绿」在 API 层没真正达成。
+
+    本函数把 `item["qc"]` 原样保留后**补齐 T12 质量字段**，并保证任何情况下都
+    不是空对象：soft_accepted / critical_issues / critical_issue_count /
+    delivered / passed / status。键名与 manifest 顶层字段同义，前端可直接消费。
+    """
+    item = sb_item if isinstance(sb_item, dict) else {}
+    qc = dict(item.get("qc")) if isinstance(item.get("qc"), dict) else {}
+    _ci_own = _sb_critical_issues(item.get("qc_gate") or {}, qc, item)
+    _soft = _sb_soft_accepted(item)
+    _fact = {"soft": False, "critical_issues": []}
+    # 历史条目（断点续跑精简形态）可能既无软放行标记也无 critical → 回落到产物旁 meta.json。
+    #
+    # ⚠️ 取舍（T25 明确）：meta 的软放行事实**可以把 item 的「通过」翻回软放行**。
+    #   两个方向都出现过，必须选一个：
+    #     · 漏报（真实软放行被显示成通过）—— 本任务要修的就是「界面骗人」，代价最大；
+    #     · 误报（重跑已通过、但 meta 还是旧的软放行记录）—— 只多一个警示徽标。
+    #   故选**保守方向**：meta 说软放行就算软放行。为了让误报能自愈，
+    #   单镜重跑真通过时会**同步重写 meta**（见 _storyboard_retry_shot_impl，
+    #   extra.qc_soft_accepted=False），因此该组合只会出现在历史数据里、且下次重跑即消失。
+    if not _soft or not _ci_own:
+        _fact = _sb_artifact_meta_soft(sb_file, seq, base_dir)
+    _soft = bool(_soft or _fact.get("soft"))
+    _ci = _ci_own or list(_fact.get("critical_issues") or [])
+    _exists = bool(sb_file) and os.path.isfile(str(sb_file))
+    _delivered = bool(item.get("delivered") or item.get("success") or _soft or _exists)
+    qc["soft_accepted"] = _soft
+    qc["delivered"] = _delivered
+    qc["critical_issues"] = _ci
+    qc["critical_issue_count"] = len(_ci)
+    if not qc.get("status"):
+        qc["status"] = ("soft_accepted" if _soft else
+                        "blocked" if item.get("qc_blocked") else
+                        "passed" if item.get("success") else
+                        "skipped" if item.get("skipped") else "unknown")
+    qc.setdefault("passed", bool(item.get("success")) and not _soft)
+    if _soft:
+        # 软放行：产物已入库但质检未达标 —— 与 worker / 回填口径一致（accept 但不算 passed）
+        qc["accept"] = True
+        qc["blocked"] = False
+        qc["entry_blocked"] = False
+        qc["asset_written"] = True
+        qc["passed"] = False
+    qc.setdefault("enabled", False)
+    return qc
+
+
+def sb_quality_parity(project: str, episode_no=None) -> dict:
+    """回归断言（T25）：**canvas 卡片可见的计数 == manifest 顶层计数**。
+
+    与 canvas 路由同源：读同一份 manifest，用同一 `_sb_quality_tally` 与
+    `_sb_canvas_qc` 算出「前端实际能从卡片读到的」三类计数，再与 manifest 顶层的
+    success_count / soft_accepted_count / qc_blocked_count / critical_issue_count 比对。
+    任何一项不等 → `ok=False` 并给出两侧明细（供自检脚本 / 回归用例断言）。幂等只读。
+    """
+    out = {"ok": False, "project": project, "episode_no": episode_no}
+    try:
+        _d = _ep_read_dir(STORYBOARDS_DIR, project, episode_no)
+        mpath = os.path.join(_d, "storyboard_manifest.json")
+        out["episode_dir"] = _d
+        out["manifest_path"] = mpath
+        if not os.path.isfile(mpath):
+            out["error"] = "分镜 manifest 不存在"
+            return out
+        manifest = read_json_strict(mpath, {}) or {}
+        if not isinstance(manifest, dict):
+            manifest = {}
+        items = [s for s in (manifest.get("shots") or []) if isinstance(s, dict)]
+        tally = _sb_quality_tally(items, base_dir=_d, use_artifact_meta=True)
+        visible = {"success": 0, "soft": 0, "blocked": 0, "critical": 0}
+        for it in items:
+            qc = _sb_canvas_qc(it, it.get("file") or "", _d, _sb_item_seq(it))
+            if qc.get("soft_accepted"):
+                visible["soft"] += 1
+                if qc.get("critical_issues"):
+                    visible["critical"] += 1
+            elif it.get("qc_blocked") or qc.get("blocked") is True:
+                visible["blocked"] += 1
+            elif qc.get("passed"):
+                visible["success"] += 1
+        man = {"success": manifest.get("success_count"),
+               "soft": manifest.get("soft_accepted_count"),
+               "blocked": manifest.get("qc_blocked_count"),
+               "critical": manifest.get("critical_issue_count")}
+        # ⭐ T25：同时给出**产物 meta.json 侧**的软放行计数（软放行事实的耐久源）——
+        #   不变式是「canvas 可见 soft == meta.json 计数」，而不只是与 manifest 顶层相等
+        #   （manifest 会被重跑重写、历史标记会丢，meta 才是随图落盘的那份）。
+        meta_soft = meta_crit = 0
+        for it in items:
+            _f = _sb_artifact_meta_soft(it.get("file") or "", _sb_item_seq(it), _d)
+            if _f.get("soft"):
+                meta_soft += 1
+                if _f.get("critical_issues"):
+                    meta_crit += 1
+        out.update({"manifest": man, "canvas_visible": visible,
+                    "meta_json": {"soft": meta_soft, "critical": meta_crit},
+                    "total": tally["total"]})
+        _mism = [k for k in ("success", "soft", "blocked", "critical")
+                 if man.get(k) != visible.get(k)]
+        if meta_soft != visible["soft"]:
+            _mism.append("meta_soft")
+        if meta_crit != visible["critical"]:
+            _mism.append("meta_critical")
+        out["mismatches"] = _mism
+        out["ok"] = not _mism
+        return out
+    except Exception as e:  # noqa: BLE001
+        out["error"] = f"{type(e).__name__}: {e}"
+        return out
 
 
 def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,

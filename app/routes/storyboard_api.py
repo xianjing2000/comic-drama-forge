@@ -50,6 +50,8 @@ from routes._shared import _shot_seq
 from routes._shared import _trash_move
 from routes._shared import comfyui_client
 from shot_helpers import _shot_coverage_map
+from storyboard_helpers import _sb_canvas_qc
+from storyboard_helpers import _sb_quality_tally
 from storyboard_helpers import _storyboard_retry_shot_impl
 from storyboard_helpers import _storyboard_scratch_map
 from storyboard_helpers import _unify_ref_canvas
@@ -91,15 +93,23 @@ def api_storyboard_canvas(project_name):
     sb_map = _keyframe_sb_map(project, script, episode_no=_cv_ep)
     sb_dir = _ep_read_dir(STORYBOARDS_DIR, project, _cv_ep)
     sb_manifest = {}
+    # ⭐ T25（2026-10-12）：同时保留 manifest 的**原始条目列表** —— 卡片的质量字段
+    #   （soft_accepted / critical_issues / delivered）与 summary 的三类计数必须与
+    #   manifest 顶层字段**同源同值**，不能再走「投影时丢字段」的老路。
+    sb_manifest_items = []
     mpath = os.path.join(sb_dir, "storyboard_manifest.json")
     if os.path.isfile(mpath):
         try:
             with open(mpath, "r", encoding="utf-8") as f:
-                for s in ((json.load(f) or {}).get("shots") or []):
-                    if isinstance(s, dict):
-                        sb_manifest[_shot_num_key(s.get("shot_id"))] = s
+                sb_manifest_items = [s for s in ((json.load(f) or {}).get("shots") or [])
+                                     if isinstance(s, dict)]
+            for s in sb_manifest_items:
+                sb_manifest[_shot_num_key(s.get("shot_id"))] = s
         except Exception as e:  # noqa: BLE001
             logger.warning(f"分镜 manifest 读取失败：{e}")
+    # 与 manifest 顶层字段同源的三类质量计数（软放行**不计入** success，T12 口径）
+    sb_quality = _sb_quality_tally(sb_manifest_items, base_dir=sb_dir,
+                                   use_artifact_meta=True)
 
     # 视频
     vid_dir = _ep_dir(os.path.join(VIDEOS_DIR, project), _cv_ep)
@@ -154,6 +164,12 @@ def api_storyboard_canvas(project_name):
         seq = _shot_seq(sid, i + 1)
         sb_file = sb_map.get(k) or sb_map.get(f"shot_{seq:02d}")
         sb_item = sb_manifest.get(k) or {}
+        # ⭐ T25：规范化 qc 投影 —— 保证**非空**且携带 T12 质量字段
+        #   （soft_accepted / critical_issues / delivered / passed）。旧实现直接
+        #   `sb_item.get("qc") or {}`：manifest 缺该镜时给 {}，历史精简条目又只有
+        #   status/label —— 前端据此什么都判断不出来。
+        card_qc = _sb_canvas_qc(sb_item, sb_file or "", sb_dir, seq)
+        card_soft = bool(card_qc.get("soft_accepted"))
         vid = vid_map.get(k) or vid_map.get(f"shot_{seq:02d}")
         kf_end = os.path.join(kf_dir, f"shot_{seq:02d}_end.png")
         cards.append({
@@ -174,9 +190,17 @@ def api_storyboard_canvas(project_name):
                 "url": (f"/api/storyboards/file/{project}/{_cv_sub}shot_{seq:02d}.png"
                         if sb_file else ""),
                 "path": sb_file or "",
-                "qc": sb_item.get("qc") or {},
-                "success": bool(sb_item.get("success")),
-                "blocked": bool(sb_item.get("qc_blocked")),
+                "qc": card_qc,
+                # 软放行**不计入** success/blocked（T12/T25 统一口径）
+                "success": bool(sb_item.get("success")) and not card_soft,
+                "blocked": bool(sb_item.get("qc_blocked")) and not card_soft,
+                # ⭐ T25：把软放行/交付事实**显式**放到卡片顶层 —— 用户实测反馈
+                #   「manifest 有 17 条软放行、canvas 软放行 0」，正是因为旧投影只把
+                #   item["qc"] 原样带出，item 顶层的 qc_soft_accepted 完全丢失。
+                "qc_soft_accepted": card_soft,
+                "soft_accepted": card_soft,
+                "delivered": bool(card_qc.get("delivered")),
+                "critical_issues": card_qc.get("critical_issues") or [],
                 "error": sb_item.get("error") or "",
                 # ⭐ 生成中快照（2026-10-02）：正式产物未落盘、但 scratch 里已有该镜
                 #    的中间图时给出预览。exists/url 语义不变，前端据此显示「生成中」。
@@ -203,9 +227,25 @@ def api_storyboard_canvas(project_name):
                          "unit_count": len(cover_map.get(str(sid)) or [])},
         })
 
+    # ⭐ T25 回归断言（运行时、响亮不静默）：卡片可见的软放行计数必须等于 manifest
+    #   顶层 soft_accepted_count —— 不等即说明投影又丢了 qc 字段（历史 bug 复发）。
+    _vis_soft = sum(1 for c in cards if c["storyboard"].get("soft_accepted"))
+    if _vis_soft != (sb_quality.get("soft_accepted_count") or 0):
+        logger.warning(
+            "画布软放行计数与 manifest 不一致（canvas=%s manifest=%s，project=%s ep=%s）："
+            "卡片投影可能丢失 qc 字段", _vis_soft, sb_quality.get("soft_accepted_count"),
+            project, _cv_ep)
+
     summary = {
         "shot_count": len(cards),
         "storyboard_ready": sum(1 for c in cards if c["storyboard"]["exists"]),
+        # ⭐ T25：三类质量计数（真通过 / 软放行 / 阻断）—— 与 manifest 顶层字段同源同值。
+        #   前端据此显示「真通过 29 / 软放行 17（37%）/ 其中 6 镜带严重问题」。
+        "success_count": sb_quality["success_count"],
+        "soft_accepted_count": sb_quality["soft_accepted_count"],
+        "critical_issue_count": sb_quality["critical_issue_count"],
+        "qc_blocked_count": sb_quality["qc_blocked_count"],
+        "delivered_count": sb_quality["delivered_count"],
         "video_ready": sum(1 for c in cards if c["video"]["exists"]),
         "keyframe_end_ready": sum(1 for c in cards if c["keyframe"]["end_exists"]),
         "qc_blocked": sum(1 for c in cards if c["storyboard"]["blocked"]),
