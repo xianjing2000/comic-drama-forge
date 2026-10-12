@@ -5,7 +5,7 @@
   · read_novel_text / NOVELS_DIR  ← config + novel_parser（叶子模块，直接 import）
   · lock / generation_state       ← job_state（共享状态唯一来源）
   · novel_screenplay / LLMError   ← 各自模块
-  · _current_llm_client           ← 延迟 import routes._shared 的实现
+  · _current_llm_client           ← 延迟 import shared_ai 的实现
       （那里是唯一口径；workers 不该另建一套，否则又会出现
         「两处定义、改一处漏一处」）
   · logger                    ← 改为模块 logger（本次唯一的行为调整：
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 def _current_llm_client():
     '''延迟取当前 LLM 客户端。
 
-    走 routes._shared 的唯一实现（那里已处理 ai_config 的按模块路由、可选客户端等
+    走 shared_ai 的唯一实现（那里已处理 ai_config 的按模块路由、可选客户端等
     细节）。延迟 import 是为了避免 workers 与 routes 的模块级循环依赖。
     '''
     from shared_ai import _current_llm_client as _impl

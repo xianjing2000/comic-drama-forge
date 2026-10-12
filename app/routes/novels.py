@@ -389,6 +389,23 @@ def api_novel_chapter_preflight(novel_id, chapter_index):
     data = request.json or {}
     proj = _resolve_novel_project(data, meta)
     key = _novel_key(meta, proj["dir_key"])
+    # 接线 force（t55）：force=false（默认）且已有前置解析结果 → 直接复用，不重复 LLM 解析；
+    # force=true 才重新解析覆盖（save_preflight 覆盖写）。
+    force = bool(data.get('force'))
+    if not force:
+        existing = chapter_preflight.load_preflight(CONTINUITY_DIR, key, int(chapter_index))
+        if existing:
+            return jsonify({
+                "success": True,
+                "chapter_index": int(chapter_index),
+                "chapter_title": existing.get("chapter_title"),
+                "result": existing,
+                "path": chapter_preflight.preflight_path(CONTINUITY_DIR, key, int(chapter_index)),
+                "project_key": key,
+                "reused": True,
+                "characters": len(existing.get("characters") or []),
+                "key_events": len(existing.get("key_events") or []),
+            })
     _full_text = read_novel_text(NOVELS_DIR, meta["novel_id"])
     ch_text = _full_text[int(target.get("start") or 0):int(target.get("end") or 0)]
 

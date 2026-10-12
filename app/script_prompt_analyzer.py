@@ -238,6 +238,11 @@ def analyze_shots(client, script: dict, ref_mode: str = "character_scene", shot_
         except LLMError as e:
             errors.append(f"镜头 {shot.get('shot_id')} 失败：{e}")
             logger.warning(f"镜头 {shot.get('shot_id')} 提示词生成失败：{e}")
+        except Exception as e:  # noqa: BLE001
+            # 扩大捕获：chat_json 返回非 dict / 结构异常等不应中断整批，
+            # 已处理的镜头保留，后续镜头继续。
+            errors.append(f"镜头 {shot.get('shot_id')} 异常：{type(e).__name__}: {e}")
+            logger.warning(f"镜头 {shot.get('shot_id')} 提示词生成异常：{type(e).__name__}: {e}")
     return {"updated": updated, "total": len(targets), "errors": errors, "invalid": invalid}
 
 

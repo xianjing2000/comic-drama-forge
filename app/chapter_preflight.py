@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 PREFLIGHT_VERSION = "chapter_preflight_v1"
 _PREFLIGHT_SUBDIR = "preflight"
 
+# 前置解析 prompt 的正文长度上限：超出则首尾各留一半、中间省略（控制单次请求体量）。
+PREFLIGHT_PROMPT_CHAR_CAP = 12000
+PREFLIGHT_PROMPT_HEAD_CHARS = 6000   # 截断时头部保留的字符数
+PREFLIGHT_PROMPT_TAIL_CHARS = 6000   # 截断时尾部保留的字符数
+
 _SYSTEM = (
     "你是漫剧编剧组的前置解析器。你的任务是在正式生成剧本之前，"
     "对单章原文做深度解析，输出固定 JSON，供后续集生成约束人物行为不 OOC。"
@@ -99,8 +104,10 @@ def save_preflight(continuity_dir: str, project_key: str, result: dict) -> str:
 def _build_prompt(novel_title: str, chapter_index: int, chapter_title: str,
                   chapter_text: str) -> str:
     text = (chapter_text or "").strip()
-    if len(text) > 12000:
-        text = text[:6000] + "\n……（中略）……\n" + text[-6000:]
+    if len(text) > PREFLIGHT_PROMPT_CHAR_CAP:
+        text = (text[:PREFLIGHT_PROMPT_HEAD_CHARS]
+                + "\n……（中略）……\n"
+                + text[-PREFLIGHT_PROMPT_TAIL_CHARS:])
     return _PROMPT_TEMPLATE.format(
         novel_title=novel_title,
         chapter_index=chapter_index,

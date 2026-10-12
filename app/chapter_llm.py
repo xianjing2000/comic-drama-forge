@@ -84,7 +84,9 @@ def _sanitize_one(pat: str) -> str:
     p = (pat or "").strip()
     if not p or len(p) > MAX_PATTERN_LEN:
         return ""
-    # 统一加上多行语义，避免模型漏写 re.M 时 finditer 只匹配首行
+    # 编译校验用「调用方等价口径」：临时加 (?m) 模拟 split_chapters 的 re.M，确保在
+    # MULTILINE 下也能编译；返回值仍用原 p —— 调用方 split_chapters 会以 re.M 重新编译，
+    # 无需在返回的正则里内联 (?m)。
     body = p if p.startswith("(?m)") else "(?m)" + p
     try:
         re.compile(body)
@@ -190,7 +192,9 @@ def structure_rows(chapters, text, preview_chars=STRUCTURE_PREVIEW_CHARS,
     lim = max(20, int(max_rows or STRUCTURE_MAX_ROWS))
     picked = list(chapters[:lim])
     if len(chapters) > lim:
-        picked = picked + list(chapters[-5:])
+        # 去重：末尾 5 条可能与前段重叠（len(chapters) 略大于 lim 时），按对象身份剔除
+        _seen = {id(ch) for ch in picked}
+        picked = picked + [ch for ch in chapters[-5:] if id(ch) not in _seen]
     out = []
     for ch in picked:
         if not isinstance(ch, dict):
@@ -318,4 +322,4 @@ def analyze_chapter_structure(client, chapters, text, novel_title=""):
                     verdict.get("first_content_index"))
     else:
         logger.info("chapter_llm：目录结构体检未给出可采信结论，沿用规则切分")
-    return verdict
+    return verdict
