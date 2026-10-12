@@ -87,6 +87,10 @@ from qc_helpers import (  # noqa: F401, E402
 from lesson_helpers import (_apply_audio_hints, _qc_lesson_from_record,  # noqa: F401, E402
                              _record_audio_qc_lesson, _record_preflight_lesson, _record_qc_lesson)
 from shared_project import _first_existing, _shot_num_key, comfyui_client  # noqa: F401  再导出
+# ⚠️ h3_cache_name 是 comfyui_client 的**模块级函数**（非实例方法）：必须从模块 import，
+#    不能走上面的实例 comfyui_client（它是 shared_project 里 ComfyUIClient() 单例，无此属性
+#    → AttributeError，t124 P0 根因）。
+from comfyui_client import h3_cache_name
 from fs_atomic import atomic_write_json, read_json_strict
 import cancellation
 import comfyui_job_store  # 崩溃免重渲检查点（2026-09-29）：种子沿用判据 + 台账查询
@@ -2075,7 +2079,7 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     #   「第 2 场的 seg_0000 覆盖第 1 场的」）→ 「段都算完了却合成不出 mp4」
                     #   的另一主因。命名口径 <项目>__ep<集号>__s<场次>：同场重跑名字不变 →
                     #   复用同一目录（保住断点续跑收益），不同场次/集次彼此隔离。
-                    _cn_scene = comfyui_client.h3_cache_name(project_name, int(_epn), _sn)
+                    _cn_scene = h3_cache_name(project_name, int(_epn), _sn)
                     # ⭐ t18：长场次主动分批（MJSCXT_H3_BATCH_SEGMENTS，默认 0 = 不分批）。
                     #   单次提交 N 段的总超时有限，极端长场次（28 段 × 17min ≈ 8h）一旦中途
                     #   失败就要整批重来；分批把失败面压到一批。⚠️ 批边界是**硬切**（H3 段间
@@ -2100,7 +2104,7 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                                                  f"{episode_tag or 'episode'}_s{_sn:02d}"
                                                  f"_b{_bi:02d}"),
                                 # 每批独立缓存目录（批之间互不覆盖，也不与整场冲突）
-                                cache_name=comfyui_client.h3_cache_name(project_name, int(_epn), _sn, batch=_bi),
+                                cache_name=h3_cache_name(project_name, int(_epn), _sn, batch=_bi),
                                 seed=comfyui_job_store.get_or_create_seed(
                                     f"video|{project_name}|{episode_tag or 'episode'}"
                                     f"|scene{_sn}|b{_bi}",
