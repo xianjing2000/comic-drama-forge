@@ -4528,8 +4528,15 @@ class ComfyUIClient:
         if slot_duplicates:
             logger.warning(f"分镜参考图存在槽位复用 {len(slot_duplicates)} 处: {slot_duplicates}")
         if slot_cleared:
-            logger.info(f"分镜参考图空槽位已留空 {len(slot_cleared)} 处（Qwen-Image-2.1 "
-                        f"「容量非目标」，不塞重复图）: {slot_cleared}")
+            # ⚠️ 措辞务必写「删除节点」而不是「留空」（2026-10-12 修）：
+            # 旧文案是「空槽位已留空」，读起来像「空槽仍占着、节点还在跑」，
+            # 实测会误导排查方向（连开发者也据此以为 9 组节点每次都执行）。
+            # 实际行为见上方 4477-4495：**连同 LoadImageOutput 与中间缩放层一起
+            # 从 API prompt 里 pop 掉**，不提交给 ComfyUI 执行。
+            # 实测裁剪幅度：模板 9+9=18 个槽位节点 -> 实际提交 4+4=8 或 3+3=6。
+            logger.info(f"分镜参考图空槽位已删除节点 {len(slot_cleared)} 处"
+                        f"（LoadImageOutput + 中间缩放层，不提交执行；"
+                        f"Qwen-Image-2.1「容量非目标」，不塞重复图）: {slot_cleared}")
         logger.info(f"分镜参考图已注入 {len(ref_values)} 个槽位（共 {len(slots)} 槽）: {ref_values}")
 
         # 4) 输出文件名前缀
