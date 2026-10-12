@@ -208,6 +208,107 @@ def is_stale(rec: Dict[str, Any], *, now: Optional[float] = None) -> bool:
     return ((now if now is not None else _now()) - hb) > max(1.0, ttl)
 
 
+# ===================== 租约丢失留痕（t1，2026-10-12） =====================
+#
+# 为什么需要：租约「被回收 / 易主」这件事原先只留在**回收方**的一次 warning 日志里，
+# 事后无法回答「这一集上一次是不是跑挂了」。前端的表现因此是「进度条永远停在那里」
+# —— 没人知道执行体已经没了。
+#
+# 做法：丢失/回收时在租约目录旁写一份 **<scope>.<hash>.lost.json** 留痕（旁路文件，
+# 与活跃租约 <scope>.<hash>.json 分开，绝不影响互斥判据）。下一个执行体开跑时
+# 调 consume_lost_marker **取走并告警一次**（取走即清，避免永久噪音）。
+#
+# 语义与失败姿态：
+#   · 只写旁路 JSON，写失败一律吞掉（租约子系统 fail-open，绝不停产线）；
+#   · 不是锁，不参与 is_stale / acquire 的任何判定 —— 纯观测信号。
+
+#: 留痕记录的 kind 标记（list_leases / 清理逻辑据此跳过）
+LOST_MARKER_KIND = "lost_marker"
+
+
+def lost_marker_path(scope: str) -> str:
+    """失联留痕路径（<lease_dir>/<scope>_<hash>.lost.json）。"""
+    digest = hashlib.sha1(str(scope or "").encode("utf-8", "ignore")).hexdigest()[:10]
+    return os.path.join(lease_dir(), "%s.%s.lost.json" % (_safe(scope), digest))
+
+
+def mark_lost(scope: str, reason: str, detail: Optional[Dict[str, Any]] = None,
+              *, owner: str = "") -> Dict[str, Any]:
+    """记录一次「租约丢失 / 被回收」留痕；返回写入内容（失败返回 {}，**绝不抛异常**）。
+
+    调用点：① Lease.heartbeat 发现易主；② acquire / reclaim_stale 回收过期租约；
+    ③ pipeline 执行中途发现自己已失去租约（见 pipeline._check_lease_alive）。
+    """
+    try:
+        rec = {"kind": LOST_MARKER_KIND, "scope": str(scope), "reason": str(reason or ""),
+               "detail": dict(detail or {}), "owner": str(owner or ""),
+               "lost_at": _now(), "lost_at_str": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "pid": os.getpid(), "host": _host()}
+        path = lost_marker_path(scope)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not _write_atomic(path, rec):
+            return {}
+        logger.warning("记录租约失联留痕：%s（原因=%s，原 owner=%s pid=%s）",
+                       scope, reason,
+                       (detail or {}).get("previous_owner") or (detail or {}).get("owner") or owner,
+                       (detail or {}).get("previous_pid") or (detail or {}).get("pid") or "")
+        return rec
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug("写租约失联留痕失败（忽略）：%s", e)
+        return {}
+
+
+def read_lost_marker(scope: str) -> Dict[str, Any]:
+    """读取失联留痕；无 / 损坏 → {}（只读，不清理）。"""
+    try:
+        rec = _read(lost_marker_path(scope))
+        return rec if rec.get("kind") == LOST_MARKER_KIND else {}
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug("读租约失联留痕失败（按无处理）：%s", e)
+        return {}
+
+
+def clear_lost_marker(scope: str) -> bool:
+    """删除失联留痕（幂等）。"""
+    try:
+        os.remove(lost_marker_path(scope))
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError as e:
+        logger.debug("清理租约失联留痕失败（忽略）：%s", e)
+        return False
+
+
+def list_lost_markers() -> list:
+    """列出**全部**失联留痕（诊断 / 巡检用，含 scope / reason / lost_at）。"""
+    out = []
+    d = lease_dir()
+    try:
+        names = sorted(os.listdir(d)) if os.path.isdir(d) else []
+    except OSError:
+        return out
+    for n in names:
+        if not n.endswith(".lost.json"):
+            continue
+        rec = _read(os.path.join(d, n))
+        if rec and rec.get("kind") == LOST_MARKER_KIND:
+            out.append(rec)
+    return out
+
+
+def consume_lost_marker(scope: str) -> Dict[str, Any]:
+    """读取**并取走**失联留痕（供下一个执行体在开跑时告警一次）；无 → {}。
+
+    「取走即清」是刻意的：留痕代表「上一次执行体失联」，重复告警会变成噪音；
+    真正的历史由集级日志（pipeline 的 lease_recovered / lease_lost 事件）保留。
+    """
+    rec = read_lost_marker(scope)
+    if rec:
+        clear_lost_marker(scope)
+    return rec
+
+
 class Lease:
     """一次租约持有。心跳由守护线程自动刷新，release() 会停掉它。"""
 
@@ -219,7 +320,11 @@ class Lease:
         self.ok, self.degraded, self.owner = bool(ok), bool(degraded), str(owner or "")
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        #: 租约是否已丢失（心跳发现易主/被回收）。t1（2026-10-12）起调用方**必须消费**
+        #: 它 —— 见 pipeline._check_lease_alive：丢失即立刻停止本执行体，不再静默跑完。
         self.lost = False
+        #: 丢失原因（人类可读），随 lost 一起置位，供日志/前端展示。
+        self.lost_reason = ""
 
     # ---------------- 心跳 ----------------
     def heartbeat(self) -> bool:
@@ -230,8 +335,17 @@ class Lease:
         if cur.get("token") != self.token:
             if not self.lost:
                 self.lost = True
+                self.lost_reason = ("文件租约已易主或被回收（本 token %s…，现持有者 "
+                                    "token %s…）" % (self.token[:6],
+                                                     str(cur.get("token") or "无")[:6]))
                 logger.warning("租约已易主或被回收，停止心跳：%s（本 token %s…）",
                                self.scope, self.token[:6])
+                # t1：留痕 —— 别的进程/下次开跑可据此知道「这一集的执行体失联过」。
+                mark_lost(self.scope, "lease_taken_over",
+                          {"token_prefix": self.token[:6],
+                           "current_owner": cur.get("owner") or "",
+                           "current_pid": cur.get("pid") or 0},
+                          owner=self.owner)
             return False
         cur["heartbeat_at"] = _now()
         return _write_atomic(self.path, cur)
@@ -330,6 +444,17 @@ def acquire(scope: str, *, owner: str = "", ttl_sec: int = DEFAULT_TTL_SEC,
                    scope, cur.get("owner"), cur.get("pid"), cur.get("host"),
                    time.strftime("%Y-%m-%d %H:%M:%S",
                                  time.localtime(float(cur.get("heartbeat_at") or 0))))
+    # t1（2026-10-12）：回收 = 上一个执行体失联（崩溃 / 卡死 / 心跳停）。
+    # 写一份旁路留痕，让「该集上一次是失联死的」成为可读事实 —— 前端与下一次开跑
+    # 都据此显示「任务已失联（已回收，可重跑）」，而不是「进度条停在那里没人知道」。
+    mark_lost(scope, "stale_reclaimed",
+              {"previous_owner": cur.get("owner") or "", "previous_pid": cur.get("pid") or 0,
+               "previous_host": cur.get("host") or "",
+               "heartbeat_at": float(cur.get("heartbeat_at") or 0),
+               "heartbeat_age_sec": round(_now() - float(cur.get("heartbeat_at") or 0), 1),
+               "ttl_sec": ttl, "reclaimed_by_pid": os.getpid(),
+               "reclaimed_by_owner": owner or ""},
+              owner=owner)
     try:
         if _try_create(path, me):
             lk = Lease(scope, token, path, ttl, hb, ok=True, owner=owner)
@@ -370,6 +495,13 @@ def reclaim_stale(scope: str, *, reason: str = "人工回收") -> Dict[str, Any]
         return {"reclaimed": False, "reason": "抢占失败：%s" % e}
     logger.warning("人工回收租约：%s（%s），原 owner=%s pid=%s",
                    scope, reason, rec.get("owner"), rec.get("pid"))
+    # t1：人工回收同样是「执行体失联」的判定证据 —— 一并留痕。
+    mark_lost(scope, "reclaimed",
+              {"previous_owner": rec.get("owner") or "", "previous_pid": rec.get("pid") or 0,
+               "previous_host": rec.get("host") or "",
+               "heartbeat_at": float(rec.get("heartbeat_at") or 0),
+               "heartbeat_age_sec": round(_now() - float(rec.get("heartbeat_at") or 0), 1),
+               "reclaim_reason": str(reason or "")})
     return {"reclaimed": True, "reason": reason, "info": rec, "archive": stamp}
 
 
@@ -385,7 +517,7 @@ def list_leases() -> list:
         if not n.endswith(".json"):
             continue
         rec = _read(os.path.join(d, n))
-        if rec:
+        if rec and rec.get("kind") != "lost_marker":   # 失联留痕不是活跃租约
             out.append({**rec, "stale": is_stale(rec)})
     return out
 
@@ -432,3 +564,12 @@ def purge_project(projects: list) -> int:
     if removed:
         logger.info("已随项目删除摘除 %d 个租约文件（scope 前缀匹配）：%s", removed, vals)
     return removed
+
+
+# t1（2026-10-12）：租约丢失留痕 —— 让「执行体已失联」成为可读事实（见上方 mark_lost 一带）。
+# ⚠️ 刻意在**文件末尾**追加而不用改顶部 __all__ 的行数：顶部多一行就会让
+#    tests/test_t24_verification_boundaries.py 里按**行号**登记的已知点
+#    （app/task_lease.py:178 —— _pid_alive 判不出进程存活时判「活着」的保守 fallback）
+#    漂移变红。这是「行号白名单」的固有脆弱性，改动顶部前请先看那份登记表。
+__all__ += ["lost_marker_path", "mark_lost", "read_lost_marker",
+            "consume_lost_marker", "clear_lost_marker", "list_lost_markers"]

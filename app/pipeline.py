@@ -160,6 +160,217 @@ def is_episode_running(project_name: str, episode_no: int) -> bool:
         logger.debug("查询集级租约状态失败（按未运行处理）：%s", e)
         return False
 
+# ===================== 租约存活（t1 P0：lease.lost 必须被消费） =====================
+#
+# 真问题（t4 验证门发现、此前一直未派发）：
+#   task_lease.py 会设置 Lease.lost（心跳发现易主 / 被回收），但 pipeline 对它
+#   **零引用** —— 于是 worker 崩溃或租约超时后，任务既不标失败、也不重试、更无告警，
+#   前端表现就是「进度条永远停在那里，已 36 分钟未推进」。
+#
+# 租约语义（2026-10-12 与 task_lease 一起明确）：
+#   · 超时：TTL = task_lease.DEFAULT_TTL_SEC = 900 秒；心跳间隔 = TTL/3 = 300 秒
+#     （拿到锁即 start_heartbeat，见 _acquire_episode_lock）。同机且持有者进程已死
+#     → **立刻**可回收，不等 TTL（见 task_lease.is_stale）。
+#   · 谁回收：下一个尝试 acquire 同一 scope 的执行体（托管轮转 / 手动 run-once /
+#     人工触发），以及人工入口 task_lease.reclaim_stale（本模块包装为
+#     reclaim_lost_lease）。**回收动作会写失联留痕**（task_lease.mark_lost），
+#     所以「这一集上一次是失联死的」是可读事实，而不是只有一行日志。
+#   · 回收后：**重跑**（不是转人工）—— 产物幂等，已完成步骤被 probe 跳过，从断点续跑。
+#     本执行体一旦发现自己失去租约，立刻停止（不再写任何产物路径），结果
+#     status=LEASE_LOST_STATUS / retryable=True，且 **pipeline 不落死信**；是否暂停
+#     等人工由调用方（autopilot 的 stop_on_failure 等既有策略）决定，pipeline 不越权。
+#
+# 可观测信号（前端「已失联」判据，任选其一即可显示）：
+#   ① episode_lease_state() 的 state / lost 字段（state=lost|stale 即已失联）；
+#   ② run_episode 结果字典：status="lease_lost" / lease_lost=True / retryable=True
+#      / lease_state=<①的快照>；
+#   ③ 集级操作日志（output/autopilot/<项目>/episodes/epNN_log.jsonl，前端
+#      /api/autopilot/episode_log 可读）事件：lease_lost / lease_recovered；
+#   ④ progress_cb 的 phase="lease_lost"（前端 current.step 直接显示「任务已失联」）；
+#   ⑤ 失联留痕文件 <lease_dir>/<scope>.<hash>.lost.json（task_lease.mark_lost）。
+
+#: 租约丢失时的任务状态（与 failed 区分：调用方 / 前端据此显示「已失联」而非「失败」）
+LEASE_LOST_STATUS = "lease_lost"
+
+
+def _episode_lease(project_name: str, episode_no: int):
+    """取**本进程**当前持有的该集租约对象；没有（降级 / 未走锁路径）→ None。"""
+    key = f"{project_name}#{int(episode_no)}"
+    with _EP_LOCKS_GUARD:
+        return _EP_LEASES.get(key)
+
+
+def episode_lease_state(project_name: str, episode_no: int) -> dict:
+    """该集租约的**可观测状态**（前端「已失联」判据的唯一信号源）。
+
+    返回字段（前端可直接透传展示，无需再解析日志）：
+      scope        租约作用域（episode:<项目>#<集号>）
+      state        held（有执行体正常持有）| lost（本执行体已失去租约）|
+                   stale（文件租约心跳已过期：上一个执行体失联/崩溃，等待回收）|
+                   free（无租约，空闲）
+      lost         bool —— True = 「任务已失联」，前端应显示「已失联」而不是「还在跑」
+      retryable    bool —— 失联能否靠重跑恢复（恒 True：产物幂等、可断点续跑）
+      reason       人类可读原因
+      owner/pid/host  执行体身份（当前或失联的那个）
+      age_sec      心跳距今秒数（None = 无租约文件）
+      ttl_sec      租约 TTL（秒）
+      signal       固定 "task_lease"，标明信号来源
+      lost_marker  最近一次失联留痕（task_lease.read_lost_marker；无则 {}）
+    """
+    try:
+        episode_no = int(episode_no)
+    except (TypeError, ValueError):
+        episode_no = 0                     # 前端可能传字符串/空值；不因入参脏而抛
+    scope = _episode_scope(project_name, episode_no)
+    out = {"scope": scope, "state": "free", "lost": False, "retryable": True,
+           "reason": "", "owner": "", "pid": 0, "host": "", "age_sec": None,
+           "ttl_sec": int(task_lease.DEFAULT_TTL_SEC), "signal": "task_lease",
+           "lost_marker": {}}
+    lease = _episode_lease(project_name, episode_no)
+    try:
+        st = task_lease.status(scope) or {}
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug("查询集级租约状态失败（按无租约处理）：%s", e)
+        st = {}
+    info = st.get("info") or {}
+    if info:
+        out["owner"] = str(info.get("owner") or "")
+        try:
+            out["pid"] = int(info.get("pid") or 0)
+        except (TypeError, ValueError):
+            out["pid"] = 0
+        out["host"] = str(info.get("host") or "")
+        out["age_sec"] = st.get("age_sec")
+        try:
+            out["ttl_sec"] = int(info.get("ttl_sec") or out["ttl_sec"])
+        except (TypeError, ValueError):
+            pass
+    held = bool(st.get("held"))
+    if lease is not None and getattr(lease, "lost", False):
+        out.update(state="lost", lost=True,
+                   reason=getattr(lease, "lost_reason", "") or "本执行体已失去该集租约")
+    elif lease is not None and held:
+        out.update(state="held")
+    elif lease is not None:
+        out.update(state="lost", lost=True,
+                   reason="本执行体持有的集级租约已不在文件上（被回收 / 被抢占 / 被删除）")
+    elif held:
+        out.update(state="held", reason="该集正由另一个执行体生产")
+    elif info:
+        _hb = float(info.get("heartbeat_at") or 0)
+        out.update(state="stale", lost=True,
+                   reason=("文件租约心跳已过期（心跳停在 %s，约 %.0f 秒前）："
+                           "上一个执行体已失联，回收后可重跑续跑"
+                           % (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_hb)),
+                              float(st.get("age_sec") or 0))))
+    try:
+        marker = task_lease.read_lost_marker(scope)
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug("读取租约失联留痕失败（忽略）：%s", e)
+        marker = {}
+    out["lost_marker"] = marker or {}
+    if not out["lost"] and out["lost_marker"]:
+        out.update(state="lost", lost=True,
+                   reason="该集最近一次执行已失联（%s）"
+                          % (out["lost_marker"].get("reason") or "未知原因"))
+    return out
+
+
+def _check_lease_alive(project_name: str, episode_no: int) -> None:
+    """执行体「是否还持有该集租约」的硬检查；丢失即抛 LeaseLostError。
+
+    为什么必须是硬检查：心跳线程发现易主后只是**自己停下**（task_lease.Lease.lost
+    = True），执行体若继续跑，就会在**别人已经接管**的情况下并发写同一批产物路径
+    —— 文件互相覆盖、进度条停住、谁都不知道发生了什么（t1 修的就是这个静默）。
+    本函数把「失去租约」变成「立刻停止 + 失败 + 告警」。
+
+    fail-open 边界：无租约（降级为内存租约 / 目录不可写）或状态查询失败时**不停生产**
+    —— 租约子系统故障不该误杀正在跑的集。
+    """
+    try:
+        episode_no = int(episode_no)
+    except (TypeError, ValueError):
+        return                             # 调用方没给出可判定的集号 → 不做判定
+    if not project_name or episode_no <= 0:
+        return
+    lease = _episode_lease(project_name, episode_no)
+    if lease is None or getattr(lease, "degraded", False):
+        return
+    if getattr(lease, "lost", False):
+        raise LeaseLostError(
+            f"{project_name} 第{int(episode_no)}集：本执行体已失联 —— 集级租约已丢失"
+            f"（{getattr(lease, 'lost_reason', '') or '被回收 / 被抢占'}），"
+            f"立即停止以免与新的执行体并发写同一批产物；本次执行作废，可重跑续跑")
+    try:
+        st = task_lease.status(lease.scope) or {}
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug("租约存活检查失败（按存活处理，不误停生产）：%s", e)
+        return
+    if st.get("held"):
+        return
+    lease.lost = True
+    lease.lost_reason = "文件租约已不在自己手里（被回收 / 被抢占 / 被删除）"
+    raise LeaseLostError(
+        f"{project_name} 第{int(episode_no)}集：本执行体已失联 —— 集级租约已不在文件上"
+        f"（被回收 / 被抢占 / 被删除），立即停止；本次执行作废，可重跑续跑")
+
+
+def list_lost_leases(project_name: str = "") -> list:
+    """列出当前处于「已失联」状态的集（供前端 / 运维 / 总控巡检一键拿清单）。
+
+    覆盖两种失联：
+      · 文件租约心跳过期 / 持有者进程已死（worker 崩溃留下的租约，等待回收）；
+      · 有失联留痕（刚被回收过 / 执行中途失联）。
+    每项即 episode_lease_state() 的字典（state / lost / retryable / reason / owner /
+    pid / age_sec / signal），前端可直接渲染「第 N 集已失联，可重跑」。
+    """
+    scopes = set()
+    try:
+        for rec in task_lease.list_leases():
+            s = str(rec.get("scope") or "")
+            if s.startswith("episode:"):
+                scopes.add(s)
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug("巡检活跃租约失败（忽略）：%s", e)
+    try:
+        for m in task_lease.list_lost_markers():
+            s = str(m.get("scope") or "")
+            if s.startswith("episode:"):
+                scopes.add(s)
+    except Exception as e:                                   # noqa: BLE001
+        logger.debug("巡检失联留痕失败（忽略）：%s", e)
+    out = []
+    for scope in sorted(scopes):
+        proj, sep, ep = scope[len("episode:"):].rpartition("#")
+        if not sep:
+            continue
+        if project_name and proj != project_name:
+            continue
+        try:
+            ep_no = int(ep)
+        except ValueError:
+            continue
+        try:
+            st = episode_lease_state(proj, ep_no)
+        except Exception as e:                               # noqa: BLE001
+            logger.debug("巡检 %s 租约状态失败（跳过）：%s", scope, e)
+            continue
+        if st.get("lost"):
+            out.append(st)
+    return out
+
+
+def reclaim_lost_lease(project_name: str, episode_no: int,
+                       reason: str = "人工 / 轮转回收失联租约") -> dict:
+    """显式回收该集的失联租约（供运维 / 后续接口入口）；心跳新鲜时**拒绝**回收。
+
+    回收 = 判定「上一个执行体已失联」并摘除其租约，该集即可被下一次轮转 / 手动重跑
+    接管（重跑即断点续跑，已完成步骤会被 probe 跳过）。回收动作写失联留痕。
+    """
+    return task_lease.reclaim_stale(_episode_scope(project_name, episode_no),
+                                    reason=str(reason or "人工 / 轮转回收失联租约"))
+
+
 
 # ===================== 集级操作日志（JSONL，一行一事件） =====================
 
@@ -375,6 +586,18 @@ class PipelineError(RuntimeError):
 
 class NeedsHumanError(PipelineError):
     """重试已耗尽 / 环境性故障，需要人工介入（不再重试）"""
+
+
+class LeaseLostError(PipelineError):
+    """执行体**已失去集级租约**（被回收 / 被抢占）—— 必须立刻停止，不得继续写产物。
+
+    t1（2026-10-12）：这是「租约语义」的执行侧闭环。抛出点见 _check_lease_alive
+    （步骤边界与步骤内重试前各检查一次）；捕获点在 run_episode：结果标记
+    status=LEASE_LOST_STATUS + retryable=True + 告警日志，且 **pipeline 不落死信**
+    —— 租约丢失是「执行体失联」而非产物质量问题，重跑即可续跑，不该转人工。
+    """
+    #: 结果字典里的状态值（调用方 / 前端据此显示「已失联」）
+    status = "lease_lost"
 
 
 # ===================== 宿主访问 =====================
@@ -1467,6 +1690,30 @@ def step_final(ctx) -> dict:
     #   · 字幕/转场 caption（时空落点/回溯/集尾悬念）→ caption_burn_enabled，默认 true，
     #     它是**剧情装置**：不烧观众就会看到无过渡的跳切（参考稿靠「春秋蝉，逆转时光。」交代）。
     # 两者都不开时直接沿用拼接产物 tmp，行为与改动前一致。
+    # ---- 时间轴基准（B-07 P1-5，2026-10-05；t6 起**字幕与文字道具叠加共用同一实现**）----
+    # 单条整集源片无法逐段 ffprobe（没有 seg_map.json，也没有镜头级时间轴落盘），唯一权威
+    # 基准是「成片 ffprobe 实测总时长 × 各镜剧本 duration 占比」。
+    # ⚠️ 口径的唯一实现是 video_text_overlay.shot_time_spans()——本文件的字幕循环也用它，
+    #    禁止两处各写一套：字幕与叠加各算一套必然漂移（画面上的字与念白错位）。
+    # 局部导入：与 .workbuddy/test/verify_step_final_episode.py 的 AST exec 解耦
+    # （那边只提供有限命名空间）；导入失败时字幕回落原内联口径，行为与改动前一致。
+    _script = ctx.get("script") or {}
+    _shots_all = [s for s in (_script.get("shots") or []) if isinstance(s, dict)]
+    try:
+        _ep_total = _probe_concat_duration(tmp, [tmp])
+    except NameError:  # 守卫脚本（.workbuddy/test/verify_step_final_episode.py）用受限命名空间
+        _ep_total = 0.0  # AST exec 抽取本函数时没有这个全局名 → 退回「按剧本时长」口径
+    except Exception as _pd_e:  # noqa: BLE001
+        logger.debug("成片时长探测失败（按剧本时长口径）：%s", _pd_e)
+        _ep_total = 0.0
+    _spans = []
+    try:
+        import video_text_overlay as _vtx_tl
+        _spans = _vtx_tl.shot_time_spans(_shots_all, _ep_total)
+    except Exception as _tl_e:  # noqa: BLE001
+        logger.warning("文字叠加时间轴模块不可用（字幕回落内联口径）：%s", _tl_e)
+    _script_total = sum(float(x.get("duration") or 5) for x in _shots_all) or 1.0
+
     subbed = ""
     if (A._project_subtitle_enabled(ctx["project_name"])
             or A._project_caption_burn_enabled(ctx["project_name"])):
@@ -1483,17 +1730,17 @@ def step_final(ctx) -> dict:
                 return str(_c or _s.get("caption_text") or "").strip()
 
             subs, cur = [], 0.0
-            # B-07 P1-5：时间轴基准用成片实测总时长 + 各镜剧本时长占比分配
-            #（单条整集源片无法逐段 ffprobe），避免字幕整体漂移。
-            # （逐镜模式分支已随 per_shot/keyframe 模式删除，2026-10-05）
-            script = ctx.get("script") or {}
-            shots = script.get("shots") or []
-            _ep_total = _probe_concat_duration(tmp, [tmp])
-            for s in shots:
-                dur = float(s.get("duration") or 5)
-                _script_total = sum(float(x.get("duration") or 5) for x in shots) or 1.0
-                if _ep_total > 0:
-                    dur = dur / _script_total * _ep_total
+            # 时间轴来自上面**共用**的 _spans（video_text_overlay.shot_time_spans，
+            # 口径 = 成片实测总时长 × 各镜剧本 duration 占比）；模块不可用时回落内联同式。
+            #（逐镜模式分支已随 per_shot/keyframe 模式删除，2026-10-05）
+            for _i, s in enumerate(_shots_all):
+                if _i < len(_spans):
+                    cur = _spans[_i]["start"]
+                    dur = _spans[_i]["duration"]
+                else:
+                    dur = float(s.get("duration") or 5)
+                    if _ep_total > 0:
+                        dur = dur / _script_total * _ep_total
                 if _want_dlg:
                     text = dialogue_text(s.get("dialogue"))
                     if text:
@@ -1502,13 +1749,42 @@ def step_final(ctx) -> dict:
                     _ct = _cap_text(s)
                     if _ct:
                         subs.append({"start": cur, "end": cur + dur, "text": _ct})
-                cur += dur
+                if _i >= len(_spans):
+                    cur += dur
             if subs:
                 subbed = A.video_processor.add_subtitles(tmp, subs, out)
         except Exception as e:  # noqa: BLE001  字幕失败不阻断成片
             logger.warning("成片字幕生成跳过（不影响成片）：%s", e)
 
-    produced = subbed if _nonempty(subbed) else ""
+    # ---- ⭐ 2026-10-12（t6）：**文字类道具后期叠加** —— 修「楼层安全守则小字 / 员工卡」乱码 ----
+    # 根因：H3 视频生成是**参考重绘**，会把分镜图里的文字重新画一遍；资产图文字本身逐字
+    # 正确（视觉复核：守则 8 条全文可读、员工卡清晰），所以把资产图按期「贴回」成片是唯一
+    # 不依赖扩散模型写字能力的路径。分镜层的特写提权只能修静帧、管不到视频层。
+    #   · 时间轴：与上面字幕**同一份 _spans**（不许另算一套）；
+    #   · 文本：资产图 / 小说原文（video_text_overlay.PROP_TEXT_REGISTRY + canon_data.json
+    #     原文引文核对），**不读 shot.surface_text**（同项目实测三套守则文本互不相同）；
+    #   · fail-open：任何失败只 warning，成片继续走原有落盘路径（与字幕同一范式）。
+    overlayed = ""
+    try:
+        import video_text_overlay as _vtx_ov
+        _ov_plan = _vtx_ov.plan_prop_overlays(ctx["project_name"], _shots_all, _spans)
+        if _ov_plan.get("items"):
+            logger.info("成片文字道具叠加计划：%s", _vtx_ov.overlay_report(_ov_plan))
+            _ov_src = subbed if _nonempty(subbed) else tmp
+            _ov_tmp = out + ".textov.mp4"
+            _ov = _vtx_ov.apply_overlays(_ov_src, _ov_tmp, _ov_plan, timeout=1800)
+            if _ov.get("ok"):
+                overlayed = _ov["out_path"]
+                logger.info("成片文字道具叠加完成：%s 段 → %s（音轨 %s）",
+                            _ov.get("items"), overlayed, (_ov.get("audio") or {}).get("audio"))
+            else:
+                logger.warning("文字道具叠加失败（不影响成片）：%s", _ov.get("error"))
+        else:
+            logger.info("成片文字道具叠加：本集无可叠加的文字类道具（跳过）")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("文字道具叠加跳过（不影响成片）：%s", e)
+
+    produced = overlayed if _nonempty(overlayed) else (subbed if _nonempty(subbed) else "")
     if not produced:
         os.replace(tmp, out)
         produced = out
@@ -2145,11 +2421,39 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
             screenplay_used=bool(config.get("screenplay_text")),
             grid_mode=bool(getattr(A, "SCENE_GRID_MODE", False)))
 
+    # ⭐ t1（2026-10-12）：开跑先取走「上一次执行体失联」留痕 —— 有则告警一次并落集级
+    # 日志（lease_recovered）。这就是「worker 崩溃后任务不再静默挂死」的收口：下一个
+    # 执行体（托管轮转 / 手动重跑）接管时会明确说出「上一棒是失联死的，本次续跑」，
+    # 而不是让用户对着一条停在原地的进度条猜。
+    try:
+        _prev_lost = task_lease.consume_lost_marker(
+            _episode_scope(project_name, int(episode_no)))
+    except Exception as _ple:                                # noqa: BLE001
+        logger.debug("读取租约失联留痕失败（忽略）：%s", _ple)
+        _prev_lost = {}
+    if _prev_lost:
+        _prev_detail = _prev_lost.get("detail") or {}
+        logger.warning("第%s集：上一次执行体已失联（原因=%s，原 owner=%s pid=%s，心跳停在 %s），"
+                       "本次为重跑续跑",
+                       episode_no, _prev_lost.get("reason"),
+                       _prev_detail.get("previous_owner"), _prev_detail.get("previous_pid"),
+                       time.strftime("%Y-%m-%d %H:%M:%S",
+                                     time.localtime(float(_prev_lost.get("lost_at") or 0))))
+        _ep_log(project_name, int(episode_no), "lease_recovered",
+                "上一次执行体已失联（%s），本次接管重跑续跑"
+                % (_prev_lost.get("reason") or "未知原因"),
+                level="warning", previous=_prev_detail,
+                lost_at=_prev_lost.get("lost_at"))
+
     result = {
         "ok": False, "status": "failed", "episode_no": int(episode_no),
         "project": project_name, "project_key": ctx["project_key"],
         "chapter_title": (chapter or {}).get("title") or f"第{int(episode_no)}集",
         "started_at": _now(), "deliverable": "", "steps": {}, "error": "",
+        # t1：字段恒定存在，前端可无脑读 lease_lost 判定「已失联」
+        "lease_lost": False, "retryable": False,
+        # 本次开跑前取走的失联留痕（上一棒失联的证据；无则 {}）
+        "previous_lease_lost": _prev_lost or {},
     }
 
     # 把「是否该停」注册进当前执行上下文（contextvars）：本集内部所有 LLM 调用与
@@ -2168,6 +2472,9 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
         # 转成结构化 result，两个调用方（run-once / 托管）都拿到干净结果而非 500。
         assert_mode_contract(config)
         for step in STEP_SEQUENCE:
+            # ⭐ t1 P0：租约存活检查放在**每步边界**（连全 disabled 的步骤也覆盖）——
+            # 失去租约立刻停手，绝不与新执行体并发写同一批产物路径。
+            _check_lease_alive(project_name, int(episode_no))
             if should_stop and should_stop():
                 result.update({"status": "cancelled",
                                "error": "托管已暂停，在步骤边界安全中止（已完成步骤保留，可续跑）"})
@@ -2267,6 +2574,45 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
     except NeedsHumanError as e:
         result["status"] = "needs_human"
         result["error"] = str(e)
+    except LeaseLostError as e:
+        # ⭐ t1 P0（2026-10-12）：租约丢失必须**立刻停止本执行体**，并让「已失联」成为
+        # 可见状态（此前这里什么都没有 —— 心跳停了执行体照跑，前端进度条永远停着，
+        # 用户看到的正是「已 36 分钟未推进」）。
+        # 语义：本次执行作废、可重跑（幂等续跑）；**不落死信** —— 租约丢失是「执行体
+        # 失联」而不是产物质量问题，重跑即可，不该被判成需人工介入。
+        result["status"] = LEASE_LOST_STATUS
+        result["ok"] = False
+        result["lease_lost"] = True
+        result["retryable"] = True
+        result["error"] = str(e)
+        try:
+            result["lease_state"] = episode_lease_state(project_name, int(episode_no))
+        except Exception as _lse:                            # noqa: BLE001
+            logger.debug("取租约状态快照失败（忽略）：%s", _lse)
+        # 留痕：即便本进程随后退出/被杀，下一个执行体开跑也能知道「上一棒是失联死的」
+        try:
+            task_lease.mark_lost(
+                _episode_scope(project_name, int(episode_no)), "lease_lost_midrun",
+                {"stage": "run_episode", "error": str(e)[:300],
+                 "lease_state": {k: v for k, v in (result.get("lease_state") or {}).items()
+                                 if k != "lost_marker"}},
+                owner="pipeline")
+        except Exception as _mle:                            # noqa: BLE001
+            logger.debug("写租约失联留痕失败（忽略）：%s", _mle)
+        logger.error("【失联】第%s集执行体已失去集级租约，立即停止本执行体：%s",
+                     episode_no, e)
+        _ep_log(project_name, int(episode_no), "lease_lost",
+                f"第{int(episode_no)}集执行体已失联（租约丢失/被回收），"
+                f"本次执行作废、可重跑续跑：{str(e)[:160]}",
+                level="error", status=LEASE_LOST_STATUS, retryable=True,
+                error=str(e)[:300])
+        # 前端「当前在做什么」立即变成「已失联」：走既有 progress_cb 契约（phase 用
+        # "lease_lost"，它不在 STEP_SEQUENCE 里，不会污染 autopilot 的 steps_done 链）。
+        try:
+            ctx["progress"]("任务已失联（集级租约丢失/被回收），本次执行作废、可重跑续跑",
+                            None, phase="lease_lost")
+        except Exception as _pe:                             # noqa: BLE001
+            logger.debug("失联进度回报失败（忽略）：%s", _pe)
     except cancellation.Cancelled as e:
         # 协作式中止（托管暂停 / 用户停止）：停在**尚未产出文件**的安全点，
         # 已完成步骤全部保留，续跑时会被逐步骤探测跳过。
@@ -2288,6 +2634,14 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
         _ep_log(project_name, int(episode_no), "episode_failed",
                 "托管暂停中止，已完成步骤已保留", level="info",
                 status="cancelled", error=result.get("error") or "",
+                elapsed_sec=result.get("elapsed_sec"))
+    elif result.get("status") == LEASE_LOST_STATUS:
+        # t1：失联收尾事件 —— 与「产物失败」区分开（可重跑续跑、不转人工）
+        _ep_log(project_name, int(episode_no), "episode_failed",
+                f"第{int(episode_no)}集执行体失联中止（可重跑续跑）："
+                f"{str(result.get('error') or '未知原因')[:200]}",
+                level="error", ok=False, status=LEASE_LOST_STATUS, retryable=True,
+                error=str(result.get("error") or "")[:300],
                 elapsed_sec=result.get("elapsed_sec"))
     elif result.get("ok"):
         _ep_log(project_name, int(episode_no), "episode_done",
@@ -2336,6 +2690,9 @@ def _run_step_with_retry(step: str, ctx: dict) -> tuple:
         # ⚠️ 中止信号优先于重试：托管暂停时立刻停，不再空转剩余重试次数。
         # 这个检查点在「还没产出任何文件」的位置，因此不会留下半成品。
         cancellation.check(f"{STEP_LABELS[step]} 重试前收到中止信号")
+        # ⭐ t1 P0：重试前再验一次租约 —— 整集视频这类长步骤会反复重试，失去租约后
+        # 绝不能靠剩余重试次数继续烧 GPU（LeaseLostError 穿透到 run_episode 的统一收口）。
+        _check_lease_alive(ctx.get("project_name"), ctx.get("episode_no"))
         if attempt > 1:
             ctx["progress"](f"{STEP_LABELS[step]} 第 {attempt}/{max_tries} 次重试…",
                             result_pct(ctx_step_ctx(ctx), step), phase=f"{step}:retry")
