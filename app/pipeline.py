@@ -1400,6 +1400,26 @@ def step_script(ctx) -> dict:
         script, _qc_info = _qc_script_feedback_rewrite(client, script, ctx, cfg)
         if _qc_info.get("rounds"):
             try:
+                # ⭐⭐ t7（2026-10-12）**后置重写兜底**：剧本质检的 LLM 重写是「落盘之后」
+                #   再改镜头表的第二处后置改写路径，改完直接 save_episode_script —— 与
+                #   continuity 落盘前那处同源（见 continuity.convert_chapter_with_continuity
+                #   的注释）：**不重编号就会把陈旧 scene_no 写回磁盘**，下游按场次渲染会
+                #   产出「前两场重复、尾部丢镜」的坏成片。这里补同样的收口，任何后置改写
+                #   都不得绕过场次编号。
+                _sn_norm = A.novel_to_script.normalize_scene_numbering(script.get("shots") or [])
+                if _sn_norm.get("renumbered"):
+                    logger.warning("第%s集：质检重写落盘前修正 %d 个镜头的 scene_no"
+                                   "（场数 %d）", ctx["episode_no"], _sn_norm["renumbered"],
+                                   _sn_norm["scene_count"])
+                script["scene_flow"] = A.novel_to_script.collect_scene_flow(
+                    script.get("shots") or [])
+                _pn = script.setdefault("production_notes", {})
+                _pn["scene_count"] = len(script["scene_flow"])
+                if not _sn_norm.get("ok"):
+                    _w = script.setdefault("metadata", {}).setdefault("warnings", [])
+                    if isinstance(_w, list):
+                        for _it in (_sn_norm.get("issues") or []):
+                            _w.append("[场次自检] %s：%s" % (_it.get("id"), _it.get("detail")))
                 A.novel_to_script.save_episode_script(
                     script, A.SCRIPT_DIR, ctx["project_key"], ctx["episode_no"],
                     ctx["project_key"])

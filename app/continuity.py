@@ -2619,6 +2619,28 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
     }
     script_path = None
     if save_dir:
+        # ⭐⭐ t7（2026-10-12）**根修**：落盘前补一次场次编号 —— 本函数体内**一切改写
+        #   镜头表的步骤（覆盖率补镜 / 局部重写 / 资产对齐）都发生在这里之前**，而场次
+        #   编号只发生在主路径（novel_to_script 覆盖率补镜**之前**的 assign_scene_numbers）。
+        #   后果（生产实证第1集）：后置新增的 6 个尾镜带着陈旧 scene_no 落盘 ——
+        #   shots[41..45].scene_no=1（location 却是青云宗外门广场）、shots[46].scene_no=2，
+        #   而 scene_flow 只到第 8 场 → 渲染侧「按连续 run 分组」得 10 组、但文件名/缓存名
+        #   只按 scene_no → 第 9 组命中第 1 组的断点续跑被复用（6 镜不渲染）+ 同一路径
+        #   重复进 concat 清单 → **成片前两场重复、尾部 6 镜丢失**。
+        #   收口三件事：重编号 + 重建场次表 + 自检告警（不静默）。
+        _sn_norm = novel_to_script.normalize_scene_numbering(script.get("shots") or [])
+        if _sn_norm.get("renumbered"):
+            logger.warning("[场次编号] 第%s集落盘前修正 %d 个镜头的 scene_no"
+                           "（场数 %d；此前有后置改写未重编号）",
+                           episode_no, _sn_norm["renumbered"], _sn_norm["scene_count"])
+        script["scene_flow"] = novel_to_script.collect_scene_flow(script.get("shots") or [])
+        _pn = script.setdefault("production_notes", {})
+        _pn["scene_count"] = len(script["scene_flow"])
+        if not _sn_norm.get("ok"):
+            _w = script.setdefault("metadata", {}).setdefault("warnings", [])
+            if isinstance(_w, list):
+                for _it in (_sn_norm.get("issues") or []):
+                    _w.append("[场次自检] %s：%s" % (_it.get("id"), _it.get("detail")))
         script_path = save_episode_script(script, save_dir, project_key, episode_no, project_key)
 
     summary = build_summary_card(script, state, episode_no)

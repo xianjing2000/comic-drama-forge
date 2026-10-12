@@ -91,6 +91,8 @@ from shared_project import _first_existing, _shot_num_key, comfyui_client  # noq
 #    不能走上面的实例 comfyui_client（它是 shared_project 里 ComfyUIClient() 单例，无此属性
 #    → AttributeError，t124 P0 根因）。
 from comfyui_client import h3_cache_name
+# ⭐ t7（2026-10-12）渲染侧防御：场次编号收口（见下方「场景分组」注释）
+from novel_to_script import normalize_scene_numbering
 from fs_atomic import atomic_write_json, read_json_strict
 import cancellation
 import comfyui_job_store  # 崩溃免重渲检查点（2026-09-29）：种子沿用判据 + 台账查询
@@ -1563,6 +1565,22 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                             len(_pw_segs), len(_pw_metas), time.perf_counter() - _pw_t0)
                 return
 
+            # ⭐⭐ t7（2026-10-12）**渲染侧防御（P0）**：分组按「连续 run」是对的，但
+            #   **输出文件名 / 缓存名 / seg_map 只按 scene_no**（下方 scene_{sn:02d}.mp4、
+            #   h3_cache_name(..., sn)）。上游一旦留下「同一 scene_no 出现两个不连续 run」
+            #   的剧本（生产实证：尾镜退回 scene_no=1/2），第 9 组会**命中第 1 组的断点
+            #   续跑分支被直接复用**（该组 6 镜根本不渲染），且同一路径重复进 concat 清单
+            #   → 成片前两场重复、尾部丢镜；overwrite=true 时反过来覆盖写 scene_01.mp4。
+            #   这里在分组之前先做一次编号收口（幂等；正常剧本 renumbered=0 零行为变更），
+            #   让「同一场号只有一段」成为下游的硬不变量 —— 即使上游编号错了也产不出重复成片。
+            _sn_guard = normalize_scene_numbering(shots)
+            if _sn_guard.get("renumbered"):
+                logger.warning(
+                    "[生成成片] 剧本场次编号不自洽（%s）→ 渲染前已收口：修正 %d 镜、"
+                    "现为 %d 场（否则会产出重复段落的坏成片）",
+                    "；".join(str(_it.get("id")) for _it in (_sn_guard.get("issues") or []))
+                    or "重编号",
+                    _sn_guard["renumbered"], _sn_guard["scene_count"])
             _scene_plan = []          # [(scene_no, [shot_idx, ...]), ...]
             for _si2, _sshot in enumerate(shots):
                 try:
@@ -1572,6 +1590,12 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 if _scene_plan and _scene_plan[-1][0] == _sn2:
                     _scene_plan[-1][1].append(_si2)
                 else:
+                    if any(_g[0] == _sn2 for _g in _scene_plan):
+                        # 收口之后不该发生：同号第二次出现必须显式记账（绝不静默）
+                        logger.error(
+                            "[生成成片] 场次号 %s 仍出现第二个不连续 run（收口未生效）"
+                            "—— 该组会与前面的同号组共用文件名/缓存名，请把本集剧本的 "
+                            "scene_no 修好后重跑", _sn2)
                     _scene_plan.append((_sn2, [_si2]))
             _vbuilt = {}              # scene_no -> {"ev": Event, "segs": [...], "metas": [...]}
             _vberr = {"err": None}

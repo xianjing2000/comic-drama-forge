@@ -3029,6 +3029,158 @@ def collect_scene_flow(shots: list) -> list:
     return flow
 
 
+#: 场记头前缀（renumber_scenes / audit_scene_numbering 共用一份正则，避免两处漂移）
+_SCENE_HEADING_PREFIX_RE = re.compile(r"^\s*【\s*第\s*\d+\s*场\s*】\s*")
+
+
+def _scene_heading_body(shot: dict) -> str:
+    """剥掉「【第N场】」前缀后的场次正文（口径与 renumber_scenes 一致）。"""
+    try:
+        head = _SCENE_HEADING_PREFIX_RE.sub("", str((shot or {}).get("scene_heading") or ""))
+    except Exception:  # noqa: BLE001
+        head = ""
+    if not head:
+        head = str((shot or {}).get("location") or "")
+    return re.sub(r"\s+", "", head)
+
+
+def audit_scene_numbering(shots: list) -> dict:
+    """场次编号自洽性自检（只读，不改动任何镜头）。
+
+    为什么需要（t7，2026-10-12 生产实证）：「剧本质检 → LLM 后置重写 → 落盘」这条
+    **后置改写**路径直接 save_episode_script，**没有重跑场次编号**；而编号只发生在主
+    路径（novel_to_script 覆盖率补镜之后的 assign_scene_numbers）。于是后置路径追加/
+    重写的尾镜带着**陈旧的 scene_no** 落盘 —— 实测第 1 集 46 镜里 shots[41..45]
+    的 scene_no 退回 1（location 却是青云宗外门广场）、shot[46] 退回 2，而
+    scene_flow 只收到第 8 场。下游后果是**用户可见的坏成片**：
+
+      · 按场次渲染按「连续 run」分组 → 10 组，但**输出文件名/缓存名只按 scene_no**
+        （video_helpers.py 的 scene_{sn:02d}.mp4 / h3_cache_name(..., sn)）→ 第 9 组
+        命中第 1 组的断点续跑分支被直接复用（该组 6 镜根本不渲染），且同一路径被
+        重复 append 进 _scene_files → concat 清单 [01..08, 01, 02] → **成片前两场
+        重复、尾部 6 镜丢失**；
+      · overwrite=true 重跑则相反：第 9 组覆盖写 scene_01.mp4 → 丢前 10 镜。
+
+    判据（全部确定性、零 LLM）：
+      · run_duplicated —— 同一场次号出现在 ≥2 个不连续 run（最常见）；
+      · no_multi_location —— 同一场次号对应 ≥2 个不同 location（场次与地点不自洽）；
+      · max_ne_flow —— max(scene_no) > 场次表长度（存在「场次表里没有的场号」= 孤儿镜头）；
+      · flow_max_ne_count —— 场次表最后一场的场号 != 场次表长度（缺号）。
+    """
+    shots = [s for s in (shots or []) if isinstance(s, dict)]
+    tracks = []
+    for sh in shots:
+        try:
+            no = int(sh.get("scene_no") or 0)
+        except (TypeError, ValueError):
+            no = 0
+        loc = str(sh.get("location") or "").strip()
+        if not tracks or tracks[-1]["scene_no"] != no:
+            tracks.append({"scene_no": no, "location": loc,
+                           "count": 1, "start": sh.get("shot_id"),
+                           "end": sh.get("shot_id")})
+        else:
+            tracks[-1]["count"] += 1
+            tracks[-1]["end"] = sh.get("shot_id")
+    flow = collect_scene_flow(shots)
+    flow_nos = [int(f.get("scene_no") or 0) for f in flow]
+    issues = []
+    seen_run = {}
+    dup_runs = []
+    for t in tracks:
+        seen_run[t["scene_no"]] = int(seen_run.get(t["scene_no"]) or 0) + 1
+        if seen_run[t["scene_no"]] == 2:
+            dup_runs.append(t["scene_no"])
+    seen_loc = {}
+    for t in tracks:
+        seen_loc.setdefault(t["scene_no"], {})
+        seen_loc[t["scene_no"]][t["location"]] = True
+    multi_loc = sorted([no for no, locs in seen_loc.items() if len(locs) > 1])
+    max_no = max([t["scene_no"] for t in tracks] or [0])
+    flow_max = max(flow_nos or [0])
+    if dup_runs:
+        issues.append({"id": "run_duplicated",
+                       "detail": "场次号 %s 出现在多个不连续的镜头段（同一场号被两段戏共用）"
+                                 % ", ".join(str(x) for x in sorted(set(dup_runs)))})
+    if multi_loc:
+        issues.append({"id": "no_multi_location",
+                       "detail": "场次号 %s 各自对应多个地点：%s"
+                                 % (", ".join(str(x) for x in multi_loc),
+                                    "; ".join("%s=%s" % (no, "/".join(sorted(seen_loc[no])))
+                                              for no in multi_loc))})
+    if max_no > len(flow):
+        issues.append({"id": "max_ne_flow",
+                       "detail": "最大场次号 %d > 场次表场数 %d（存在不在场次表里的孤儿镜头）"
+                                 % (max_no, len(flow))})
+    if flow_nos and flow_max != len(flow):
+        issues.append({"id": "flow_max_ne_count",
+                       "detail": "场次表最后一场的场号为 %d，但场次表只有 %d 场（场号不连续）"
+                                 % (flow_max, len(flow))})
+    return {
+        "ok": not issues,
+        "shot_count": len(shots),
+        "scene_count": len(flow),
+        "max_scene_no": max_no,
+        "scene_nos": sorted(set([t["scene_no"] for t in tracks])),
+        "group_runs": [{"scene_no": t["scene_no"], "location": t["location"],
+                        "count": t["count"], "start_shot_id": t["start"],
+                        "end_shot_id": t["end"]} for t in tracks],
+        "flow": flow,
+        "issues": issues,
+    }
+
+
+def normalize_scene_numbering(shots: list, warnings: list = None) -> dict:
+    """落盘前/渲染前的**统一收口**：重编号 + 重建场次表 + 自检告警（幂等）。
+
+    调用点（t7）：
+      · continuity.convert_chapter_with_continuity 落盘前 —— 覆盖率补镜 / 局部重写
+        都在它之前改过镜头表，这里补一次编号，后置改写不再留下陈旧 scene_no；
+      · pipeline.step_script 剧本质检重写落盘前 —— 后置重写的兜底；
+      · video_helpers 生成成片前 —— 渲染侧防御（磁盘上的存量剧本也能自愈）。
+
+    与 assign_scene_numbers 的关系：后者是主路径的编号器（覆盖率补镜之前跑）；
+    本函数是**任何后置改写之后的收口**，语义相同、可重复调用。
+
+    warnings 非空时把自检问题逐条 append 进去（**不静默**，由调用方打日志/落 metadata）。
+    返回 {"renumbered": n, "scene_count": m, "ok": bool, "issues": [...]}。
+    """
+    before = []
+    for sh in (shots or []):
+        if not isinstance(sh, dict):
+            before.append(None)
+            continue
+        try:
+            before.append(int(sh.get("scene_no") or 0))
+        except (TypeError, ValueError):
+            before.append(0)
+    flow = assign_scene_numbers(shots)
+    after = []
+    for sh in (shots or []):
+        if not isinstance(sh, dict):
+            after.append(None)
+            continue
+        try:
+            after.append(int(sh.get("scene_no") or 0))
+        except (TypeError, ValueError):
+            after.append(0)
+    renumbered = sum(1 for i in range(min(len(before), len(after)))
+                     if before[i] != after[i])
+    _audit = audit_scene_numbering(shots)
+    for _it in (_audit.get("issues") or []):
+        _msg = ("[场次自检] %s：%s（场数 %d，最大场号 %d，%d 镜）"
+                % (_it.get("id"), _it.get("detail"), _audit.get("scene_count"),
+                   _audit.get("max_scene_no"), _audit.get("shot_count")))
+        if isinstance(warnings, list):
+            warnings.append(_msg)
+        logger.warning("%s", _msg)
+    if renumbered:
+        logger.info("场次编号收口：已修正 %d 个镜头的 scene_no（场数 %d，最大场号 %d）",
+                    renumbered, _audit.get("scene_count"), _audit.get("max_scene_no"))
+    return {"renumbered": renumbered, "scene_count": len(flow),
+            "ok": bool(_audit.get("ok")), "issues": list(_audit.get("issues") or [])}
+
+
 def _norm_caption(raw) -> dict:
     """字幕/转场文本规范化：{text, kind}；空/无效返回 {}（形状恒定，前端好判）。
 
@@ -4254,9 +4406,33 @@ def episode_script_path(script_dir: str, novel_name: str, episode_no, project_ke
 
 def save_episode_script(script: dict, script_dir: str, novel_name: str, episode_no,
                         project_key: str = None) -> str:
-    """按集落盘（覆盖同名集号），返回绝对路径"""
+    """按集落盘（覆盖同名集号），返回绝对路径。
+
+    ⭐⭐ t7（2026-10-12）**唯一收口点**：落盘前自动做一次场次编号收口
+    （normalize_scene_numbering + 重建 scene_flow）。为什么放在**落盘函数内部**而不是
+    各调用点：本函数是全库 23 处剧本落盘（含「剧本质检 → LLM 后置重写」这条
+    **落盘之后再改镜头表**的路径）的必经入口，而场次编号此前只发生在主路径
+    （覆盖率补镜之前）—— 任何后置改写路径都会把**陈旧的 scene_no** 写回磁盘，
+    实测导致渲染侧「前两场重复、尾部 6 镜丢失」的坏成片（见
+    normalize_scene_numbering 的 docstring）。收口幂等：正常剧本零改动、零告警。
+    """
     path = episode_script_path(script_dir, novel_name, episode_no, project_key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if isinstance(script, dict) and script.get("shots"):
+        try:
+            _sn_norm = normalize_scene_numbering(script.get("shots") or [])
+            script["scene_flow"] = collect_scene_flow(script.get("shots") or [])
+            _pn = script.setdefault("production_notes", {})
+            if isinstance(_pn, dict):
+                _pn["scene_count"] = len(script["scene_flow"])
+            if not _sn_norm.get("ok"):
+                _mw = script.setdefault("metadata", {}).setdefault("warnings", [])
+                if isinstance(_mw, list):
+                    for _it in (_sn_norm.get("issues") or []):
+                        _mw.append("[场次自检] %s：%s" % (_it.get("id"), _it.get("detail")))
+        except Exception as _sne:  # noqa: BLE001  收口失败不得阻断落盘
+            logger.warning("场次编号收口失败（按原样落盘）：%s: %s",
+                           type(_sne).__name__, _sne)
     meta = script.setdefault("metadata", {})
     meta["script_path"] = path
     meta["project_name"] = meta.get("project_name") or episode_project_name(novel_name, episode_no)
