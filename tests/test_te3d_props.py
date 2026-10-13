@@ -88,5 +88,45 @@ class TestSceneIntegration(unittest.TestCase):
         self.assertFalse([e for e in scene["entities"] if e.get("type") == "prop"])
 
 
+class TestCrowd(unittest.TestCase):
+    def test_crowd_role_detection(self):
+        self.assertTrue(D._is_crowd_role("外门围观弟子"))
+        self.assertTrue(D._is_crowd_role("围观群众"))
+        self.assertFalse(D._is_crowd_role("羡进"))
+        self.assertFalse(D._is_crowd_role("赵天霸"))
+
+    def test_crowd_expands_into_array(self):
+        scene = D.build_scene_json({"shot_id": 1, "camera": "全景",
+                                    "characters_in_shot": ["羡进", "外门围观弟子"]},
+                                   aspect="16:9")
+        chars = [e for e in scene["entities"] if e.get("type") == "character"]
+        crowd = [e for e in chars if str(e.get("name") or "").startswith("外门围观弟子")]
+        self.assertGreater(len(crowd), 1, "群演角色应展开成多个人偶")
+        self.assertIn("外门围观弟子", scene.get("crowdMap") or {})
+        xs = [e["transform"]["position"][0] for e in crowd]
+        self.assertEqual(len(set(xs)), len(xs), "群演阵列不应重合")
+
+    def test_single_role_not_expanded(self):
+        scene = D.build_scene_json({"shot_id": 1, "camera": "全景",
+                                    "characters_in_shot": ["羡进"]}, aspect="16:9")
+        chars = [e for e in scene["entities"] if e.get("type") == "character"]
+        self.assertEqual(len(chars), 1)
+        self.assertEqual(scene.get("crowdMap"), {})
+
+    def test_explicit_crowd_count_wins(self):
+        scene = D.build_scene_json({"shot_id": 1, "camera": "全景",
+                                    "characters_in_shot": ["外门围观弟子"],
+                                    "crowd": {"count": 5}}, aspect="16:9")
+        chars = [e for e in scene["entities"] if e.get("type") == "character"]
+        self.assertEqual(len(chars), 5)
+
+    def test_crowd_members_spread(self):
+        ms = D._crowd_members([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 5, 2.0)
+        self.assertEqual(len(ms), 5)
+        xs = [m[0][0] for m in ms]
+        self.assertLess(min(xs), 0.0)
+        self.assertGreater(max(xs), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

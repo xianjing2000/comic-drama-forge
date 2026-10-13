@@ -364,6 +364,10 @@ async function run() {
 
   const diag = { chars: 0, meshesPerChar: [], boneBox: [] };
   diag.props = _propCount;   // 道具已入场景（见上方 propEnts）
+  const _crowdMap = sceneDef.crowdMap || {};
+  diag.crowdRoles = Object.keys(_crowdMap).length;
+  diag.crowdMembers = Object.keys(_crowdMap).reduce(
+    (a, k) => a + (Number(_crowdMap[k]) || 0), 0);
   const focus = [];
   const facingFixY = Number(payload.facingFixY || 0);
 

@@ -133,9 +133,15 @@ def qc_blocking_image(shot: dict, png_path: str, diag: Optional[dict] = None,
             got = int(diag.get("chars"))
         except (TypeError, ValueError):
             got = -1
-        add("char_count", got == len(chars),
-            "渲染人偶 %d 个 vs 本镜出场 %d 个%s" % (got, len(chars),
-                                                    ("（%s）" % "/".join(chars)) if chars else ""))
+        # 群演角色会被展开成多个人偶（scene.crowdMap 登记），期望人数要按展开后算，
+        # 否则「1 个围观弟子 → 5 个人偶」会被误判成人数不符。
+        _cr = int(diag.get("crowdRoles") or 0)
+        _cm = int(diag.get("crowdMembers") or 0)
+        exp = (len(chars) - _cr + _cm) if (_cr and _cm) else len(chars)
+        add("char_count", got == exp,
+            "渲染人偶 %d 个 vs 期望 %d 个（出场 %d 人%s）"
+            % (got, exp, len(chars),
+               "，群演展开 %d 角色→%d 人" % (_cr, _cm) if (_cr and _cm) else ""))
     else:
         add("char_count", None, "无渲染诊断，跳过（降级判据）")
 

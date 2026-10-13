@@ -509,32 +509,41 @@ def build_scene_json(
         _pose = {}
     _pose_values = dict(_pose.get("poseValues") or {})
     _pose_preset = str(_pose.get("currentPreset") or "")
+    _crowd_map: Dict[str, int] = {}
     for idx, name in enumerate(chars, start=1):
         if name in _blk:
             pos, rot = _blocking_pose(_blk[name], spread, idx - 1, total)
         else:
             pos = _position_for_index(idx - 1, total, spread)
             rot = _rotation_for_index(idx - 1, total)
-        entities.append({
-            "id": _entity_id("char", idx),
-            "type": "character",
-            "kind": "standard",
-            "name": name,
-            "color": _CHAR_COLORS[(idx - 1) % len(_CHAR_COLORS)],
-            "visible": True,
-            "uniformScale": 1.0,
-            "heightScale": 1.0,
-            "height": TARGET_CHARACTER_HEIGHT,
-            "girth": 1.0,
-            "style": "neutral",
-            "transform": {
-                "position": list(pos),
-                "rotation": list(rot),
-                "scale": [1.0, 1.0, 1.0],
-            },
-            "poseValues": dict(_pose_values),
-            "currentPreset": _pose_preset,
-        })
+        # ⭐ 群演展开（见文件上方 crowd 段）：把「外门围观弟子」渲成阵列而非 1 个
+        _members = [(list(pos), list(rot))]
+        if _is_crowd_role(name):
+            _n = _crowd_count(shot, aspect, _cam_key, max(0, len(chars) - 1))
+            if _n > 1:
+                _crowd_map[str(name)] = _n
+                _members = _crowd_members(pos, rot, _n, spread)
+        for _mi, (_mp, _mr) in enumerate(_members, start=1):
+            entities.append({
+                "id": _entity_id("char", idx if len(_members) == 1 else idx * 100 + _mi),
+                "type": "character",
+                "kind": "standard",
+                "name": name if len(_members) == 1 else "%s#%d" % (name, _mi),
+                "color": _CHAR_COLORS[(idx - 1) % len(_CHAR_COLORS)],
+                "visible": True,
+                "uniformScale": 1.0,
+                "heightScale": 1.0,
+                "height": TARGET_CHARACTER_HEIGHT,
+                "girth": 1.0,
+                "style": "neutral",
+                "transform": {
+                    "position": list(_mp),
+                    "rotation": list(_mr),
+                    "scale": [1.0, 1.0, 1.0],
+                },
+                "poseValues": dict(_pose_values),
+                "currentPreset": _pose_preset,
+            })
 
     # ---- 道具 entity（2026-10-13：官方 addProp 的 cube/cylinder/sphere）----
     for _pe in _prop_entities(shot, aspect=aspect):
@@ -574,6 +583,9 @@ def build_scene_json(
             "panorama": None,
         },
         "entities": entities,
+        # 群演展开登记：{角色名: 人偶数} —— 质检按它核对 diag.chars（否则会把
+        # 「1 个群演角色展开成 5 个人偶」误判成人数不符）
+        "crowdMap": dict(_crowd_map),
     }
     return validate_scene_json(scene)
 
@@ -658,6 +670,53 @@ _PROP_PLACE = (
 )
 #: 「依附主体」的方位词：命中时道具就该在人偶手上/身上，允许与主体重叠
 _PROP_IN_HAND = ("手中", "手里", "握着", "手持", "掌中", "抓住")
+
+
+# ===================== 人群（crowd，2026-10-13 接入官方 crowd 口径） =====================
+# 剧本里「外门围观弟子」这类**群演角色**此前只渲 1 个人偶 —— 基准图显示"画面里 1 个人"，
+# 而参考图与剧本说的是"一群人"，人数判据直接给错信息。这里按景别横向容量把它展开成阵列
+# （纵深交错），并把展开登记写进 scene.crowdMap，供质检核对人数。
+_CROWD_KEYWORDS = ("围观", "群众", "人群", "众人", "百姓", "弟子们", "门人", "族人",
+                   "喽啰", "手下", "侍卫", "士兵", "人群", "众人")
+_CROWD_MAX = 6
+
+
+def _is_crowd_role(name: str) -> bool:
+    """是否群演角色（按名字判定：围观群众/弟子们/侍卫…）。"""
+    return any(k in str(name or "") for k in _CROWD_KEYWORDS)
+
+
+def _crowd_count(shot: dict, aspect: str, cam_key: str, others: int) -> int:
+    """群演人数：剧本显式声明优先，否则按景别横向容量推（收敛 [2,6]）。"""
+    explicit = 0
+    _crowd = (shot or {}).get("crowd")
+    if isinstance(_crowd, dict):
+        try:
+            explicit = int(_crowd.get("count") or 0)
+        except (TypeError, ValueError):
+            explicit = 0
+    if explicit >= 2:
+        return max(2, min(_CROWD_MAX, explicit))
+    try:
+        cap = int(framing_capacity(aspect, cam_key))
+    except Exception:  # noqa: BLE001
+        cap = 3
+    room = cap - int(others)
+    if room < 2:
+        return 1
+    return max(2, min(_CROWD_MAX, room))
+
+
+def _crowd_members(pos, rot, n: int, spread: float) -> List[tuple]:
+    """群演阵列：以基位为中心横向排开、纵深交错（免得糊成一坨）。"""
+    out: List[tuple] = []
+    half = max(1.0, (n - 1) / 2.0)
+    for j in range(n):
+        frac = (j - half) / half
+        px = float(pos[0]) + frac * float(spread) * 0.42
+        pz = float(pos[2]) - 0.30 * (j % 2) + 0.12 * frac
+        out.append(([round(px, 3), float(pos[1]), round(pz, 3)], list(rot)))
+    return out
 
 
 def _prop_kind(name: str) -> str:
