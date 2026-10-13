@@ -3991,8 +3991,8 @@ def _validate_script_92rules(script: dict) -> list:
 #: 自动切成 ≤4 秒的子段提交给模型（「AI 视频可信窗口约 4 秒」的红线在**单次生成**这一层，
 #: 不在剧本这一层）。
 SHOT_DURATION_MIN_OK = config.SHOT_DURATION_MIN
-#: ⭐ 2026-10-13（用户口径）：收尾镜（beat=收尾 / 本集末镜）内容不足时允许更短，
-#:   判据随 config.SHOT_DURATION_MIN_TAIL 走。
+#: ⭐ 2026-10-13（用户口径）：收尾镜 = **每场戏的最后一镜**（连续 run 口径，
+#:   见 config.tail_shot_indexes）—— 内容不足时允许更短，判据随 SHOT_DURATION_MIN_TAIL 走。
 SHOT_DURATION_MIN_TAIL_OK = config.SHOT_DURATION_MIN_TAIL
 SHOT_DURATION_MAX_OK = config.SHOT_DURATION_MAX
 #: 超出边界的容差（模型四舍五入 / 台词长度微调）。
@@ -4053,6 +4053,9 @@ def _validate_script_feasibility(script: dict, target_duration: int = None) -> l
     # 计算总时长
     total_duration = 0
     shot_durations = []
+    #: ⭐ 2026-10-13（用户口径）：收尾镜 = **每场戏的最后一镜**（连续 run 口径），
+    #:   与 novel_to_script 的 clamp 同源（否则生成端放行、质检端照样判错）。
+    _qc_tail_idx = config.tail_shot_indexes(shots)
     for i, shot in enumerate(shots):
         if not isinstance(shot, dict):
             continue
@@ -4064,10 +4067,7 @@ def _validate_script_feasibility(script: dict, target_duration: int = None) -> l
         shot_durations.append(duration)
         total_duration += duration
 
-        # ⭐ 2026-10-13（用户口径）：收尾镜（beat=收尾 / 本集末镜）内容不足时允许更短 ——
-        #   与 novel_to_script 的 clamp 同口径（否则生成端放行、质检端照样判错）。
-        _qc_is_tail = (str(shot.get("beat") or "").strip() == "收尾") or (i == len(shots) - 1)
-        _qc_min_ok = SHOT_DURATION_MIN_TAIL_OK if _qc_is_tail else SHOT_DURATION_MIN_OK
+        _qc_min_ok = SHOT_DURATION_MIN_TAIL_OK if i in _qc_tail_idx else SHOT_DURATION_MIN_OK
         # 检查单个镜头时长（留容差，避免浮点/取整误报）
         if duration < _qc_min_ok - SHOT_DURATION_TOLERANCE:
             issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 时长过短: {duration}秒"

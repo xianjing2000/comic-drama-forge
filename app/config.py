@@ -395,9 +395,10 @@ def count_action_beats(text: str) -> int:
 SHOT_DURATION_MIN = 5.0            # 单镜最短秒数（用户口径：每镜 5~6 秒）
 SHOT_DURATION_MAX = 8.0            # 单镜最长秒数（留余量给长台词；>6 秒的镜属长尾）
 SHOT_DURATION_SILENT = 0.6         # 无台词纯画面镜头的基准秒数（旧值 3.0s）
-#: ⭐ 2026-10-13（用户口径）：**收尾镜**（beat=收尾 或 本集末镜）内容不足时允许更短 ——
-#:   收尾镜常是静态定格 / 悬念定格，硬套「5 秒 × 9 宫格」会逼模型重复构图或编造元素
-#:   （实测第1集 shot_13 连打 3 轮质检不过）。分镜侧配套按内容量下调宫格数。
+#: ⭐ 2026-10-13（用户口径）：**收尾镜 = 每场戏的最后一镜**（连续 run 口径，见下方
+#:   tail_shot_indexes）。这类镜常是静态定格 / 悬念定格，硬套「5 秒 × 9 宫格」会逼模型
+#:   重复构图或编造元素（实测第1集 shot_13 连打 3 轮质检不过）。
+#:   分镜侧配套降级为单帧（storyboard_helpers 的 _shot_grid）。
 SHOT_DURATION_MIN_TAIL = 2.5       # 收尾镜允许的更低时长下限
 CHARS_PER_SECOND = 4.5             # 中文配音语速基准（字/秒），按台词长度推算时长
 BEAT_CLIMAX_BONUS_SEC = 0.7        # 「高潮」节拍镜的画面停留加成（旧值 2.0s）
@@ -431,6 +432,35 @@ SHOT_SPEECH_BUDGET_CHARS = 16
 SHOT_GRANULARITY_TARGET_SHOTS = 25      # 每集目标镜数（20~30 的中值）
 SHOT_GRANULARITY_MAX_SHOTS = 30         # 每集镜数上限（超过即视为「又切细了」，诊断时点名）
 SHOT_GRANULARITY_TARGET_SEC = 5.5       # 每镜目标秒数（5~6 的中值）
+
+
+def tail_shot_indexes(shots) -> set:
+    """本集「**每场戏的最后一镜**」的下标集合（唯一权威，三处消费点共用）。
+
+    ⭐ 2026-10-13（用户口径）：收尾镜 = **每场戏的最后一镜**（不是本集末镜）。
+    这些镜头常是静态定格 / 悬念定格，内容量撑不起「5 秒 × 9 关键帧」，
+    故允许更短时长（SHOT_DURATION_MIN_TAIL）并降级为单帧分镜。
+
+    ⚠️ **必须按「连续 run」分组，不能按 scene_no 值分组**：重写的尾镜会带陈旧的
+       scene_no 落盘（实测第 1 集 shots[41..45] 的 scene_no 退回 1，location 却是
+       青云宗外门广场）—— 按值分组会把它们并进第 1 场，判不出它们其实是独立一场。
+       本函数与 novel_to_script 的场次表 / video_helpers 的按场渲染**同口径**。
+
+    消费点：novel_to_script 时长 clamp、qc_client 时长下限判据、
+            storyboard_helpers 逐镜九宫格降级。
+    """
+    out = set()
+    n = len(shots or [])
+    for i, s in enumerate(shots or []):
+        if not isinstance(s, dict):
+            continue
+        no = int(s.get("scene_no") or 0)
+        nxt = None
+        if i + 1 < n and isinstance(shots[i + 1], dict):
+            nxt = int(shots[i + 1].get("scene_no") or 0)
+        if nxt != no:
+            out.add(i)
+    return out
 #: 单块镜头数上限相对目标值的**放大倍数**（2026-10-06 由「2 倍 + 3」收紧而来）。
 #: 原口径（`shots_target * 2 + 3`，上限 120）让模型「被允许」写到目标的 2 倍以上 ——
 #: 实测第 1 集目标 38 镜、模型产出约 40 镜，再叠加插入镜/拆镜吹到 56 镜。

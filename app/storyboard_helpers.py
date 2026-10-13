@@ -32,6 +32,8 @@ from config import (
     H3_COMMON_REFS, H3_COMMON_REFS_MAX,
     PROJECT_DEFAULT_CONFIG,
     PROMPT_ENHANCE_CONFIG_PATH, save_prompt_enhance_config, _prompt_enhance_file_flags,
+    #: T20（2026-10-13 用户口径）：每场戏的最后一镜（连续 run 口径）
+    tail_shot_indexes,
 )
 from comfyui_client import (ComfyUIClient, camera_spec as _camera_spec,
                             camera_key as _camera_key, camera_angle as _camera_angle,
@@ -2306,6 +2308,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     # 视频提示词（切段 / LoRA / 增强 / 预检，只填缓存）：不碰 GPU、不占 ComfyUI 队列、
     # 与出图并行；预热失败绝不影响主线（daemon + 全捕获）。
     # 关闭开关：env MJSCXT_PREWARM_VIDEO_PROMPT=0（与 video_helpers 同一开关）。
+    #: ⭐ T20：收尾镜 = **每场戏的最后一镜**（连续 run 口径，config.tail_shot_indexes）
+    _tail_idx = tail_shot_indexes(shots)
     _vw_done_seqs = set()
     _vw_fired: set = set()
     _vw_state = {"script": None}
@@ -2370,15 +2374,14 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             shot_id = shot.get("shot_id", i + 1)
             seq = _shot_seq(shot_id, i + 1)
             # ⭐ T20（2026-10-13 用户口径）：**逐镜**判定是否用九宫格 ——
-            #   收尾镜（beat=收尾 / 本集末镜）常是静态定格或悬念定格，缺少「9 个随时间推进的
-            #   关键帧」所需的内容量；硬套 3×3 会逼模型重复构图或编造设定里没有的元素
+            #   收尾镜 = **每场戏的最后一镜**（连续 run 口径，见 config.tail_shot_indexes）——
+            #   常是静态定格或悬念定格，缺少「9 个随时间推进的关键帧」所需的内容量；
+            #   硬套 3×3 会逼模型重复构图或编造设定里没有的元素
             #   （实测 shot_13 连打 3 轮质检不过）。这类镜降级为**单帧**：质检口径同步切到
             #   单帧（见下方 _qc_desc），景别自动裁剪也恢复启用。
             #   ⚠️ 只影响本镜的三个消费点（grid_layout / 结构闸门 / 质检口径 / 裁剪）；
             #      循环外的提示词预热仍按全局 _sb_grid_mode 预取（预热不命中只是性能损失）。
-            _shot_grid = bool(_sb_grid_mode) and not (
-                str(shot.get("beat") or "").strip() == "收尾" or i == len(shots) - 1
-            )
+            _shot_grid = bool(_sb_grid_mode) and (i not in _tail_idx)
             if bool(_sb_grid_mode) and not _shot_grid:
                 logger.info("镜头 %s 为收尾镜（beat=%s idx=%d/%d）→ 本镜降级单帧，不用九宫格（T20）",
                             shot_id, shot.get("beat") or "", i + 1, len(shots))

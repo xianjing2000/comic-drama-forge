@@ -55,6 +55,7 @@ from config import (
     COVERAGE_THRESHOLD,   # 唯一事实源在 config（2026-10-08 解耦）
     SHOT_TYPES, ACTION_WORDS, ACTION_CLAUSE_RE, count_action_beats,
     SHOT_DURATION_MIN, SHOT_DURATION_MAX, SHOT_DURATION_MIN_TAIL, SHOT_DURATION_SILENT, CHARS_PER_SECOND,
+    tail_shot_indexes,
     BEAT_CLIMAX_BONUS_SEC, SHOT_SPEECH_BUDGET_CHARS,
     SHOT_DURATION_DESC_SEC_MAX, SHOT_DURATION_DESC_CHARS_PER_SEC,
     SHOT_DURATION_ACTION_SEC_MAX,
@@ -2690,15 +2691,15 @@ def align_shots_to_reference(shots: list, start_id: int = 1) -> list:
     # 这才是「看不出切换」的真正来源：参考片中位镜长 2.08s，而本系统旧剧本单镜能拖到 11~12s，
     # 一镜 10 秒不切，观感就是一镜演完好几件事。这里把上限收到参考片最长镜（6.5s）。
     # ⚠️ 只砍长尾，绝不压到台词所需时长以下 —— 压下去配音会溢出（duration_overflow_sec 同理重算）。
+    # ⭐ 2026-10-13（用户口径）：**收尾镜 = 每场戏的最后一镜**（连续 run 口径，
+    #   既不是本集末镜、也不能按 scene_no 值分组 —— 陈旧 scene_no 会把独立场次并进第 1 场）。
+    #   这类镜常是静态/悬念定格，允许更短时长（SHOT_DURATION_MIN_TAIL）。
+    _tail_idx = tail_shot_indexes(shots)
     for _si, s in enumerate(shots):
         need = required_shot_duration(s)
         d = float(s.get("duration") or SHOT_DURATION_MIN)
         target = max(min(d, REF_SHOT_DURATION_MAX), min(need, SHOT_DURATION_MAX))
-        # ⭐ 2026-10-13（用户口径）：**收尾镜**（beat=收尾 或 本集末镜）内容不足时允许更短，
-        #   下限降到 SHOT_DURATION_MIN_TAIL；其余镜头仍守 SHOT_DURATION_MIN（5s）。
-        #   收尾镜常是静态/悬念定格，不适用「5 秒 × 9 关键帧」的时间推进要求。
-        _is_tail = (str(s.get("beat") or "").strip() == "收尾") or (_si == len(shots) - 1)
-        _floor = SHOT_DURATION_MIN_TAIL if _is_tail else SHOT_DURATION_MIN
+        _floor = SHOT_DURATION_MIN_TAIL if _si in _tail_idx else SHOT_DURATION_MIN
         s["duration"] = round(max(_floor, target), 2)
         if need > SHOT_DURATION_MAX:
             s["duration_overflow_sec"] = round(need - SHOT_DURATION_MAX, 2)
