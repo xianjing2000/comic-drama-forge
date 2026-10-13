@@ -2369,6 +2369,19 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         for i, shot in enumerate(shots):
             shot_id = shot.get("shot_id", i + 1)
             seq = _shot_seq(shot_id, i + 1)
+            # ⭐ T20（2026-10-13 用户口径）：**逐镜**判定是否用九宫格 ——
+            #   收尾镜（beat=收尾 / 本集末镜）常是静态定格或悬念定格，缺少「9 个随时间推进的
+            #   关键帧」所需的内容量；硬套 3×3 会逼模型重复构图或编造设定里没有的元素
+            #   （实测 shot_13 连打 3 轮质检不过）。这类镜降级为**单帧**：质检口径同步切到
+            #   单帧（见下方 _qc_desc），景别自动裁剪也恢复启用。
+            #   ⚠️ 只影响本镜的三个消费点（grid_layout / 结构闸门 / 质检口径 / 裁剪）；
+            #      循环外的提示词预热仍按全局 _sb_grid_mode 预取（预热不命中只是性能损失）。
+            _shot_grid = bool(_sb_grid_mode) and not (
+                str(shot.get("beat") or "").strip() == "收尾" or i == len(shots) - 1
+            )
+            if bool(_sb_grid_mode) and not _shot_grid:
+                logger.info("镜头 %s 为收尾镜（beat=%s idx=%d/%d）→ 本镜降级单帧，不用九宫格（T20）",
+                            shot_id, shot.get("beat") or "", i + 1, len(shots))
             dst = os.path.join(out_dir, f"shot_{seq:02d}.png")
             # ---------- 断点续跑：**真达标**的镜头才直接复用，只重跑缺失/不达标的 ----------
             # 正式目录里已有非空 shot_XX.png **且该图不是软放行/带严重问题产物** → 跳过。
@@ -2433,7 +2446,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             item = {"shot_id": shot_id, "success": False, "refs": {}, "prompt": "",
                     # 单镜九宫格标记（2026-10-06）：随 manifest 落盘，画布接口把它投影成
                     # storyboard.grid，前端灯箱据此叠加 1-9 编号覆盖层（编号不再让模型画）。
-                    "grid_layout": bool(_sb_grid_mode)}
+                    "grid_layout": bool(_shot_grid)}
             # ⭐⭐ 2026-10-08 修复（严重）：scratch_png 必须**逐镜重置**。
             #    它原本只在「生成成功」后赋值，生成失败/预检阻断时**保留上一镜的路径**；
             #    下方的「质检软放行」若直接读它，会把**上一镜的图**复制成本镜产物
@@ -2579,7 +2592,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                 # ★ 双保险（2026-10-06）：即时优化结果**再走一次**确定性
                                 #   结构闸门。不合格就当作「没有优化」回落历史召回/换种子 ——
                                 #   重试路径此前不复检提示词，那正是本次事故的入口。
-                                _pf_ok, _pf_miss = _storyboard_prompt_structurally_ok(_opt_prompt, _sb_grid_mode)
+                                _pf_ok, _pf_miss = _storyboard_prompt_structurally_ok(_opt_prompt, _shot_grid)
                                 if not _pf_ok:
                                     logger.warning(
                                         "镜头 %s 即时优化提示词缺协议段（%s），弃用并回落原逻辑",
@@ -2693,7 +2706,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         # ⚠️ 九宫格模式（2026-10-02）禁用：一张图是 3x3 九个关键帧，
                         #    按景别裁剪会切掉 8 格、只剩一格，破坏九宫格结构。
                         _shot_type = (shot.get("shot_type") or shot.get("camera") or "").strip()
-                        if _shot_type and not _sb_grid_mode and os.path.isfile(scratch_png):
+                        if _shot_type and not _shot_grid and os.path.isfile(scratch_png):
                             try:
                                 _crop_res = qc_client.auto_crop_framing(scratch_png, _shot_type)
                                 if _crop_res.get("cropped") and os.path.isfile(_crop_res["out_path"]):
@@ -2704,7 +2717,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         # 九宫格模式（2026-10-02）：质检描述加「九宫格」口径，
                         # 判官按 9 个关键帧的整体一致性评，不按单帧景别判。
                         _qc_desc = _qc_shot_desc(shot)
-                        if _sb_grid_mode:
+                        if _shot_grid:
                             _qc_desc = ("本图为一张 3x3 九宫格故事板：同一镜头的 9 个关键帧，"
                                         "随时间从左到右、从上到下推进；请评 9 格整体的角色/场景/"
                                         "光线/色调一致性、动作推进的连贯性与画面质量，"
