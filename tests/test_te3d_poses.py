@@ -112,5 +112,58 @@ class TestHandShape(unittest.TestCase):
         self.assertTrue(any("Hand" in k for k in built["poseValues"]))
 
 
+class TestOpenPoseEstimate(unittest.TestCase):
+    """OpenPose BODY_18 -> poseValues 的近似反解（官方 estimatePoseValuesFromOpenPose 口径）。"""
+
+    def _standing(self):
+        # 竖直站姿：颈在头下、肩在颈两侧、肘腕膝踝依次向下
+        pts = [[0.0, 0.0, 1.0] for _ in range(18)]
+        pts[0] = [0.0, -20.0, 1.0]     # nose
+        pts[1] = [0.0, 0.0, 1.0]       # neck
+        pts[2] = [-30.0, 10.0, 1.0]    # rShoulder
+        pts[3] = [-30.0, 60.0, 1.0]    # rElbow
+        pts[4] = [-30.0, 110.0, 1.0]   # rWrist
+        pts[5] = [30.0, 10.0, 1.0]     # lShoulder
+        pts[6] = [30.0, 60.0, 1.0]     # lElbow
+        pts[7] = [30.0, 110.0, 1.0]    # lWrist
+        pts[8] = [-15.0, 100.0, 1.0]   # rHip
+        pts[9] = [-15.0, 160.0, 1.0]   # rKnee
+        pts[10] = [-15.0, 220.0, 1.0]  # rAnkle
+        pts[11] = [15.0, 100.0, 1.0]   # lHip
+        pts[12] = [15.0, 160.0, 1.0]   # lKnee
+        pts[13] = [15.0, 220.0, 1.0]   # lAnkle
+        return pts
+
+    def test_standing_is_neutral(self):
+        got = P.estimate_pose_values_from_openpose(self._standing())
+        self.assertAlmostEqual(got.get("lFore", 0.0), 0.0, delta=8.0)
+        self.assertAlmostEqual(got.get("rFore", 0.0), 0.0, delta=8.0)
+        self.assertAlmostEqual(got.get("lKnee", 0.0), 0.0, delta=8.0)
+        self.assertAlmostEqual(got.get("lLegFwd", 0.0), 0.0, delta=8.0)
+
+    def test_bent_elbow_left(self):
+        pts = self._standing()
+        pts[6] = [30.0, 60.0, 1.0]
+        pts[7] = [90.0, 60.0, 1.0]     # 前臂水平 -> 肘弯 90°
+        got = P.estimate_pose_values_from_openpose(pts)
+        self.assertLess(got["lFore"], -60.0)   # 左肘负值弯
+        self.assertGreater(got["lFore"], -120.0)
+
+    def test_bent_knee_right(self):
+        pts = self._standing()
+        pts[10] = [-15.0, 160.0, 1.0]  # 踝抬到膝同高 -> 膝弯 90°
+        got = P.estimate_pose_values_from_openpose(pts)
+        self.assertGreater(got["rKnee"], 60.0)
+
+    def test_low_confidence_ignored(self):
+        pts = self._standing()
+        pts[7][2] = 0.0
+        got = P.estimate_pose_values_from_openpose(pts)
+        self.assertNotIn("lFore", got)
+
+    def test_too_few_points(self):
+        self.assertEqual(P.estimate_pose_values_from_openpose([[0, 0, 1]]), {})
+
+
 if __name__ == "__main__":
     unittest.main()

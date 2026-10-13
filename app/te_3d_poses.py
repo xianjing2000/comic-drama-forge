@@ -191,6 +191,101 @@ _HAND_KEYWORDS = (
 )
 
 
+#: OpenPose BODY_18 关键点索引（官方导演台导入/导出用的就是这套 18 点）
+OP18 = {"nose": 0, "neck": 1, "rShoulder": 2, "rElbow": 3, "rWrist": 4,
+        "lShoulder": 5, "lElbow": 6, "lWrist": 7, "rHip": 8, "rKnee": 9, "rAnkle": 10,
+        "lHip": 11, "lKnee": 12, "lAnkle": 13, "rEye": 14, "lEye": 15, "rEar": 16, "lEar": 17}
+
+
+def _angle_at(a, b, c) -> float:
+    """三点在 b 处的夹角（度）。"""
+    import math
+    v1 = (a[0] - b[0], a[1] - b[1])
+    v2 = (c[0] - b[0], c[1] - b[1])
+    n1 = math.hypot(v1[0], v1[1])
+    n2 = math.hypot(v2[0], v2[1])
+    if n1 < 1e-6 or n2 < 1e-6:
+        return 0.0
+    cosv = max(-1.0, min(1.0, (v1[0] * v2[0] + v1[1] * v2[1]) / (n1 * n2)))
+    return math.degrees(math.acos(cosv))
+
+
+def _lift_from_vertical(a, b) -> float:
+    """线段 a->b 相对「竖直向下」的抬升角（度）：直立 0、水平 90、举过头 >90。"""
+    import math
+    dx = b[0] - a[0]
+    dy = b[1] - a[1]
+    n = math.hypot(dx, dy)
+    if n < 1e-6:
+        return 0.0
+    return math.degrees(math.acos(max(-1.0, min(1.0, dy / n))))
+
+
+def estimate_pose_values_from_openpose(points, conf_threshold: float = 0.2) -> Dict[str, float]:
+    """OpenPose BODY_18 关键点（[[x, y, conf], ...]）-> poseValues（近似解）。
+
+    ⚠️ 原理性限制：单张 2D 图**无法**恢复 3D 姿态（深度缺失）。这里只从图像平面内的
+    肢体方向反推可判定的量：屈肘、屈膝、抬腿；其余关节保持 0。官方
+    estimatePoseValuesFromOpenPose 同样是近似解 —— 适用于「拿一张 OpenPose 图当姿势
+    输入」的场景，不用于精确复刻。
+
+    y 轴方向按 OpenPose 惯例取**向下为正**。
+    """
+    pts = []
+    for p in list(points or [])[:18]:
+        try:
+            x = float(p[0])
+            y = float(p[1])
+            c = float(p[2]) if len(p) > 2 else 1.0
+        except (TypeError, ValueError, IndexError):
+            x = y = 0.0
+            c = 0.0
+        pts.append((x, y, c))
+    if len(pts) < 14:
+        return {}
+
+    def ok(i: int) -> bool:
+        return pts[i][2] >= conf_threshold
+
+    out: Dict[str, float] = {}
+    # 屈肘：肩-肘-腕夹角 → 补角（左肘负值弯、右肘正值弯）
+    if ok(5) and ok(6) and ok(7):
+        out["lFore"] = round(-(180.0 - _angle_at(pts[5], pts[6], pts[7])), 1)
+    if ok(2) and ok(3) and ok(4):
+        out["rFore"] = round(180.0 - _angle_at(pts[2], pts[3], pts[4]), 1)
+    # 屈膝：髋-膝-踝夹角 → 补角（膝只能向后折，取正）
+    if ok(11) and ok(12) and ok(13):
+        out["lKnee"] = round(max(0.0, 180.0 - _angle_at(pts[11], pts[12], pts[13])), 1)
+    if ok(8) and ok(9) and ok(10):
+        out["rKnee"] = round(max(0.0, 180.0 - _angle_at(pts[8], pts[9], pts[10])), 1)
+    # 抬腿：大腿相对竖直的抬升（Fwd 负值 = 前抬）
+    if ok(11) and ok(12):
+        lift = _lift_from_vertical(pts[11], pts[12])
+        if lift > 20.0:
+            out["lLegFwd"] = round(-min(90.0, lift), 1)
+    if ok(8) and ok(9):
+        lift = _lift_from_vertical(pts[8], pts[9])
+        if lift > 20.0:
+            out["rLegFwd"] = round(-min(90.0, lift), 1)
+    # 前举 / 外展：上臂相对竖直的抬升，按水平位移占比分派到 Fwd 或 Abd
+    for side, sh, el, fwd_key, abd_key in (
+            ("l", 5, 6, "lArmFwd", "lArmAbd"), ("r", 2, 3, "rArmFwd", "rArmAbd")):
+        if not (ok(sh) and ok(el)):
+            continue
+        lift = _lift_from_vertical(pts[sh], pts[el])
+        if lift <= 25.0:
+            continue
+        dx = abs(pts[el][0] - pts[sh][0])
+        dy = abs(pts[el][1] - pts[sh][1])
+        ratio = dx / max(1e-6, (dx + dy))
+        if ratio >= 0.6:            # 主要朝两侧 → 外展
+            base = -80.0 if side == "l" else 80.0
+            out[abd_key] = round(base + (lift - 80.0) * 0.5, 1)
+        else:                       # 主要朝上下 → 前举
+            out[fwd_key] = round(min(170.0, lift), 1)
+    return clamp_joints(out)
+
+
 def preset_values(name: str) -> Dict[str, float]:
     """取预设的关节角（未知预设 -> 空 dict）。"""
     item = PRESETS.get(str(name or "").strip())
