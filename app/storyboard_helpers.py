@@ -1934,6 +1934,20 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             _pf_pending.append((_pseq, _ps))
     _pf_shot_by_seq = {sq: s for sq, s in _pf_pending}
 
+    # ⭐ T20（2026-10-13 用户口径）：收尾镜 = **每场戏的最后一镜**（连续 run 口径）。
+    #   ⚠️ 标记必须打在**上方 shots 重建（dict(s, style=…)）之后**，否则重建会丢标记；
+    #      也必须早于 _prep_shot —— 它是内联与预取**共用的唯一提示词构建实现**，
+    #      否则预取阶段仍按全局 _sb_grid_mode 生成「3x3 九宫格」提示词，而质检按单帧判，
+    #      两边口径打架（2026-10-13 实测 shot_13 卡住：提示词仍写「9格是同一条动作链」）。
+    _tail_idx = tail_shot_indexes(shots)
+    for _ti in _tail_idx:
+        if 0 <= _ti < len(shots or []) and isinstance(shots[_ti], dict):
+            shots[_ti]["_tail_shot"] = True
+    if _tail_idx:
+        logger.info("[T20] 本集收尾镜（每场戏最后一镜）共 %d 个：%s",
+                        len(_tail_idx),
+                        [shots[_t].get("shot_id") for _t in sorted(_tail_idx) if isinstance(shots[_t], dict)])
+
     # 九宫格逐格规划用的「文本分析模型」客户端（worker 级读一次，G13 同款口径）：
     # 未配置 → None → _grid_panel_plan 直接跳过 → 九宫格回落英文版提示词（fail-open）。
     try:
@@ -2023,6 +2037,10 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         #    注意：② 是 ① 的**子集**，只更保守（不插 ref / 少调一次渲染），不会分叉。
         #    ⚠️ `has_characters` 提示词参数仍只取 ①（declared）—— 见下方与 L2817。
         from config import ENABLE_3D_BLOCKING_IMAGE
+        # ⭐ T20：本镜是否走九宫格 —— 收尾镜（场末镜）降级单帧，**本函数唯一判据**，
+        #   供三处消费：身份基准网格（3×3 九格只对九宫格输出有意义）/
+        #   提示词构建（九宫格版 vs 单帧版）/ 3D 构图基准段。
+        _p_grid = bool(_sb_grid_mode) and not bool(shot_p.get("_tail_shot"))
         _has_on_screen = _shot_has_on_screen(shot_p)
         # ---- 角色身份基准网格（2026-10-06，用户拍板「先拼九宫格再送工作流」）----
         # 九宫格 9 面板一次扩散生成，格间服装/发型漂移纯文字约束不住；
@@ -2035,7 +2053,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         #    个别参考图本身已足够锚定身份，不再拼 9 格同图网格。多角色/多视图
         #    时网格各格互异，逐格绑定仍有意义，保持原行为。
         _identity_grid_path = ""
-        if _sb_grid_mode and _has_on_screen:
+        if _p_grid and _has_on_screen:
             _ig_paths = [r[2] for r in refs if r[0] in ("主角色", "次角色")]
             if len(set(_ig_paths)) >= 3:
                 try:
@@ -2136,7 +2154,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 _blocking_ref_path = ""
         _ph["3D站位基准图"] = time.perf_counter() - _tprev
         _tprev = time.perf_counter()
-        if _sb_grid_mode:
+        if _p_grid:
             # ---------- 九宫格逐格规划（2026-10-07，两段式第一步）----------
             # 先用文本 LLM 把本镜拆成 9 个关键帧分镜（内容寻址缓存，同镜重复零成本）；
             # 规划成功 → build_shot_grid_keyframes_prompt 走「逐格写死」中文模板
@@ -2308,8 +2326,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     # 视频提示词（切段 / LoRA / 增强 / 预检，只填缓存）：不碰 GPU、不占 ComfyUI 队列、
     # 与出图并行；预热失败绝不影响主线（daemon + 全捕获）。
     # 关闭开关：env MJSCXT_PREWARM_VIDEO_PROMPT=0（与 video_helpers 同一开关）。
-    #: ⭐ T20：收尾镜 = **每场戏的最后一镜**（连续 run 口径，config.tail_shot_indexes）
-    _tail_idx = tail_shot_indexes(shots)
+    #: ⭐ T20：_tail_idx 已在 _prep_shot 之前算好（并已给 shots 打上 _tail_shot 标记）
     _vw_done_seqs = set()
     _vw_fired: set = set()
     _vw_state = {"script": None}
@@ -2381,7 +2398,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             #   单帧（见下方 _qc_desc），景别自动裁剪也恢复启用。
             #   ⚠️ 只影响本镜的三个消费点（grid_layout / 结构闸门 / 质检口径 / 裁剪）；
             #      循环外的提示词预热仍按全局 _sb_grid_mode 预取（预热不命中只是性能损失）。
-            _shot_grid = bool(_sb_grid_mode) and (i not in _tail_idx)
+            _shot_grid = bool(_sb_grid_mode) and not bool(shot.get("_tail_shot"))
             if bool(_sb_grid_mode) and not _shot_grid:
                 logger.info("镜头 %s 为收尾镜（beat=%s idx=%d/%d）→ 本镜降级单帧，不用九宫格（T20）",
                             shot_id, shot.get("beat") or "", i + 1, len(shots))
