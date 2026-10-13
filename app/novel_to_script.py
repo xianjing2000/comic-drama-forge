@@ -296,6 +296,19 @@ OVER_SPLIT_MIN_EXPECT = 2.0    # 引导镜数低于此值时不判定（原文�
 OVER_SPLIT_MIN_SHRINK = 0.7    # 重切后至少要缩到 70% 才考虑采纳（密度仍不达标时）
 
 
+def _over_split_heal_enabled() -> bool:
+    """「过碎重切」开关 —— **默认关闭**（2026-10-13 用户口径：每集镜数不设上限）。
+
+    历史（2026-10-10）：它用来治「模型把一镜拆成三镜」（《进境》第2集落盘 109 镜）。
+    但它的判据是「原文长度 / CHARS_PER_SHOT」，本质就是**按字数给镜数设上限** ——
+    用户多次明确「每集不要设上限、镜数由内容决定、不为凑密度合并内容」，故默认关。
+    质量约束改由提示词的「不要把同一动作拆成多镜 / 静态画面不许单独成镜」承担
+    （那些是**切法**约束，不是数量上限）。
+    """
+    return str(os.environ.get("MJSCXT_OVER_SPLIT_HEAL") or "").strip().lower() \
+        in ("1", "true", "yes", "on")
+
+
 def shots_density_ok(n_shots: int, chars: int,
                      chars_per_shot: int = None, tolerance: float = None) -> bool:
     """镜数密度体检（纯函数）：过碎返回 False。
@@ -1248,9 +1261,10 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
             "  · ⛔ 不要把**同一个动作**的连续瞬间拆成多镜"
             "（「手伸进口袋」→「攥紧」→「纸角露出」应合为**一镜**，不是三镜）；\n"
             "  · ⛔ 不要为同一句台词拆正反打，也不要为同一时刻、同一空间重复给镜；\n"
-            "  · 密度锚点：一镜通常承载原文约 **%d 字**。"
-            "若你的切法平均每镜**不足 %d 字**，说明切得太碎，"
-            "应把同一动作 / 同一时空间的相邻镜合并。\n"
+            # ⚠️ 2026-10-13 **删除**「密度锚点（一镜约 240 字 / 不足 120 字就合并）」：
+            #    用户第三次强调每集镜数不设上限，这条锚点实质是变相上限 —— 它会让
+            #    模型把内容合并进更少镜头（2478 字 → 10 镜）。镜数完全由原文内容决定。
+            #    只保留下面「不要切碎同一动作 / 静态画面不许单独成镜」这类**切法**约束。
             # ⭐ 2026-10-10 用户口径 C：静态画面不许单独成镜 + 内容必须撑得起时长。
             #    背景（第9集实测）：48 镜里 21 镜无台词（44%），平均内容量仅 1.54 秒，
             #    却被单镜 5 秒下限硬撑 → 每镜空转 3.5 秒，合计空转 72.7 秒（占总时长
@@ -1266,8 +1280,9 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
             "应把它并回相邻镜。\n"
             "  · **无台词的纯画面镜头占比不宜超过三成**：连续多个无台词镜会让整集"
             "变成幻灯片；空镜用于转场或情绪留白即可，不要用它承载信息。\n"
-            "既不要为凑数灌水，也不要为省事把原文情节合并丢掉。"
-            % (CHARS_PER_SHOT, max(30, CHARS_PER_SHOT // 2)))
+            # ⚠️ 2026-10-13：上面两条含 %d 的「密度锚点」已删除 —— 这里的格式化参数
+            #    必须同步去掉，否则 "%" 拼接会抛 TypeError（参数多于占位符）。
+            "既不要为凑数灌水，也不要为省事把原文情节合并丢掉。")
     # ★ 自愈重切时注入的额外指令（追加在粒度判据之后，无需改提示词模板）
     if extra_hint:
         _shots_targeting_text = _shots_targeting_text + "\n" + str(extra_hint)
@@ -1418,7 +1433,10 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                            "findings": drift[:12]})
     # ★ 切分粒度自愈（2026-10-10）：密度体检 + 过碎时带反馈重切一次。
     #   _no_heal=True 表示「本次就是自愈重切」，避免无限递归。
-    if not _no_heal:
+    # ⚠️ 2026-10-13 用户第三次强调：**每集镜数不设上限** —— 镜数由原文内容决定，
+    #    不得因「平均每镜字数不够」把内容合并掉。故「过碎重切」默认**关闭**
+    #    （需要时 MJSCXT_OVER_SPLIT_HEAL=1 打开；回滚开关）。
+    if not _no_heal and _over_split_heal_enabled():
         out = _heal_over_split(client, bible, outline, chunk, out, label,
                                events=events, depth=depth,
                                continuity_ctx=continuity_ctx, cache_dir=cache_dir,
