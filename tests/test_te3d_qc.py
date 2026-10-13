@@ -1,0 +1,115 @@
+# -*- coding: utf-8 -*-
+"""3D 构图基准图质检回归（2026-10-13）。
+
+用户要求：基准图**先生成前质检**，没问题了再生成分镜图。本测试锁定判据行为：
+  · 空白图 -> image_ok 不过
+  · 人数不符 -> char_count 不过（有 diag 时）
+  · 命中动作但姿势没应用 -> pose_applied 不过
+  · 单角色站位错档 -> slot 不过
+  · 景别越档 -> framing 不过
+  · 缺 diag -> 相关判据记 skipped（None），不误杀
+"""
+import os
+import sys
+import tempfile
+import unittest
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_APP = os.path.join(os.path.dirname(_HERE), "app")
+if _APP not in sys.path:
+    sys.path.insert(0, _APP)
+
+from PIL import Image  # noqa: E402
+
+import te_3d_qc as Q  # noqa: E402
+
+
+def _mk(path, blocks, size=(640, 360), bg=(140, 140, 145)):
+    """造一张「灰底 + 若干彩色块」的假基准图。blocks = [(x0,y0,x1,y1,color)]"""
+    im = Image.new("RGB", size, bg)
+    px = im.load()
+    for x0, y0, x1, y1, col in blocks:
+        for y in range(max(0, y0), min(size[1], y1)):
+            for x in range(max(0, x0), min(size[0], x1)):
+                px[x, y] = col
+    im.save(path)
+    return path
+
+
+CHAR_BLUE = (47, 128, 255)
+
+
+class TestBlockingQc(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.d = self.td.name
+
+    def _p(self, name):
+        return os.path.join(self.d, name)
+
+    def test_blank_image_fails(self):
+        p = _mk(self._p("blank.png"), [])
+        r = Q.qc_blocking_image({"characters_in_shot": ["羡进"]}, p)
+        self.assertFalse(r["ok"])
+        self.assertIn("image_ok", [c["name"] for c in r["checks"] if c["ok"] is False])
+
+    def test_char_count_from_diag(self):
+        p = _mk(self._p("one.png"), [(260, 100, 380, 300, CHAR_BLUE)])
+        ok = Q.qc_blocking_image({"characters_in_shot": ["羡进"]}, p, diag={"chars": 1})
+        self.assertTrue(ok["ok"], ok["reasons"])
+        bad = Q.qc_blocking_image({"characters_in_shot": ["羡进", "赵天霸"]}, p, diag={"chars": 1})
+        self.assertFalse(bad["ok"])
+        self.assertTrue(any("人偶" in x for x in bad["reasons"]))
+
+    def test_pose_applied_required_when_action_matched(self):
+        p = _mk(self._p("kneel.png"), [(260, 100, 380, 300, CHAR_BLUE)])
+        shot = {"characters_in_shot": ["羡进"], "action": "他跪坐在地上"}
+        bad = Q.qc_blocking_image(shot, p, diag={"chars": 1, "poseApplied": 0})
+        self.assertFalse(bad["ok"])
+        good = Q.qc_blocking_image(shot, p, diag={"chars": 1, "poseApplied": 41})
+        self.assertTrue(good["ok"], good["reasons"])
+
+    def test_slot_position(self):
+        left = _mk(self._p("left.png"), [(40, 100, 140, 300, CHAR_BLUE)])
+        right = _mk(self._p("right.png"), [(500, 100, 600, 300, CHAR_BLUE)])
+        shot_left = {"characters_in_shot": ["羡进"], "blocking": [{"name": "羡进", "x": "left"}]}
+        shot_right = {"characters_in_shot": ["羡进"], "blocking": [{"name": "羡进", "x": "right"}]}
+        self.assertTrue(Q.qc_blocking_image(shot_left, left)["ok"])
+        self.assertFalse(Q.qc_blocking_image(shot_left, right)["ok"])
+        self.assertTrue(Q.qc_blocking_image(shot_right, right)["ok"])
+        self.assertFalse(Q.qc_blocking_image(shot_right, left)["ok"])
+
+    def test_framing_band(self):
+        small = _mk(self._p("small.png"), [(280, 150, 340, 210, CHAR_BLUE)])
+        big = _mk(self._p("big.png"), [(240, 20, 400, 340, CHAR_BLUE)])
+        shot = {"characters_in_shot": ["羡进"]}
+        self.assertFalse(Q.qc_blocking_image(shot, small, cam_key="近景")["ok"])
+        self.assertTrue(Q.qc_blocking_image(shot, small, cam_key="全景")["ok"])
+        self.assertTrue(Q.qc_blocking_image(shot, big, cam_key="近景")["ok"])
+        self.assertFalse(Q.qc_blocking_image(shot, big, cam_key="远景")["ok"])
+
+    def test_missing_diag_is_skipped_not_failed(self):
+        p = _mk(self._p("nod.png"), [(260, 100, 380, 300, CHAR_BLUE)])
+        r = Q.qc_blocking_image({"characters_in_shot": ["羡进"], "action": "他跪坐在地上"}, p)
+        by = {c["name"]: c for c in r["checks"]}
+        self.assertIsNone(by["char_count"]["ok"])
+        self.assertIsNone(by["pose_applied"]["ok"])
+        self.assertTrue(r["ok"], r["reasons"])
+
+    def test_enabled_switch(self):
+        old = os.environ.get("MJSCXT_TE3D_QC")
+        try:
+            os.environ["MJSCXT_TE3D_QC"] = "0"
+            self.assertFalse(Q.enabled())
+            os.environ["MJSCXT_TE3D_QC"] = "1"
+            self.assertTrue(Q.enabled())
+        finally:
+            if old is None:
+                os.environ.pop("MJSCXT_TE3D_QC", None)
+            else:
+                os.environ["MJSCXT_TE3D_QC"] = old
+
+
+if __name__ == "__main__":
+    unittest.main()

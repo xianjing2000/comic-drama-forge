@@ -544,7 +544,9 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
                 logger.warning("[3D站位图] 渲染结果近乎全黑（%s，非背景占比 %.4f）",
                                tag, ratio)
                 return None
-            return png
+            # ⭐ 2026-10-13：连渲染诊断一起返回（人数 / 骨骼盒 / 机位 / 姿势应用数…）——
+            #    基准图质检（app/te_3d_qc.py）靠它做确定性判据，见 read_render_diag。
+            return png, box.diag
         finally:
             _terminate(proc)
             try:
@@ -560,11 +562,11 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
             with open(payload_path, "w", encoding="utf-8") as f:
                 json.dump(plan, f, ensure_ascii=False)
 
-        png = _attempt("第1次")
+        png, diag = _attempt("第1次") or (None, None)
         if png is None:
             # 冷启动偶发失败（首建浏览器 profile / 着色器编译超时）→ 重试一次再降级
             time.sleep(0.6)
-            png = _attempt("重试")
+            png, diag = _attempt("重试") or (None, None)
         if png is None:
             return None
 
@@ -573,6 +575,17 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
         else:
             with open(dst, "wb") as f:
                 f.write(png)
+        # 渲染诊断落 sidecar（同目录同 key）：质检与排障都靠它，缓存命中时也读得回
+        try:
+            _dp = _diag_path(dst)
+            if diag is not None:
+                if atomic_write_json is not None:
+                    atomic_write_json(_dp, diag)
+                else:
+                    with open(_dp, "w", encoding="utf-8") as _f:
+                        json.dump(diag, _f, ensure_ascii=False)
+        except Exception as _de:  # noqa: BLE001
+            logger.debug("[3D站位图] 诊断落盘失败（忽略）：%s", _de)
         _mark_render_done()
         logger.info("[3D站位图] 渲染完成：%s（%.0f KB）", dst, len(png) / 1024.0)
         return dst
@@ -597,6 +610,28 @@ _render_done_once = False
 def _mark_render_done() -> None:
     global _render_done_once
     _render_done_once = True
+
+
+def _diag_path(png_path: str) -> str:
+    """渲染诊断 sidecar 路径（与 PNG 同 key 同目录）。"""
+    return os.path.splitext(str(png_path or ""))[0] + ".diag.json"
+
+
+def read_render_diag(png_path: str) -> Optional[dict]:
+    """读回某张基准图的渲染诊断（人数 / 骨骼盒 / 机位 / 朝向 / 姿势应用数）。
+
+    没有 sidecar（旧图 / 落盘失败）返回 None —— 调用方必须容忍 None（判据降级为
+    只看像素统计）。
+    """
+    try:
+        p = _diag_path(png_path)
+        if os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def _terminate(proc: subprocess.Popen) -> None:

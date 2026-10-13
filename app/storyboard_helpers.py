@@ -2377,6 +2377,47 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                             target_size=_sb_size,
                         ) or ""
                 if _blocking_ref_path:
+                    # ⭐ 2026-10-13（用户要求）：**生成前先质检这张基准图**，不通过就不注入。
+                    #    基准图是分镜的 <image1> 强先验：人偶人数/站位/景别/姿势错了，分镜图
+                    #    必然跟着错，而分镜侧质检要等 20+ 分钟（含 3 次重试）才发现。判据全部
+                    #    确定性、零模型调用（见 app/te_3d_qc.py）。
+                    #    不通过 → 本镜不注入基准图、回落文字站位锚点：既不污染生成，也不会
+                    #    把生产卡住（硬门禁会让 46 镜大面积停摆）。
+                    try:
+                        import te_3d_qc
+                        if te_3d_qc.enabled():
+                            _bq_camk = ""
+                            try:
+                                from shot_camera import camera_key as _bq_ck
+                                _bq_camk = _bq_ck(str(shot_p.get("camera") or ""))
+                            except Exception:  # noqa: BLE001
+                                _bq_camk = ""
+                            _bq = te_3d_qc.qc_blocking_image(
+                                shot_p, _blocking_ref_path,
+                                diag=te_3d_render.read_render_diag(_blocking_ref_path),
+                                cam_key=_bq_camk)
+                            if not _bq.get("ok"):
+                                _bq_why = "；".join(_bq.get("reasons") or []) or "未知"
+                                logger.warning(
+                                    "[3D基准图质检] shot=%s 不通过 → 本镜不注入基准图"
+                                    "（回落文字站位锚点）：%s",
+                                    shot_p.get("shot_id"), _bq_why)
+                                try:
+                                    _note_ref_warning(
+                                        shot_p, "3D 构图基准图质检不通过：%s" % _bq_why)
+                                except Exception:  # noqa: BLE001
+                                    pass
+                                _blocking_ref_path = ""
+                            else:
+                                logger.info(
+                                    "[3D基准图质检] shot=%s 通过：%s",
+                                    shot_p.get("shot_id"),
+                                    "｜".join(str(c.get("detail")) for c in
+                                             (_bq.get("checks") or [])
+                                             if c.get("ok") is not None))
+                    except Exception as _bq_e:  # noqa: BLE001  质检自身失败不阻断注入
+                        logger.debug("[3D基准图质检] 异常（忽略，照常注入）：%s", _bq_e)
+                if _blocking_ref_path:
                     logger.info("[3D导演台] shot=%s 站位基准图已渲染：%s",
                                      shot_p.get("shot_id"), os.path.basename(_blocking_ref_path))
                     # 插入为第一张参考图（<image1>），后续参考图序号后移
