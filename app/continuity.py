@@ -2628,6 +2628,12 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
         #   只按 scene_no → 第 9 组命中第 1 组的断点续跑被复用（6 镜不渲染）+ 同一路径
         #   重复进 concat 清单 → **成片前两场重复、尾部 6 镜丢失**。
         #   收口三件事：重编号 + 重建场次表 + 自检告警（不静默）。
+        # ⚠️ 2026-10-13 修（t7 / 2026-10-12 引入的缺陷）：本函数用的是**模块名**
+        #    novel_to_script.xxx，而本模块顶部只有 "from novel_to_script import (...)" ——
+        #    那只绑定了符号，模块名并未绑定 → NameError。它位于**落盘前**，于是每次生产
+        #    都在这里必炸（生产实证：重试 3 次全部炸在同一行、scripts/*.json 从未落盘）。
+        #    用函数内局部导入，规避 novel_to_script 与 continuity 的潜在循环导入。
+        import novel_to_script  # noqa: PLC0415
         _sn_norm = novel_to_script.normalize_scene_numbering(script.get("shots") or [])
         if _sn_norm.get("renumbered"):
             logger.warning("[场次编号] 第%s集落盘前修正 %d 个镜头的 scene_no"
