@@ -31,8 +31,8 @@
 2. 注入**逐段**``segment.refs``（参考图走 ComfyUI ``input/`` 相对文件名，
    每段的第 j 张 = 该段提示词里的 ``<Picture {j+1}>``）；
 3. 改写 SaveVideo 的 ``filename_prefix``（2026-10-04 起的单采模板输出链已是
-   **单一成片**：``Director.images → CreateVideo → SaveVideo``；旧的二采回退模板
-   输出链含 ``NvidiaDLSSFrameInterpolation`` 补帧，构建器原样保留，让
+   **单一成片**：``Director.images → CreateVideo → SaveVideo``；二采回退模板同理，
+   构建器原样保留成片链，让
    「一次调用 = 一个 mp4」，保住 ``shot_XX.mp4`` 契约；
 4. 把一采链上的 ``SolAttnPatch`` 参数**完全跟随模板**（``_SOLATTN_ALIGNED_*``）；
    LowVRAM/ChunkFS 等加速注入已退役删除（2026-10-05），build() 不再程序化注入任何加速节点。
@@ -672,7 +672,7 @@ class H3DirectorBuilder:
         插件侧行为已核实（ComfyUI_MiniMaxH3_Director/nodes/director.py +
         director/refine_pack.py）：refine 输入未接线时 ``normalize_refine_pack`` 返回
         None → ``refine_will_sample=False`` → 二采整段跳过，Director ``images`` 输出
-        自动落一采帧 → 成片链（CreateVideo/DLSS/SaveVideo）一行不用改；被裁的专属
+        自动落一采帧 → 成片链（CreateVideo/SaveVideo）一行不用改；被裁的专属
         链成孤儿，ComfyUI 从输出反向溯源时不执行、不加载二采 UNET/Lora、不占显存。
         """
         refine = next((n for n in wf["nodes"] if n.get("type") == "MiniMaxH3DirectorRefine"), None)
@@ -699,8 +699,7 @@ class H3DirectorBuilder:
             for n in wf["nodes"]:
                 nid = n.get("id")
                 if nid in dead or n.get("type") in ("MiniMaxH3Director", "SaveVideo",
-                                                     "CreateVideo", "NvidiaDLSSFrameInterpolation",
-                                                     "DLSSNR_Video", "PreviewAny"):
+                                                     "CreateVideo", "PreviewAny"):
                     continue
                 out_ids = node_out_link_ids(nid)
                 if not out_ids:
@@ -989,7 +988,7 @@ class H3DirectorBuilder:
         # ``h3_director_r2v_单采.json``（单实例、**单采**，无二采链）：
         #   模型链：UNETLoader → LoraLoader → PathchSage → TESpeed → SolAttnPatch → EasyCache → Director
         #   输出链：Director.images → CreateVideo → SaveVideo
-        # 模板**不含** MiniMaxH3DirectorRefine / BasicScheduler / NvidiaDLSSFrameInterpolation /
+        # 模板**不含** MiniMaxH3DirectorRefine / BasicScheduler /
         # 第二通道 UNETLoader/LoraLoader，也不含 MiniMaxLowVRAMAttention /
         # MiniMaxChunkFeedForward / MemoryEfficientSagePatch。
         # 因此 LowVRAM/ChunkFS 等加速注入已退役删除（2026-10-05），build() 不再

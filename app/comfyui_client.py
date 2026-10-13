@@ -42,7 +42,6 @@ from config import (
     PROJECT_OUTPUT_DIR, WORKFLOW_TEMPLATE, MULTIVIEW_CONFIG,
     SCENE_VIEW_ANGLE_ZH, SCENE_VIEW_KEYS, SCENE_VIEW_LABELS,
     H3_EMIT_AUDIO,
-    H3_DISABLE_DLSS,
     CONFLICT_NEGATIVE_TOKENS,
     ENABLE_BLOCKING_ANNOTATION,
     H3_ENABLE_REFINE,
@@ -4550,51 +4549,6 @@ class ComfyUIClient:
                     changed.append(f"{nid}({ctype}).{key}=None(原={old})")
         return changed
 
-    # ===================== DLSS 补帧旁路（2026-10-01） =====================
-
-    @classmethod
-    def bypass_dlss_node(cls, api_prompt: dict) -> List[str]:
-        """把工作流里的 DLSS 补帧节点设为 bypass（mode=4）并重连输出直连。
-
-        NvidiaDLSSFrameInterpolation 在 ComfyUI temp 下建工作目录，该目录被外部
-        （TE 启动器/磁盘清理）周期性删除 → mkdtemp 报 WinError 3 → 收尾文件不存在
-        → 整集成片丢失（实测连续 18 次提交全死于此）。本系统的 FlashVSR 超分已
-        独立承担画质提升，DLSS 补帧属可选增强，旁路后少一个单点故障。
-
-        做法：找到 DLSS 节点 → 记录它的 video 来源 → 把下游 SaveVideo 的 video
-        输入改为直连 DLSS 的上游（CreateVideo），DLSS 节点设 mode=4。
-        """
-        changed: List[str] = []
-        dlss_id = None
-        for nid, node in (api_prompt or {}).items():
-            if not isinstance(node, dict):
-                continue
-            ctype = str(node.get("class_type") or "")
-            if "dlss" in ctype.lower() or "DLSS" in ctype:
-                dlss_id = nid
-                break
-        if dlss_id is None:
-            return changed
-        # 找 DLSS 的 video 来源（上游 CreateVideo 的输出）
-        dlss_inputs = api_prompt[dlss_id].get("inputs") or {}
-        video_src = dlss_inputs.get("video")
-        if not video_src:
-            return changed
-        # 把下游 SaveVideo 的 video 输入改直连上游
-        for nid, node in api_prompt.items():
-            if not isinstance(node, dict):
-                continue
-            if node.get("class_type") not in ("SaveVideo", "SaveImage", "VHS_VideoCombine"):
-                continue
-            inputs = node.get("inputs") or {}
-            vid = inputs.get("video")
-            if vid and isinstance(vid, list) and str(vid[0]) == str(dlss_id):
-                inputs["video"] = video_src
-                changed.append(f"{nid}(SaveVideo).video: {dlss_id} → {video_src[0]}")
-        # DLSS 节点标记 bypass
-        api_prompt[dlss_id]["mode"] = 4
-        changed.append(f"{dlss_id} mode=bypass")
-        return changed
 
     # ===================== 随机种子注入（质检重试时用于产出不同结果） =====================
 
@@ -5198,13 +5152,6 @@ class ComfyUIClient:
         if report["unknown_types"] or report["missing_required"] or report["dangling_links"]:
             logger.warning(f"H3 提交前自检异常: {json.dumps(report, ensure_ascii=False)[:400]}")
 
-        # DLSS 补帧旁路（2026-10-01）：NvidiaDLSSFrameInterpolation 的 temp 工作目录
-        # 被外部周期性删除 → mkdtemp WinError 3 → 收尾文件不存在 → 整集成片丢失。
-        # 本系统 FlashVSR 超分已独立承担画质，DLSS 插帧属可选增强，跳过不失衡。
-        if H3_DISABLE_DLSS:
-            dlss_bypassed = self.bypass_dlss_node(api_prompt)
-            if dlss_bypassed:
-                logger.info(f"H3 DLSS 补帧已旁路（temp 不稳定）: {dlss_bypassed}")
 
         timeout = timeout or _h3_timeout_seconds(n, timeout_per_segment)
         logger.info(f"H3 提交：{n} 段，总超时 {timeout}s"
@@ -5845,13 +5792,7 @@ class ComfyUIClient:
                     f"到点后仍会先复查续等 {_env_int('MJSCXT_WAIT_EXTENSIONS', 3)} 次），"
                     f"段间引导 {'开' if layout.get('continuity') else '关'}"
                     f"（{layout.get('continuity_overlap_frames')} 帧）")
-        # DLSS 补帧旁路（2026-10-01）：NvidiaDLSSFrameInterpolation 的 temp 工作目录
-        # 被外部周期性删除 → mkdtemp WinError 3 → 收尾文件不存在 → 整集成片丢失。
-        # 本系统 FlashVSR 超分已独立承担画质，DLSS 插帧属可选增强，跳过不失衡。
-        if H3_DISABLE_DLSS:
-            dlss_bypassed = self.bypass_dlss_node(api_prompt)
-            if dlss_bypassed:
-                logger.info(f"H3(Director) DLSS 补帧已旁路: {dlss_bypassed}")
+
         # 崩溃免重渲（2026-09-29）：整集一次提交要跑几十分钟，崩溃/重启后先查台账与
         # 远端 history —— 能复用就复用、还在跑就重连，绝不重复提交白烧 GPU。
         history, prompt_id, resumed = self.submit_resumable(

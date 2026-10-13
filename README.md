@@ -418,7 +418,6 @@ models/FlashVSR-v1.1/                                          # 超分（仅 en
 custom_nodes/
 ├── ComfyUI_MiniMaxH3_Director/      # H3 Director 核心（MiniMaxH3Director / Refine / BasicScheduler）
 ├── ComfyUI-H3VAE_TRT/               # 视频 VAE 走 TRT（MiniMaxH3TRTVAELoader）
-├── ComfyUI-NVIDIA-DLSS-Frame-Interpolation/   # 补帧（NvidiaDLSSFrameInterpolation）
 ├── ComfyUI-KJNodes/                 # SageAttention + EasyCache + XHImagePrecision
 ├── ComfyUI-SolAttn_triton/          # SolAttn 注意力（morton=False）
 └── TE-Speed-MiniMaxH3 / TE-Speed-QwenImage21/  # 视频/图片 TE 加速

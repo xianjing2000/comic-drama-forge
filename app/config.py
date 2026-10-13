@@ -96,19 +96,12 @@ _DERIVED = _derive_comfyui_paths(COMFYUI_ROOT)
 COMFYUI_WORKFLOWS_DIR = _norm_path(_env("COMFYUI_WORKFLOWS_DIR", _DERIVED["workflows"]))
 COMFYUI_INPUT_DIR = _norm_path(_env("COMFYUI_INPUT_DIR", _DERIVED["input"]))
 COMFYUI_OUTPUT_DIR = _norm_path(_env("COMFYUI_OUTPUT_DIR", _DERIVED["output"]))
-# ComfyUI temp 目录（DLSS 补帧等节点在此建工作目录；被外部清理会导致收尾
+# ComfyUI temp 目录（部分自定义节点在此建工作目录；被外部清理会导致收尾
 # FileNotFoundError → 整集成片丢失，见 comfyui_client.wait_for_completion 的看门狗）
 COMFYUI_TEMP_DIR = _norm_path(_env(
     "COMFYUI_TEMP_DIR",
     os.path.join(os.path.dirname(_DERIVED["output"]), "temp")))
 
-# DLSS 补帧节点旁路（2026-10-01）：NvidiaDLSSFrameInterpolation 在 ComfyUI temp
-# 下建工作目录，该目录被外部（TE 启动器/磁盘清理）周期性删除 → mkdtemp 报
-# WinError 3 → 收尾文件不存在 → 整集成片丢失（实测连续 18 次提交全死于此）。
-# 设为 True 后工作流跳过补帧节点（CreateVideo 直接进 SaveVideo），
-# 24fps 原速出片（无 50fps 插帧），FlashVSR 超分不受影响。
-# 2026-10-05：与 _env_bool 白名单语义对齐（非法值一律视为 False）；默认 '1' = DLSS 旁路生效
-H3_DISABLE_DLSS = _env("H3_DISABLE_DLSS", "1").strip().lower() in ("1", "true", "yes", "on")
 
 # ===================== 工作流模板目录（项目自包含） =====================
 # ⚠️ 为什么要有这一段：工作流 JSON 以前只存在于本机 ComfyUI 的
@@ -889,7 +882,7 @@ WORKFLOW_TEMPLATE = {
     # 一个 MiniMaxH3Director 节点吃整条 timeline_data，段数由 timeline.segments 决定
     # （1 段=逐镜头；整集=N 段），段间由插件原生「段间引导」衔接。
     # 现役模板为用户**亲自跑通**的 12 节点单采工作流（单实例、无二采链、
-    # 无 BasicScheduler / MiniMaxH3DirectorRefine / DLSS）。
+    # 无 BasicScheduler / MiniMaxH3DirectorRefine）。
     # 工作流**不重建拓扑**，只程序化注入 timeline（见 app/h3_director_builder.py）。
     # 旧二采模板 minimax_h3_director_二采_加速.json 保留为**回退**（见下方 h3_video_refine）。
     # 旧母版「H3信号10段测试001.json」（10 个子图实例 + H3ContinuousSeamlessJoinV14
@@ -898,7 +891,7 @@ WORKFLOW_TEMPLATE = {
     # 不看文件名——改这里的值不会让分流逻辑失效。
     "h3_video": "h3_director_r2v_单采.json",
     # H3 视频 · 二采模板（**回退用，勿删**）：23 节点版（含 BasicScheduler /
-    # MiniMaxH3DirectorRefine / DLSS 补帧）。与 h3_video **互换即可切回二采模板**：
+    # MiniMaxH3DirectorRefine）。与 h3_video **互换即可切回二采模板**：
     # 把本键的值填进 h3_video、或设 MJSCXT_WORKFLOW_MAPPING 覆盖 h3_video 皆可。
     "h3_video_refine": "minimax_h3_director_二采_加速.json",
     # 旧连续拼接母版（回退用，勿删）

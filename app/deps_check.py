@@ -40,7 +40,7 @@ from config import (
 
 # 节点类型 → 所属插件包（依据 docs/依赖清单.md §1，本机实测映射）。
 # ⚠️ 2026-10-04：H3 视频现役模板已换成 **12 节点单采**（h3_director_r2v_单采.json），
-#    故 MiniMaxH3DirectorRefine / BasicScheduler / NvidiaDLSSFrameInterpolation 这三个
+#    故 MiniMaxH3DirectorRefine / BasicScheduler 这两个
 #    **仅二采回退模板**（WORKFLOW_TEMPLATE["h3_video_refine"]）需要 —— 这里**不删**映射，
 #    避免回退模板被误报「缺插件」。
 NODE_TO_PLUGIN = {
@@ -50,7 +50,6 @@ NODE_TO_PLUGIN = {
     "BasicScheduler": {"plugin": "ComfyUI_MiniMaxH3_Director", "dir": "ComfyUI_MiniMaxH3_Director", "repo": "github.com/AIMixer/ComfyUI_MiniMaxH3_Director", "note": "仅二采回退模板需要"},
     "ResolutionSelector": {"plugin": "ComfyUI_MiniMaxH3_Director / KJNodes", "dir": "ComfyUI_MiniMaxH3_Director", "repo": "github.com/AIMixer/ComfyUI_MiniMaxH3_Director", "note": "KJNodes 亦提供，任一即可"},
     "MiniMaxH3TRTVAELoader": {"plugin": "ComfyUI-H3VAE_TRT", "dir": "ComfyUI-H3VAE_TRT", "repo": "github.com/lihaoyun6/ComfyUI-H3VAE_TRT", "note": "视频 VAE 走 TRT；⚠ 音频 VAE 不能用它"},
-    "NvidiaDLSSFrameInterpolation": {"plugin": "ComfyUI-NVIDIA-DLSS-Frame-Interpolation", "dir": "ComfyUI-NVIDIA-DLSS-Frame-Interpolation", "repo": "github.com/Comfy-Org/ComfyUI-NVIDIA-DLSS-Frame-Interpolation", "note": "仅二采回退模板需要"},
     "PathchSageAttentionKJ": {"plugin": "ComfyUI-KJNodes", "dir": "ComfyUI-KJNodes", "repo": "github.com/jjy1998/ComfyUI-KJNodes"},
     "EasyCache": {"plugin": "ComfyUI-KJNodes", "dir": "ComfyUI-KJNodes", "repo": "github.com/jjy1998/ComfyUI-KJNodes"},
     "XHImagePrecision": {"plugin": "ComfyUI-KJNodes", "dir": "ComfyUI-KJNodes", "repo": "github.com/jjy1998/ComfyUI-KJNodes"},
