@@ -2294,6 +2294,77 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     _pw_done["n"], _pw_total, _pw_done["fail"], _pw_done["skip"])
         return
 
+    # ===================== T19：分镜「逐场次」→ 视频提示词预热 =====================
+    # 用户指令（2026-10-13）：「不是分镜齐备后生成提示词啊，不应该是分镜在生成时
+    # 同步进行预热提示词吗」。原实现只在 step_storyboard **全部**完成后触发一次整集
+    # 预热（video_helpers.prewarm_video_prompts 的 docstring 亦写着「用户早期明确要求
+    # （一直未落地）：视频场次需要 1-20 分镜在这些分镜生成后就可以开始预热了」），
+    # 且那个调用点还落在 step_storyboard 的提前 return 之后 —— 分镜齐备时根本不执行。
+    #
+    # 现改为**依赖驱动**（与 _trigger_storyboard_prewarm 的「资产→分镜提示词预热」同范式）：
+    # 某场次（shot["scene_no"]）的 1..N 个分镜**全部落盘**后，立即在后台预热该场的 h3
+    # 视频提示词（切段 / LoRA / 增强 / 预检，只填缓存）：不碰 GPU、不占 ComfyUI 队列、
+    # 与出图并行；预热失败绝不影响主线（daemon + 全捕获）。
+    # 关闭开关：env MJSCXT_PREWARM_VIDEO_PROMPT=0（与 video_helpers 同一开关）。
+    _vw_done_seqs = set()
+    _vw_fired: set = set()
+    _vw_state = {"script": None}
+    _vw_lock = threading.Lock()
+    _vw_scene_of: dict = {}
+    _vw_scene_seqs: dict = {}
+    for _vi, _vs in enumerate(shots or []):
+        if not isinstance(_vs, dict):
+            continue
+        _vk = _vs.get("scene_no")
+        if _vk in (None, ""):
+            continue
+        _vkey = _vk if isinstance(_vk, int) else str(_vk).strip()
+        _vw_scene_of.setdefault(_vkey, []).append(_vs)
+        _vw_scene_seqs.setdefault(_vkey, set()).add(
+            _shot_seq(_vs.get("shot_id", _vi + 1), _vi + 1))
+
+    def _vw_fire(_key):
+        """后台预热单个场次的 h3 视频提示词（daemon 线程；只填缓存，不碰 GPU）。"""
+        try:
+            import video_helpers as _vh
+            with _vw_lock:
+                _sc = _vw_state["script"]
+            if _sc is None:
+                try:
+                    _sc = _load_script_for(project_name, episode_no) or {}
+                except Exception:  # noqa: BLE001
+                    _sc = {}
+                with _vw_lock:
+                    _vw_state["script"] = _sc
+            _sc_shots = list(_vw_scene_of.get(_key) or [])
+            if not _sc_shots:
+                return
+            logger.info("[视频提示词预热] 场次 %s 的 %d 镜已全部落盘 → 后台预热该场"
+                        " h3 提示词（T19）", _key, len(_sc_shots))
+            _vh.prewarm_video_prompts(
+                project_name, _sc_shots,
+                character_refs=(_sc.get("characters") or []),
+                scene_refs=(_sc.get("scenes") or []),
+                episode_no=(episode_no if episode_no not in (None, "") else 1),
+                style=style)
+        except Exception as _vw_f_e:  # noqa: BLE001
+            logger.warning("[视频提示词预热] 场次 %s 触发失败（忽略，不影响生产）：%s",
+                           _key, _vw_f_e)
+
+    def _vw_after_shot(_seq):
+        """本镜落盘后调用：把已齐备的场次交给后台预热（幂等，逐镜仅集合运算）。"""
+        try:
+            with _vw_lock:
+                _vw_done_seqs.add(_seq)
+                _ready = [k for k, need in _vw_scene_seqs.items()
+                          if k not in _vw_fired and need and need <= _vw_done_seqs]
+                for _k in _ready:
+                    _vw_fired.add(_k)
+            for _k in _ready:
+                _vw_fire(_k)
+        except Exception as _vw_e:  # noqa: BLE001
+            logger.warning("[视频提示词预热] 场次齐备判定失败（忽略）：%s", _vw_e)
+
     try:
         for i, shot in enumerate(shots):
             shot_id = shot.get("shot_id", i + 1)
@@ -2316,8 +2387,12 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                and os.path.getsize(dst) > 0)
             _dst_facts = (_sb_dst_soft_facts(dst, seq=seq, base_dir=out_dir,
                                              prev=_prev_item) if _dst_exists else {})
-            _dst_unqualified = bool(_dst_facts.get("soft")
-                                    or _sb_critical_issues(_dst_facts))
+            # 口径（2026-10-13 用户定稿）：**只有「严重问题」禁止复用** ——
+            #   critical_issues 非空 → 不跳过、重新生成；仅软放行（无严重问题）的图仍复用。
+            #   收紧范围是有意的：2026-10-08 用户拍板「评分不达标但无 critical_issues 的
+            #   仍走软放行」（防 VLM 判官双标把可用图挡在门外、白烧 GPU）。
+            #   与 pipeline.probe_storyboard 的进入判据同口径，避免两侧漂移。
+            _dst_unqualified = bool(_sb_critical_issues(_dst_facts))
             if _dst_exists and _dst_unqualified:
                 logger.warning(
                     "镜头 %s 正式目录里的图**并非达标产物**（软放行/严重问题 %s）→ "
@@ -2345,6 +2420,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         "current_shot": shot_id,
                     })
                     generation_state[task_id]["results"].append(item)
+                # T19：断点续跑复用的镜同样算「本镜已就绪」→ 推进场次齐备判定
+                _vw_after_shot(seq)
                 continue
             with lock:
                 generation_state[task_id].update({
@@ -2936,6 +3013,13 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 _live = generation_state[task_id].get("live")
                 if isinstance(_live, dict) and _live.get("shot") == shot_id:
                     _live["done"] = True
+            # T19：本镜确有产物落盘才算「已就绪」（以磁盘事实为准；失败/未交付不预热，
+            #      避免拿半成品镜去预热视频提示词）→ 某场次 1..N 镜齐了就后台预热该场。
+            try:
+                if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+                    _vw_after_shot(seq)
+            except OSError:
+                pass
 
         # ⭐ T12（2026-10-12）：三类质量**分开统计** —— 软放行不计入 success。
         #   旧口径 ok=46/blocked=0 让界面全绿，掩盖了 37% 的不合格镜。

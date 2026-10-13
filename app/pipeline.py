@@ -837,17 +837,54 @@ def probe_assets(ctx) -> dict:
     return out
 
 
-def probe_storyboard(ctx) -> dict:
+def probe_storyboard(ctx, quality: bool = True) -> dict:
+    """分镜就绪探测。
+
+    quality=True（默认）：额外叠加**达标判据** —— 正式目录里的图若带
+    「软放行 / 严重问题」事实，视为**未完成**，从而让 step_storyboard 真正进入
+    worker 重画（worker 内的 T13 断点续跑判据本来就会重画它们，但旧探针只看
+    文件存在、整步短路，worker 根本没机会跑）。
+    quality=False：只看文件齐不齐 —— 供 step_storyboard 的**收尾复核**使用。
+    两者必须分工：质量判据用于「要不要重画」，文件判据用于「步骤算不算完成」；
+    否则某个镜反复过不了质检会让整集永久失败、无法推进到下一集。
+
+    ⭐ T19（2026-10-13，用户指令「严重问题重新生成」）：旧判据只有「文件在不在」，
+    质检不达标但被软放行入库的图同样写正式目录（2026-10-08 起），于是被后续每一轮
+    当成已达标跳过 —— 实测 shot_11/13/18/25/28/44 的 .png mtime 全部停在
+    2026-10-11/12，用户质问「我不是说了不要放行吗，为什么没有重新生成」。
+    判据与 worker 断点续跑**同源**（storyboard_helpers._sb_dst_soft_facts +
+    _sb_critical_issues），漂移会出现「探针判缺 → 复核判不缺」的反复失败。
+    fail-open：判据求值异常一律按「达标」处理，绝不因本探针把整集打挂。
+    """
     A = _A()
     d = A._ep_dir(os.path.join(A.STORYBOARDS_DIR, ctx["project_name"]), ctx["episode_no"])
     shots = (ctx.get("script") or {}).get("shots") or []
     missing = []
+    unqualified = []
     for i, s in enumerate(shots):
         seq = A._shot_seq(s.get("shot_id", i + 1), i + 1)
-        if not _nonempty(os.path.join(d, f"shot_{seq:02d}.png")):
+        dst = os.path.join(d, f"shot_{seq:02d}.png")
+        if not _nonempty(dst):
             missing.append(s.get("shot_id", i + 1))
+            continue
+        if not quality:
+            continue
+        try:
+            import storyboard_helpers as _sbh_probe
+            _facts = _sbh_probe._sb_dst_soft_facts(dst, seq=seq, base_dir=d) or {}
+            # 口径（2026-10-13 用户定稿）：**只重画「严重问题」那一档** ——
+            #   critical_issues 非空才算不合格；仅「质检不达标（软放行）」而无严重问题的
+            #   维持 2026-10-08 用户拍板的放行（防 VLM 判官双标把可用图挡在门外、白烧 GPU）。
+            #   与 worker 断点续跑判据（storyboard_helpers._dst_unqualified）**同口径**，
+            #   不同口径就会出现「探针判缺 → worker 判不缺」的空转或反之漏判。
+            if _sbh_probe._sb_critical_issues(_facts):
+                missing.append(s.get("shot_id", i + 1))
+                unqualified.append(s.get("shot_id", i + 1))
+        except Exception as _sbq_e:  # noqa: BLE001
+            logger.warning("分镜达标判据求值失败（按达标处理，不阻断续跑）：%s", _sbq_e)
     return {"total": len(shots), "ready": len(shots) - len(missing),
-            "missing": missing, "done": bool(shots) and not missing, "dir": d}
+            "missing": missing, "unqualified": unqualified,
+            "done": bool(shots) and not missing, "dir": d}
 
 
 # probe_keyframe 已随 keyframe 步骤移出流水线删除（2026-10-05）；手动尾帧链路的
@@ -1805,6 +1842,14 @@ def step_storyboard(ctx) -> dict:
     A = _A()
     pd = probe_storyboard(ctx)
     if pd.get("done"):
+        # ⭐ T19（2026-10-13，用户指令「不是分镜齐备后生成提示词，应该是分镜在生成时」
+        #   同步预热」）：旧实现在这里直接 return —— 于是函数末尾的
+        #   _trigger_video_prewarm **永不执行**（只有真正跑完生成链路才会走到）。
+        #   分镜本来就是齐的（断点续跑复用），结果每一轮视频阶段都在逐镜现场
+        #   做增强/复审/预检（每镜 20~40s，实测 46 镜）。
+        #   分镜已齐 ⇒ 所有场次都已齐，逐场次预热与整集预热等价，这里直接整集触发；
+        #   分镜**仍在生成中**时的增量预热由 _storyboard_worker 的 T19 逐场次钩子负责。
+        _trigger_video_prewarm(ctx)
         return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["dir"]}
     script = ctx.get("script") or {}
     shots = script.get("shots") or []
@@ -1847,7 +1892,10 @@ def step_storyboard(ctx) -> dict:
     if not out["ok"]:
         return {"ok": False, "blocked": out["blocked"], "detail": detail, "error": out["error"]}
     # 复核产物：worker 报成功但文件缺失 / 为空 → 仍然判失败（不能凭状态字段放行）
-    recheck = probe_storyboard(ctx)
+    # ⭐ T19（2026-10-13）：复核**只看文件齐不齐**（quality=False）。质量判据用于
+    #   「要不要重画」，不能用于「步骤算不算完成」—— 否则某个镜反复过不了质检
+    #   会让整集永久失败、永远推进不到下一集（重画本身仍由进入判定的质量判据触发）。
+    recheck = probe_storyboard(ctx, quality=False)
     detail["probe"] = recheck
     if not recheck.get("done"):
         return {"ok": False, "detail": detail,
