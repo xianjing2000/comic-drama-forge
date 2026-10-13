@@ -486,15 +486,19 @@ DEFAULT_CONFIG = {
     "upscale_scale": 2,            # 超分倍率，FlashVSR 支持 2 / 3 / 4
     # 逐场次先超分再拼接（2026-10-08）：True = 各场次独立超分→流拼接成整集；False = 直接超分整集原片
     "upscale_per_scene": True,
-    # ⭐ 2026-10-13（t9）**场内切片超分**：逐场超分时，先把该场按不超过 N 秒切成小片
+    # ⭐ 2026-10-13（t9）**场内切片超分**：逐场超分时，可先把该场按不超过 N 秒切成小片
     #   （ffmpeg -ss/-t + -c copy，不重编码）→ 逐片超分 → 拼回场级。
-    #   为什么必须切：实测一场 = 960x544/24fps/164.5s/3949 帧 ——
-    #     · VHS_LoadVideoPath(frame_load_cap=0) 全帧载入 ≈ 23GiB → 8G 卡必 OOM；
-    #     · 超分标定 ≈ 1.96 s/帧 → 一场 ≈ 2.15 小时，击穿单次等待上限。
-    #   默认 10；显式传 0 = 关闭切片（回到整段一次超分，兼容旧行为）。
+    #   为什么当初默认切：实测一场 = 960x544/24fps/164.5s/3949 帧 ——
+    #     · VHS_LoadVideoPath(frame_load_cap=0) 全帧载入 ≈ 23GiB → 8G 卡可能 OOM；
+    #     · 超分标定 ≈ 1.96 s/帧 → 一场 ≈ 2.15 小时 > 单次等待上限 3600s
+    #       （t22 已支持「到点复查 → 仍在跑 → 续等」，不会误杀；设 MJSCXT_UPSCALE_TIMEOUT=7200 更稳）。
+    #   ⚠️ 不切片 = 整段（约 5 个分镜）一次提交，显存与耗时全压在这一提交上；用户已知情并指定。
+    #   ⭐ 2026-10-13 用户口径：**默认 0 = 不切片**（整段一次超分）——原话「导出方式改成全部导出吧，
+    #     我电脑超分 5 段分镜还是带的动的」「超分直接整个 5 个分镜生成的视频进行超分」。
+    #     要回到「≤N 秒/片」时显式设 5/10/20（前端「场内切片时长」档位），无需改代码。
     #   ⚠️ 四处同改（少一处就会出现「界面上设了不生效」）：DEFAULT_CONFIG / normalize_config /
     #     autopilot.PLAN_DEFAULTS / 前端 ProjectWorkbenchPage 的 UpscaleTab。
-    "upscale_chunk_seconds": 10,
+    "upscale_chunk_seconds": 0,
     # ⭐「配音先行」（2026-10-04 新语义）：默认开启。True = 剧本后为**每个角色**生成
     # 一段参考音色音频，供 H3 以 `audioMode=generate` 锁定角色音色并自生成对白。
     # （不再逐句合成整集配音、不再回填 shot.duration。）仅在调试或无需参考音色时关闭。
@@ -552,7 +556,7 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
     if cfg["upscale_scale"] not in (2, 3, 4):
         cfg["upscale_scale"] = DEFAULT_CONFIG["upscale_scale"]
     # ⭐ t9：场内切片时长（秒）。收敛为 [0, 60] 的整数：
-    #   · 非法/缺省 → DEFAULT_CONFIG 的 10（前端 JSON 类型不可信）；
+    #   · 非法/缺省 → DEFAULT_CONFIG 的 0（= 不切片；前端 JSON 类型不可信）；
     #   · 0 或负数 → **0 = 显式关闭切片**（回到整段一次超分，兼容旧行为）；
     #   · > 60 → 上限 60（再大就回到「整场一次超分」的老问题：显存/超时）。
     try:
@@ -1151,14 +1155,22 @@ def _try_per_scene_upscale(ctx, scene_srcs, out_path) -> bool:
     _up_tid = f"pipe_up_ps_{int(time.time() * 1000)}"
     _upscaler.current_task_id = _up_tid
     up_scene_files = []
-    # ⭐ t9：场内切片时长（秒）—— 一场 164s 整段提交会击穿显存与超时，故默认切成 10s 片
-    chunk_sec = 0
+    # ⭐ t9：场内切片时长（秒）。⭐ 2026-10-13 用户口径：**默认 0 = 不切片**（整段一次超分）。
+    # ⚠️ 这里**绝不能**写成 `.get(k, 10) or 10`：配置值为 0 时 `0 or 10` 会把它静默改回
+    #   10 秒/片 —— 用户在前端点「不切片（整场）」却不生效的假通道（实测踩到，2026-10-13 修）。
+    #   0 是合法值，必须原样保留；缺省/空串/非法/负数一律回落 DEFAULT_CONFIG 的口径。
+    _chunk_default = int(DEFAULT_CONFIG.get("upscale_chunk_seconds") or 0)
+    chunk_sec = _chunk_default
     try:
-        chunk_sec = int(ctx["config"].get("upscale_chunk_seconds", 10) or 10)
+        _raw_chunk = ctx["config"].get("upscale_chunk_seconds")
+        if _raw_chunk is not None and str(_raw_chunk).strip() != "":
+            chunk_sec = int(float(_raw_chunk))
     except (TypeError, ValueError):
-        chunk_sec = 10
+        logger.warning("[超分] upscale_chunk_seconds 非法值 %r → 回落默认 %d",
+                       ctx["config"].get("upscale_chunk_seconds"), _chunk_default)
+        chunk_sec = _chunk_default
     if chunk_sec < 0:
-        chunk_sec = 10
+        chunk_sec = _chunk_default
     # 清理**历史遗留**的场级拼接临时件（t6 缺陷②：旧实现留下的 .mp4 临时件从未清理，
     # 会被 /api/upscale/list 当正式产物列出来）。只删我们自己的临时件，不碰正式产物。
     _legacy_tmp = os.path.join(os.path.dirname(out_path), f"_per_scene_concat_ep{ep_no:02d}.mp4")

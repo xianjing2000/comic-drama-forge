@@ -5647,6 +5647,10 @@ class ComfyUIClient:
             continuity_overlap = (int(ov_env) if ov_env.isdigit()
                                   else h3_director_builder.CONTINUITY_OVERLAP_DEFAULT)
         # ⭐ 2026-10-12 分段导出（用户需求：「只重生成有问题的分镜，再拼回去」）。
+        # ⭐ 2026-10-13 用户口径（随「超分不切片」同批确认）：「导出方式改成**全部导出**吧，
+        #    我电脑超分 5 段分镜还是带的动的」→ **常规出片链一律 all（全部导出）**。
+        #    segments 只作为显式排障 / 单镜返工开关保留（函数参数或 MJSCXT_H3_EXPORT_MODE），
+        #    **不得**成为默认，也不要接到前端常规入口上。
         #
         # ⚠️ t13/B6 校正：**当前默认 export_mode = "all"**（见下方那行的 or "all"；t24 已把
         #    它钉为既定边界：tests/test_t24_verification_boundaries.py::test_default_is_all）。

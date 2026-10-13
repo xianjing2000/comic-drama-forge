@@ -115,8 +115,14 @@ _DIRECTOR_POS: Dict[str, int] = {
 #: 2026-10-04 用户实测定档：视频模板换成用户**亲自跑通**的 12 节点单采工作流
 #: ``h3_director_r2v_单采.json``（节点 id=87），SolAttnPatch 口径**逐字段跟随
 #: 该实测模板**（不再沿用 2026-09-27 二采模板的 tau=1.2/int8_qk=False/exact_kv/
-#: verbose=True/dense_blocks=0-5）。实测值：``tau=1.3 / int8_qk=True /
-#: sink_conditioning=exact_kv_and_rows / verbose=False / dense_blocks=0-2,-1``。
+#: verbose=True）。
+#: ⭐ 2026-10-13 用户口径（「全部都对对齐我本地测试的工作流」）：以用户本地实测工作流
+#: ``<ComfyUI>/user/default/workflows/minimax_h3_director_二采_加速.json``（10-13 09:18 版）
+#: 的**执行子集**（二采链 mode=4 已 bypass）为唯一口径 —— 该子集实测值：
+#: ``tau=1.3 / int8_qk=True / sink_conditioning=exact_kv_and_rows / verbose=False /
+#: dense_blocks=0-5``（dense_blocks 由 0-2,-1 改为 0-5，LoRA 见模板 node 80 =
+#: fl2v_lightx2v_turbo）。⚠️ BasicScheduler(denoise 0.58) 在该用户工作流里属二采链且为
+#: bypass，**不执行**，故现役单采路径同样不含该节点（对齐的是"实际跑的东西"）。
 #: ⚠️ 安全提示（2026-09-27 竖屏实测，**继续保留**）：``morton=True`` 在本机 8GB
 #: 竖屏下曾稳定 ``Fatal Python error: Aborted``（栈顶 ``_morton_h3.py``）。
 #: 实测模板把 ``morton`` 设为 ``False``（且 ``morton_curve=3d``），用户选择
@@ -125,12 +131,12 @@ _DIRECTOR_POS: Dict[str, int] = {
 #: 下方位置列表与 named 字典必须**逐项一一对应（共 12 项、同序）**：
 #: 位置下标取自模板 ``SolAttnPatch.inputs`` 里带 widget 的字段声明顺序。
 _SOLATTN_ALIGNED_WV = [1.3, 0.2, 0.9, 4096, True, "exact_kv_and_rows", False,
-                       "3d", True, False, False, "0-2,-1"]
+                       "3d", True, False, False, "0-5"]
 _SOLATTN_ALIGNED_NAMED = {
     "tau": 1.3, "start_percent": 0.2, "end_percent": 0.9, "min_tokens": 4096,
     "int8_qk": True, "sink_conditioning": "exact_kv_and_rows", "morton": False,
     "morton_curve": "3d", "int8_pv": True, "verbose": False,
-    "use_tma": False, "dense_blocks": "0-2,-1",
+    "use_tma": False, "dense_blocks": "0-5",
 }
 # 代码内断言：位置列表与 named 字典**逐项同序一致**（防日后单边改一处）。
 assert list(_SOLATTN_ALIGNED_NAMED.keys()) == [

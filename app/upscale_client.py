@@ -322,7 +322,12 @@ def save_calibration(entry: Dict) -> str:
 _BSCH = chr(92)      # 反斜杠: 转义单引号 / 清单换行
 _NLCH = chr(10)      # 换行: ffmpeg concat 清单的分隔符
 #: 单个切片的目标时长上限（秒）——片段时长 <= 该值时「不切片」，走原来的单次超分路径。
-DEFAULT_CHUNK_SECONDS = 10
+#: ⭐ 2026-10-13 用户口径（原话：「导出方式改成全部导出吧，我电脑超分 5 段分镜还是带的动的」
+#:   「超分直接整个 5 个分镜生成的视频进行超分」）：**默认不切片** —— 一场视频（约 5 个分镜，
+#:   实测 164.5s）整段一次提交给 FlashVSR。0 = 显式关闭切片，语义见 normalize_chunk_seconds。
+#:   要回到「≤N 秒/片」的粒度时显式传 segment_seconds/chunk_seconds（前端「场内切片时长」
+#:   档位 5/10/20，或项目计划 upscale_chunk_seconds），不需要改代码。
+DEFAULT_CHUNK_SECONDS = 0
 #: 切片时长下限：小于 1s 的切片没有意义（额外一次模型装载/提交，收益为负）。
 MIN_CHUNK_SECONDS = 1
 #: 切片时长上限：超过 60s 就回到了「整场一次超分」的老问题（显存/超时）。

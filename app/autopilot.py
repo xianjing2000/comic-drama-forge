@@ -221,9 +221,10 @@ PLAN_DEFAULTS = {
     "enable_upscale": False,
     "upscale_scale": 2,
     # ⭐ 2026-10-13（t9）场内切片超分：逐场超分时按不超过 N 秒切片（0 = 关闭切片）。
+    #   ⭐ 2026-10-13 用户口径：**默认 0 = 不切片** —— 一场（约 5 个分镜）整段一次超分。
     #   必须留在 PLAN_DEFAULTS —— api_autopilot_plan_set 按 k in PLAN_DEFAULTS 过滤入参，
     #   不在此处的字段无法通过接口开关，等于没有入口（与上面 enable_upscale 同一条纪律）。
-    "upscale_chunk_seconds": 10,
+    "upscale_chunk_seconds": 0,
     "coverage_min_percent": 85.0,   # ⭐ 2026-10-11 与 pipeline/config 统一为 85%（用户口径 0.85）
     "consistency_min_score": 80,
     "require_consistency": True,
