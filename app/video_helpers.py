@@ -939,6 +939,10 @@ def prewarm_video_prompts(project_name, shots, character_refs=None, scene_refs=N
     开关：env MJSCXT_PREWARM_VIDEO_PROMPT=0 可强制关闭（默认恒开）。
     """
     try:
+        # ⚠️ 本模块顶层**没有** import time（历史遗留，各处按需局部导入，见 :127 / :2527 注释）——
+        #   2026-10-13 T19 首次真正调用本函数时，下方 time.time() 直接 NameError，被外层宽
+        #   except 吞成「启动失败（忽略）」→ 预热静默失效（实测场次 3 触发即失败）。这里补导入。
+        import time
         if str(os.environ.get("MJSCXT_PREWARM_VIDEO_PROMPT") or "1").strip().lower() \
                 in ("0", "false", "off", "no"):
             return
