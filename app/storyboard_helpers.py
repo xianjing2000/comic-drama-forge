@@ -2392,29 +2392,39 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                 _bq_camk = _bq_ck(str(shot_p.get("camera") or ""))
                             except Exception:  # noqa: BLE001
                                 _bq_camk = ""
-                            _bq = te_3d_qc.qc_blocking_image(
+                            # ⭐ 用户口径（2026-10-13）：「不通过就不注入，不应该是不通过就根据
+                            #    质检发现的问题重新生成吗」—— 基准图由我们**确定性渲染**，问题可
+                            #    定位、参数可反推，所以走「质检 → 修计划重渲 → 再质检」闭环
+                            #    （最多 2 轮修复）。仍不过才回落文字站位锚点。
+                            _bq = te_3d_qc.qc_and_repair(
                                 shot_p, _blocking_ref_path,
-                                diag=te_3d_render.read_render_diag(_blocking_ref_path),
-                                cam_key=_bq_camk)
-                            if not _bq.get("ok"):
+                                cam_key=_bq_camk,
+                                aspect=":".join(map(str, _sb_style_res.get("ratio") or ("16", "9"))),
+                                target_size=_sb_size, width=_sb_size[0],
+                                out_dir=_blk_out_dir,
+                                render_fn=te_3d_render.render_blocking_from_plan,
+                                max_rounds=2)
+                            _bq_hist = "；".join(
+                                "第%d轮 %s" % (int(r.get("round") or 0) + 1,
+                                              "通过" if r.get("ok")
+                                              else ("/".join(r.get("reasons") or []) or "不通过"))
+                                for r in (_bq.get("rounds") or []))
+                            if _bq.get("ok"):
+                                _blocking_ref_path = str(_bq.get("path") or _blocking_ref_path)
+                                logger.info("[3D基准图质检] shot=%s 通过（%s）",
+                                            shot_p.get("shot_id"), _bq_hist)
+                            else:
                                 _bq_why = "；".join(_bq.get("reasons") or []) or "未知"
                                 logger.warning(
-                                    "[3D基准图质检] shot=%s 不通过 → 本镜不注入基准图"
-                                    "（回落文字站位锚点）：%s",
-                                    shot_p.get("shot_id"), _bq_why)
+                                    "[3D基准图质检] shot=%s 自愈重渲后仍不通过 → 本镜不注入基准图"
+                                    "（回落文字站位锚点）：%s｜%s",
+                                    shot_p.get("shot_id"), _bq_why, _bq_hist)
                                 try:
                                     _note_ref_warning(
-                                        shot_p, "3D 构图基准图质检不通过：%s" % _bq_why)
+                                        shot_p, "3D 构图基准图质检不通过（已自愈重渲）：%s" % _bq_why)
                                 except Exception:  # noqa: BLE001
                                     pass
                                 _blocking_ref_path = ""
-                            else:
-                                logger.info(
-                                    "[3D基准图质检] shot=%s 通过：%s",
-                                    shot_p.get("shot_id"),
-                                    "｜".join(str(c.get("detail")) for c in
-                                             (_bq.get("checks") or [])
-                                             if c.get("ok") is not None))
                     except Exception as _bq_e:  # noqa: BLE001  质检自身失败不阻断注入
                         logger.debug("[3D基准图质检] 异常（忽略，照常注入）：%s", _bq_e)
                 if _blocking_ref_path:

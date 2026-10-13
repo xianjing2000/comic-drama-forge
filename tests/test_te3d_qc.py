@@ -97,6 +97,87 @@ class TestBlockingQc(unittest.TestCase):
         self.assertIsNone(by["pose_applied"]["ok"])
         self.assertTrue(r["ok"], r["reasons"])
 
+    def _plan(self):
+        return {
+            "camera": {"position": [0.0, 1.0, 4.0], "target": [0.0, 1.0, 0.0]},
+            "scene": {"entities": [
+                {"id": "char_1", "type": "character",
+                 "transform": {"position": [0.0, 0.0, 0.0], "rotation": [0, 0, 0],
+                               "scale": [1, 1, 1]},
+                 "poseValues": {}, "currentPreset": ""},
+                {"id": "cam_1", "type": "camera", "transform": {"position": [0, 1, 4]}},
+            ]},
+        }
+
+    def test_repair_framing_moves_camera_closer(self):
+        """近景但人物太小 -> 机位拉近（投影高度与距离成反比）。"""
+        plan = self._plan()
+        qc = {"checks": [{"name": "framing", "ok": False, "detail": ""}],
+              "stats": {"h_ratio": 0.10}}
+        shot = {"camera": "近景", "characters_in_shot": ["羡进"]}
+        fixed, notes = Q.repair_plan(shot, plan, qc)
+        self.assertTrue(notes)
+        d0 = abs(plan["camera"]["position"][2] - plan["camera"]["target"][2])
+        d1 = abs(fixed["camera"]["position"][2] - fixed["camera"]["target"][2])
+        self.assertLess(d1, d0)
+
+    def test_repair_slot_shifts_character_left(self):
+        plan = self._plan()
+        qc = {"checks": [{"name": "slot", "ok": False, "detail": ""}], "stats": {"cx": 0.5}}
+        shot = {"characters_in_shot": ["羡进"], "blocking": [{"name": "羡进", "x": "left"}]}
+        fixed, notes = Q.repair_plan(shot, plan, qc)
+        self.assertTrue(notes)
+        self.assertLess(fixed["scene"]["entities"][0]["transform"]["position"][0], 0.0)
+
+    def test_repair_pose_writes_values(self):
+        plan = self._plan()
+        qc = {"checks": [{"name": "pose_applied", "ok": False, "detail": ""}], "stats": {}}
+        shot = {"characters_in_shot": ["羡进"], "action": "他跪坐在地上"}
+        fixed, notes = Q.repair_plan(shot, plan, qc)
+        self.assertTrue(notes)
+        ent = fixed["scene"]["entities"][0]
+        self.assertTrue(ent["poseValues"])
+        self.assertEqual(ent["currentPreset"], "kneelTwo")
+
+    def test_no_fixable_returns_none(self):
+        fixed, notes = Q.repair_plan({}, self._plan(),
+                                     {"checks": [{"name": "image_ok", "ok": False}],
+                                      "stats": {}})
+        self.assertIsNone(fixed)
+        self.assertEqual(notes, [])
+
+    def test_qc_and_repair_loop(self):
+        """闭环：第 1 轮不通过 -> 调 render_fn 重渲 -> 第 2 轮通过。"""
+        good = _mk(self._p("good.png"), [(200, 10, 440, 350, CHAR_BLUE)])
+        calls = []
+
+        def fake_render(plan, out_dir):
+            calls.append(plan)
+            return good
+
+        small = _mk(self._p("small2.png"), [(300, 170, 330, 200, CHAR_BLUE)])
+        shot = {"characters_in_shot": ["羡进"], "camera": "近景"}
+        res = Q.qc_and_repair(shot, small, cam_key="近景", target_size=(640, 360),
+                              out_dir=self.d, render_fn=fake_render, max_rounds=2)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["path"], good)
+        self.assertEqual(len(res["rounds"]), 2)
+
+    def test_qc_and_repair_gives_up_when_unfixable(self):
+        blank = _mk(self._p("blank2.png"), [])
+        calls = []
+
+        def fake_render(plan, out_dir):
+            calls.append(plan)
+            return blank
+
+        res = Q.qc_and_repair({"characters_in_shot": ["羡进"]}, blank, target_size=(640, 360),
+                              out_dir=self.d, render_fn=fake_render, max_rounds=2)
+        self.assertFalse(res["ok"])
+        # 空白图属于「不可自动修复」（没有任何可反推的参数）→ 不该白重渲
+        self.assertEqual(calls, [])
+
     def test_enabled_switch(self):
         old = os.environ.get("MJSCXT_TE3D_QC")
         try:

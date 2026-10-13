@@ -23,9 +23,10 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -191,3 +192,173 @@ def qc_blocking_image(shot: dict, png_path: str, diag: Optional[dict] = None,
 
     reasons = [c["detail"] for c in checks if c["ok"] is False]
     return {"ok": not reasons, "checks": checks, "reasons": reasons, "stats": stats}
+
+
+# ===================== 自愈：按质检发现的问题修正渲染计划，重渲 =====================
+# 用户口径（2026-10-13）：「不通过就不注入，不应该是不通过就根据质检发现的问题
+# 重新生成吗」。对 —— 基准图是我们**确定性渲染**出来的，问题可定位、参数可反推，
+# 所以不通过时应当修正计划再渲一次，而不是直接放弃。
+# 每类问题对应一个修正器；修正后由调用方重渲再质检（最多 max_rounds 轮）。
+
+#: 质心偏差 → 站位位移的增益（经验值；1.0 = 质心差多少就挪多少米，先保守取 4.0）
+_SLOT_GAIN = 4.0
+#: 单次站位修正的上限（米），避免把角色甩出画面
+_SLOT_MAX_DX = 2.0
+
+
+def _refit_camera(plan: dict, cam_key: str, h_ratio: float) -> str:
+    """景别越档 → 沿视线缩放机位距离（小孔成像：投影高度与距离成反比）。"""
+    band = _FRAMING_BAND.get(str(cam_key or "").strip())
+    if not band or h_ratio <= 0:
+        return ""
+    lo, hi = band
+    if lo is not None and h_ratio < lo:
+        target = lo * 1.12
+    elif hi is not None and h_ratio > hi:
+        target = hi * 0.88
+    else:
+        return ""
+    # ⚠️ 方向别搞反（2026-10-13 实测纠错）：投影高度 ∝ 1/距离 —— 想让占比**变大**
+    #    就必须把机位**拉近**，所以倍率 = 实测占比 / 目标占比（小于 1 = 拉近）。
+    #    单轮限幅 [0.4, 2.5]，靠多轮逐步逼近，避免一次甩到人脸前或飞到天边。
+    scale = max(0.4, min(2.5, h_ratio / max(target, 1e-3)))
+    cam = plan.get("camera") or {}
+    pos = list(cam.get("position") or [])
+    tgt = list(cam.get("target") or [])
+    if len(pos) < 3 or len(tgt) < 3:
+        return ""
+    new_pos = [tgt[i] + (pos[i] - tgt[i]) * scale for i in range(3)]
+    new_pos[1] = pos[1]                      # 只拉近/推远，保持机位高度（免得钻地/飞天）
+    cam["position"] = [round(float(v), 3) for v in new_pos]
+    plan["camera"] = cam
+    return "机位缩放 x%.2f（竖直占比 %.2f → 目标 %.2f）" % (scale, h_ratio, target)
+
+
+def _refit_slot(plan: dict, shot: dict, cx: float) -> str:
+    """站位越档 → 按声明档位中心平移该角色（仅单角色镜头，质心口径才成立）。"""
+    chars = _on_screen_chars(shot)
+    blk = (shot or {}).get("blocking")
+    if len(chars) != 1 or not isinstance(blk, list):
+        return ""
+    decl = ""
+    for it in blk:
+        if isinstance(it, dict) and str(it.get("name") or "").strip() == chars[0]:
+            decl = str(it.get("x") or it.get("side") or "").strip().lower()
+            break
+    band = _SLOT_BAND.get(decl)
+    if not band:
+        return ""
+    target_cx = (band[0] + band[1]) / 2.0
+    dx = (target_cx - cx) * _SLOT_GAIN
+    dx = max(-_SLOT_MAX_DX, min(_SLOT_MAX_DX, dx))
+    if abs(dx) < 0.05:
+        return ""
+    for e in (plan.get("scene") or {}).get("entities") or []:
+        if isinstance(e, dict) and e.get("type") == "character":
+            tf = e.setdefault("transform", {})
+            p = list(tf.get("position") or [0, 0, 0])
+            p[0] = round(float(p[0]) + dx, 3)
+            tf["position"] = p
+            break
+    return "站位平移 x%+.2f（质心 %.2f → 档位中心 %.2f）" % (dx, cx, target_cx)
+
+
+def _refit_pose(plan: dict, shot: dict) -> str:
+    """姿势未应用 → 按剧本动作重新写入 scene 的 poseValues/currentPreset。"""
+    try:
+        import te_3d_poses as P  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return ""
+    text = " ".join(str(shot.get(_k) or "") for _k in ("action", "description"))
+    built = P.build_pose(text)
+    pv = dict(built.get("poseValues") or {})
+    if not pv:
+        return ""
+    hit = False
+    for e in (plan.get("scene") or {}).get("entities") or []:
+        if isinstance(e, dict) and e.get("type") == "character":
+            e["poseValues"] = dict(pv)
+            e["currentPreset"] = str(built.get("currentPreset") or "")
+            hit = True
+    if not hit:
+        return ""
+    return "重写姿势（%d 个关节，preset=%s）" % (len(pv), built.get("currentPreset") or "-")
+
+
+def repair_plan(shot: dict, plan: dict, qc: dict) -> Tuple[Optional[dict], List[str]]:
+    """按质检结论修正渲染计划；返回 (新计划, 修正说明)；无可修项返回 (None, [])。"""
+    by_name = {str(c.get("name")): c for c in (qc.get("checks") or [])}
+    stats = qc.get("stats") or {}
+    cam_key = ""
+    try:
+        from shot_camera import camera_key as _ck  # noqa: PLC0415
+        cam_key = _ck(str((shot or {}).get("camera") or ""))
+    except Exception:  # noqa: BLE001
+        cam_key = ""
+    new = copy.deepcopy(plan or {})
+    notes: List[str] = []
+    if by_name.get("framing", {}).get("ok") is False:
+        n = _refit_camera(new, cam_key, float(stats.get("h_ratio") or 0.0))
+        if n:
+            notes.append(n)
+    if by_name.get("slot", {}).get("ok") is False:
+        n = _refit_slot(new, shot, float(stats.get("cx") or 0.5))
+        if n:
+            notes.append(n)
+    if by_name.get("pose_applied", {}).get("ok") is False:
+        n = _refit_pose(new, shot)
+        if n:
+            notes.append(n)
+    return (new, notes) if notes else (None, [])
+
+
+def qc_and_repair(shot: dict, png_path: str, cam_key: Optional[str] = None,
+                  aspect: str = "16:9", target_size=None, width: int = 768,
+                  out_dir: Optional[str] = None, render_fn=None,
+                  max_rounds: int = 2) -> Dict[str, object]:
+    """渲染后调用：质检 → 不通过就修计划重渲 → 再质检（最多 max_rounds 轮修复）。
+
+    :param render_fn: 重渲函数（签名 (plan, out_dir) -> 新 PNG 路径）。为 None 时只质检。
+    :return: {ok, path, rounds:[{round, ok, reasons, checks, repair?}], checks, reasons}
+    """
+    path = str(png_path or "")
+    rounds: List[Dict[str, object]] = []
+    if not path:
+        return {"ok": False, "path": "", "rounds": rounds, "checks": [],
+                "reasons": ["无基准图"]}
+    try:
+        import te_3d_render as R  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        R = None
+    diag = R.read_render_diag(path) if R is not None else None
+    last_qc: Dict[str, object] = {}
+    for rnd in range(int(max_rounds) + 1):
+        last_qc = qc_blocking_image(shot, path, diag=diag, cam_key=cam_key)
+        rounds.append({"round": rnd, "ok": last_qc["ok"],
+                       "reasons": list(last_qc.get("reasons") or []),
+                       "checks": last_qc.get("checks"), "path": path})
+        if last_qc["ok"] or rnd >= int(max_rounds) or render_fn is None or not out_dir:
+            break
+        try:
+            import te_3d_director as D  # noqa: PLC0415
+            plan = D.build_render_plan(shot, aspect=aspect, width=width,
+                                       target_size=target_size)
+        except Exception as _pe:  # noqa: BLE001
+            rounds[-1]["repair"] = ["重建渲染计划失败：%s" % _pe]
+            break
+        fixed, notes = repair_plan(shot, plan, last_qc)
+        rounds[-1]["repair"] = notes
+        if not fixed:
+            break
+        try:
+            new_path = render_fn(fixed, out_dir)
+        except Exception as _re:  # noqa: BLE001
+            rounds[-1]["repair"] = list(notes) + ["重渲异常：%s" % _re]
+            break
+        if not new_path:
+            break
+        path = str(new_path)
+        diag = R.read_render_diag(path) if R is not None else None
+    return {"ok": bool(last_qc.get("ok")), "path": path, "rounds": rounds,
+            "checks": last_qc.get("checks") or [],
+            "reasons": list(last_qc.get("reasons") or [])}
