@@ -1015,6 +1015,46 @@ def _identity_views_for(char_img: str, outfit_override: str = "") -> list:
     return out
 
 
+def _identity_views_for_dir(char_dir: str, outfit_override: str = "",
+                            episode_no=None) -> list:
+    """从**角色资产目录**收集视图：本集服装变体（优先）+ 主设定图。
+
+    与 _identity_views_for（走「命中图路径」）互补：覆盖表为空、或命中图不带 outfits/
+    时，直接从资产目录拿得到两张图 —— 实测 shot=13 正是这情况（覆盖表空 → 只 1 视图
+    → 门槛不满足 → 不建网格）。变体定位顺序：覆盖表 key → 本集前缀 epNN_ 取最新一个。
+    """
+    out = []
+    if not char_dir or not os.path.isdir(char_dir):
+        return out
+    _vdir = ""
+    try:
+        if outfit_override:
+            _d = os.path.join(char_dir, "outfits", str(outfit_override))
+            if os.path.isdir(_d):
+                _vdir = _d
+        if not _vdir:
+            try:
+                _ep = int(episode_no or 0)
+            except (TypeError, ValueError):
+                _ep = 0
+            _oroot = os.path.join(char_dir, "outfits")
+            if _ep > 0 and os.path.isdir(_oroot):
+                _pref = "ep%02d_" % _ep
+                for _d in sorted(os.listdir(_oroot)):
+                    _p = os.path.join(_oroot, _d)
+                    if _d.startswith(_pref) and os.path.isdir(_p):
+                        _vdir = _p          # 同集多个时取排序最后一个（最新）
+    except Exception:  # noqa: BLE001
+        pass
+    for _d in ([_vdir] if _vdir else []) + [char_dir]:
+        for _cand in ("base.png", "front.png", "half.png"):
+            _p = os.path.join(_d, _cand)
+            if os.path.isfile(_p) and _p not in out:
+                out.append(_p)
+                break
+    return out
+
+
 def _identity_grid_layout(n: int) -> tuple:
     """按「不同角色基准图张数」选身份基准网格的行列（2026-10-13 用户口径）。
 
@@ -2214,7 +2254,23 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     _b = _lab.find("」", _a + 3)
                     if _b > _a:
                         _nm = _lab[_a + 3:_b]
-                _views = _identity_views_for(_r[2], _ig_outfits.get(_nm, ""))
+                _ovr_key = _ig_outfits.get(_nm, "")
+                _views = _identity_views_for(_r[2], _ovr_key)
+                if _nm:
+                    # 兜底：直接从角色资产目录取（本集服装变体 + 主设定图）—— 覆盖表为空、
+                    # 或命中图不带 outfits/ 时靠它凑齐「一个角色的多张视图」（实测 shot=13）。
+                    try:
+                        _cdir = os.path.join(CHARACTERS_DIR, _safe_project(project_name),
+                                             str(_nm))
+                        _dir_views = _identity_views_for_dir(_cdir, _ovr_key, episode_no)
+                        if len(_dir_views) >= 2:
+                            _views = _dir_views        # 资产目录更权威（本集变体优先）
+                        elif _dir_views:
+                            for _p in _dir_views:
+                                if _p not in _views:
+                                    _views.append(_p)
+                    except Exception as _ig_d_e:  # noqa: BLE001
+                        logger.debug("[身份基准网格] 资产目录兜底失败（忽略）：%s", _ig_d_e)
                 if _views:
                     _ig_groups.append((_nm or ("角色%d" % (len(_ig_groups) + 1)), _views))
             _ig_total = sum(len(_v) for _n, _v in _ig_groups)
