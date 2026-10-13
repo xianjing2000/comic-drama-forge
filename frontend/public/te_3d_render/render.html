@@ -116,6 +116,74 @@ function poseInstance(root, animations) {
   mixer.update(Math.min(POSE_TIME, Math.max(0.05, clip.duration * 0.35)));
 }
 
+/* ---------- 姿势层（2026-10-13）----------
+ * 把 scene_json 里 character entity 的 poseValues 施加到骨骼。
+ * 与官方 applyEntityPose 同口径：bone.rotation[axis] += degToRad(value)，**原值直接叠加**。
+ * ⚠️ 不要对外展类做右侧取负：STAND 基准 lArmAbd:-80 / rArmAbd:+80 的左右反号，
+ *    是因为 Mixamo 左右骨架镜像 —— 同一 z 轴旋转在两侧产生相反运动，±80 正好两臂都下垂。
+ *    （2026-10-13 实测：取负会变成「一臂高举、一臂下垂」，已复核纠正。）
+ * 关节键与官方 JOINTS 27 条同名同轴，故 scene_json 在导演台里回读一致。
+ * ⚠️ 语义前提：poseValues 是相对**绑定姿势(T-pose)**的角度，所以有姿势时**不播 idle**，
+ *    否则会把关节角叠加在自然站姿上（实测表现：手臂双重内收）。无姿势才播 idle。
+ * ⚠️ 手骨（mixamorig:*Hand*）不在官方 27 关节里，是我们补的「手型」；轴先用 x，待实测校准。 */
+const JOINT_AXIS = {
+  bodyX: ['mixamorig:Hips', 'x'], bodyY: ['mixamorig:Hips', 'y'], bodyZ: ['mixamorig:Hips', 'z'],
+  spineX: ['mixamorig:Spine1', 'x'], spineY: ['mixamorig:Spine1', 'y'], spineZ: ['mixamorig:Spine1', 'z'],
+  headX: ['mixamorig:Head', 'x'], headY: ['mixamorig:Head', 'y'], headZ: ['mixamorig:Head', 'z'],
+  lArmFwd: ['mixamorig:LeftArm', 'x'], lArmAbd: ['mixamorig:LeftArm', 'z'], lArmTwist: ['mixamorig:LeftArm', 'y'],
+  rArmFwd: ['mixamorig:RightArm', 'x'], rArmAbd: ['mixamorig:RightArm', 'z'], rArmTwist: ['mixamorig:RightArm', 'y'],
+  lFore: ['mixamorig:LeftForeArm', 'y'], rFore: ['mixamorig:RightForeArm', 'y'],
+  lHand: ['mixamorig:LeftHand', 'x'], rHand: ['mixamorig:RightHand', 'x'],
+  lLegFwd: ['mixamorig:LeftUpLeg', 'x'], lLegAbd: ['mixamorig:LeftUpLeg', 'z'],
+  rLegFwd: ['mixamorig:RightUpLeg', 'x'], rLegAbd: ['mixamorig:RightUpLeg', 'z'],
+  lKnee: ['mixamorig:LeftLeg', 'x'], rKnee: ['mixamorig:RightLeg', 'x'],
+  lFoot: ['mixamorig:LeftFoot', 'x'], rFoot: ['mixamorig:RightFoot', 'x'],
+};
+
+/* ⚠️ 2026-10-13 实测踩坑：GLTFLoader 对节点名做 PropertyBinding.sanitizeNodeName，
+ * 保留字符（含冒号）会被洗掉 —— GLB 里的 mixamorig:LeftArm 进了 three.js 实际叫
+ * mixamorigLeftArm。原先按「去 mixamorig: 前缀」比较，一个都匹配不上（实测
+ * diag.poseApplied=0、poseMissing=全部关节）。改为「去掉所有非字母数字后比较」。 */
+function normBoneName(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function findBone(root, name) {
+  const want = normBoneName(name);
+  if (!want) return null;
+  let found = null;
+  root.traverse((o) => {
+    if (found || !o.isBone) return;
+    if (normBoneName(o.name) === want) found = o;
+  });
+  return found;
+}
+
+function applyPoseValues(root, poseValues) {
+  const applied = [];
+  const missing = [];
+  for (const k of Object.keys(poseValues || {})) {
+    const deg = Number(poseValues[k]) || 0;
+    if (!deg) continue;
+    let bone = null;
+    let axis = 'x';
+    let d = deg;
+    if (/^mixamorig:/i.test(k)) {
+      bone = findBone(root, k);            // 手型：直接给骨骼名
+    } else {
+      const spec = JOINT_AXIS[k];
+      if (!spec) { missing.push(k); continue; }
+      bone = findBone(root, spec[0]);
+      axis = spec[1];
+      // ⚠️ 原值直接叠加，不要对外展类取负（见本函数上方实测说明）。
+    }
+    if (!bone) { missing.push(k); continue; }
+    bone.rotation[axis] += THREE.MathUtils.degToRad(d);
+    applied.push(k);
+  }
+  return { applied: applied, missing: missing };
+}
+
 /* 中性灰盒（greybox）天空：竖直渐变，刻意**不是平坦纯色**。
    深色平坦区会被生图模型读成「信箱黑边」照抄（见文件顶部坑⑤）。 */
 function makeSkyTexture() {
@@ -201,7 +269,11 @@ async function run() {
     // 坑②：每个角色独立解析一次 GLB → 独立骨架
     const gltf = await parse(glbBuf.slice(0));
     const root = buildCharacterInstance(gltf, sceneDef);
-    poseInstance(root, gltf.animations);
+    // 姿势层：有 poseValues → 保持绑定姿势(T-pose)当基准（官方语义），不播 idle；
+    // 无 poseValues → 播 idle 拿自然站姿（旧行为，零回归）。
+    const _pv = (ent && ent.poseValues) || {};
+    const _hasPose = Object.keys(_pv).length > 0;
+    if (!_hasPose) poseInstance(root, gltf.animations);
 
     const box = boneWorldBox(root);
     const boxH = box ? (box.max.y - box.min.y) : 0;
@@ -226,6 +298,32 @@ async function run() {
     }
     inst.position.set(pos[0], pos[1], pos[2]);
     inst.rotation.y += Number(rot[1]) || 0;
+    if (_hasPose) {
+      // 摆完姿再算世界矩阵（**缩放**仍按 T-pose 完成 —— 姿势不该改变人偶的真实身高基准）
+      const _res = applyPoseValues(root, _pv);
+      root.updateMatrixWorld(true);
+      // ⭐ 摆姿后**重新贴地**：跪坐/躺下时膝盖与脚的位置大幅变化，若沿用 T-pose 的
+      //    贴地偏移，小腿会整段埋进地板（实测表现就是「看起来腿没弯」）。重算骨骼
+      //    包围盒并把最低点重新对到 y=0。
+      const _box2 = boneWorldBox(root);
+      if (_box2) {
+        root.position.set(
+          -((_box2.min.x + _box2.max.x) / 2) * hs,
+          -_box2.min.y * hs,
+          -((_box2.min.z + _box2.max.z) / 2) * hs,
+        );
+        root.updateMatrixWorld(true);
+        diag.poseGroundY = +(-_box2.min.y * hs).toFixed(3);
+      }
+      diag.poseApplied = (diag.poseApplied || 0) + _res.applied.length;
+      diag.poseMissing = (diag.poseMissing || []).concat(_res.missing);
+      diag.posePreset = String(ent.currentPreset || '');
+      if (!diag.boneNames) {   // 一次性：真骨骼名（排障用，见 findBone 注释）
+        const _names = [];
+        root.traverse((o) => { if (o.isBone && _names.length < 6) _names.push(o.name); });
+        diag.boneNames = _names;
+      }
+    }
 
     const col = new THREE.Color(ent.color || DEFAULT_CHAR_COLOR);
     let meshes = 0;

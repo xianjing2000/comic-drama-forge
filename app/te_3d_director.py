@@ -494,6 +494,20 @@ def build_scene_json(
     total = len(chars)
     # 显式站位优先（缺失/不匹配 → 逐字回退旧行为，老剧本零影响）
     _blk = _blocking_lookup(shot, chars)
+    # ⭐ 2026-10-13 姿势层（app/te_3d_poses.py）：把剧本的 action / description 自动
+    #    翻译成关节角（官方 27 关节 + 10 预设 + 手型）。此前 poseValues 恒为空 →
+    #    人偶永远是 idle 站姿，剧本里写的「跪坐压膝」「抱拳行礼」全部白写。
+    #    纯规则、零模型调用、确定性（与 build_scene_json 既有纪律一致）；
+    #    解析失败/命中不了 → 回落 stand（即旧行为，零回归）。
+    _pose_text = " ".join(str(shot.get(_k) or "") for _k in ("action", "description"))
+    try:
+        import te_3d_poses  # noqa: PLC0415
+        _pose = te_3d_poses.build_pose(_pose_text)
+    except Exception as _pose_e:  # noqa: BLE001
+        _t3d_logger.warning("[3D导演台] 姿势解析失败（回落站立）：%s", _pose_e)
+        _pose = {}
+    _pose_values = dict(_pose.get("poseValues") or {})
+    _pose_preset = str(_pose.get("currentPreset") or "")
     for idx, name in enumerate(chars, start=1):
         if name in _blk:
             pos, rot = _blocking_pose(_blk[name], spread, idx - 1, total)
@@ -517,8 +531,8 @@ def build_scene_json(
                 "rotation": list(rot),
                 "scale": [1.0, 1.0, 1.0],
             },
-            "poseValues": {},
-            "currentPreset": "",
+            "poseValues": dict(_pose_values),
+            "currentPreset": _pose_preset,
         })
 
     # ---- 机位 entity（camera）----
