@@ -561,6 +561,9 @@ def identity_baseline_grid_section(pos, cols: int = 3, rows: int = 3, cells=None
         f"their character baseline assets. It is the appearance ground truth: every "
         f"character rendered in the output must replicate EXACTLY the face, hairstyle "
         f"and outfit shown in the cell(s) of that same character in <image{pos}>. "
+        f"Rows group one character's views together: all cells in the same row show "
+        f"the SAME character (different views / outfits of that character), so match "
+        f"each output character against its own row only. "
         f"Do not add, remove or recolor any clothing element relative to the "
         f"baseline grid.")
 
