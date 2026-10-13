@@ -1233,15 +1233,19 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     #    **不写进提示词**，模型看不到。
     if shots_target > 0:
         shots_cap = max(shots_target, min(120, int(math.ceil(shots_target * SHOT_CAP_GROWTH))))
-        _shots_min_text = f"至少 {shots_target} 个（**不设上限**）"
-        _shots_range_text = (f"shots 数组元素个数**不设上限**（显式要求至少 {shots_target} 个）；"
-                             f"不得为凑数把同一件事拆成多镜")
+        # ⚠️ 2026-10-13：此前这里写「至少 {shots_target} 个（不设上限）」—— 那是**下限**，
+        #    且 shots_target 是**按字数**估出来的（estimate_shots_for_chars = 字数/240），
+        #    等于变相按字数定镜数。现改为：shots_target 只用于技术预算（shots_cap，
+        #    防单次响应体过大），**不写进提示词**；提示词口径与「无下限」分支完全一致。
+        _shots_min_text = "数量由你按「每镜时长 5~6 秒」判定（**不设上下限**）"
+        _shots_range_text = ("shots 数组元素个数**不设上下限**"
+                             "（既无「至少 N 镜」，也无「不得超过 N 镜」）")
         _shots_targeting_text = (f"本块镜数**下限 {shots_target} 个、不设上限**"
                                  f"（原文信息量更大时可远多于它）。")
     else:
         # 无下限：cap 仅作技术护栏（防单次响应体过大），不写进提示词。
         shots_cap = max(12, min(120, int(math.ceil(SHOT_GRANULARITY_MAX_SHOTS * SHOT_CAP_GROWTH))))
-        _shots_min_text = "数量由你按本块原文的信息密度判定（**不设上下限**）"
+        _shots_min_text = "数量由你按「每镜时长 5~6 秒」判定（**不设上下限**）"
         _shots_range_text = ("shots 数组元素个数**不设上下限**"
                              "（既无「至少 N 镜」，也无「不得超过 N 镜」）")
         # ⚠️ 2026-10-10（用户追加口径）：「不预设镜数」不等于「随便切多细」。
