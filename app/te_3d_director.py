@@ -523,6 +523,7 @@ def build_scene_json(
             if _n > 1:
                 _crowd_map[str(name)] = _n
                 _members = _crowd_members(pos, rot, _n, spread)
+        _body_hs, _body_girth = char_body(name)
         for _mi, (_mp, _mr) in enumerate(_members, start=1):
             entities.append({
                 "id": _entity_id("char", idx if len(_members) == 1 else idx * 100 + _mi),
@@ -532,9 +533,11 @@ def build_scene_json(
                 "color": _CHAR_COLORS[(idx - 1) % len(_CHAR_COLORS)],
                 "visible": True,
                 "uniformScale": 1.0,
-                "heightScale": 1.0,
-                "height": TARGET_CHARACTER_HEIGHT,
-                "girth": 1.0,
+                # 体型差异化（2026-10-13）：由角色档案 appearance/age 确定性推断，
+                # 见 set_char_profiles / _infer_body。未登记 -> 1.0（旧行为零回归）
+                "heightScale": _body_hs,
+                "height": round(TARGET_CHARACTER_HEIGHT * _body_hs, 3),
+                "girth": _body_girth,
                 "style": "neutral",
                 "transform": {
                     "position": list(_mp),
@@ -612,6 +615,71 @@ _T3D_NUM_RANGE = {
     "girth": (0.2, 3.0),         # 体型（胖瘦）
     "fov_deg": (10.0, 120.0),    # 垂直 FOV（度）
 }
+
+
+# ===================== 体型差异化（2026-10-13） =====================
+# 此前所有人偶恒 1.7m / 体型 1.0 —— 而剧本角色档案里白纸黑字写着「清瘦少年」「体格壮硕」。
+# 基准图的作用就是给生图定"谁站在哪、什么姿态、什么体量"，同高同胖等于丢掉一半信息。
+#
+#: 体型关键词 -> (heightScale, girth)；按顺序匹配，命中即停（先具体后一般）
+_BODY_KEYWORDS = (
+    (("魁梧", "壮硕", "肌肉虬结", "体格壮", "虎背熊腰", "膀大腰圆", "高大威猛", "彪形"),
+     1.09, 1.26),
+    (("矮胖", "肥胖", "圆胖", "臃肿", "肥硕", "肥头大耳"), 0.95, 1.32),
+    (("瘦高", "高瘦", "修长", "高挑"), 1.08, 0.90),
+    (("清瘦", "消瘦", "单薄", "瘦弱", "纤细", "孱弱", "清削"), 0.99, 0.88),
+    (("中年", "壮年", "成年"), 1.02, 1.05),
+)
+
+_char_profiles: Dict[str, dict] = {}
+
+
+def _infer_body(appearance: str = "", age: str = "") -> Tuple[float, float]:
+    """从角色档案的外观/年龄文本推 (heightScale, girth)。确定性规则，零模型调用。"""
+    text = "%s %s" % (appearance or "", age or "")
+    for words, hs, girth in _BODY_KEYWORDS:
+        if any(w in text for w in words):
+            return float(hs), float(girth)
+    return 1.0, 1.0
+
+
+def build_char_profiles(characters) -> Dict[str, dict]:
+    """剧本 characters 数组 -> {角色名: {heightScale, girth, height}}。"""
+    out: Dict[str, dict] = {}
+    for c in (characters or []):
+        if not isinstance(c, dict):
+            continue
+        nm = str(c.get("name") or "").strip()
+        if not nm:
+            continue
+        hs, girth = _infer_body(str(c.get("appearance") or ""), str(c.get("age") or ""))
+        out[nm] = {"heightScale": round(hs, 3), "girth": round(girth, 3),
+                   "height": round(TARGET_CHARACTER_HEIGHT * hs, 3)}
+    return out
+
+
+def set_char_profiles(profiles) -> None:
+    """登记项目角色体型（调用方渲染基准图前设置一次）。
+
+    为什么用模块级登记而不是逐层传参：角色档案在剧本层（project / episode），而
+    build_scene_json 只拿到一个 shot —— 逐层穿透 render_blocking → build_render_plan
+    → build_scene_json 要改四处签名，收益不成正比。
+    """
+    global _char_profiles
+    _char_profiles = dict(profiles or {})
+
+
+def char_body(name: str) -> Tuple[float, float]:
+    """角色体型 (heightScale, girth)；未登记 -> (1.0, 1.0)（旧行为，零回归）。"""
+    p = _char_profiles.get(str(name or ""))
+    if not isinstance(p, dict):
+        return 1.0, 1.0
+    def _f(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 1.0
+    return _f(p.get("heightScale", 1.0)), _f(p.get("girth", 1.0))
 
 
 def _skeleton_mode_enabled() -> bool:

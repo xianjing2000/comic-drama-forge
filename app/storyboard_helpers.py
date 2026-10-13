@@ -139,6 +139,29 @@ _OPT_REASONING_MARKERS = (
 )
 
 
+_TE3D_BODY_CACHE: dict = {}
+
+
+def _te3d_body_profiles(project_name, episode_no):
+    """本集角色体型 {角色名: {heightScale, girth, height}}（进程内缓存）。
+
+    数据源 = 剧本 characters 的 appearance / age（「清瘦少年」「魁梧…体格壮硕」），
+    由 te_3d_director 的确定性规则推断，零模型调用。给 3D 构图基准图消费。
+    """
+    key = (str(project_name or ""), str(episode_no or ""))
+    if key in _TE3D_BODY_CACHE:
+        return _TE3D_BODY_CACHE[key]
+    out: dict = {}
+    try:
+        import te_3d_director as _t3d
+        _script = _load_script_for(project_name, episode_no) or {}
+        out = _t3d.build_char_profiles(_script.get("characters") or [])
+    except Exception as _e:  # noqa: BLE001
+        logger.debug("[3D导演台] 体型档案构建失败（忽略）：%s", _e)
+    _TE3D_BODY_CACHE[key] = out
+    return out
+
+
 def _storyboard_scratch_ep(episode_no=None) -> int:
     """分镜「生成中」暂存路径的集号（兜底口径与 shared_project._ep_dir 一致）。"""
     try:
@@ -2355,6 +2378,15 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             try:
                 import te_3d_render
                 if te_3d_render.available():
+                    # ⭐ 体型差异化（2026-10-13）：登记本集角色体型（清瘦/魁梧），供
+                    #    build_scene_json 写 heightScale/girth。此前所有人偶恒 1.7m/1.0，
+                    #    而角色档案白纸黑字写着「清瘦少年」「体格壮硕」—— 同高同胖等于
+                    #    把「谁是什么体量」这条构图信息整个丢掉。
+                    try:
+                        import te_3d_director as _t3d_body
+                        _t3d_body.set_char_profiles(_te3d_body_profiles(project_name, episode_no))
+                    except Exception as _bp_e:  # noqa: BLE001
+                        logger.debug("[3D导演台] 体型登记失败（忽略）：%s", _bp_e)
                     _blk_out_dir = os.path.join(QC_DIR, project_name, "te3d_blocking")
                     # ⚠️ 并发纪律（2026-10-06 预取改造）：render_blocking 不可并发重入
                     #    （回传服务是进程级单例且只有一个 inbox 槽位、浏览器 profile

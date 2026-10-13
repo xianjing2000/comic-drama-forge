@@ -393,6 +393,13 @@ async function run() {
     const inst = new THREE.Group();
     inst.add(root);
     root.scale.setScalar(hs);
+    // 体型（girth）：只放大横向（x/z），身高另由 heightScale 管 —— 「壮硕」是变宽不是
+    // 变高、「清瘦」是变窄。缺字段或 =1 时完全无操作（旧行为零回归）。
+    const _girth = Math.max(0.2, Math.min(3.0, Number(ent.girth) || 1.0));
+    if (Math.abs(_girth - 1.0) > 1e-3) {
+      root.scale.x *= _girth;
+      root.scale.z *= _girth;
+    }
     root.rotation.y = facingFixY;
     if (box) {
       // 骨骼盒居中到 x=0/z=0、脚底（骨骼最低点）落到 y=0

@@ -128,5 +128,43 @@ class TestCrowd(unittest.TestCase):
         self.assertGreater(max(xs), 0.0)
 
 
+class TestBodyTypes(unittest.TestCase):
+    """体型差异化：角色档案 appearance/age -> heightScale/girth。"""
+
+    def tearDown(self):
+        D.set_char_profiles({})          # 复位模块级登记，避免污染其他用例
+
+    def test_infer_body(self):
+        self.assertEqual(D._infer_body("男性，清瘦少年，脸型清削", "十六岁"), (0.99, 0.88))
+        hs, girth = D._infer_body("男性，魁梧青年，肌肉虬结，体格壮硕", "十八岁")
+        self.assertGreater(hs, 1.0)
+        self.assertGreater(girth, 1.0)
+
+    def test_build_char_profiles(self):
+        prof = D.build_char_profiles([
+            {"name": "羡进", "appearance": "清瘦少年", "age": "十六岁"},
+            {"name": "赵天霸", "appearance": "魁梧青年，体格壮硕", "age": "十八岁"},
+        ])
+        self.assertLess(prof["羡进"]["girth"], 1.0)
+        self.assertGreater(prof["赵天霸"]["girth"], 1.0)
+        self.assertGreater(prof["赵天霸"]["height"], prof["羡进"]["height"])
+
+    def test_scene_uses_profiles(self):
+        D.set_char_profiles({"甲": {"heightScale": 1.1, "girth": 1.25}})
+        scene = D.build_scene_json({"shot_id": 1, "camera": "全景",
+                                    "characters_in_shot": ["甲"]}, aspect="16:9")
+        ent = [e for e in scene["entities"] if e.get("type") == "character"][0]
+        self.assertAlmostEqual(ent["heightScale"], 1.1, places=3)
+        self.assertAlmostEqual(ent["girth"], 1.25, places=3)
+
+    def test_default_zero_regression(self):
+        D.set_char_profiles({})
+        scene = D.build_scene_json({"shot_id": 1, "camera": "全景",
+                                    "characters_in_shot": ["无名氏"]}, aspect="16:9")
+        ent = [e for e in scene["entities"] if e.get("type") == "character"][0]
+        self.assertEqual(ent["heightScale"], 1.0)
+        self.assertEqual(ent["girth"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
