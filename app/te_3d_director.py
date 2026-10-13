@@ -503,7 +503,7 @@ def build_scene_json(
     _pose_text = " ".join(str(shot.get(_k) or "") for _k in ("action", "description"))
     try:
         import te_3d_poses  # noqa: PLC0415
-        _pose = te_3d_poses.build_pose(_pose_text)
+        _pose = te_3d_poses.build_pose(_pose_text, pose_hint=str(shot.get("pose") or ""))
     except Exception as _pose_e:  # noqa: BLE001
         _t3d_logger.warning("[3D导演台] 姿势解析失败（回落站立）：%s", _pose_e)
         _pose = {}

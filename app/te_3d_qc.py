@@ -145,6 +145,17 @@ def qc_blocking_image(shot: dict, png_path: str, diag: Optional[dict] = None,
     else:
         add("char_count", None, "无渲染诊断，跳过（降级判据）")
 
+    # ---- 道具数量（剧本声明了几个道具，图里就该有几个）----
+    _items = [str(x).strip() for x in ((shot or {}).get("items_in_shot") or []) if str(x).strip()]
+    if not _items:
+        add("prop_count", None, "本镜无道具声明，跳过")
+    elif isinstance(diag, dict) and diag.get("props") is not None:
+        add("prop_count", int(diag.get("props") or 0) == len(_items),
+            "渲染道具 %d 个 vs 剧本声明 %d 个（%s）"
+            % (int(diag.get("props") or 0), len(_items), "/".join(_items)))
+    else:
+        add("prop_count", None, "无渲染诊断，跳过（降级判据）")
+
     # ---- 姿势是否真的应用 ----
     try:
         import te_3d_poses as P  # noqa: PLC0415

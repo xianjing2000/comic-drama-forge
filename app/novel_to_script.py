@@ -225,6 +225,12 @@ SHOT_FIELDS_DEFAULT = {
     #   facing∈ camera / left / right / back（面朝镜头 / 画面左 / 画面右 / 背对）；留空 = 向内稍转
     "blocking": [],
     "action": "",
+    # 2026-10-13：**整体姿态**（3D 构图基准图直接消费）。取值为 app/te_3d_poses.PRESETS
+    # 的键（stand/walk/run/sit/crouch/kneelTwo/prone/lieDown/bow/reach/wave/point/kick/tpose）。
+    # 为什么让剧本产出而不是程序猜：实测用关键词从 description 猜，旧剧本 46 镜只命中 2%
+    # （"盘坐""虚点""压着膝头"…用词远比词表丰富）；让写剧本的模型从固定清单里选，命中率
+    # 接近 100%。字段缺失/非法 → 回落关键词匹配，老剧本零影响。
+    "pose": "",
 }
 
 #: **已废弃分镜字段登记表**（结构化，替代注释里的君子协定）。

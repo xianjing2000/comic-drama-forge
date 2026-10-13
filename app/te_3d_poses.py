@@ -92,17 +92,49 @@ PRESETS: Dict[str, Dict[str, object]] = {
                                                  "rKnee": 5, "lFoot": 0, "rFoot": 0}},
 }
 
+#: **我们自建**的预设（官方 10 个里没有，但剧本高频出现）。
+#: ⚠️ 官方表只有 stand/tpose/walk/run/bow/kick/reach/kneelTwo/prone/lieDown ——
+#: 「坐 / 挥手 / 指 / 蹲」这些只能自己用关节角拼。数值是工程初值，**逐张实拍校准**
+#: （2026-10-13 渲染图确认姿态正确后才接进关键词表）。
+#: 关节语义参照官方 JOINTS：l/rLegFwd 负值 = 大腿前抬；l/rKnee 正值 = 小腿后折；
+#: l/rArmFwd 正值 = 前举；lFore 负值 / rFore 正值 = 该侧屈肘。
+CUSTOM_PRESETS: Dict[str, Dict[str, object]] = {
+    "sit": {"label": "坐（椅凳）", "values": {
+        "lLegFwd": -85, "rLegFwd": -85, "lKnee": 85, "rKnee": 85,
+        "lFoot": 5, "rFoot": 5, "spineX": 6,
+        "lArmAbd": -70, "rArmAbd": 70, "lArmFwd": -10, "rArmFwd": -10,
+        "lFore": -35, "rFore": 35}},
+    "crouch": {"label": "蹲下", "values": {
+        "lLegFwd": -70, "rLegFwd": -70, "lKnee": 100, "rKnee": 100,
+        "lFoot": 18, "rFoot": 18, "spineX": 18, "headX": -8,
+        "lArmAbd": -72, "rArmAbd": 72, "lArmFwd": -18, "rArmFwd": -18,
+        "lFore": -55, "rFore": 55}},
+    "wave": {"label": "挥手", "values": {
+        "rArmFwd": 148, "rArmAbd": 22, "rArmTwist": -18, "rFore": 58,
+        "lArmAbd": -80, "lFore": -8, "headX": -5, "spineY": -6}},
+    "point": {"label": "指向", "values": {
+        "rArmFwd": 92, "rArmAbd": 12, "rFore": 8,
+        "lArmAbd": -80, "lFore": -8, "spineY": -8}},
+}
+PRESETS.update(CUSTOM_PRESETS)
+
 #: 剧本动作关键词 -> 预设（从具体到通用，命中即停）。
 #: 只覆盖官方 10 个预设；命中不了回落 stand（= 旧行为，零回归）。
 _POSE_KEYWORDS = (
-    ("prone",    ("匍匐", "趴在地上", "趴在", "俯卧", "趴着")),
-    ("lieDown",  ("躺下", "躺倒", "仰卧", "平躺", "倒在床上")),
-    ("kneelTwo", ("双膝跪", "跪坐", "跪下", "跪地", "长跪", "跪拜", "跪伏")),
-    ("kick",     ("踢", "踹")),
-    ("run",      ("奔跑", "狂奔", "疾冲", "冲向", "飞跑", "跑了")),
-    ("walk",     ("行走", "走过", "走远", "踱步", "迈步", "离开", "上前")),
-    ("bow",      ("鞠躬", "行礼", "作揖", "抱拳", "躬身", "拱手")),
-    ("reach",    ("伸手", "探手", "举起手", "抬手去", "伸手去", "伸手抓", "递出")),
+    ("prone",    ("匍匐", "趴在地上", "趴在", "俯卧", "趴着", "伏在地上", "趴伏")),
+    ("lieDown",  ("躺下", "躺倒", "仰卧", "平躺", "倒在床上", "瘫在", "卧倒", "横躺")),
+    ("kneelTwo", ("双膝跪", "跪坐", "跪下", "跪地", "长跪", "跪拜", "跪伏", "伏跪", "跪在")),
+    ("crouch",   ("蹲下", "蹲在", "蹲身", "蹲伏", "半蹲", "屈膝蹲")),
+    ("sit",      ("坐下", "落座", "端坐", "就座", "坐回", "坐进", "坐在", "席地而坐", "盘腿坐",
+                  "盘坐", "对坐", "正坐", "坐定")),
+    ("kick",     ("踢", "踹", "飞踢")),
+    ("run",      ("奔跑", "狂奔", "疾冲", "冲向", "飞跑", "跑了", "奔来", "急奔", "飞奔", "逃跑", "逃走")),
+    ("walk",     ("行走", "走过", "走远", "踱步", "迈步", "离开", "上前", "走向", "走来", "走进",
+                  "走到", "退开", "后退", "退出", "跨过", "踏入", "步出", "起身")),
+    ("bow",      ("鞠躬", "行礼", "作揖", "抱拳", "躬身", "拱手", "弯腰行礼")),
+    ("wave",     ("挥手", "招手", "举手示意", "摆摆手")),
+    ("point",    ("指向", "指着", "抬手一指", "直指", "虚点", "一指", "戳向")),
+    ("reach",    ("伸手", "探手", "举起手", "抬手", "抬手去", "伸手去", "伸手抓", "递出", "接过")),
 )
 
 #: 手型（我们自建：官方 UI 未暴露手指，但 GLB 含 20 根手骨）。
@@ -209,13 +241,25 @@ def resolve_hand_shape(text: str) -> str:
     return ""
 
 
-def build_pose(text: str, extra: Optional[Dict[str, float]] = None) -> Dict[str, object]:
+def build_pose(text: str, extra: Optional[Dict[str, float]] = None,
+               pose_hint: str = "") -> Dict[str, object]:
     """一步到位：文本 -> 可直接写进 scene_json 的姿势块。
 
     返回 {currentPreset, poseValues, handShape, reason}
     poseValues = 预设展开 + 显式覆盖 + 手型骨骼角，合并后夹回合法域。
     """
+    # ⭐ 剧本显式声明的姿势优先（2026-10-13）：关键词表是在**猜**语义 —— 实测旧剧本
+    #    46 镜只命中 2%，因为 description 的用词（"盘坐""虚点""压着膝头"…）远比词表丰富。
+    #    而剧本 LLM 本来就知道这一镜人物在做什么，让它从固定清单里选一个，命中率接近 100%。
+    #    字段缺失/非法 → 回落关键词（老剧本零回归）。
+    _hint = str(pose_hint or "").strip()
+    if _hint in PRESETS:
+        text = ""
+    else:
+        _hint = ""
     preset, over, why = resolve_pose(text)
+    if _hint:
+        preset, why = _hint, ("pose字段:" + _hint)
     values: Dict[str, float] = {}
     if why or extra:
         # 只有**命中动作关键词**（或调用方显式给角度）才产出预设姿势。

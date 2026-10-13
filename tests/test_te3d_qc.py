@@ -89,6 +89,14 @@ class TestBlockingQc(unittest.TestCase):
         self.assertTrue(Q.qc_blocking_image(shot, big, cam_key="近景")["ok"])
         self.assertFalse(Q.qc_blocking_image(shot, big, cam_key="远景")["ok"])
 
+    def test_prop_count(self):
+        p = _mk(self._p("prop.png"), [(260, 100, 380, 300, CHAR_BLUE)])
+        shot = {"characters_in_shot": ["羡进"], "items_in_shot": ["旧木剑"]}
+        self.assertTrue(Q.qc_blocking_image(shot, p, diag={"chars": 1, "props": 1})["ok"])
+        bad = Q.qc_blocking_image(shot, p, diag={"chars": 1, "props": 0})
+        self.assertFalse(bad["ok"])
+        self.assertTrue(any("道具" in x for x in bad["reasons"]))
+
     def test_missing_diag_is_skipped_not_failed(self):
         p = _mk(self._p("nod.png"), [(260, 100, 380, 300, CHAR_BLUE)])
         r = Q.qc_blocking_image({"characters_in_shot": ["羡进"], "action": "他跪坐在地上"}, p)

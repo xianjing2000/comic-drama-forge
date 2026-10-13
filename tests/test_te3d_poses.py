@@ -34,10 +34,12 @@ class TestOfficialData(unittest.TestCase):
         self.assertEqual(P.JOINTS["rFoot"][:4], ("mixamorig:RightFoot", "x", -40, 40))
 
     def test_presets_match_official(self):
-        self.assertEqual(len(P.PRESETS), 10)
-        self.assertEqual(sorted(P.PRESETS), sorted([
-            "stand", "tpose", "walk", "run", "bow", "kick", "reach",
-            "kneelTwo", "prone", "lieDown"]))
+        # 官方 10 条 + 我们自建 4 条（sit / crouch / wave / point，见 CUSTOM_PRESETS）
+        self.assertEqual(len(P.PRESETS), 14)
+        self.assertEqual(len(P.CUSTOM_PRESETS), 4)
+        for k in ("stand", "tpose", "walk", "run", "bow", "kick", "reach",
+                  "kneelTwo", "prone", "lieDown"):
+            self.assertIn(k, P.PRESETS, "官方预设不得缺失：" + k)
         self.assertEqual(P.STAND, {"lArmAbd": -80, "rArmAbd": 80, "lFore": -8, "rFore": 8})
         self.assertEqual(P.preset_values("stand"), dict(P.STAND))
         self.assertEqual(P.preset_values("tpose"), {})
