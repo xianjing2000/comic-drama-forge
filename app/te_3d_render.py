@@ -540,7 +540,10 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
                 logger.warning("[3D站位图] 渲染页未回传图像（%s）", tag)
                 return None
             ratio = _ink_ratio(png)
-            if ratio is not None and ratio < _MIN_INK_RATIO:
+            _skel = bool(((plan.get("scene") or {}).get("skeletonMode")))
+            if ratio is not None and ratio < _MIN_INK_RATIO and not _skel:
+                # ⚠️ 骨骼模式的图是「黑底 + 细彩线」，非背景占比天然很低，
+                #    不能套用人偶图的空白判据（否则骨架图会被误判全黑而丢弃）。
                 logger.warning("[3D站位图] 渲染结果近乎全黑（%s，非背景占比 %.4f）",
                                tag, ratio)
                 return None

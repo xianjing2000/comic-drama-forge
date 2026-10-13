@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from typing import Dict, List, Optional, Tuple
 
@@ -559,7 +560,7 @@ def build_scene_json(
     scene = {
         "version": SCENE_VERSION,
         "aspect": aspect,
-        "skeletonMode": False,
+        "skeletonMode": _skeleton_mode_enabled(),
         "activeCameraId": cam_id,
         "scene": {
             "background": DEFAULT_BACKGROUND,
@@ -595,6 +596,17 @@ _T3D_NUM_RANGE = {
     "girth": (0.2, 3.0),         # 体型（胖瘦）
     "fov_deg": (10.0, 120.0),    # 垂直 FOV（度）
 }
+
+
+def _skeleton_mode_enabled() -> bool:
+    """是否输出「黑底彩色 OpenPose 骨架图」（官方导演台骨骼模式口径）。
+
+    2026-10-13 接入：骨架图把关节位置给成硬约束，比人偶素模更硬 —— 对「手部结构、
+    肢体姿态」这类模型最爱画错的部位最直接。默认关闭（保持人偶图 = 旧行为零回归），
+    env MJSCXT_TE3D_SKELETON=1 打开；也可按镜切换（shot["skeleton_mode"]）。
+    """
+    env = str(os.environ.get("MJSCXT_TE3D_SKELETON") or "").strip().lower()
+    return env in ("1", "true", "yes", "on")
 
 
 def _t3d_clamp(value, rng, default=0.0):

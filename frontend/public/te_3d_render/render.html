@@ -159,6 +159,74 @@ function findBone(root, name) {
   return found;
 }
 
+/* ---------- 骨骼模式（scene.skeletonMode）----------
+ * 输出**黑底彩色 OpenPose 骨架图**：官方导演台「骨骼模式」的截图口径，
+ * 用作生图的手部/姿态强约束（骨骼点定位比人偶像素更硬）。
+ * 关节映射用 Mixamo 骨骼（我们的人偶就是 Xbot），骨架连线按 BODY_18 约定。
+ * ⚠️ 与主渲染共用同一台相机与世界矩阵 —— 姿势/机位改了，骨架自动跟着改。 */
+const OP_BONES = {
+  nose: 'mixamorig:Head', neck: 'mixamorig:Neck',
+  rShoulder: 'mixamorig:RightArm', rElbow: 'mixamorig:RightForeArm', rWrist: 'mixamorig:RightHand',
+  lShoulder: 'mixamorig:LeftArm', lElbow: 'mixamorig:LeftForeArm', lWrist: 'mixamorig:LeftHand',
+  rHip: 'mixamorig:RightUpLeg', rKnee: 'mixamorig:RightLeg', rAnkle: 'mixamorig:RightFoot',
+  lHip: 'mixamorig:LeftUpLeg', lKnee: 'mixamorig:LeftLeg', lAnkle: 'mixamorig:LeftFoot',
+};
+
+const OP_EDGES = [
+  ['neck', 'nose', '#ffdd00'],
+  ['neck', 'rShoulder', '#ff5500'], ['rShoulder', 'rElbow', '#ff5500'], ['rElbow', 'rWrist', '#ff5500'],
+  ['neck', 'lShoulder', '#00aaff'], ['lShoulder', 'lElbow', '#00aaff'], ['lElbow', 'lWrist', '#00aaff'],
+  ['neck', 'rHip', '#ff5500'], ['rHip', 'rKnee', '#ff5500'], ['rKnee', 'rAnkle', '#ff5500'],
+  ['neck', 'lHip', '#00aaff'], ['lHip', 'lKnee', '#00aaff'], ['lKnee', 'lAnkle', '#00aaff'],
+  ['rHip', 'lHip', '#ffdd00'],
+];
+
+function _projectPixel(v3, camera, W, H) {
+  const v = v3.clone().project(camera);
+  return { x: (v.x * 0.5 + 0.5) * W, y: (-v.y * 0.5 + 0.5) * H };
+}
+
+function drawOpenPoseCanvas(roots, camera, W, H) {
+  const cv = document.createElement('canvas');
+  cv.width = W;
+  cv.height = H;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#000000';
+  g.fillRect(0, 0, W, H);
+  const lineW = Math.max(3, Math.round(H / 220));
+  const dotR = Math.max(4, Math.round(H / 170));
+  for (const root of (roots || [])) {
+    const pts = {};
+    root.updateMatrixWorld(true);
+    root.traverse((o) => {
+      if (!o.isBone) return;
+      const bn = normBoneName(o.name);
+      for (const k of Object.keys(OP_BONES)) {
+        if (pts[k] || normBoneName(OP_BONES[k]) !== bn) continue;
+        const v = new THREE.Vector3();
+        o.getWorldPosition(v);
+        pts[k] = _projectPixel(v, camera, W, H);
+      }
+    });
+    for (const [a, b, col] of OP_EDGES) {
+      if (!pts[a] || !pts[b]) continue;
+      g.strokeStyle = col;
+      g.lineWidth = lineW;
+      g.beginPath();
+      g.moveTo(pts[a].x, pts[a].y);
+      g.lineTo(pts[b].x, pts[b].y);
+      g.stroke();
+    }
+    for (const k of Object.keys(pts)) {
+      g.fillStyle = '#ffffff';
+      g.beginPath();
+      g.arc(pts[k].x, pts[k].y, dotR, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+  return cv.toDataURL('image/png');
+}
+
 function applyPoseValues(root, poseValues) {
   const applied = [];
   const missing = [];
@@ -259,6 +327,7 @@ async function run() {
 
   const entities = sceneDef.entities || [];
   const charEnts = entities.filter((e) => e && e.type === 'character');
+  const charRoots = [];       // 骨骼模式要遍历这些 root 取关节世界坐标
   const camEnt = entities.find((e) => e && e.type === 'camera') || null;
 
   const diag = { chars: 0, meshesPerChar: [], boneBox: [] };
@@ -335,6 +404,7 @@ async function run() {
       meshes += 1;
     });
     scene.add(inst);
+    charRoots.push(root);
     diag.chars += 1;
     diag.meshesPerChar.push(meshes);
     diag.boneBox.push(box ? [+boxH.toFixed(3), +k.toFixed(4)] : null);
@@ -373,7 +443,17 @@ async function run() {
   diag.tris = renderer.info.render.triangles;
   diag.calls = renderer.info.render.calls;
 
-  window.__te_3d_render__ = () => renderer.domElement.toDataURL('image/png');
+  window.__te_3d_render__ = () => {
+    if (sceneDef.skeletonMode) {
+      try {
+        diag.skeleton = true;
+        return drawOpenPoseCanvas(charRoots, camera, W, H);
+      } catch (e) {
+        diag.skeletonError = String(e);
+      }
+    }
+    return renderer.domElement.toDataURL('image/png');
+  };
   window.__TE_3D_READY__ = true;
   if (DEBUG) {
     const pre = document.createElement('pre');
