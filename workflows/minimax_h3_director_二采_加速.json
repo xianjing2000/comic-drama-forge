@@ -2,7 +2,7 @@
   "id": "79e9753c-d7eb-464f-b072-38c26f869748",
   "revision": 0,
   "last_node_id": 67,
-  "last_link_id": 143,
+  "last_link_id": 144,
   "nodes": [
     {
       "id": 8,
@@ -1567,143 +1567,6 @@
       }
     },
     {
-      "id": 50,
-      "type": "NvidiaDLSSFrameInterpolation",
-      "pos": [
-        1076.5691141590887,
-        629.4518668821796
-      ],
-      "size": [
-        320,
-        415.77777777777777
-      ],
-      "flags": {},
-      "order": 20,
-      "mode": 0,
-      "inputs": [
-        {
-          "localized_name": "video",
-          "name": "video",
-          "type": "VIDEO",
-          "link": 9
-        },
-        {
-          "localized_name": "output_fps",
-          "name": "output_fps",
-          "type": "COMBO",
-          "widget": {
-            "name": "output_fps"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "dlss_engine",
-          "name": "dlss_engine",
-          "type": "COMBO",
-          "widget": {
-            "name": "dlss_engine"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "encoding_quality",
-          "name": "encoding_quality",
-          "type": "COMBO",
-          "widget": {
-            "name": "encoding_quality"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "video_codec",
-          "name": "video_codec",
-          "type": "COMBO",
-          "widget": {
-            "name": "video_codec"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "container",
-          "name": "container",
-          "type": "COMBO",
-          "widget": {
-            "name": "container"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "rename",
-          "name": "rename",
-          "type": "COMBO",
-          "widget": {
-            "name": "rename"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "custom_suffix",
-          "name": "custom_suffix",
-          "type": "STRING",
-          "widget": {
-            "name": "custom_suffix"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "hdr_mode",
-          "name": "hdr_mode",
-          "type": "BOOLEAN",
-          "widget": {
-            "name": "hdr_mode"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "localized_name": "interpolated_video",
-          "name": "interpolated_video",
-          "type": "VIDEO",
-          "links": [
-            143
-          ]
-        },
-        {
-          "localized_name": "report_json",
-          "name": "report_json",
-          "type": "STRING",
-          "links": null
-        }
-      ],
-      "title": "DLSS 补帧",
-      "properties": {
-        "aux_id": "Konohamaru04/ComfyUI-NVIDIA-DLSS-Frame-Interpolation",
-        "ver": "7765f01b85bdb9342c8048b321650174856a2328",
-        "Node name for S&R": "NvidiaDLSSFrameInterpolation"
-      },
-      "widgets_values": [
-        "50",
-        "Auto",
-        "Max",
-        "H.264",
-        "MP4",
-        "Auto",
-        "_DLSSFG",
-        false
-      ],
-      "widgets_values_named": {
-        "output_fps": "50",
-        "dlss_engine": "Auto",
-        "encoding_quality": "Max",
-        "video_codec": "H.264",
-        "container": "MP4",
-        "rename": "Auto",
-        "custom_suffix": "_DLSSFG",
-        "hdr_mode": false
-      }
-    },
-    {
       "id": 6,
       "type": "CreateVideo",
       "pos": [
@@ -1784,7 +1647,7 @@
           "name": "VIDEO",
           "type": "VIDEO",
           "links": [
-            9
+            144
           ]
         }
       ],
@@ -2340,7 +2203,7 @@
           "localized_name": "视频",
           "name": "video",
           "type": "VIDEO",
-          "link": 143
+          "link": 144
         },
         {
           "label": "filename_prefix",
@@ -2462,14 +2325,6 @@
     }
   ],
   "links": [
-    [
-      9,
-      6,
-      0,
-      50,
-      0,
-      "VIDEO"
-    ],
     [
       16,
       2,
@@ -2639,8 +2494,8 @@
       "VAE"
     ],
     [
-      143,
-      50,
+      144,
+      6,
       0,
       7,
       0,
