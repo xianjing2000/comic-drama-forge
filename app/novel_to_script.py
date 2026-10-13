@@ -3405,6 +3405,14 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             "first_frame": str(s.get("first_frame") or "").strip()[:40],
             "last_frame": str(s.get("last_frame") or "").strip()[:40],
             "motion": str(s.get("motion") or "").strip()[:30],
+            # ⭐ 2026-10-13 修复（3D 导演台「没料可控」的真根因）：
+            #    本 row 是**手工列举**的白名单，此前漏了 blocking / action / pose ——
+            #    模型其实每一镜都输出了（shots 缓存实证 41/41 非空），却被这一步静默丢弃，
+            #    于是 3D 构图基准图永远只能拿到「按出场顺序排布 + idle 站姿」。
+            #    SHOT_FIELDS_DEFAULT 里虽有这三个字段，但本函数并不消费它，故必须在此显式保留。
+            "blocking": [dict(b) for b in (s.get("blocking") or []) if isinstance(b, dict)][:12],
+            "action": str(s.get("action") or "").strip()[:200],
+            "pose": str(s.get("pose") or "").strip()[:20],
         }
         # ---- 角色补全（2026-09-30）：画面文本点名了谁，就必须带谁的参考图 ----
         # 模型偶尔漏登记 characters_in_shot（实测分镜 2：description 写「指向右前方羡进
@@ -4441,7 +4449,7 @@ def episode_script_path(script_dir: str, novel_name: str, episode_no, project_ke
     folder = project_key or safe_project_name(novel_name)
     p = os.path.realpath(os.path.join(
         script_dir, folder, f"第{int(episode_no)}集.json"))
-    # 2026-10-12 t40：补 commonpath 包含校验（与 novel_screenplay.screenplay_path 同口径），
+    # 2026-10-12 t40：补 commonpath 包含校验（与资产/剧集路径同口径），
     # project_key 若含 .. 等越界片段直接抛 ValueError，不再静默落到数据根之外。
     if os.path.commonpath([p, root]) != root:
         raise ValueError(f"剧集路径越出剧本数据根：{p}")
