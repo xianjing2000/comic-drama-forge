@@ -14,6 +14,8 @@ _APP = os.path.join(os.path.dirname(_HERE), "app")
 if _APP not in sys.path:
     sys.path.insert(0, _APP)
 
+from PIL import Image  # noqa: E402
+
 import te_3d_director as D  # noqa: E402
 
 
