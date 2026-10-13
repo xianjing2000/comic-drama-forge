@@ -2176,7 +2176,11 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         #    个别参考图本身已足够锚定身份，不再拼 9 格同图网格。多角色/多视图
         #    时网格各格互异，逐格绑定仍有意义，保持原行为。
         _identity_grid_path = ""
-        if _has_on_screen:
+        # ⚠️ 2026-10-13：**不再要求 _has_on_screen** —— 那个口径判的是「画面内是否有出场
+        #    角色」（服务于 3D 人偶基准图与无人物镜禁令），而局部特写镜（shot=13 只拍手/
+        #    膝头、无完整人脸）会被判 False，却照样需要角色外观锚点：实测这正是收尾镜拿不到
+        #    身份基准网格的真因（日志「身份基准网格=0.0s」）。门槛改由「视图数 ≥2」把关。
+        if True:
             # ⭐ T20b（2026-10-13 用户口径）：
             #   ① 收尾镜**也要**身份基准网格 —— T20 补齐把条件从 _sb_grid_mode 收紧为
             #      _p_grid 后，10 个收尾镜一并失去这层锚定（实测 shot=13「身份基准网格=0.0s」）；
@@ -2189,12 +2193,17 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             # ⚠️ 不要用 _shot_outfit_dir 代替：分镜侧它恒为空（实测 0/46，见 L1859）。
             _ig_outfits = {}
             try:
-                from episode_helpers import _episode_outfit_overrides as _ep_ovr
-                _ig_outfits = _ep_ovr(project_name,
-                                      episode_no if episode_no not in (None, "") else 1) or {}
-            except Exception as _ig_ov_e:  # noqa: BLE001
-                logger.debug("[身份基准网格] 本集服装覆盖表读取失败（忽略）：%s", _ig_ov_e)
+                _ig_outfits = dict(_ep_outfit_override or {})   # worker 已解析过一次（见上）
+            except Exception:  # noqa: BLE001
                 _ig_outfits = {}
+            if not _ig_outfits:
+                try:
+                    from episode_helpers import _episode_outfit_overrides as _ep_ovr
+                    _ig_outfits = _ep_ovr(project_name,
+                                          episode_no if episode_no not in (None, "") else 1) or {}
+                except Exception as _ig_ov_e:  # noqa: BLE001
+                    logger.debug("[身份基准网格] 本集服装覆盖表读取失败（忽略）：%s", _ig_ov_e)
+                    _ig_outfits = {}
             for _r in refs:
                 if _r[0] not in ("主角色", "次角色"):
                     continue
@@ -2209,6 +2218,11 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 if _views:
                     _ig_groups.append((_nm or ("角色%d" % (len(_ig_groups) + 1)), _views))
             _ig_total = sum(len(_v) for _n, _v in _ig_groups)
+            if _ig_groups and _ig_total < 2:
+                # 只在「有角色槽位但视图不足」时留痕（罕见）—— 便于以后一眼看出是素材不够
+                logger.warning("[身份基准网格] shot=%s 视图不足 → 本镜不建网格：%s",
+                               shot_p.get("shot_id"),
+                               "/".join("%s(%d视图)" % (_n, len(_v)) for _n, _v in _ig_groups))
             if _ig_groups and _ig_total >= 2:      # 2026-10-13 用户拍板：门槛放宽到 ≥2
                 if _p_grid:
                     # 九宫格输出：3×3 与输出同构（行为逐字不变），平铺去重后的全部视图
