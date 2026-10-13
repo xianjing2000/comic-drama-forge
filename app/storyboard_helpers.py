@@ -970,8 +970,41 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
         logger.warning(f"分镜 manifest 更新失败：{e}")
 
 
-def _build_identity_ref_grid(char_paths: list, out_path: str, target_size=None) -> str:
-    """把角色基准图拼成 3×3「身份基准网格」参考图（2026-10-06，用户拍板）。
+def _identity_grid_layout(n: int) -> tuple:
+    """按「不同角色基准图张数」选身份基准网格的行列（2026-10-13 用户口径）。
+
+    用户原话：「收尾镜可以动态调整成 2x3、1x3、2x2 等等」。单帧输出不需要与输出
+    同构的 3×3 九格，网格只承担「外观基准」职责，因此形状随素材张数动态取：
+      n ≤ 3 → n×1（1×1 / 1×2 / 1×3）、n = 4 → 2×2、n ≤ 6 → 3×2（2 行 3 列）、
+      n ≥ 7 → 3×3（上限 9 格，超出由调用方/填充逻辑截断）。
+    九宫格输出仍固定 3×3（与输出同构、逐格绑定），见 _build_identity_ref_grid 的
+    repeat 参数语义。
+    """
+    try:
+        n = max(1, int(n))
+    except (TypeError, ValueError):
+        n = 1
+    if n <= 3:
+        return (n, 1)
+    if n == 4:
+        return (2, 2)
+    if n <= 6:
+        return (3, 2)
+    return (3, 3)
+
+
+def _build_identity_ref_grid(char_paths: list, out_path: str, target_size=None,
+                             cols: int = 3, rows: int = 3, repeat: bool = True) -> str:
+    """把角色基准图拼成「身份基准网格」参考图（2026-10-06 起；2026-10-13 支持动态布局）。
+
+    cols/rows：网格行列。
+      · 九宫格输出（_p_grid）沿用 3×3（与输出同构、逐格绑定，行为逐字不变）；
+      · 收尾镜单帧输出按 _identity_grid_layout() 动态取 1×3 / 2×2 / 2×3 / 3×3
+        （2026-10-13 用户口径）：单帧不需要九格同构，网格只承担「外观基准」职责。
+    repeat：是否按顺序循环填满全部格位。
+      · True（九宫格路径）：多角色/多视图依次轮转填满（旧行为逐字不变）；
+      · False（单帧动态路径）：不重复，空格留背景色 —— 同图拷贝会被扩散模型
+        当成「输出范例」诱导趋同（2026-10-07 事故结论）。
 
     单镜九宫格的 9 个面板在**一次扩散**里生成，格间服装/发型漂移是扩散模型已知
     行为（逐格重画），纯提示词约束不住。这里把角色基准图先用 PIL 拼成与输出
@@ -992,13 +1025,21 @@ def _build_identity_ref_grid(char_paths: list, out_path: str, target_size=None) 
     paths = [p for p in (char_paths or []) if p and os.path.isfile(p)]
     if not paths:
         raise ValueError("没有可用的角色基准图")
+    try:
+        cols = max(1, int(cols))
+        rows = max(1, int(rows))
+    except (TypeError, ValueError):
+        cols, rows = 3, 3
     w, h = (int(target_size[0]), int(target_size[1])) if target_size else (1632, 928)
     # 格边界：末列/末行吸收整除余数，保证整图尺寸与 target_size 逐像素一致
-    xs = [0, w // 3, (w // 3) * 2, w]
-    ys = [0, h // 3, (h // 3) * 2, h]
+    xs = [int(round(w * i / cols)) for i in range(cols + 1)]
+    ys = [int(round(h * i / rows)) for i in range(rows + 1)]
+    xs[0], ys[0], xs[-1], ys[-1] = 0, 0, w, h
     sheet = Image.new("RGB", (w, h), (12, 12, 16))
-    for i in range(9):
-        r, c = divmod(i, 3)
+    for i in range(cols * rows):
+        if not repeat and i >= len(paths):
+            break          # 单帧动态网格：不重复填充，空格留背景色
+        r, c = divmod(i, cols)
         im = Image.open(paths[i % len(paths)]).convert("RGB").resize(
             (xs[c + 1] - xs[c], ys[r + 1] - ys[r]))
         sheet.paste(im, (xs[c], ys[r]))
@@ -2053,15 +2094,28 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         #    个别参考图本身已足够锚定身份，不再拼 9 格同图网格。多角色/多视图
         #    时网格各格互异，逐格绑定仍有意义，保持原行为。
         _identity_grid_path = ""
-        if _p_grid and _has_on_screen:
+        if _has_on_screen:
+            # ⭐ T20b（2026-10-13 用户口径）：收尾镜**也要**身份基准网格，只是形状动态。
+            #   T20 补齐把本条件从 _sb_grid_mode 收紧为 _p_grid 后，10 个收尾镜一并失去
+            #   了这层身份锚定（实测 shot=13「身份基准网格=0.0s」整段跳过）。单帧输出
+            #   不需要九格同构，但「外观基准」照样有用 —— 按素材张数动态取
+            #   1×3 / 2×2 / 2×3 / 3×3（用户原话：「收尾镜可以动态调整成 2x3、1x3、2x2 等等」）。
             _ig_paths = [r[2] for r in refs if r[0] in ("主角色", "次角色")]
-            if len(set(_ig_paths)) >= 3:
+            _ig_uniq = list(dict.fromkeys([_pp for _pp in _ig_paths if _pp]))
+            if len(_ig_uniq) >= 3:
+                if _p_grid:
+                    _ig_cols, _ig_rows, _ig_repeat = 3, 3, True   # 九宫格：与输出同构（原行为）
+                else:
+                    _ig_cols, _ig_rows = _identity_grid_layout(len(_ig_uniq))
+                    _ig_repeat = False                           # 单帧：不重复填充
+                _ig_cells = _ig_cols * _ig_rows
                 try:
                     _identity_grid_path = _build_identity_ref_grid(
-                        _ig_paths,
+                        _ig_uniq,
                         os.path.join(QC_DIR, project_name, "identity_grid",
                                      f"shot_{seq_p:02d}_identity_grid.png"),
-                        target_size=_sb_size)
+                        target_size=_sb_size,
+                        cols=_ig_cols, rows=_ig_rows, repeat=_ig_repeat)
                 except Exception as _ig_e:  # noqa: BLE001
                     logger.warning(
                         "[身份基准网格] shot=%s 拼接失败（降级为常规参考图）：%s",
@@ -2075,10 +2129,15 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     refs.insert(0, (
                         _identity_grid_path,
                         f"参考图1（<image1>）【{_IDENTITY_GRID_REF_MARK}】"
-                        f"是本镜出场角色的身份基准网格（3×3 九格角色基准外观）："
-                        f"输出九个面板逐格与它保持面部身份、发型与服装一致",
+                        f"是本镜出场角色的身份基准网格（{_ig_rows}×{_ig_cols} 共 {_ig_cells} 格"
+                        f"角色基准外观）："
+                        + ("输出九个面板逐格与它保持面部身份、发型与服装一致" if _p_grid
+                           else "输出画面中的角色必须与它保持面部身份、发型与服装一致"),
                         _identity_grid_path))
                     labels = [r[1] for r in refs]
+                    logger.info("[身份基准网格] shot=%s 布局=%d×%d（%d 张不同角色图，输出=%s）",
+                                shot_p.get("shot_id"), _ig_rows, _ig_cols, len(_ig_uniq),
+                                "九宫格" if _p_grid else "单帧")
         # ⭐ 2026-10-09（用户反馈）：**跨镜视觉衔接**。
         #    问题：每镜的九宫格都是独立生成的，下一镜看不到上一镜长什么样 ——
         #    服装/发型/光位/道具（用户实测：旧哨子被画反）逐镜漂移，

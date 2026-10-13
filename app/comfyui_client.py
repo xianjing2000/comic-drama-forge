@@ -535,6 +535,59 @@ IDENTITY_BASELINE_GRID_SECTION = (
     "the cell(s) of that same character in <image{pos}>. Do not add, remove or "
     "recolor any clothing element relative to the baseline grid.")
 
+
+def identity_baseline_grid_section(pos, cols: int = 3, rows: int = 3, cells=None) -> str:
+    """身份基准网格提示词段（2026-10-13：支持动态布局）。
+
+    九宫格输出沿用 3×3（与输出同构 → 返回原常量、逐字不变，避免提示词指纹漂移）；
+    收尾镜单帧输出按实际网格形状给出 1×3 / 2×2 / 2×3 / 3×3 等描述 —— 单帧不需要
+    九格同构，网格只承担「外观基准」职责（2026-10-13 用户口径）。
+    """
+    try:
+        cols = max(1, int(cols))
+        rows = max(1, int(rows))
+    except (TypeError, ValueError):
+        cols, rows = 3, 3
+    if (cols, rows) == (3, 3):
+        return IDENTITY_BASELINE_GRID_SECTION.format(pos=pos)
+    try:
+        n = int(cells) if cells else cols * rows
+    except (TypeError, ValueError):
+        n = cols * rows
+    return (
+        f"IDENTITY BASELINE GRID (critical): <image{pos}> is a {cols}x{rows} grid "
+        f"of {n} cells showing the canonical appearance (facial identity, hairstyle, "
+        f"outfit and colour palette) of the character(s) of this shot, taken from "
+        f"their character baseline assets. It is the appearance ground truth: every "
+        f"character rendered in the output must replicate EXACTLY the face, hairstyle "
+        f"and outfit shown in the cell(s) of that same character in <image{pos}>. "
+        f"Do not add, remove or recolor any clothing element relative to the "
+        f"baseline grid.")
+
+
+#: 从身份基准网格 label 解析动态布局（2026-10-13）：形状串形如「1×3 共 3 格」。
+_IDENTITY_GRID_SHAPE_RE = re.compile(r"(\d+)\s*[x×X]\s*(\d+)\s*共\s*(\d+)\s*格")
+_IDENTITY_GRID_SHAPE_LOOSE_RE = re.compile(r"(\d+)\s*[x×X]\s*(\d+)")
+
+
+def _parse_identity_grid_layout(label):
+    """从网格参考图 label 解析 (cols, rows, cells)；解析不到返回 None（调用方按 3×3）。"""
+    try:
+        # ⚠️ label 按用户语言书写「行×列」（1×3 = 1 行 3 列），本函数对外返回
+        #    (cols, rows, cells)（与 _identity_grid_layout / 构建函数同口径）→ 此处交换。
+        m = _IDENTITY_GRID_SHAPE_RE.search(str(label or ""))
+        if m:
+            r, c = int(m.group(1)), int(m.group(2))
+            return (c, r, int(m.group(3)))
+        m = _IDENTITY_GRID_SHAPE_LOOSE_RE.search(str(label or ""))
+        if m:
+            r, c = int(m.group(1)), int(m.group(2))
+            return (c, r, c * r)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 #: 分镜图光学/材质段（2026-09-28 画质提升）。
 #: 背景：分镜提示词此前**系统性缺画质/光学/材质词** —— 无景深、无次表面散射、
 #: 无皮肤/毛发/布料材质描述，输出图扁平、塑料感、细节量低。
@@ -4274,6 +4327,7 @@ class ComfyUIClient:
             role_lines = []
             blocking_pos = 0      # <imageN> 里「3D 导演台构图基准图」的位置（0 = 没带）
             identity_grid_pos = 0  # <imageN> 里「角色身份基准网格」参考图的位置（0 = 没带）
+            identity_grid_layout = None  # (cols, rows, cells) 动态布局（2026-10-13），None = 3×3
             # ⚠️ **必须按位置重新编号**：官方协议里 ``<imageN>`` 的 N 就是「输入顺序」
             # （``images.image_N`` 槽位序号），不是 label 里写的那个数字。label 由
             # app._allocate_storyboard_refs 生成时可能带「预留槽位号」（例如角色占 1-3、
@@ -4291,8 +4345,10 @@ class ComfyUIClient:
                     continue
                 if IDENTITY_GRID_REF_MARK in lab:
                     # 身份基准网格单独走 IDENTITY BASELINE GRID 段（见下）：
-                    # 它的职责是「九个面板的外观基准」，不进常规 IDENTITY/ROLES 句式。
+                    # 它的职责是「本镜出场角色的外观基准」，不进常规 IDENTITY/ROLES 句式。
+                    # ⭐ 2026-10-13：布局可变（收尾镜单帧 → 1×3 / 2×2 / 2×3 …），从 label 解析。
                     identity_grid_pos = pos
+                    identity_grid_layout = _parse_identity_grid_layout(lab)
                     continue
                 # 身份锚点：官方句式 “Preserve the exact identity from <imageN>.”
                 if "身份锚点" in lab:
@@ -4342,7 +4398,11 @@ class ComfyUIClient:
             if blocking_pos:
                 sections.append(COMPOSITION_BASELINE_SECTION.format(pos=blocking_pos))
             if identity_grid_pos:
-                sections.append(IDENTITY_BASELINE_GRID_SECTION.format(pos=identity_grid_pos))
+                # ⭐ 2026-10-13：按实际网格形状发段（(3,3) 时返回原常量、逐字不变）。
+                _igc, _igr, _igcells = (list(identity_grid_layout) + [None, None, None])[:3] \
+                    if identity_grid_layout else (None, None, None)
+                sections.append(identity_baseline_grid_section(
+                    identity_grid_pos, cols=_igc or 3, rows=_igr or 3, cells=_igcells))
         else:
             sections.append(
                 "PRIMARY CANVAS: No reference image is provided for this shot. "
