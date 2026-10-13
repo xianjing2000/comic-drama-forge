@@ -3013,13 +3013,11 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 _live = generation_state[task_id].get("live")
                 if isinstance(_live, dict) and _live.get("shot") == shot_id:
                     _live["done"] = True
-            # T19：本镜确有产物落盘才算「已就绪」（以磁盘事实为准；失败/未交付不预热，
-            #      避免拿半成品镜去预热视频提示词）→ 某场次 1..N 镜齐了就后台预热该场。
-            try:
-                if os.path.isfile(dst) and os.path.getsize(dst) > 0:
-                    _vw_after_shot(seq)
-            except OSError:
-                pass
+            # T19：本镜**处理完毕即登记**（无论成功 / 软放行 / 质检硬阻断 / 生成失败）。
+            #   预热只是「提前构建缓存」，绝不能因个别镜反复过不了质检（实测 shot_13
+            #   手部大特写连续被打回）而把整条预热链永久卡死；某场次 1..N 镜都处理完
+            #   即后台预热该场，缺图的镜由 video_helpers 内部按实际情况处理（fail-open）。
+            _vw_after_shot(seq)
 
         # ⭐ T12（2026-10-12）：三类质量**分开统计** —— 软放行不计入 success。
         #   旧口径 ok=46/blocked=0 让界面全绿，掩盖了 37% 的不合格镜。
