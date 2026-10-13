@@ -573,6 +573,10 @@ def build_scene_json(
         "target": list(cam_target),
     })
 
+    # 场景背板（官方 panorama 口径）先算一次：有图时**同时关掉灰地面与网格** ——
+    # 场景图自带地面，留着灰平面会把背板下半整块盖住（2026-10-13 实测）。
+    _pano_blk = _panorama_block(str(shot.get("location") or ""))
+
     scene = {
         "version": SCENE_VERSION,
         "aspect": aspect,
@@ -580,10 +584,11 @@ def build_scene_json(
         "activeCameraId": cam_id,
         "scene": {
             "background": DEFAULT_BACKGROUND,
-            "gridVisible": True,
-            "groundVisible": True,
+            "gridVisible": _pano_blk is None,
+            "groundVisible": _pano_blk is None,
             "snap": True,
-            "panorama": None,
+            # 场景全景/背板（官方 panorama 口径；无场景图时为 None = 旧行为）
+            "panorama": _pano_blk,
         },
         "entities": entities,
         # 群演展开登记：{角色名: 人偶数} —— 质检按它核对 diag.chars（否则会把
@@ -680,6 +685,56 @@ def char_body(name: str) -> Tuple[float, float]:
         except (TypeError, ValueError):
             return 1.0
     return _f(p.get("heightScale", 1.0)), _f(p.get("girth", 1.0))
+
+
+# ===================== 全景 / 场景背板（2026-10-13 接入官方 panorama 口径） =====================
+# 官方 scene.panorama 字段：{enabled, filename, subfolder, type, rotation, radius,
+# subjectDistance, mode, anchor, directorTarget, directorFov}。官方只接受 2:1 等距柱状图
+# 贴球；我们的场景图是普通插画（非 2:1），贴球会严重变形 —— 所以按比例分派：
+# 真 2:1 → spherical（贴球）；其余 → billboard（远景背板）。mode 字段承载这个区分。
+_scene_images: Dict[str, str] = {}
+
+
+def set_scene_images(mapping) -> None:
+    """登记「场景名 -> 场景图绝对路径」（调用方渲染前设置一次，同 set_char_profiles）。"""
+    global _scene_images
+    _scene_images = dict(mapping or {})
+
+
+def scene_image_for(location: str) -> str:
+    """取某场景的图路径；未登记返回空串。"""
+    return str(_scene_images.get(str(location or "").strip()) or "")
+
+
+def _panorama_block(location: str) -> Optional[dict]:
+    """本镜场景 -> 官方 panorama 块；无图返回 None（= 旧行为：纯灰背景）。"""
+    path = scene_image_for(location)
+    if not path or not os.path.isfile(path):
+        return None
+    mode = "billboard"
+    try:
+        from PIL import Image  # noqa: PLC0415
+        with Image.open(path) as _im:
+            _w, _h = _im.size
+        if _h > 0 and abs((_w / float(_h)) - 2.0) <= 0.08:
+            mode = "spherical"      # 真 2:1 等距柱状图才配贴球
+    except Exception:  # noqa: BLE001
+        mode = "billboard"
+    return {
+        "enabled": True,
+        "filename": os.path.basename(path),
+        "subfolder": "",
+        "type": "local",
+        "rotation": 0.0,
+        "radius": PANORAMA_RADIUS,
+        "subjectDistance": PANORAMA_SUBJECT_DISTANCE,
+        "mode": mode,
+        "anchor": None,
+        "directorTarget": None,
+        "directorFov": None,
+        # 我们自加：渲染器直接读本地文件（render 侧会转成 dataUrl 内联进 payload）
+        "localPath": path,
+    }
 
 
 def _skeleton_mode_enabled() -> bool:

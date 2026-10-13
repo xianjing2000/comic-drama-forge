@@ -166,5 +166,59 @@ class TestBodyTypes(unittest.TestCase):
         self.assertEqual(ent["girth"], 1.0)
 
 
+class TestPanorama(unittest.TestCase):
+    """全景 / 场景背板（官方 scene.panorama 口径）。"""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+
+    def tearDown(self):
+        D.set_scene_images({})
+
+    def _img(self, name, size, color=(30, 30, 30)):
+        p = os.path.join(self.td.name, name)
+        Image.new("RGB", size, color).save(p)
+        return p
+
+    def test_no_scene_image_keeps_old_behavior(self):
+        D.set_scene_images({})
+        scene = D.build_scene_json({"shot_id": 1, "camera": "全景",
+                                    "characters_in_shot": ["甲"], "location": "没有的景"},
+                                   aspect="16:9")
+        self.assertIsNone(scene["scene"]["panorama"])
+        self.assertTrue(scene["scene"]["groundVisible"])     # 灰地面照旧
+
+    def test_scene_image_billboard_and_hides_ground(self):
+        p = self._img("base.png", (100, 100))                 # 1:1 -> 不能贴球
+        D.set_scene_images({"广场": p})
+        scene = D.build_scene_json({"shot_id": 1, "camera": "全景",
+                                    "characters_in_shot": ["甲"], "location": "广场"},
+                                   aspect="16:9")
+        pano = scene["scene"]["panorama"]
+        self.assertTrue(pano["enabled"])
+        self.assertEqual(pano["mode"], "billboard")
+        self.assertEqual(pano["radius"], D.PANORAMA_RADIUS)
+        self.assertEqual(pano["localPath"], p)
+        # 有背板 -> 关掉灰地面与网格（否则背板下半会被盖住）
+        self.assertFalse(scene["scene"]["groundVisible"])
+        self.assertFalse(scene["scene"]["gridVisible"])
+
+    def test_two_to_one_is_spherical(self):
+        p = self._img("pano.png", (200, 100))                 # 真 2:1 -> 贴球
+        D.set_scene_images({"廣場": p})
+        scene = D.build_scene_json({"shot_id": 1, "camera": "全景",
+                                    "characters_in_shot": ["甲"], "location": "廣場"},
+                                   aspect="16:9")
+        self.assertEqual(scene["scene"]["panorama"]["mode"], "spherical")
+
+    def test_missing_file_is_ignored(self):
+        D.set_scene_images({"广场": os.path.join(self.td.name, "不存在.png")})
+        scene = D.build_scene_json({"shot_id": 1, "camera": "全景",
+                                    "characters_in_shot": ["甲"], "location": "广场"},
+                                   aspect="16:9")
+        self.assertIsNone(scene["scene"]["panorama"])
+
+
 if __name__ == "__main__":
     unittest.main()

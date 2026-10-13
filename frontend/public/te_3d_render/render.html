@@ -334,6 +334,46 @@ async function run() {
    * kind ∈ cube / cylinder / sphere；transform.scale 就是道具实际尺寸（米），
    * 位置/尺寸由 te_3d_director 从剧本 items_in_shot + 描述方位词确定性推断。 */
   let _propCount = 0;   // 本块在 diag 定义之前执行，先局部计数，稍后并入 diag.props
+  /* ---------- 全景 / 场景背板（2026-10-13 接入官方 scene.panorama）----------
+   * 官方只接受 2:1 等距柱状图贴球；场景插画（非 2:1）贴球会严重变形，故分派：
+   *   mode=spherical -> 天空球（BackSide）
+   *   mode=billboard -> 远景背板（按原图比例）
+   * 图由服务端内联成 dataUrl（避免再开一条文件服务）。 */
+  const _pano = (sceneDef.scene || {}).panorama;
+  let _panoMode = '';        // 本块在 diag 定义之前执行，先局部记，稍后并入 diag
+  let _panoErr = '';
+  if (_pano && _pano.enabled && _pano.dataUrl) {
+    try {
+      const _tex = await new THREE.TextureLoader().loadAsync(String(_pano.dataUrl));
+      if (THREE.SRGBColorSpace) _tex.colorSpace = THREE.SRGBColorSpace;
+      if (String(_pano.mode) === 'spherical') {
+        const _geo = new THREE.SphereGeometry(Number(_pano.radius) || 60, 48, 32);
+        const _mesh = new THREE.Mesh(_geo, new THREE.MeshBasicMaterial({
+          map: _tex, side: THREE.BackSide,
+        }));
+        _mesh.rotation.y = Number(_pano.rotation) || 0;
+        scene.add(_mesh);
+      } else {
+        const _im = _tex.image || {};
+        const _ratio = (_im.width && _im.height) ? (_im.width / _im.height) : 1.78;
+        // 背板要**铺满取景范围**：它固定在远处，而相机 z 随景别变化（近景更近、
+        // 全景更远）→ 可视高度随之变化。取 34m 高度可覆盖 fov 40° 下各景别的画面
+        // （近景约 23m、全景约 28m），并保持原图宽高比不变形。
+        const _ph = 40.0;
+        const _pw = _ph * _ratio;
+        const _geo = new THREE.PlaneGeometry(_pw, _ph);
+        const _mesh = new THREE.Mesh(_geo, new THREE.MeshBasicMaterial({ map: _tex }));
+        const _z = -(Number(_pano.radius) || 60) * 0.52;
+        // 垂直居中于视平线（相机高度 1.0m），保证上下都铺满取景
+        _mesh.position.set(0, 1.0, _z);
+        scene.add(_mesh);
+      }
+      _panoMode = String(_pano.mode || '');
+    } catch (e) {
+      _panoErr = String(e);
+    }
+  }
+
   const propEnts = entities.filter((e) => e && e.type === 'prop');
   for (const ent of propEnts) {
     const tf = ent.transform || {};
@@ -364,6 +404,8 @@ async function run() {
 
   const diag = { chars: 0, meshesPerChar: [], boneBox: [] };
   diag.props = _propCount;   // 道具已入场景（见上方 propEnts）
+  diag.panorama = _panoMode;               // 场景背板模式（见上方 _pano 块）
+  if (_panoErr) diag.panoramaError = _panoErr;
   const _crowdMap = sceneDef.crowdMap || {};
   diag.crowdRoles = Object.keys(_crowdMap).length;
   diag.crowdMembers = Object.keys(_crowdMap).reduce(

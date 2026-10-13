@@ -559,6 +559,20 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
             _profile_dir = ""
 
     try:
+        # 全景/场景背板：把本地图内联成 dataUrl（渲染页只经 HTTP 取 payload，
+        # 不再为场景图单开一条文件服务）
+        try:
+            _pano = ((plan.get("scene") or {}).get("scene") or {}).get("panorama")
+            if isinstance(_pano, dict):
+                _lp = str(_pano.get("localPath") or "")
+                if _lp and os.path.isfile(_lp):
+                    with open(_lp, "rb") as _pf:
+                        _b64 = base64.b64encode(_pf.read()).decode("ascii")
+                    _ext = os.path.splitext(_lp)[1].lower().lstrip(".") or "png"
+                    _mime = "jpeg" if _ext in ("jpg", "jpeg") else _ext
+                    _pano["dataUrl"] = "data:image/%s;base64,%s" % (_mime, _b64)
+        except Exception as _pe2:  # noqa: BLE001
+            logger.debug("[3D站位图] 全景图内联失败（忽略）：%s", _pe2)
         if atomic_write_json is not None:
             atomic_write_json(payload_path, plan)
         else:

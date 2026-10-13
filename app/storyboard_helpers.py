@@ -162,6 +162,28 @@ def _te3d_body_profiles(project_name, episode_no):
     return out
 
 
+_TE3D_SCENE_CACHE: dict = {}
+
+
+def _te3d_scene_images(project_name, episode_no=None):
+    """{场景名: base.png 绝对路径}（进程内缓存）—— 3D 基准图的场景背板/全景来源。"""
+    key = str(project_name or "")
+    if key in _TE3D_SCENE_CACHE:
+        return _TE3D_SCENE_CACHE[key]
+    out: dict = {}
+    try:
+        root = os.path.join(SCENES_DIR, _safe_project(project_name))
+        if os.path.isdir(root):
+            for nm in os.listdir(root):
+                p = os.path.join(root, str(nm), "base.png")
+                if os.path.isfile(p):
+                    out[str(nm)] = p
+    except Exception as _se:  # noqa: BLE001
+        logger.debug("[3D导演台] 场景图索引失败（忽略）：%s", _se)
+    _TE3D_SCENE_CACHE[key] = out
+    return out
+
+
 def _storyboard_scratch_ep(episode_no=None) -> int:
     """分镜「生成中」暂存路径的集号（兜底口径与 shared_project._ep_dir 一致）。"""
     try:
@@ -2385,6 +2407,10 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     try:
                         import te_3d_director as _t3d_body
                         _t3d_body.set_char_profiles(_te3d_body_profiles(project_name, episode_no))
+                        # 场景背板/全景（官方 scene.panorama 口径）：登记本集场景图，
+                        # 命中 location 时基准图带真实场景背景（非 2:1 走远景背板，
+                        # 避免贴球变形）
+                        _t3d_body.set_scene_images(_te3d_scene_images(project_name, episode_no))
                     except Exception as _bp_e:  # noqa: BLE001
                         logger.debug("[3D导演台] 体型登记失败（忽略）：%s", _bp_e)
                     _blk_out_dir = os.path.join(QC_DIR, project_name, "te3d_blocking")
