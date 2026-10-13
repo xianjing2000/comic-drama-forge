@@ -77,7 +77,9 @@ def _char_mask_stats(png_path: str) -> Optional[Dict[str, float]]:
     px = im.load()
     n = 0
     sx = sy = 0
+    minx, maxx = sw, -1
     miny, maxy = sh, -1
+    edge = {"left": 0, "right": 0, "top": 0, "bottom": 0}
     for y in range(sh):
         for x in range(sw):
             r, g, b = px[x, y]
@@ -86,18 +88,37 @@ def _char_mask_stats(png_path: str) -> Optional[Dict[str, float]]:
             n += 1
             sx += x
             sy += y
+            if x < minx:
+                minx = x
+            if x > maxx:
+                maxx = x
             if y < miny:
                 miny = y
             if y > maxy:
                 maxy = y
+            if x <= 1:
+                edge["left"] += 1
+            if x >= sw - 2:
+                edge["right"] += 1
+            if y <= 1:
+                edge["top"] += 1
+            if y >= sh - 2:
+                edge["bottom"] += 1
     if not n:
-        return {"ratio": 0.0, "cx": 0.5, "cy": 0.5, "h_ratio": 0.0, "pixels": 0}
+        return {"ratio": 0.0, "cx": 0.5, "cy": 0.5, "h_ratio": 0.0, "pixels": 0,
+                "edge": {}, "clipped": False}
+    # 「被裁」判定：贴边像素占人偶总像素的一定比例（抗单像素噪点）。
+    # 2026-10-13 实测触发场景：体型大的角色（赵天霸）在近景里头顶直接出画。
+    _clipped_sides = [k for k, v in edge.items() if v >= max(12, n * 0.01)]
     return {
         "ratio": n / float(sw * sh),
         "cx": (sx / float(n)) / sw,
         "cy": (sy / float(n)) / sh,
         "h_ratio": (maxy - miny + 1) / float(sh),
         "pixels": n,
+        "edge": edge,
+        "clipped": bool(_clipped_sides),
+        "clipped_sides": _clipped_sides,
     }
 
 
@@ -144,6 +165,13 @@ def qc_blocking_image(shot: dict, png_path: str, diag: Optional[dict] = None,
                "，群演展开 %d 角色→%d 人" % (_cr, _cm) if (_cr and _cm) else ""))
     else:
         add("char_count", None, "无渲染诊断，跳过（降级判据）")
+
+    # ---- 是否被画面裁掉（2026-10-13 实测触发：体型大的角色近景里头顶出画）----
+    if stats.get("clipped"):
+        add("clipped", False,
+            "人偶贴到画面边缘（%s）—— 会被裁掉" % "/".join(stats.get("clipped_sides") or []))
+    else:
+        add("clipped", True, "人偶完整在画内（未触边）")
 
     # ---- 道具数量（剧本声明了几个道具，图里就该有几个）----
     _items = [str(x).strip() for x in ((shot or {}).get("items_in_shot") or []) if str(x).strip()]
@@ -221,6 +249,21 @@ def qc_blocking_image(shot: dict, png_path: str, diag: Optional[dict] = None,
 _SLOT_GAIN = 4.0
 #: 单次站位修正的上限（米），避免把角色甩出画面
 _SLOT_MAX_DX = 2.0
+
+
+def _refit_clipped(plan: dict, stats: dict) -> str:
+    """人偶被画面裁掉 → 把机位拉远（保高度），让它整个进画。"""
+    cam = plan.get("camera") or {}
+    pos = list(cam.get("position") or [])
+    tgt = list(cam.get("target") or [])
+    if len(pos) < 3 or len(tgt) < 3:
+        return ""
+    scale = 1.28
+    new_pos = [tgt[i] + (pos[i] - tgt[i]) * scale for i in range(3)]
+    new_pos[1] = pos[1]
+    cam["position"] = [round(float(v), 3) for v in new_pos]
+    plan["camera"] = cam
+    return "机位拉远 x%.2f（人偶贴边：%s）" % (scale, "/".join(stats.get("clipped_sides") or []))
 
 
 def _refit_camera(plan: dict, cam_key: str, h_ratio: float) -> str:
@@ -314,6 +357,10 @@ def repair_plan(shot: dict, plan: dict, qc: dict) -> Tuple[Optional[dict], List[
         cam_key = ""
     new = copy.deepcopy(plan or {})
     notes: List[str] = []
+    if by_name.get("clipped", {}).get("ok") is False:
+        n = _refit_clipped(new, stats)
+        if n:
+            notes.append(n)
     if by_name.get("framing", {}).get("ok") is False:
         n = _refit_camera(new, cam_key, float(stats.get("h_ratio") or 0.0))
         if n:
@@ -379,3 +426,62 @@ def qc_and_repair(shot: dict, png_path: str, cam_key: Optional[str] = None,
     return {"ok": bool(last_qc.get("ok")), "path": path, "rounds": rounds,
             "checks": last_qc.get("checks") or [],
             "reasons": list(last_qc.get("reasons") or [])}
+
+
+#: 备选机位俯仰角（**只改俯仰、不改景别**）。为什么只改俯仰：景别是提示词里的硬约束，
+#: 为「凑合格」把景别放宽等于篡改约束（见 build_render_plan 的既有纪律）。
+_ALT_CAM_ANGLES = ("仰拍", "俯拍")
+
+
+def _qc_score(qc: dict) -> int:
+    """质检得分 = 通过的判据条数（用于在候选里择优；None/skipped 不计）。"""
+    return len([c for c in (qc.get("checks") or []) if c.get("ok") is True])
+
+
+def qc_repair_and_alt_cameras(shot: dict, png_path: str, cam_key: Optional[str] = None,
+                              aspect: str = "16:9", target_size=None, width: int = 768,
+                              out_dir: Optional[str] = None, render_fn=None,
+                              max_rounds: int = 2,
+                              cam_angles=_ALT_CAM_ANGLES) -> Dict[str, object]:
+    """渲染后**完整闭环**：质检 → 修计划重渲（≤max_rounds）→ 仍不过则换机位俯仰角重渲择优。
+
+    多机位的正确用法在这里：不是机械多渲几张，而是「主板自愈无效时换视角」。
+    """
+    res = qc_and_repair(shot, png_path, cam_key=cam_key, aspect=aspect,
+                        target_size=target_size, width=width, out_dir=out_dir,
+                        render_fn=render_fn, max_rounds=max_rounds)
+    if res.get("ok") or not out_dir or render_fn is None or not cam_angles:
+        return res
+    try:
+        import te_3d_director as D  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return res
+    _ck = cam_key or ""
+    if not _ck:
+        try:
+            from shot_camera import camera_key as _ckf  # noqa: PLC0415
+            _ck = _ckf(str((shot or {}).get("camera") or ""))
+        except Exception:  # noqa: BLE001
+            _ck = ""
+    best = res
+    best_score = _qc_score(res)
+    for ang in cam_angles:
+        try:
+            plan = D.build_render_plan(shot, aspect=aspect, width=width,
+                                       target_size=target_size,
+                                       cam_key=_ck or None, cam_angle=ang)
+            p = render_fn(plan, out_dir)
+        except Exception:  # noqa: BLE001
+            p = None
+        if not p:
+            continue
+        r2 = qc_and_repair(shot, p, cam_key=cam_key, aspect=aspect,
+                           target_size=target_size, width=width, out_dir=out_dir,
+                           render_fn=None, max_rounds=0)
+        r2["cameraAngle"] = ang
+        if r2.get("ok"):
+            return r2
+        sc = _qc_score(r2)
+        if sc > best_score:
+            best, best_score = r2, sc
+    return best

@@ -2428,7 +2428,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                             #    质检发现的问题重新生成吗」—— 基准图由我们**确定性渲染**，问题可
                             #    定位、参数可反推，所以走「质检 → 修计划重渲 → 再质检」闭环
                             #    （最多 2 轮修复）。仍不过才回落文字站位锚点。
-                            _bq = te_3d_qc.qc_and_repair(
+                            _bq = te_3d_qc.qc_repair_and_alt_cameras(
                                 shot_p, _blocking_ref_path,
                                 cam_key=_bq_camk,
                                 aspect=":".join(map(str, _sb_style_res.get("ratio") or ("16", "9"))),

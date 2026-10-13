@@ -147,6 +147,24 @@ class TestBlockingQc(unittest.TestCase):
         self.assertTrue(ent["poseValues"])
         self.assertEqual(ent["currentPreset"], "kneelTwo")
 
+    def test_clipped_detected_and_repaired(self):
+        # 人偶顶到画面顶边 = 被裁
+        p = _mk(self._p("clip.png"), [(240, 0, 400, 300, CHAR_BLUE)])
+        r = Q.qc_blocking_image({"characters_in_shot": ["羡进"]}, p)
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("裁" in x for x in r["reasons"]), r["reasons"])
+        fixed, notes = Q.repair_plan({"characters_in_shot": ["羡进"]}, self._plan(), r)
+        self.assertTrue(notes)
+        d0 = abs(self._plan()["camera"]["position"][2] - self._plan()["camera"]["target"][2])
+        d1 = abs(fixed["camera"]["position"][2] - fixed["camera"]["target"][2])
+        self.assertGreater(d1, d0)      # 拉远
+
+    def test_not_clipped_when_inside(self):
+        p = _mk(self._p("inset.png"), [(260, 60, 380, 300, CHAR_BLUE)])
+        r = Q.qc_blocking_image({"characters_in_shot": ["羡进"]}, p)
+        by = {c["name"]: c for c in r["checks"]}
+        self.assertTrue(by["clipped"]["ok"])
+
     def test_no_fixable_returns_none(self):
         fixed, notes = Q.repair_plan({}, self._plan(),
                                      {"checks": [{"name": "image_ok", "ok": False}],
@@ -185,6 +203,39 @@ class TestBlockingQc(unittest.TestCase):
         self.assertFalse(res["ok"])
         # 空白图属于「不可自动修复」（没有任何可反推的参数）→ 不该白重渲
         self.assertEqual(calls, [])
+
+    def test_alt_camera_when_repair_fails(self):
+        """主板自愈无效时换机位俯仰角重渲（只改俯仰、不改景别）。"""
+        bad = _mk(self._p("badalt.png"), [(300, 170, 330, 200, CHAR_BLUE)])
+        good = _mk(self._p("goodalt.png"), [(240, 20, 400, 340, CHAR_BLUE)])
+        seen = []
+
+        def fake_render(plan, out_dir):
+            seen.append(plan)
+            return good          # 备选机位渲出来的图通过质检
+
+        shot = {"characters_in_shot": ["羡进"], "camera": "近景"}
+        res = Q.qc_repair_and_alt_cameras(shot, bad, cam_key="近景", target_size=(640, 360),
+                                          out_dir=self.d, render_fn=fake_render,
+                                          max_rounds=0, cam_angles=("仰拍",))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res.get("cameraAngle"), "仰拍")
+        self.assertTrue(seen)
+
+    def test_alt_camera_not_tried_when_ok(self):
+        good = _mk(self._p("ok1.png"), [(240, 20, 400, 340, CHAR_BLUE)])
+        called = []
+
+        def fake_render(plan, out_dir):
+            called.append(plan)
+            return good
+
+        res = Q.qc_repair_and_alt_cameras({"characters_in_shot": ["羡进"], "camera": "近景"},
+                                          good, cam_key="近景", target_size=(640, 360),
+                                          out_dir=self.d, render_fn=fake_render,
+                                          max_rounds=0, cam_angles=("仰拍",))
+        self.assertTrue(res["ok"])
+        self.assertEqual(called, [])
 
     def test_enabled_switch(self):
         old = os.environ.get("MJSCXT_TE3D_QC")
