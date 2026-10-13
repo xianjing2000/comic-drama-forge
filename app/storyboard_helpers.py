@@ -2362,10 +2362,16 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 return
             logger.info("[视频提示词预热] 场次 %s 的 %d 镜已全部落盘 → 后台预热该场"
                         " h3 提示词（T19）", _key, len(_sc_shots))
+            # ⭐ T19b（2026-10-13）：**不要**把剧本结构当参考图传下去 —— 剧本场次的
+            #   characters/scenes 只有 name / reference_prompt_zh，**没有 front/base 键**，
+            #   而 _collect_reference_images 只认 front/base → 取图恒为 0。实测（12:45 起每场
+            #   触发预热）：18 次「角色参考图不可用: 羡进/赵天霸」→ 随即「磁盘无参考图，跳过」，
+            #   T19 逐场次预热全程空转、零收益。传 None 由 prewarm_video_prompts 内部从磁盘
+            #   资产目录自动收集（与正式视频链路同源，collect_helpers 注释早已警告此坑）。
             _vh.prewarm_video_prompts(
                 project_name, _sc_shots,
-                character_refs=(_sc.get("characters") or []),
-                scene_refs=(_sc.get("scenes") or []),
+                character_refs=None,
+                scene_refs=None,
                 episode_no=(episode_no if episode_no not in (None, "") else 1),
                 style=style)
         except Exception as _vw_f_e:  # noqa: BLE001

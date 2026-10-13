@@ -946,6 +946,27 @@ def prewarm_video_prompts(project_name, shots, character_refs=None, scene_refs=N
         if str(os.environ.get("MJSCXT_PREWARM_VIDEO_PROMPT") or "1").strip().lower() \
                 in ("0", "false", "off", "no"):
             return
+        # ⭐ T19b（2026-10-13）：参考图归一 —— 调用方若传「剧本结构」（有 name、无 front/base）
+        #   或直接传空，_collect_reference_images 一律取不到图（实测 18 次「角色参考图不可用」
+        #   后预热直接「磁盘无参考图，跳过」）→ 预热空转、零收益。这里统一回落到磁盘资产目录，
+        #   与正式视频链路 _collect_asset_refs 同源，避免「预热构建的提示词缺角色锚点」。
+        def _refs_usable(_rs) -> bool:
+            for _r in (_rs or []):
+                if isinstance(_r, dict) and (_r.get("front") or _r.get("base")):
+                    return True
+            return False
+
+        if not _refs_usable(character_refs) or not _refs_usable(scene_refs):
+            try:
+                _ar, _as = _collect_asset_refs(project_name)
+                if not _refs_usable(character_refs):
+                    character_refs = _ar
+                if not _refs_usable(scene_refs):
+                    scene_refs = _as
+                logger.info("[视频提示词预热] 参考图归一：角色 %d / 场景 %d（磁盘资产目录）",
+                            len(character_refs or []), len(scene_refs or []))
+            except Exception as _norm_e:  # noqa: BLE001
+                logger.warning("[视频提示词预热] 参考图归一失败（忽略）：%s", _norm_e)
         if not shots:
             return
         try:
