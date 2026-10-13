@@ -536,6 +536,10 @@ def build_scene_json(
             "currentPreset": _pose_preset,
         })
 
+    # ---- 道具 entity（2026-10-13：官方 addProp 的 cube/cylinder/sphere）----
+    for _pe in _prop_entities(shot, aspect=aspect):
+        entities.append(_pe)
+
     # ---- 机位 entity（camera）----
     cx, cz = _subject_center(chars, spread)
     cam_pos, cam_target, _cam_fov = build_camera(_cam_key, _cam_angle, cx, cz)
@@ -630,6 +634,100 @@ def _t3d_clamp_vec3(vec, key_xz: str, key_y: str, default=0.0) -> list:
         _t3d_clamp(out[1], _T3D_NUM_RANGE[key_y], default),
         _t3d_clamp(out[2], _T3D_NUM_RANGE[key_xz], default),
     ]
+
+
+# ===================== 道具（prop，2026-10-13 接入官方 addProp） =====================
+# 官方导演台的道具只有三种基本体：cube / cylinder / sphere（addProp + BoxGeometry /
+# CylinderGeometry / SphereGeometry）。我们按**道具名 + 画面描述**确定性推断形状与位置，
+# 数据源是剧本逐镜就有的 items_in_shot（不新增字段、不给剧本生成加负担、零人工标注）。
+#
+#: 形状关键词（按名字判定；命中即停；默认方块）
+_PROP_CYL = ("剑", "刀", "棍", "棒", "柱", "枪", "箭", "瓶", "杯", "筒", "杆", "鞭", "伞", "杖")
+_PROP_SPH = ("丹", "珠", "球", "丸", "灯", "果", "玉", "钟")
+#: 尺寸档（米，取最长边）
+_PROP_SIZE = (("小", 0.20), ("大", 0.78), ("巨", 0.78), ("碑", 0.78), ("门", 0.90))
+_PROP_SIZE_DEFAULT = 0.40
+#: 道具配色（暖灰/木色系，与人偶的冷色区分）
+_PROP_COLORS = ("#c8a45a", "#a8794a", "#8f9aa6", "#b08cc0", "#7fb08a", "#c07b6a")
+#: 方位关键词 -> (画面左右槽, 景深槽, 离地高度/米)；按顺序匹配，命中即停
+_PROP_PLACE = (
+    (("桌上", "案上", "供桌", "几上", "桌边"), ("center", "mid", 0.98)),
+    (("空中", "天上", "半空", "悬浮", "飞起"), ("center", "mid", 2.10)),
+    (("手中", "手里", "握着", "手持", "掌中", "抓住"), ("center", "mid", 1.05)),
+    (("地上", "地面", "脚下", "落在", "掉落"), ("center", "mid", 0.0)),
+)
+#: 「依附主体」的方位词：命中时道具就该在人偶手上/身上，允许与主体重叠
+_PROP_IN_HAND = ("手中", "手里", "握着", "手持", "掌中", "抓住")
+
+
+def _prop_kind(name: str) -> str:
+    """道具名 -> 基本体（官方只有 cube / cylinder / sphere）。"""
+    n = str(name or "")
+    if any(k in n for k in _PROP_CYL):
+        return "cylinder"
+    if any(k in n for k in _PROP_SPH):
+        return "sphere"
+    return "cube"
+
+
+def _prop_size(name: str) -> float:
+    for kw, sz in _PROP_SIZE:
+        if kw in str(name or ""):
+            return sz
+    return _PROP_SIZE_DEFAULT
+
+
+def _prop_entities(shot: dict, aspect: str = "9:16") -> List[dict]:
+    """本镜道具 -> prop 实体列表（官方 addProp 口径）。
+
+    数据源：剧本 items_in_shot（逐镜出场物品）。形状/尺寸取名字，位置取 description
+    里的方位词（桌上/空中/手中/地上 + 左/右），全为确定性规则 —— 无人工标注。
+    """
+    names = [str(x).strip() for x in ((shot or {}).get("items_in_shot") or []) if str(x).strip()]
+    if not names:
+        return []
+    desc = " ".join(str((shot or {}).get(k) or "")
+                    for k in ("description", "visual_detail", "action"))
+    spread = _lateral_spread(aspect, "", max(1, len(names)))
+    out: List[dict] = []
+    for i, nm in enumerate(names, start=1):
+        xk, dk, y = "center", "front", 0.0
+        for words, place in _PROP_PLACE:
+            if any(w in desc for w in words):
+                xk, dk, y = place
+                break
+        # 画面左右：描述里的方向词优先；否则**单道具默认放画面右侧**（摆正中会挡住
+        # 主体 —— 2026-10-13 实测：石碑摆 center+front 时把人偶整个下半身盖住），
+        # 多道具则左右错开；「手中」类道具例外，它就该在人偶手上。
+        _in_hand = any(w in desc for w in _PROP_IN_HAND)
+        if "左" in desc and ("右" not in desc or desc.find("左") < desc.find("右")):
+            xk = "left"
+        elif "右" in desc:
+            xk = "right"
+        elif _in_hand:
+            xk = "center"
+        elif len(names) > 1:
+            xk = ("left", "right")[(i - 1) % 2]
+        else:
+            xk = "right"
+        size = _prop_size(nm)
+        px = _X_SLOT.get(xk, 0.0) * max(0.15, float(spread)) + 0.26 * ((i - 1) % 3)
+        pz = _DEPTH_Z.get(dk, 0.45)
+        out.append({
+            "id": _entity_id("prop", i),
+            "type": "prop",
+            "kind": _prop_kind(nm),
+            "name": nm,
+            "color": _PROP_COLORS[(i - 1) % len(_PROP_COLORS)],
+            "visible": True,
+            "transform": {
+                # 贴地/落桌：球体与圆柱体都以中心为原点，故 y 取半径或指定高度
+                "position": [round(px, 3), round(size / 2.0 if y <= 0 else y, 3), round(pz, 3)],
+                "rotation": [0.0, 0.0, 0.0],
+                "scale": [round(size, 3), round(size, 3), round(size, 3)],
+            },
+        })
+    return out
 
 
 def validate_scene_json(scene: dict) -> dict:

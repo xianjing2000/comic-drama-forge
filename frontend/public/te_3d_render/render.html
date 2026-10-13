@@ -330,7 +330,40 @@ async function run() {
   const charRoots = [];       // 骨骼模式要遍历这些 root 取关节世界坐标
   const camEnt = entities.find((e) => e && e.type === 'camera') || null;
 
+  /* ---------- 道具（2026-10-13 接入官方 addProp 口径）----------
+   * kind ∈ cube / cylinder / sphere；transform.scale 就是道具实际尺寸（米），
+   * 位置/尺寸由 te_3d_director 从剧本 items_in_shot + 描述方位词确定性推断。 */
+  let _propCount = 0;   // 本块在 diag 定义之前执行，先局部计数，稍后并入 diag.props
+  const propEnts = entities.filter((e) => e && e.type === 'prop');
+  for (const ent of propEnts) {
+    const tf = ent.transform || {};
+    const sc = Array.isArray(tf.scale) ? tf.scale : [0.4, 0.4, 0.4];
+    const kind = String(ent.kind || 'cube');
+    let geo;
+    if (kind === 'cylinder') {
+      geo = new THREE.CylinderGeometry(0.5, 0.5, 1, 18);
+    } else if (kind === 'sphere') {
+      geo = new THREE.SphereGeometry(0.5, 20, 14);
+    } else {
+      geo = new THREE.BoxGeometry(1, 1, 1);
+    }
+    const mat = new THREE.MeshStandardMaterial({
+      color: new THREE.Color(ent.color || '#c8a45a'), roughness: 0.65, metalness: 0.08,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    mesh.scale.set(Number(sc[0]) || 0.4, Number(sc[1]) || 0.4, Number(sc[2]) || 0.4);
+    const pp = Array.isArray(tf.position) ? tf.position : [0, 0, 0];
+    const pr = Array.isArray(tf.rotation) ? tf.rotation : [0, 0, 0];
+    mesh.position.set(Number(pp[0]) || 0, Number(pp[1]) || 0, Number(pp[2]) || 0);
+    mesh.rotation.set(Number(pr[0]) || 0, Number(pr[1]) || 0, Number(pr[2]) || 0);
+    scene.add(mesh);
+    _propCount += 1;
+  }
+
   const diag = { chars: 0, meshesPerChar: [], boneBox: [] };
+  diag.props = _propCount;   // 道具已入场景（见上方 propEnts）
   const focus = [];
   const facingFixY = Number(payload.facingFixY || 0);
 
