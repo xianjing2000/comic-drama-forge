@@ -516,7 +516,11 @@ async function run() {
     const box = boneWorldBox(root);
     const boxH = box ? (box.max.y - box.min.y) : 0;
     const k = boxH > 1e-4 ? TARGET_HEIGHT / boxH : 1;
-    const hs = k * (Number(ent.heightScale) || 1.0) * (Number(ent.uniformScale) || 1.0)
+    // ⚠️ 2026-10-13 修（体型接入时引入的平方 bug）：ent.height 已经是
+    //    TARGET_CHARACTER_HEIGHT(1.7m) * heightScale，再乘一次 heightScale 等于把身高
+    //    **平方**放大（赵天霸 1.09 -> 实测 1.19 倍）。这里只用 height（已含 heightScale）
+    //    与 uniformScale。
+    const hs = k * (Number(ent.uniformScale) || 1.0)
              * ((Number(ent.height) || 1.7) / 1.7);
     const tf = ent.transform || {};
     const pos = tf.position || [0, 0, 0];
