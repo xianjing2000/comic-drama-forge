@@ -970,28 +970,46 @@ def _update_storyboard_manifest_shot(project: str, shot_id, seq: int, dst: str,
         logger.warning(f"分镜 manifest 更新失败：{e}")
 
 
-def _identity_views_for(char_img: str) -> list:
-    """给定「本镜命中的那张角色图」，返回该角色可用的多视图（去重保序）。
+def _identity_views_for(char_img: str, outfit_override: str = "") -> list:
+    """给定「本镜命中的那张角色图」+「本集服装变体 key」，返回该角色可用视图（去重保序）。
 
     ⭐ 2026-10-13 用户口径：网格一格 = 一张视图/服装变体，同一角色占同一行 ——
     所以这里要的不是「一张」，而是该角色**这一集实际可用的全部视图**。
-    实测资产结构（逆天系统_全书）：
+    实测资产结构（逆天系统_全书）每角色恰有 2 张：
       characters/<proj>/<角色>/base.png                      ← 基础设定图（四区 character sheet）
       characters/<proj>/<角色>/outfits/ep01_<hash>/base.png  ← 本集服装变体（t16 服装覆盖）
-    命中变体时返回 [变体, 基础图]（本集服装优先，剧情相关性更强）；命中基础图时只 1 张。
-    用路径推导而非再查索引：变体路径含 outfits/，去掉它两级就是角色目录。
+    outfit_override 来自 episode_helpers._episode_outfit_overrides（t16「本集服装覆盖」表）。
+      · 有 override → 返回 [本集变体, 主设定图]（本集服装优先，剧情相关性更强）；
+      · 命中变体但无 override → 至少补回主设定图；
+      · 两者都没有 → 只有命中那一张（调用方按门槛判断建不建网格）。
+    ⚠️ 不能用 qc_helpers._shot_outfit_dir 代替：分镜侧它恒返回空
+       （实测第 1/2/3 集 0/46、0/39、0/39，见 L1859 注释）。
     """
     out = []
     p = str(char_img or "")
     if p and os.path.isfile(p):
         out.append(p)
     try:
-        _parts = os.path.normpath(p).split(os.sep)
-        if "outfits" in _parts:
-            _i = _parts.index("outfits")
-            _base = os.path.join(os.sep.join(_parts[:_i]), _parts[-1])
-            if os.path.isfile(_base) and _base not in out:
-                out.append(_base)
+        _parts = os.path.normpath(p).split(os.sep) if p else []
+        _leaf = os.path.basename(p) or "base.png"
+        _in_outfit = "outfits" in _parts
+        _char_dir = (os.sep.join(_parts[:_parts.index("outfits")]) if _in_outfit
+                     else os.path.dirname(p))
+        _variant = ""
+        if _char_dir and outfit_override:
+            _vdir = os.path.join(_char_dir, "outfits", str(outfit_override))
+            if os.path.isdir(_vdir):
+                for _cand in (_leaf, "base.png", "front.png", "half.png"):
+                    _cp = os.path.join(_vdir, _cand)
+                    if os.path.isfile(_cp):
+                        _variant = _cp
+                        break
+        if _variant and _variant not in out:
+            out = [_variant] + out          # 本集服装优先
+        elif _in_outfit:
+            _base_img = os.path.join(_char_dir, _leaf)
+            if os.path.isfile(_base_img) and _base_img not in out:
+                out.append(_base_img)
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -2167,6 +2185,16 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             #      所以 1 角色 × 2 视图 → 1×2、2 角色 × 2 视图 → 2×2、3 角色 × 2 视图 → 3×2。
             #      用户原话：「我只是举例子比例，具体比例要根据具体剧情来啊」。
             _ig_groups = []           # [(角色名, [视图路径…]), …]
+            # 本集服装覆盖表（t16）：{角色名: outfit_key} —— 给每个角色补「本集服装视图」
+            # ⚠️ 不要用 _shot_outfit_dir 代替：分镜侧它恒为空（实测 0/46，见 L1859）。
+            _ig_outfits = {}
+            try:
+                from episode_helpers import _episode_outfit_overrides as _ep_ovr
+                _ig_outfits = _ep_ovr(project_name,
+                                      episode_no if episode_no not in (None, "") else 1) or {}
+            except Exception as _ig_ov_e:  # noqa: BLE001
+                logger.debug("[身份基准网格] 本集服装覆盖表读取失败（忽略）：%s", _ig_ov_e)
+                _ig_outfits = {}
             for _r in refs:
                 if _r[0] not in ("主角色", "次角色"):
                     continue
@@ -2177,7 +2205,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     _b = _lab.find("」", _a + 3)
                     if _b > _a:
                         _nm = _lab[_a + 3:_b]
-                _views = _identity_views_for(_r[2])
+                _views = _identity_views_for(_r[2], _ig_outfits.get(_nm, ""))
                 if _views:
                     _ig_groups.append((_nm or ("角色%d" % (len(_ig_groups) + 1)), _views))
             _ig_total = sum(len(_v) for _n, _v in _ig_groups)

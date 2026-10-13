@@ -51,6 +51,22 @@ class TestIdentityViews(unittest.TestCase):
             self.assertEqual(sb._identity_views_for(base), [base])
             self.assertEqual(sb._identity_views_for(os.path.join(td, "无.png")), [])
 
+    def test_views_use_episode_outfit_override(self):
+        """命中主设定图 + 本集服装 key → [本集变体, 主设定图]（本集优先）。
+
+        这正是生产里 shot=13 的真实情形：命中的是主设定图（_shot_outfit_dir 在分镜侧
+        恒为空），必须靠 t16 的覆盖表才能把「本集服装」补进网格。
+        """
+        with tempfile.TemporaryDirectory() as td:
+            char_dir = os.path.join(td, "羡进")
+            base = os.path.join(char_dir, "base.png")
+            variant = os.path.join(char_dir, "outfits", "ep01_3f97355a", "base.png")
+            _mk_img(base, (10, 10, 10))
+            _mk_img(variant, (200, 200, 200))
+            self.assertEqual(sb._identity_views_for(base, "ep01_3f97355a"), [variant, base])
+            self.assertEqual(sb._identity_views_for(base, "ep01_不存在"), [base])
+            self.assertEqual(sb._identity_views_for(base), [base])
+
 
 class TestIdentityGridBuild(unittest.TestCase):
     def test_rows_paths_two_characters(self):
