@@ -227,6 +227,83 @@ function drawOpenPoseCanvas(roots, camera, W, H) {
   return cv.toDataURL('image/png');
 }
 
+/* ---------- 场景内骨架实体（官方 kind='skeleton' / openPosePlane）----------
+ * 与「骨骼模式」的区别：骨骼模式是**整图**输出黑底骨架；这里是**场景里的一个实体** ——
+ * 人偶不显示实体网格，只画它的骨架线，仍参与透视/遮挡/贴地，可以和普通角色同框。
+ * 官方 serializeScene 里对应：kind:'skeleton' + bones，以及 openPosePlane /
+ * openPosePlanePoints / openPoseEditable 一族字段。 */
+function buildSkeletonLines(root, color) {
+  root.updateMatrixWorld(true);
+  const pts = {};
+  root.traverse((o) => {
+    if (!o.isBone) return;
+    const bn = normBoneName(o.name);
+    for (const k of Object.keys(OP_BONES)) {
+      if (pts[k] || normBoneName(OP_BONES[k]) !== bn) continue;
+      const v = new THREE.Vector3();
+      o.getWorldPosition(v);
+      pts[k] = v.clone();
+    }
+  });
+  const pos = [];
+  for (const e of OP_EDGES) {
+    const a = pts[e[0]];
+    const b = pts[e[1]];
+    if (a && b) {
+      pos.push(a.x, a.y, a.z, b.x, b.y, b.z);
+    }
+  }
+  if (!pos.length) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  const mat = new THREE.LineBasicMaterial({ color: new THREE.Color(color || '#ffffff') });
+  return new THREE.LineSegments(geo, mat);
+}
+
+/* ---------- 简易人偶（官方 kind='mannequin'）----------
+ * 不加载 GLB，直接用基本体拼一个可辨识的人形（头/颈/躯干/髋 + 四肢），
+ * 按 heightScale / girth 缩放。我们默认用 standard（Xbot：有蒙皮骨架、能摆姿势、
+ * 更真实）；此分支适合远景群演这类「不需要细节、要快」的场合。
+ * ⚠️ 不支持 poseValues（没有关节层级）—— 要摆姿势请用 standard。 */
+function buildMannequinEntity(color, heightScale, girth) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({
+    color: new THREE.Color(color || '#8fa3b8'), roughness: 0.72, metalness: 0.05,
+  });
+  const H = 1.72 * (Number(heightScale) || 1);
+  const W = Number(girth) || 1;
+  const add = (geo, x, y, z) => {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.castShadow = true;
+    g.add(m);
+    return m;
+  };
+  const headR = (H / 7.5) * 0.68;
+  add(new THREE.SphereGeometry(headR, 16, 12), 0, H - headR, 0);
+  add(new THREE.CylinderGeometry(0.052 * W, 0.052 * W, H * 0.06, 10), 0,
+      H - 2 * headR - H * 0.03, 0);
+  const torsoH = H * 0.30;
+  const torsoTop = H - 2 * headR - H * 0.06;
+  add(new THREE.CylinderGeometry(0.145 * W, 0.115 * W, torsoH, 12), 0, torsoTop - torsoH / 2, 0);
+  const hipY = H * 0.47;
+  add(new THREE.CylinderGeometry(0.115 * W, 0.115 * W, H * 0.07, 12), 0, hipY, 0);
+  const armL = H * 0.29;
+  const foreL = H * 0.26;
+  const legL = H * 0.245;
+  const shinL = H * 0.245;
+  const shY = torsoTop - torsoH * 0.12;
+  for (const s of [-1, 1]) {
+    const ax = s * 0.20 * W;
+    add(new THREE.CylinderGeometry(0.042 * W, 0.038 * W, armL, 10), ax, shY - armL / 2, 0);
+    add(new THREE.CylinderGeometry(0.038 * W, 0.034 * W, foreL, 10), ax, shY - armL - foreL / 2, 0);
+    const hx = s * 0.085 * W;
+    add(new THREE.CylinderGeometry(0.062 * W, 0.052 * W, legL, 10), hx, hipY - legL / 2, 0);
+    add(new THREE.CylinderGeometry(0.052 * W, 0.042 * W, shinL, 10), hx, hipY - legL - shinL / 2, 0);
+  }
+  return g;
+}
+
 function applyPoseValues(root, poseValues) {
   const applied = [];
   const missing = [];
@@ -414,6 +491,19 @@ async function run() {
   const facingFixY = Number(payload.facingFixY || 0);
 
   for (const ent of charEnts) {
+    // 简易人偶分支（见 buildMannequinEntity）：不加载 GLB，直接拼基本体
+    if (String(ent.kind) === 'mannequin') {
+      const _mq = buildMannequinEntity(ent.color, ent.heightScale, ent.girth);
+      const _mtf = ent.transform || {};
+      const _mp = _mtf.position || [0, 0, 0];
+      const _mr = _mtf.rotation || [0, 0, 0];
+      _mq.position.set(Number(_mp[0]) || 0, Number(_mp[1]) || 0, Number(_mp[2]) || 0);
+      _mq.rotation.y = Number(_mr[1]) || 0;
+      scene.add(_mq);
+      diag.chars += 1;
+      diag.mannequins = (diag.mannequins || 0) + 1;
+      continue;
+    }
     // 坑②：每个角色独立解析一次 GLB → 独立骨架
     const gltf = await parse(glbBuf.slice(0));
     const root = buildCharacterInstance(gltf, sceneDef);
@@ -492,6 +582,16 @@ async function run() {
     scene.add(inst);
     charRoots.push(root);
     diag.chars += 1;
+    // 骨架实体（官方 kind='skeleton' / openPosePlane）：隐藏实体网格，只留骨架线
+    if (String(ent.kind) === 'skeleton' || ent.openPosePlane) {
+      const _skl = buildSkeletonLines(root, ent.color);
+      if (_skl) {
+        inst.add(_skl);
+        diag.skeletonEntities = (diag.skeletonEntities || 0) + 1;
+      }
+      root.visible = false;
+      diag.skeletonEntitiesHidden = (diag.skeletonEntitiesHidden || 0) + 1;
+    }
     diag.meshesPerChar.push(meshes);
     diag.boneBox.push(box ? [+boxH.toFixed(3), +k.toFixed(4)] : null);
     if (!diag.facing) diag.facing = inferFacing(root);

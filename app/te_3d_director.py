@@ -528,7 +528,7 @@ def build_scene_json(
             entities.append({
                 "id": _entity_id("char", idx if len(_members) == 1 else idx * 100 + _mi),
                 "type": "character",
-                "kind": "standard",
+                "kind": _char_kind(),
                 "name": name if len(_members) == 1 else "%s#%d" % (name, _mi),
                 "color": _CHAR_COLORS[(idx - 1) % len(_CHAR_COLORS)],
                 "visible": True,
@@ -735,6 +735,16 @@ def _panorama_block(location: str) -> Optional[dict]:
         # 我们自加：渲染器直接读本地文件（render 侧会转成 dataUrl 内联进 payload）
         "localPath": path,
     }
+
+
+#: 角色实体形态（官方 entity kind）：standard = GLB 角色（默认）、mannequin = 简易人偶、
+#: skeleton = 只画骨架线。用 env 全局切换，便于 A/B 比对（默认 standard 零回归）。
+_CHAR_KIND_ENV = "MJSCXT_TE3D_KIND"
+
+
+def _char_kind() -> str:
+    k = str(os.environ.get(_CHAR_KIND_ENV) or "").strip().lower()
+    return k if k in ("standard", "mannequin", "skeleton") else "standard"
 
 
 def _skeleton_mode_enabled() -> bool:
