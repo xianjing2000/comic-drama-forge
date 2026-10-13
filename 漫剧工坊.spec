@@ -54,7 +54,7 @@ excludes = [
 
 a = Analysis(
     ['main.py'],
-    pathex=['C:\\Users\\liujianghua\\WorkBuddy\\2026-09-09-16-55-22\\漫剧生成系统'],
+    pathex=[_ROOT],
     binaries=[],
     datas=datas,
     hiddenimports=hidden_imports,
