@@ -4636,9 +4636,13 @@ class ComfyUIClient:
                 if _bl and os.path.exists(_bl) and api_prompt.get("400"):
                     _bn = "sb_fix_%s.png" % os.path.splitext(os.path.basename(filename_prefix))[0]
                     _up = self.upload_image(_bl, _bn, image_type="output")
-                    api_prompt["400"]["inputs"]["image"] = _up
-                    logger.info("[编辑式修复] 画布已注入 #400=%s（源图 %s）",
-                                _up, os.path.basename(_bl))
+                    # P0-5：LoadImageOutput 读 output 目录，**必须**带 " [output]" 标注，
+                    #    否则 ComfyUI 直接 prompt_outputs_failed_validation（节点 400 验证失败）——
+                    #    实测踩过：漏标注时编辑式修复整条链路 400 失败。用既有工具保证幂等。
+                    _image_ref = self.annotate_file_ref(_up, "LoadImageOutput")
+                    api_prompt["400"]["inputs"]["image"] = _image_ref
+                    logger.info("[编辑式修复] 画布已注入 #400=%r（源图 %s）",
+                                _image_ref, os.path.basename(_bl))
                 else:
                     logger.warning("[编辑式修复] 失败图不可用，回落全量重生成：%s", base_image)
             except Exception as _be:  # noqa: BLE001
