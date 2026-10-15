@@ -94,8 +94,7 @@ from prompt_protocol import (  # noqa: F401
     SB_MARK_NO_TEXT_LEGACY, SB_MARK_PRESERVE, SB_MARK_PRESERVE_LEGACY, SB_MARK_REF_USAGE,
     SB_MARK_REF_USAGE_LEGACY, SB_MARK_STYLE, SB_MARK_STYLE_LEGACY, SB_MARK_TASK,
     SB_PRESERVE_BLANKET,
-    GRID_ZH_TEMPLATE_NAME, assert_grid_zh_template_markers,
-    missing_grid_zh_template_markers,
+    assert_grid_zh_template_markers,
     prompt_qc_cfg_decision_key)
 #: 参考图编号标记：官方协议的核心，提示词里**必须**用 <imageN> 而非自然语言指代
 SB_IMAGE_TAG_RE = re.compile(r"<image\s*(\d+)\s*>", re.IGNORECASE)
@@ -546,16 +545,7 @@ def verify_grid_zh_template(template_text: Optional[str] = None) -> None:
        本函数的守卫脚本则原样抛出。生成端 render 前也应收口（见 t7 交接说明）。
     """
     if template_text is None:
-        try:
-            import prompt_templates  # 函数内导入：质检层不静态依赖模板中心
-            _text = prompt_templates.load(GRID_ZH_TEMPLATE_NAME)
-        except Exception as e:  # noqa: BLE001 —— 拿不到模板=没有中文逐格版可判
-            logger.warning("九宫格逐格版模板读取失败（跳过判据串守卫）：%s", e)
-            return
-        if not str(_text or "").strip():
-            return
-        assert_grid_zh_template_markers(
-            _text, source=f"prompt_templates:{GRID_ZH_TEMPLATE_NAME}")
+        # 九宫格中文逐格版模板已随九宫格一起移除（2026-10-15）：没有该模板可判，直接返回。
         return
     assert_grid_zh_template_markers(template_text)
 

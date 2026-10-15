@@ -730,24 +730,12 @@ def render_blocking(shot: dict, out_dir: str, aspect: str = "9:16", width: int =
 #:   (5) high angle        (6) over-shoulder (7) side profile  (8) extreme close-up
 #:   (9) dutch-tilt dramatic
 #: cam_key 取 config.SHOT_TYPES 景别（_FRAMING_SPAN 键），cam_angle 取 te_3d_director._ANGLE_SHOT 键。
-GRID_BLOCKING_CELLS = (
-    ("全景", "平视"),
-    ("中景", "平视"),
-    ("特写", "平视"),
-    ("近景", "仰拍"),
-    ("近景", "俯拍"),
-    ("中近景", "过肩"),
-    ("中景", "环绕"),
-    ("大特写", "平视"),
-    ("近景", "斜侧"),
-)
 
 #: 九宫格「单镜 9 关键帧」→ 逐格渲染用的机位角度序列（2026-10-15 用户口径）。
 #: 与 GRID_BLOCKING_CELLS（9 个**不同景别**的候选构图）不同：本表**景别一律取本镜自身**，
 #: 只用机位角度区分 9 格 —— 因为输出九宫格是「同一镜头随时间的 9 个关键帧」，不是 9 个景别；
 #: 锁定本镜景别还能保证 fits 判据必然通过（本镜人数必然适配本镜景别），
 #: 否则特写/大特写会因「人数超横向容量」被跳过，9 格只剩 1 格（实测）。
-_KEYFRAME_ANGLES = ("平视", "平视", "斜侧", "斜侧", "过肩", "过肩", "仰拍", "俯拍", "平视")
 
 
 def render_blocking_variant(shot, cam_key, cam_angle,
@@ -781,110 +769,11 @@ def render_blocking_variant(shot, cam_key, cam_angle,
     return render_blocking_from_plan(plan, out_dir, timeout=timeout, root_dir=root_dir)
 
 
-def render_blocking_grid(shot, out_dir, target_size=None,
-                         root_dir=None, timeout=None):
-    """渲染一镜九宫格全部 9 个候选构图的 3D 站位基准图，**拼成一张 3x3 联系表**返回路径。
-
-    逐格调用 :func:`render_blocking_variant` 渲出 9 张单格站位图，再用 Pillow 按九宫格
-    顺序拼成一张**与目标九宫格一一对应**的 3x3 基准网格，供生成端作 `<image1>`
-    构图基准 —— 模型「照着这张 3D 网格的机位/站位/动作来摆九宫格」。
-
-    失败降级（fail-open）：
-      * 任一格渲染失败 → 该格用空白占位（生成端仍会看到其余格的 3D 基准）；
-      * 全部失败 / 无浏览器 / Pillow 缺失 → 返回 `None`，调用方回退旧行为（纯文字站位锚点）。
-    绝不抛异常、绝不阻断九宫格主链路。
-    """
-    cells = render_blocking_grid_cells(
-        shot, out_dir, target_size=target_size, root_dir=root_dir, timeout=timeout)
-    if not cells or not any(cells):
-        return None
-    return _assemble_grid(cells, shot, out_dir)
-
-def _assemble_grid(cells, shot, out_dir):
-    """把 9 格 PNG 拼成 3x3 联系表并保存，返回路径；Pillow 缺失/保存失败返回 None。
-
-    格序即九宫格格序（左上→右下）。单格为 None 时留空底色，不阻断其余格。
-    """
-    if not cells or not any(cells):
-        return None
-    try:
-        from PIL import Image  # noqa: PLC0415
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[3D站位图] Pillow 缺失（降级，返回 None）：%s", e)
-        return None
-    sizes = [(Image.open(c).size if c else (64, 64)) for c in cells]
-    cw = max(w for w, _h in sizes)
-    ch = max(h for _w, h in sizes)
-    sheet = Image.new("RGB", (cw * 3, ch * 3), (6, 6, 8))
-    for i, c in enumerate(cells):
-        if not c:
-            continue
-        try:
-            im = Image.open(c).convert("RGB").resize((cw, ch), Image.LANCZOS)
-            sheet.paste(im, ((i % 3) * cw, (i // 3) * ch))
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[3D站位图] 拼贴格 %d 失败（跳过该格）：%s", i + 1, e)
-    try:
-        os.makedirs(os.path.join(out_dir, "te3d_blocking"), exist_ok=True)
-        dst = os.path.join(out_dir, "te3d_blocking",
-                           f"grid_{plan_cache_key({'shot': str(shot.get('shot_id'))})}.png")
-        sheet.save(dst, "PNG")
-        return dst
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[3D站位图] 九宫格基准图保存失败（降级）：%s", e)
-        return None
 
 
-def render_blocking_keyframes(shot, out_dir, target_size=None,
-                              root_dir=None, timeout=None):
-    """渲染「**单镜 9 关键帧**」的 3D 构图基准网格（3x3），返回路径；不可用返回 None。
-
-    与 :func:`render_blocking_grid` 的区别（2026-10-15 用户口径）：
-      * 后者按 ``GRID_BLOCKING_CELLS`` 渲 **9 个不同景别**的候选构图，用于「候选选择」
-        场景；特写/大特写会因「人数超过该景别横向容量」被 fits 判据跳过 ——
-        实测 3 人镜头 9 格只剩 1 格；
-      * 本函数**锁定本镜自身景别**，只用机位角度区分 9 格，与输出九宫格（同一镜头内
-        随时间推进的 9 个关键帧）语义一致，且必然通过 fits（本镜人数必然适配本镜景别）。
-
-    失败降级：单格失败留空、全部失败返回 None（调用方回退单张站位图）。绝不抛异常。
-    """
-    if not available(root_dir):
-        return None
-    cam_key = ""
-    try:
-        from shot_camera import camera_key as _ck  # noqa: PLC0415
-        cam_key = _ck(str(shot.get("camera") or "")) or ""
-    except Exception as e:  # noqa: BLE001
-        logger.debug("[3D站位图] 本镜景别解析失败（回落中景）：%s", e)
-    if not cam_key:
-        cam_key = "中景"
-    cells = []
-    for ang in _KEYFRAME_ANGLES:
-        cells.append(render_blocking_variant(
-            shot, cam_key, ang, out_dir, ignore_fit=True,
-            target_size=target_size, root_dir=root_dir, timeout=timeout))
-    ok = sum(1 for c in cells if c)
-    logger.info("[3D站位图] 关键帧九宫格：景别=%s 成功 %d/9 格", cam_key, ok)
-    if not any(cells):
-        return None
-    return _assemble_grid(cells, shot, out_dir)
 
 
-def render_blocking_grid_cells(shot, out_dir, target_size=None,
-                               root_dir=None, timeout=None):
-    """渲染一镜九宫格全部 9 个候选构图的 3D 站位基准图，返回 9 个 PNG 路径列表。
 
-    逐格调用 :func:`render_blocking_variant`；单格失败置 `None`。列表长度恒为 9。
-    整体不可用（无浏览器/资产缺失）时由各格内部静默降级为 None。
-    """
-    if not available(root_dir):
-        return [None] * len(GRID_BLOCKING_CELLS)
-    cells = []
-    for cam_key, cam_angle in GRID_BLOCKING_CELLS:
-        cells.append(render_blocking_variant(
-            shot, cam_key, cam_angle, out_dir,
-            target_size=target_size, root_dir=root_dir, timeout=timeout))
-    return cells
 
 
 def _has_character(plan: dict) -> bool:

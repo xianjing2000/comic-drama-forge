@@ -276,7 +276,7 @@ from routes.script_api import (
     api_generate_script, api_fallback_script)  # noqa: F401
 from routes.storyboard_api import (
     api_storyboard_canvas, api_storyboard_shot_reorder, api_storyboard_retry_shot,
-    api_storyboard_grid_candidates, api_storyboard_grid_apply)  # noqa: F401
+    )  # noqa: F401
 from routes.storyboards_api import (
     api_generate_storyboards, api_storyboard_manifest, api_storyboard_file,
     api_storyboard_scratch_file)  # noqa: F401
@@ -311,7 +311,7 @@ from storyboard_helpers import _PromptQCBlocked, _REF_CANVAS_CACHE  # noqa: F401
 from storyboard_helpers import (  # noqa: F401, E402
     _GRID_PLAN_TPL_FP, _OPT_REASONING_MARKERS, _TE3D_RENDER_LOCK,
     _blocking_spec_text, _build_identity_ref_grid, _fit_ref_to_canvas,
-    _grid_panel_plan, _grid_plan_template_fingerprint, _optimize_prompt_from_qc,
+    _optimize_prompt_from_qc,
     _ref_canvas_target, _sanitize_optimized_prompt, _storyboard_prompt_structurally_ok,
     _storyboard_retry_shot_impl, _storyboard_scratch_map, _storyboard_worker,
     _unify_ref_canvas, _update_storyboard_manifest_shot, _write_artifact_meta)

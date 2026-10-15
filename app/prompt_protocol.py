@@ -87,7 +87,6 @@ SB_MARK_NO_TEXT_LEGACY = "不得出现任何文字、字幕、台词文本、水
 # 顺手删掉这些字样 → render 出的提示词不再含该判据 → prompt_qc 把**模板缺陷**误报成
 # **模型缺陷**（每镜假红，重试与自愈越修越远，还会把假教训写进教训库）。
 # 故把「模板必须含这些字样」写成**断言**：改模板的人第一次跑链路就撞上。
-GRID_ZH_TEMPLATE_NAME = "storyboard_grid_main"
 #: 模板正文必须含的判据串（标签 → 判据串）。
 #: ⚠️ 只收「模板静态持有」的串：逐格清单（SB_MARK_GRID_ZH_PANEL / _PANEL_LAST）与
 #:    防文字措辞（SB_MARK_GRID_ZH_NO_TEXT / _SPEECH_OFF）由代码在 render 时注入，
@@ -105,7 +104,7 @@ def missing_grid_zh_template_markers(template_text: str) -> List[str]:
 
 
 def assert_grid_zh_template_markers(template_text: str,
-                                    source: str = GRID_ZH_TEMPLATE_NAME) -> None:
+                                    source: str = "") -> None:
     """守卫：模板必须含全部判据串，缺则 ``AssertionError``（**刻意不 fail-open**）。
 
     为什么不做成「只记一条日志」：这些字样缺失不会自愈，只会稳定地把模板缺陷记成

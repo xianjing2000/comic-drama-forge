@@ -1811,153 +1811,8 @@ def apply_transition_directive(shots: list, plan: dict) -> dict:
         out["annotated"].append(t.get("transition_shot_id"))
     return out
 
-def _grid_plan_template_fingerprint() -> str:
-    """规划模板的内容指纹（并入九宫格规划的缓存键）。
-
-    为什么必须有：规划缓存是内容寻址的 —— 键只由 shot 的输入字段算出，不含模板版本。
-    于是改了 storyboard_grid_plan.txt（2026-10-08 新增「场景锁死 / 方位锁死 / 反雷同」
-    三条硬约束）之后，已经缓存过的镜头会继续命中旧规划 → 修复对它们完全无效，而且
-    日志只显示「命中缓存」，看不出模板已变。把模板内容哈希并进键里，模板一改旧缓存
-    自然失效（缓存文件保留，只是不再命中）。
-    """
-    if _GRID_PLAN_TPL_FP["v"]:
-        return _GRID_PLAN_TPL_FP["v"]
-    v = ""
-    try:
-        import hashlib
-        p = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "prompts", "storyboard_grid_plan.txt")
-        with open(p, "r", encoding="utf-8") as f:
-            v = hashlib.sha1(f.read().encode("utf-8")).hexdigest()[:8]
-    except Exception as e:  # noqa: BLE001 拿不到指纹不阻断（退化为旧行为）
-        logger.debug("[九宫格规划] 模板指纹计算失败（按空指纹处理）：%s", e)
-    _GRID_PLAN_TPL_FP["v"] = v
-    return v
 
 
-def _grid_panel_plan(shot, chars, style, client, project_name: str = "",
-                     shot_key: str = ""):
-    """把一个镜头规划成九宫格的 9 个关键帧分镜（LLM 规划 → 内容寻址缓存 → 严格校验）。
-
-    - 内容寻址缓存：``QC_DIR/<项目>/panel_plans/<shot_key>_<sha1[:10]>.json`` —— 键 =
-      本镜全部规划输入（description / action / 首末帧 / motion / emotion / dialogue /
-      duration / 角色清单 / 风格），同镜重复（断点续跑 / 质检重试 / 预取与内联）直接
-      命中零 LLM 成本；缓存损坏按未命中处理（重规划并覆盖），读写失败只降级不阻断。
-    - JSON 解析失败由 ``client.chat_json(retries=1)`` 的重试链内部「重试 1 次」处理；
-      仍失败（或输出不满 9 格 / no 重复）→ 返回 ``None``，调用方
-      （:func:`_storyboard_worker` 的 ``_prep_shot``）随即将 ``panel_plans=None`` 传入
-      ``build_shot_grid_keyframes_prompt``，**回落现有英文版提示词**（fail-open，
-      绝不因规划失败阻断分镜生成）。
-    - LLM 不可用（未配置，``client is None``）→ 直接返回 None，同样走英文版回落。
-
-    :param chars: 本镜出场角色名清单（``shot._char_ref_names`` 优先，兜底 characters_in_shot）
-    :param client: 文本 LLM 客户端（worker 级 ``_optional_llm_client()`` 的产物；可为 None）
-    :param project_name: 项目键（缓存目录定位）；空则落 ``default`` 目录
-    :param shot_key: 镜头缓存键（如 ``shot_07``）
-    :returns: 9 个 ``{"no","framing","tone","content"}`` 的列表；失败 → None
-    """
-    shot = shot if isinstance(shot, dict) else {}
-    if client is None:
-        return None
-
-    def _s(key: str) -> str:
-        return str(shot.get(key) or "").strip()
-
-    # 台词统一成「角色：台词」行（dialogue 兼容 str / dict / list / None）
-    dlg_lines = []
-    for ln in dialogue_utils.normalize_lines(shot.get("dialogue")):
-        dlg_lines.append(f"{ln['speaker']}：{ln['text']}" if ln.get("speaker")
-                         else ln["text"])
-
-    plan_inputs = {
-        "description": _s("description"), "storyboard_prompt_zh": _s("storyboard_prompt_zh"),
-        "action": _s("action"), "first_frame": _s("first_frame"),
-        "last_frame": _s("last_frame"), "motion": _s("motion"),
-        "emotion": _s("emotion"), "duration": _s("duration"),
-        "characters": [str(c) for c in (chars or [])], "style": str(style or ""),
-        "dialogue": dlg_lines,
-        # 2026-10-08：模板指纹并入缓存键 —— 否则改了规划模板，已缓存镜头仍命中旧规划，
-        # 修复静默失效（见 _grid_plan_template_fingerprint 的说明）。
-        "template": _grid_plan_template_fingerprint(),
-    }
-    cache_path = ""
-    try:
-        import hashlib
-        digest = hashlib.sha1(json.dumps(plan_inputs, ensure_ascii=False,
-                                         sort_keys=True).encode("utf-8")).hexdigest()[:10]
-        cache_dir = os.path.join(QC_DIR, project_name or "default", "panel_plans")
-        cache_path = os.path.join(cache_dir, f"{shot_key or 'shot'}_{digest}.json")
-        if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                cached = json.load(f)
-            if isinstance(cached, list) and len(cached) == 9:
-                logger.debug("[九宫格规划] 镜头 %s 命中内容寻址缓存（%s）",
-                                 shot.get("shot_id"), os.path.basename(cache_path))
-                return cached
-            logger.warning("[九宫格规划] 缓存内容异常（%s），按未命中重新规划",
-                               os.path.basename(cache_path))
-    except Exception as e:  # noqa: BLE001 —— 缓存读失败只降级为「每次现算」
-        logger.debug("[九宫格规划] 缓存读取失败（忽略，按未命中处理）：%s", e)
-        cache_path = ""
-
-    prompt = prompt_templates.render(
-        "storyboard_grid_plan",
-        shot_id=shot_key or str(shot.get("shot_id") or "本镜"),
-        duration=_s("duration") or "5",
-        style=str(style or ""),
-        characters=("、".join(str(c) for c in (chars or []))
-                    if (chars or []) else "（本镜无出场角色）"),
-        description=_s("description") or _s("storyboard_prompt_zh") or "（未提供）",
-        action=_s("action") or "（未提供）",
-        first_frame=_s("first_frame") or "（未提供）",
-        last_frame=_s("last_frame") or "（未提供）",
-        motion=_s("motion") or "（未提供）",
-        emotion=_s("emotion") or "（未提供）",
-        dialogue="\n".join(dlg_lines) if dlg_lines else "（本镜无台词）",
-    )
-    if not prompt:
-        return None
-    try:
-        # retries=1：chat_json 内部对「非法 JSON / 截断」自动追加修正提示重试 1 次；
-        # 仍失败抛 LLMError → 捕获后返回 None（英文版回落）。
-        raw = client.chat_json(prompt, temperature=0.4, max_tokens=4096, retries=1)
-    except Exception as e:  # noqa: BLE001 —— LLMError / 网关异常一律 fail-open
-        logger.warning("[九宫格规划] 镜头 %s 规划失败（回落英文版提示词）：%s: %s",
-                           shot.get("shot_id"), type(e).__name__, e)
-        return None
-    plans = raw if isinstance(raw, list) else None
-    if plans is None and isinstance(raw, dict):
-        # 兜底：个别模型无视「只要数组」的指令，用对象包了一层数组
-        plans = raw.get("panels") or raw.get("plan") or raw.get("data")
-    clean = []
-    for p in (plans or []):
-        if not isinstance(p, dict):
-            continue
-        try:
-            no = int(p.get("no") or 0)
-        except (TypeError, ValueError):
-            no = 0
-        content = str(p.get("content") or "").strip()
-        if no < 1 or no > 9 or not content:
-            continue
-        clean.append({"no": no,
-                      "framing": str(p.get("framing") or "").strip() or "中景",
-                      "tone": str(p.get("tone") or "").strip(),
-                      "content": content})
-    if len(clean) != 9 or len({p["no"] for p in clean}) != 9:
-        logger.warning("[九宫格规划] 镜头 %s 规划不满 9 格（实得 %d），回落英文版提示词",
-                           shot.get("shot_id"), len(clean))
-        return None
-    clean.sort(key=lambda p: p["no"])
-    if cache_path:
-        try:
-            atomic_write_json(cache_path, clean)
-        except Exception as e:  # noqa: BLE001 —— 缓存写失败不影响本次结果
-            logger.debug("[九宫格规划] 缓存写入失败（忽略）：%s", e)
-    logger.info("[九宫格规划] 镜头 %s 已产出 9 格分镜规划%s",
-                    shot.get("shot_id"),
-                    f"（缓存 {os.path.basename(cache_path)}）" if cache_path else "")
-    return clean
 
 
 def _storyboard_worker(task_id: str, project_name: str, shots: list,
@@ -2044,15 +1899,9 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                       megapixels=style_kit.storyboard_megapixels())
     _sb_style = _sb_style_res["style"]
     _sb_size = _sb_style_res["size"]
-    # 分镜图「单镜九宫格（9 关键帧）」开关（2026-10-02 用户指定，见 config.SB_GRID_MODE）。
-    # 开启时：① 提示词用 build_shot_grid_keyframes_prompt（一个镜头 = 3x3 九宫格 = 9 关键帧）；
-    #         ② 景别自动裁剪禁用（九宫格不能按景别裁，否则破坏 9 格结构）；
-    #         ③ 质检描述带「九宫格」口径（判官按整体一致性评，不按单帧景别判）。
-    from config import SB_GRID_MODE
-    _sb_grid_mode = bool(SB_GRID_MODE)
     if _sb_style:
-        logger.info("[分镜风格] 风格=%s；画幅=%s；九宫格=%s", _sb_style,
-                        _sb_style_res["label"] or "未指定（沿用模板）", _sb_grid_mode)
+        logger.info("[分镜风格] 风格=%s；画幅=%s", _sb_style,
+                        _sb_style_res["label"] or "未指定（沿用模板）")
         shots = [dict(s, style=(s.get("style") or _sb_style)) for s in (shots or [])
                  if isinstance(s, dict)]
     # ---- T3（2026-10-12）：异常物件（用户口径里的「渗血洞」）过渡判定 ----
@@ -2173,7 +2022,6 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
     # ⭐ T20（2026-10-13 用户口径）：收尾镜 = **每场戏的最后一镜**（连续 run 口径）。
     #   ⚠️ 标记必须打在**上方 shots 重建（dict(s, style=…)）之后**，否则重建会丢标记；
     #      也必须早于 _prep_shot —— 它是内联与预取**共用的唯一提示词构建实现**，
-    #      否则预取阶段仍按全局 _sb_grid_mode 生成「3x3 九宫格」提示词，而质检按单帧判，
     #      两边口径打架（2026-10-13 实测 shot_13 卡住：提示词仍写「9格是同一条动作链」）。
     _tail_idx = tail_shot_indexes(shots)
     for _ti in _tail_idx:
@@ -2274,10 +2122,6 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         #    ⚠️ `has_characters` 提示词参数仍只取 ①（declared）—— 见下方与 L2817。
         from config import ENABLE_3D_BLOCKING_IMAGE
         from config import ENABLE_STORYBOARD_IDENTITY_GRID as _SB_IDENTITY_GRID
-        # ⭐ T20：本镜是否走九宫格 —— 收尾镜（场末镜）降级单帧，**本函数唯一判据**，
-        #   供三处消费：身份基准网格（3×3 九格只对九宫格输出有意义）/
-        #   提示词构建（九宫格版 vs 单帧版）/ 3D 构图基准段。
-        _p_grid = bool(_sb_grid_mode) and not bool(shot_p.get("_tail_shot"))
         _has_on_screen = _shot_has_on_screen(shot_p)
         # ---- 角色身份基准网格（2026-10-06，用户拍板「先拼九宫格再送工作流」）----
         # 九宫格 9 面板一次扩散生成，格间服装/发型漂移纯文字约束不住；
@@ -2300,8 +2144,6 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         #    设 True 可完整回退旧行为。
         if _SB_IDENTITY_GRID:
             # ⭐ T20b（2026-10-13 用户口径）：
-            #   ① 收尾镜**也要**身份基准网格 —— T20 补齐把条件从 _sb_grid_mode 收紧为
-            #      _p_grid 后，10 个收尾镜一并失去这层锚定（实测 shot=13「身份基准网格=0.0s」）；
             #   ② 形状**按剧情**来，不套「总张数 → 比例」的固定表：一行 = 一个出场角色、
             #      列 = 该角色的视图/服装变体（基础设定图 + 本集服装变体）。
             #      所以 1 角色 × 2 视图 → 1×2、2 角色 × 2 视图 → 2×2、3 角色 × 2 视图 → 3×2。
@@ -2358,20 +2200,15 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                shot_p.get("shot_id"),
                                "/".join("%s(%d视图)" % (_n, len(_v)) for _n, _v in _ig_groups))
             if _ig_groups and _ig_total >= 2:      # 2026-10-13 用户拍板：门槛放宽到 ≥2
-                if _p_grid:
-                    # 九宫格输出：3×3 与输出同构（行为逐字不变），平铺去重后的全部视图
-                    _ig_cols, _ig_rows = 3, 3
-                    _ig_cells = 9
-                    _ig_flat = [_p for _n, _vs in _ig_groups for _p in _vs][:9]
-                    _ig_build_kw = {"cols": 3, "rows": 3, "repeat": True}
-                else:
-                    # 单帧（含收尾镜）：一行一角色，列数 = 出场角色里最多的视图数
-                    _ig_cols = max(len(_vs) for _n, _vs in _ig_groups)
-                    _ig_rows = len(_ig_groups)
-                    _ig_cells = _ig_cols * _ig_rows
-                    _ig_flat = None
-                    _ig_build_kw = {"rows_paths": [[_p for _p in _vs[:_ig_cols]]
-                                                   for _n, _vs in _ig_groups]}
+                # 单帧布局（2026-10-15：九宫格已移除，只保留这一条路径）：
+                # 一行一角色，列数 = 出场角色里最多的视图数。
+                # 单帧（含收尾镜）：一行一角色，列数 = 出场角色里最多的视图数
+                _ig_cols = max(len(_vs) for _n, _vs in _ig_groups)
+                _ig_rows = len(_ig_groups)
+                _ig_cells = _ig_cols * _ig_rows
+                _ig_flat = None
+                _ig_build_kw = {"rows_paths": [[_p for _p in _vs[:_ig_cols]]
+                                               for _n, _vs in _ig_groups]}
                 _ig_brief = "/".join("%s(%d视图)" % (_n, len(_vs)) for _n, _vs in _ig_groups)
                 try:
                     _identity_grid_path = _build_identity_ref_grid(
@@ -2394,13 +2231,12 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         f"参考图1（<image1>）【{_IDENTITY_GRID_REF_MARK}】"
                         f"是本镜出场角色的身份基准网格（{_ig_rows}×{_ig_cols} 共 {_ig_cells} 格，"
                         f"同一行 = 同一角色：{_ig_brief}）："
-                        + ("输出九个面板逐格与它保持面部身份、发型与服装一致" if _p_grid
-                           else "输出画面中的角色必须与它保持面部身份、发型与服装一致"),
+                        + "输出画面中的角色必须与它保持面部身份、发型与服装一致",
                         _identity_grid_path))
                     labels = [r[1] for r in refs]
                     logger.info("[身份基准网格] shot=%s 布局=%d×%d 共%d格（%s，输出=%s）",
                                 shot_p.get("shot_id"), _ig_rows, _ig_cols, _ig_cells,
-                                _ig_brief, "九宫格" if _p_grid else "单帧")
+                                _ig_brief, "单帧")
         # ⭐ 2026-10-09（用户反馈）：**跨镜视觉衔接**。
         #    问题：每镜的九宫格都是独立生成的，下一镜看不到上一镜长什么样 ——
         #    服装/发型/光位/道具（用户实测：旧哨子被画反）逐镜漂移，
@@ -2459,23 +2295,12 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     #    确定 —— 跳过会让预取出的提示词整体作废、预检白跑。锁内自带
                     #    计划哈希 PNG 缓存，同镜重复调用零成本。
                     with _TE3D_RENDER_LOCK:
-                        if _p_grid:
-                            # 2026-10-15（用户口径）：九宫格镜头改用「3D 构图基准网格」——
-                            #    逐格渲染 9 个候选机位并拼成 3x3，与输出的九宫格逐格对应，
-                            #    模型照着 3D 网格摆位（比单张站位图强得多）。
-                            #    取景由 te_3d_render.GRID_BLOCKING_CELLS 决定，故不传 aspect/width。
-                            #    返回 None 时静默回落单张 render_blocking（fail-open）。
-                            _blocking_ref_path = te_3d_render.render_blocking_keyframes(
-                                shot_p, _blk_out_dir,
-                                target_size=_sb_size,
-                            ) or ""
-                        if not _blocking_ref_path:
-                            _blocking_ref_path = te_3d_render.render_blocking(
-                                shot_p, _blk_out_dir,
-                                aspect=":".join(map(str, _sb_style_res.get("ratio") or ("16", "9"))),
-                                width=_sb_size[0],
-                                target_size=_sb_size,
-                            ) or ""
+                        _blocking_ref_path = te_3d_render.render_blocking(
+                            shot_p, _blk_out_dir,
+                            aspect=":".join(map(str, _sb_style_res.get("ratio") or ("16", "9"))),
+                            width=_sb_size[0],
+                            target_size=_sb_size,
+                        ) or ""
                 if _blocking_ref_path:
                     # ⭐ 2026-10-13（用户要求）：**生成前先质检这张基准图**，不通过就不注入。
                     #    基准图是分镜的 <image1> 强先验：人偶人数/站位/景别/姿势错了，分镜图
@@ -2553,28 +2378,10 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 _blocking_ref_path = ""
         _ph["3D站位基准图"] = time.perf_counter() - _tprev
         _tprev = time.perf_counter()
-        if _p_grid:
-            # ---------- 九宫格逐格规划（2026-10-07，两段式第一步）----------
-            # 先用文本 LLM 把本镜拆成 9 个关键帧分镜（内容寻址缓存，同镜重复零成本）；
-            # 规划成功 → build_shot_grid_keyframes_prompt 走「逐格写死」中文模板
-            # （storyboard_grid_main，用户范本结构）；规划失败 / LLM 未配置（_sb_llm=None）
-            # → panel_plans=None → 该函数内部**原样走英文版全路径**
-            #（fail-open：默认行为只有拿到规划才变，原路径一字不动）。
-            _plan_chars = shot_p.get("_char_ref_names")
-            if not isinstance(_plan_chars, (list, tuple)):
-                _plan_chars = shot_p.get("characters_in_shot")
-            _panel_plans = _grid_panel_plan(
-                shot_p, [str(c) for c in (_plan_chars or [])],
-                (shot_p.get("style") or _sb_style), _sb_llm,
-                project_name=project_name, shot_key=f"shot_{seq_p:02d}")
-            prompt = comfyui_client.build_shot_grid_keyframes_prompt(
-                shot_p, labels, style=(shot_p.get("style") or _sb_style),
-                has_characters=_has_on_screen, panel_plans=_panel_plans)
-        else:
-            prompt = comfyui_client.build_storyboard_prompt(
-                shot_p, labels,
-                has_blocking_image=bool(_blocking_ref_path),
-                has_characters=_has_on_screen)
+        prompt = comfyui_client.build_storyboard_prompt(
+            shot_p, labels,
+            has_blocking_image=bool(_blocking_ref_path),
+            has_characters=_has_on_screen)
         _ph["LLM九宫格规划+build提示词"] = time.perf_counter() - _tprev
         _tprev = time.perf_counter()
         orig_prompt = prompt      # 教训库的稳定键：改写后的提示词不参与指纹
@@ -2594,7 +2401,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         if _td:
             _td_cand = prompt.rstrip() + "\n" + _td
             try:
-                _td_ok, _td_miss = _storyboard_prompt_structurally_ok(_td_cand, _sb_grid_mode)
+                _td_ok, _td_miss = _storyboard_prompt_structurally_ok(_td_cand, False)
             except Exception:  # noqa: BLE001 —— 闸门自身异常按放行处理（与预检 fail-open 同口径）
                 _td_ok, _td_miss = True, []
             if _td_ok:
@@ -2801,12 +2608,6 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             #   硬套 3×3 会逼模型重复构图或编造设定里没有的元素
             #   （实测 shot_13 连打 3 轮质检不过）。这类镜降级为**单帧**：质检口径同步切到
             #   单帧（见下方 _qc_desc），景别自动裁剪也恢复启用。
-            #   ⚠️ 只影响本镜的三个消费点（grid_layout / 结构闸门 / 质检口径 / 裁剪）；
-            #      循环外的提示词预热仍按全局 _sb_grid_mode 预取（预热不命中只是性能损失）。
-            _shot_grid = bool(_sb_grid_mode) and not bool(shot.get("_tail_shot"))
-            if bool(_sb_grid_mode) and not _shot_grid:
-                logger.info("镜头 %s 为收尾镜（beat=%s idx=%d/%d）→ 本镜降级单帧，不用九宫格（T20）",
-                            shot_id, shot.get("beat") or "", i + 1, len(shots))
             dst = os.path.join(out_dir, f"shot_{seq:02d}.png")
             # ---------- 断点续跑：**真达标**的镜头才直接复用，只重跑缺失/不达标的 ----------
             # 正式目录里已有非空 shot_XX.png **且该图不是软放行/带严重问题产物** → 跳过。
@@ -2869,9 +2670,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     "phase": "分镜图生成",
                 })
             item = {"shot_id": shot_id, "success": False, "refs": {}, "prompt": "",
-                    # 单镜九宫格标记（2026-10-06）：随 manifest 落盘，画布接口把它投影成
-                    # storyboard.grid，前端灯箱据此叠加 1-9 编号覆盖层（编号不再让模型画）。
-                    "grid_layout": bool(_shot_grid)}
+                    "grid_layout": False}
             # ⭐⭐ 2026-10-08 修复（严重）：scratch_png 必须**逐镜重置**。
             #    它原本只在「生成成功」后赋值，生成失败/预检阻断时**保留上一镜的路径**；
             #    下方的「质检软放行」若直接读它，会把**上一镜的图**复制成本镜产物
@@ -3017,7 +2816,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                 # ★ 双保险（2026-10-06）：即时优化结果**再走一次**确定性
                                 #   结构闸门。不合格就当作「没有优化」回落历史召回/换种子 ——
                                 #   重试路径此前不复检提示词，那正是本次事故的入口。
-                                _pf_ok, _pf_miss = _storyboard_prompt_structurally_ok(_opt_prompt, _shot_grid)
+                                _pf_ok, _pf_miss = _storyboard_prompt_structurally_ok(_opt_prompt, False)
                                 if not _pf_ok:
                                     logger.warning(
                                         "镜头 %s 即时优化提示词缺协议段（%s），弃用并回落原逻辑",
@@ -3128,10 +2927,8 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                 "shot": shot_id, "attempt": attempt + 1,
                                 "prompt": prompt, "phase": "checking", "done": False}
                         # ---- 景别后处理（C 方案，2026-09-30）：送检前若主体占比超出目标景别，自动裁剪 ----
-                        # ⚠️ 九宫格模式（2026-10-02）禁用：一张图是 3x3 九个关键帧，
-                        #    按景别裁剪会切掉 8 格、只剩一格，破坏九宫格结构。
                         _shot_type = (shot.get("shot_type") or shot.get("camera") or "").strip()
-                        if _shot_type and not _shot_grid and os.path.isfile(scratch_png):
+                        if _shot_type and os.path.isfile(scratch_png):
                             try:
                                 _crop_res = qc_client.auto_crop_framing(scratch_png, _shot_type)
                                 if _crop_res.get("cropped") and os.path.isfile(_crop_res["out_path"]):
@@ -3142,15 +2939,6 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         # 九宫格模式（2026-10-02）：质检描述加「九宫格」口径，
                         # 判官按 9 个关键帧的整体一致性评，不按单帧景别判。
                         _qc_desc = _qc_shot_desc(shot)
-                        if _shot_grid:
-                            _qc_desc = ("本图为一张 3x3 九宫格故事板：同一镜头的 9 个关键帧，"
-                                        "随时间从左到右、从上到下推进；请评 9 格整体的角色/场景/"
-                                        "光线/色调一致性、动作推进的连贯性与画面质量，"
-                                        "不要按单帧的景别去判（景别可能随运镜在格间渐次变化）。"
-                                        "⚠️ 面板重复判据：若 ≥4/9 格的动作与构图基本相同"
-                                        "（仅微小位移），判为面板雷同，必须不合格并在 issues "
-                                        "写明『九宫格面板雷同』。"
-                                        + _qc_desc)
                         verdict = qc_client.check_image(
                             scratch_png, _qc_desc, qc_cfg,
                             style=(shot.get("style") or _sb_style),
@@ -3747,7 +3535,6 @@ def _storyboard_prompt_structurally_ok(prompt: str, grid_mode: bool = True) -> t
                          ("画面段", getattr(prompt_qc, "SB_MARK_CONTENT", "SCENE AND ACTION"))):
         if _mark and _mark not in t:
             miss.append(_name)
-    # ⚠️ 3x3 布局段只在**九宫格模式**下才是必备段：单帧分镜（SB_GRID_MODE 关）
     #    本来就不含 3x3，若无条件要求会误伤全部单帧镜头。
     if grid_mode:
         _low = t.lower()

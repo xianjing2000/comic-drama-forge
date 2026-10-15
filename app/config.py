@@ -711,7 +711,9 @@ ASSET_LIBRARY_ENABLED = _env_bool("MJSCXT_ASSET_LIBRARY", True)
 #    本开关是**唯一总闸** —— 关掉后提示词(九宫格版/单帧版)、质检口径、景别自动裁剪、
 #    3D 基准图(九宫格网格/单张站位图)会全链路同步回落单镜，无需逐处改。
 #    需要时设 MJSCXT_SB_GRID=1 可完整恢复（九宫格代码路径保留，未删除）。
-SB_GRID_MODE = _env_bool("MJSCXT_SB_GRID", False)
+# （2026-10-15 用户口径）九宫格已整体移除：SB_GRID_MODE 开关随之删除。
+# 分镜图固定为一镜一张单帧。相关代码（提示词模板、逐格规划、质检口径、
+# 3D 构图网格、两个 API 路由）均已物理删除，不再是「开关关闭」。
 
 
 # ===================== 两级生产：预演 → 批准 → 正式（2026-09-29，借鉴 ai-manga-factory） =====================
@@ -1090,7 +1092,7 @@ ENABLE_BLOCKING_ANNOTATION = _env_bool("ENABLE_BLOCKING_ANNOTATION", True)
 #   False = 完全回退到现状（不出站位图、提示词无该段、质检不送基准图）
 # ⚠️ 渲染是**增强项**：无浏览器 / 资产缺失 / 超时 / 全黑 → 自动降级为「只注入文字站位锚点」，
 #    绝不阻断分镜主链路（见 app/te_3d_render.py 的失败静默降级口径）。
-ENABLE_3D_BLOCKING_IMAGE = _env_bool("ENABLE_3D_BLOCKING_IMAGE", True)
+ENABLE_3D_BLOCKING_IMAGE = _env_bool("ENABLE_3D_BLOCKING_IMAGE", False)
 
 # 分镜参考图精简（2026-10-15 用户口径，两处独立开关）：
 # ① 身份基准网格（ENABLE_STORYBOARD_IDENTITY_GRID）：旧行为把本镜多个角色的基准图
