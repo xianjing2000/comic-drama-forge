@@ -46,6 +46,7 @@ class ScriptTemplateError(RuntimeError):
     """
 import asset_prompt_kit
 import asset_name_match
+import script_validator
 # 提示词模板中心（2026-10-07 外置改造）：REWRITE_RULES 等常量的生效值从这里加载
 # （用户覆盖 > 出厂默认 app/prompts/*.txt > 代码内兜底常量）。只依赖标准库、config 延迟
 # 导入，不会形成循环依赖。
@@ -1801,6 +1802,19 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
             out = _m["shots"]
         except Exception as _me:  # noqa: BLE001
             logger.warning("[分镜合并] 失败（保留原镜头）：%s: %s", type(_me).__name__, _me)
+    # ★ 事后校验（2026-10-15，参考 KT-AI-Studio 的 Post Validation 口径）：
+    #   ① 角色名归一 —— 确定性修复。下游「按名字取设定图」时名字对不上会**静默丢弃**，
+    #      画面里角色外观只能靠模型自己想象，是「角色长相漂移」最隐蔽的来源。
+    #   ②③④ 出场人数 / 相对空间 / 系统 UI —— 内容质量告警，只记账不改写（改写就是篡改剧情）。
+    #   fail-open：校验异常绝不影响剧本产出。
+    try:
+        out, _vsum = script_validator.validate_and_repair_shots(out, bible, label)
+        if (_vsum["renamed"] or _vsum["findings"]) and events is not None:
+            events.append({"label": label, "event": "script_validation",
+                           "renamed": len(_vsum["renamed"]),
+                           "findings": _vsum["findings"][:20]})
+    except Exception as _ve:  # noqa: BLE001
+        logger.warning("[剧本校验] 调用失败（跳过）：%s: %s", type(_ve).__name__, _ve)
     return out
 
 

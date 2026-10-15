@@ -2532,8 +2532,21 @@ class ComfyUIClient:
             logger.debug("免重渲：台账收尾记录失败（不影响生成）：%s", e)
         return history, pid, False
 
-    def get_output_files(self, history: dict, file_ext: str = "") -> List[str]:
+    def get_output_files(self, history: dict, file_ext: str = "",
+                         filename_prefix: str = "") -> List[str]:
+        """从 ComfyUI history 收集产物文件路径。
+
+        :param filename_prefix: 非空时**只**返回相对 output 目录的路径以该前缀开头的产物。
+            为什么需要（对齐 KT-AI-Studio run_scene_merge 的前缀校验口径）：
+            history 的 outputs 是**按节点 id 组织的字典**，一次提交里可能有多个保存节点；
+            调用方通常取 files[0] 当结果。历史实现不过滤，一旦工作流里混入第二个 SaveImage
+            （模板改造 / 增强节点回传 / 上游残留），就会把**别的节点或别的任务**的图当成结果
+            返回 —— 静默串档，且事后无法从日志看出。显式传入前缀后，不符合的产物被丢弃并
+            **告警**（宁可告警，不可静默）。
+        """
+        prefix = str(filename_prefix or "").replace("\\", "/").strip("/")
         files = []
+        skipped = []
         for _node_id, node_output in (history.get("outputs") or {}).items():
             for _key, value in (node_output or {}).items():
                 if not isinstance(value, list):
@@ -2544,8 +2557,17 @@ class ComfyUIClient:
                         subfolder = item.get("subfolder", "")
                         base = os.path.join(COMFYUI_OUTPUT_DIR, subfolder) if subfolder else COMFYUI_OUTPUT_DIR
                         full = os.path.join(base, filename)
-                        if not file_ext or filename.endswith(file_ext):
-                            files.append(full)
+                        if file_ext and not filename.endswith(file_ext):
+                            continue
+                        if prefix:
+                            rel = ("%s/%s" % (str(subfolder).replace("\\", "/").strip("/"), filename)).lstrip("/")
+                            if not rel.startswith(prefix):
+                                skipped.append(rel)
+                                continue
+                        files.append(full)
+        if skipped:
+            logger.warning("[产物回收] 前缀「%s」过滤掉 %d 个非本任务产物（例：%s）",
+                           prefix, len(skipped), skipped[:3])
         return files
 
     # ---------- 路径工具（P0-4：HTTP 资源路径 → 本地绝对路径） ----------
@@ -2868,7 +2890,7 @@ class ComfyUIClient:
 
         prompt_id = self.queue_prompt(api_prompt)
         history = self.wait_for_completion(prompt_id)
-        files = self.get_output_files(history, ".png")
+        files = self.get_output_files(history, ".png", filename_prefix)
         if _fp and files:
             try:
                 asset_library.store(_fp, files, meta={
@@ -3750,7 +3772,7 @@ class ComfyUIClient:
 
         prompt_id = self.queue_prompt(api_prompt)
         history = self.wait_for_completion(prompt_id, timeout=900)
-        files = self.get_output_files(history, ".png")
+        files = self.get_output_files(history, ".png", filename_prefix)
         return files[0] if files else None
 
     # ===================== 第三阶段：分镜图生成（Qwen Edit 2511） =====================

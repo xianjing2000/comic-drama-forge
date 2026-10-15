@@ -334,6 +334,16 @@ def api_storyboard_retry_shot():
 @storyboard_api_bp.route('/api/storyboard/grid-candidates', methods=['POST'])
 def api_storyboard_grid_candidates():
     """为一镜生成九宫格候选构图（异步）。body: {project_name, episode_no, shot_id}"""
+
+    # ⭐ 2026-10-15（用户口径）：「删除所有九宫格改成单镜，本地模型跑不了九宫格」。
+    #    九宫格已全局停用（config.SB_GRID_MODE 默认 False）。本路由是**独立入口**，
+    #    不受分镜主流程的 _p_grid 管辖，故在这里显式挡住，避免误触发一次 3x3 扩散
+    #    （本地模型跑不动：耗时长、显存吃紧、格间一致性差）。
+    #    需要恢复：设环境变量 MJSCXT_SB_GRID=1 后重启后端。
+    from config import SB_GRID_MODE as _sb_grid_enabled
+    if not _sb_grid_enabled:
+        return jsonify({"ok": False, "disabled": True,
+                        "error": "九宫格已停用（当前为单镜模式）。如需恢复请设 MJSCXT_SB_GRID=1 并重启后端。"}), 400
     data = _body()
     project_name, err = _project_or_400((data.get('project_name') or '').strip())
     if err is not None:
@@ -446,6 +456,15 @@ def api_storyboard_grid_apply():
 
     ⚠️ 选格应用视为**用户人工定稿**：裁切结果直接入库，不再走图片 AI 质检。
     """
+    # ⭐ 2026-10-15（用户口径）：「删除所有九宫格改成单镜，本地模型跑不了九宫格」。
+    #    九宫格已全局停用（config.SB_GRID_MODE 默认 False）。本路由是**独立入口**，
+    #    不受分镜主流程的 _p_grid 管辖，故在这里显式挡住，避免误触发一次 3x3 扩散
+    #    （本地模型跑不动：耗时长、显存吃紧、格间一致性差）。
+    #    需要恢复：设环境变量 MJSCXT_SB_GRID=1 后重启后端。
+    from config import SB_GRID_MODE as _sb_grid_enabled
+    if not _sb_grid_enabled:
+        return jsonify({"ok": False, "disabled": True,
+                        "error": "九宫格已停用（当前为单镜模式）。如需恢复请设 MJSCXT_SB_GRID=1 并重启后端。"}), 400
     data = _body()
     project_name, err = _project_or_400((data.get('project_name') or '').strip())
     if err is not None:
