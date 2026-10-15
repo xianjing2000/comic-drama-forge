@@ -205,7 +205,6 @@ def enhance_asset_dir(asset_dir: str, kind: str, **kw) -> dict:
     if kind == "character":
         return enhance_character_sheet(asset_dir, **kw)
     return {"ok": False, "reason": "该类型不参与增强（物品保持原样）",
-    return {"ok": False, "reason": "该类型不参与增强（物品保持原样）",
             "produced": [], "failed": [], "seconds": 0.0}
 
 

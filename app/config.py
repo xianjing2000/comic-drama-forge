@@ -1107,6 +1107,20 @@ ENABLE_3D_BLOCKING_IMAGE = _env_bool("ENABLE_3D_BLOCKING_IMAGE", False)
 ENABLE_STORYBOARD_IDENTITY_GRID = _env_bool("ENABLE_STORYBOARD_IDENTITY_GRID", False)
 ENABLE_STORYBOARD_SCENE_REF = _env_bool("ENABLE_STORYBOARD_SCENE_REF", False)
 
+# ===================== 资产高清增强（2026-10-16） =====================
+# 资产生成后**自动**产出 <asset_dir>/hd/ 高清增强图，供分镜链路优先取用。
+# 动机：场景九宫格 grid.png @1.5MP 单格仅 554×309；角色三视图单视图约 0.5MP，
+#      而分镜输出是 1.5MP —— 参考图细节不足会锁死输出画质上限。
+# 做法：切格 → 逐格放大到目标像素 → 以**单张**为参考重绘（见 app/asset_enhance.py）。
+#      ⚠️ 参考图必须是单张：喂整张九宫格会被「版式污染」（实测仍返回 9 格）。
+# ⚠️ 只对**角色 / 场景**生效；**物品不参与**（用户 2026-10-16 口径）。
+# ⚠️ **视频链路不受影响** —— 视频走 asset_refs._pick_scene_view / _pick_char_view，
+#    仍取 grid.png / 三视图整图。
+# 实测成本：角色 3 张约 100 秒、场景 9 张约 300 秒 —— 会显著拉长资产批次耗时，
+#          不想等就把 MJSCXT_ASSET_HD 设为 0。
+ENABLE_ASSET_HD = _env_bool("MJSCXT_ASSET_HD", True)
+ASSET_HD_MEGAPIXELS = float(_env("MJSCXT_ASSET_HD_MP", "1.5"))
+
 # 多视角生成配置
 #
 # ⚠️ 实测结论（2026-09-23，8 组对照实验；详见 .workbuddy/memory/2026-09-23.md）

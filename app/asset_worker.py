@@ -34,6 +34,7 @@ from config import (
     H3_COMMON_REFS, H3_COMMON_REFS_MAX,
     PROJECT_DEFAULT_CONFIG,
     PROMPT_ENHANCE_CONFIG_PATH, save_prompt_enhance_config, _prompt_enhance_file_flags,
+    ENABLE_ASSET_HD, ASSET_HD_MEGAPIXELS,
 )
 from asset_refs import (  # noqa: F401, E402  助手按域下沉（第四批）
                         _ASSET_IMG_EXTS, _ASSET_IMG_PRIORITY, _STATIC_DIR, _build_asset_index,
@@ -1689,6 +1690,33 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                         logger.warning("[道具固定参考图] %s/%s 钉住失败（不影响入库）：%s: %s",
                                        project_name, name, type(_pin_e).__name__, _pin_e)
                 results.append(_asset_result)
+
+                # ⭐ 2026-10-16 资产高清增强（用户口径：**自动触发**）
+                #    资产落盘 + 入库完成后立即产出 <asset_dir>/hd/ 高清增强图，
+                #    供分镜链路优先取用（qc_helpers.prefer_hd_char_ref / prefer_hd_scene_ref）。
+                #    ⚠️ 只对**角色 / 场景**触发；**物品不参与**（保持原样，取图路径不变）。
+                #    ⚠️ 换装变体（sub_dir 非空）不触发，避免递归。
+                #    fail-open：增强失败只记日志 —— 资产已入库，绝不影响主流程。
+                if ENABLE_ASSET_HD and asset_type in ("character", "scene") and not sub_dir:
+                    try:
+                        import asset_enhance as _ae
+                        _enh = _ae.enhance_asset_dir(
+                            asset_dir,
+                            "character" if asset_type == "character" else "scene",
+                            megapixels=ASSET_HD_MEGAPIXELS, client=comfyui_client)
+                        _asset_result["hd_enhance"] = {
+                            "ok": _enh.get("ok"),
+                            "produced": _enh.get("produced") or [],
+                            "failed": _enh.get("failed") or [],
+                            "seconds": _enh.get("seconds"),
+                        }
+                        logger.info(
+                            "[资产增强] %s「%s」完成：成功 %d / 失败 %d，耗时 %.1f 秒",
+                            asset_type, name, len(_enh.get("produced") or []),
+                            len(_enh.get("failed") or []), _enh.get("seconds") or 0.0)
+                    except Exception as _he:  # noqa: BLE001
+                        logger.warning("[资产增强] %s「%s」失败（不影响入库）：%s: %s",
+                                       asset_type, name, type(_he).__name__, _he)
 
             except Exception as _asset_err:  # noqa: BLE001
                 # ⚠️ 审计 S11：旧代码这里没有 try —— `generate_multiview` 上传基础图失败会
