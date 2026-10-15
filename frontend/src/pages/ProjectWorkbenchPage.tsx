@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '@/context/AppContext';
 import { t } from '@/i18n';
-import { projectsApi, keyframesApi, storyboardApi, videoApi, qcApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi, novelsSplitPlanApi, preflightApi, screenplayApi, characterOutfits, characterSheetUpload, assetPrecipitation, generationApi, assetsApi, asOverwriteConfirm, overwriteScopeSummary, type OverwriteConfirmPayload, type VideoMode, type EpisodeScenesResponse, type ChapterPreflightResult, type AssetPrecipitationResponse, type PrecipitationStatus } from '@/api/client';
+import { projectsApi, keyframesApi, storyboardApi, videoApi, qcApi, autopilotApi, upscaleApi, chatApi, agentApi, episodesApi, novelsSplitPlanApi, preflightApi, characterOutfits, characterSheetUpload, assetPrecipitation, generationApi, assetsApi, asOverwriteConfirm, overwriteScopeSummary, type OverwriteConfirmPayload, type VideoMode, type EpisodeScenesResponse, type ChapterPreflightResult, type AssetPrecipitationResponse, type PrecipitationStatus } from '@/api/client';
 import { Button, ConfirmDialog, Input, EmptyState, ErrorState, Loading, Skeleton, Modal, Select, ReorderControls } from '@/components/ui';
 // tab 图标統一走线性 SVG（方案 P2-10）：此前是 emoji，字号受系统字体影响且观感与全站割裂
 import {
@@ -1006,25 +1006,12 @@ function OverviewTab({
     }
   };
 
-  // --- 文学剧本（人审层，两段式第一步）：1章=1集，episode_no 即章号 ---
-  const [spOpen, setSpOpen] = useState(false);
-  const [spEpisode, setSpEpisode] = useState<number | null>(null);
-  const [spContent, setSpContent] = useState('');
-  const [spLoading, setSpLoading] = useState(false);
-  const [spGenerating, setSpGenerating] = useState(false);
-  const [spRewriting, setSpRewriting] = useState(false);
-  // 2026-10-04 改写已自动化：本标志仅用于弹窗底部状态条展示「✅ 分镜剧本已生成」，
-  // 打开弹窗/重新生成时重置（回看已有剧本永远走不到该状态）
-  const [spRewritten, setSpRewritten] = useState(false);
-  const [spError, setSpError] = useState('');
   // 标签切换会卸载本组件：卸载后让任务轮询让位，不再 setState
   const spAliveRef = useRef(true);
   useEffect(() => {
     spAliveRef.current = true;
     return () => { spAliveRef.current = false; };
   }, []);
-  // 请求令牌：A 章生成中用户改点 B 章时，丢弃 A 的迟到结果，防止跨章串内容
-  const spReqRef = useRef(0);
 
   /** 轮询 generation 任务至终态（3s 一次，15 分钟兜底）。
    *  ⚠️ /api/generation/status 历史上有 {success, task:{…}} 信封与顶层平铺两种形态，
@@ -1034,97 +1021,14 @@ function OverviewTab({
     const deadline = Date.now() + 15 * 60 * 1000;
     for (;;) {
       await new Promise(r => setTimeout(r, 3000));
-      if (!spAliveRef.current || !isCurrent()) throw new Error(failMsg || t('wb.screenplayGenerateFailed'));
+      if (!spAliveRef.current || !isCurrent()) throw new Error(failMsg || t('wb.actionFailed'));
       const d: any = await generationApi.status(taskId);
       const task = (d?.task ?? d) || {};
       if (task.status === 'completed') return;
       if (task.status === 'failed' || task.status === 'cancelled') {
-        throw new Error(task.error || failMsg || t('wb.screenplayGenerateFailed'));
+        throw new Error(task.error || failMsg || t('wb.actionFailed'));
       }
-      if (Date.now() > deadline) throw new Error(timeoutMsg || t('wb.screenplayTimeout'));
-    }
-  };
-
-  /** 每章行「文学剧本」：已有则直接弹窗展示；没有则发起生成（异步任务轮询）后再展示 */
-  const openScreenplay = async (chapterNo: number) => {
-    if (!novelId) return;
-    const token = ++spReqRef.current;
-    const isCurrent = () => token === spReqRef.current;
-    setSpEpisode(chapterNo);
-    setSpContent('');
-    setSpError('');
-    setSpGenerating(false);
-    // 上一章迟到的改写请求被令牌作废后可能遗留 true：不许把改写态带进本章
-    setSpRewriting(false);
-    setSpRewritten(false);
-    setSpOpen(true);
-    setSpLoading(true);
-    try {
-      const doc = await screenplayApi.get(novelId, chapterNo, projectKey);
-      if (!isCurrent()) return;
-      if (doc.exists && doc.markdown) {
-        // 回看已有剧本：只展示，不自动改写（避免回看场景重复烧 LLM）
-        setSpContent(doc.markdown);
-        setSpLoading(false);
-        return;
-      }
-      // 不存在 → 生成（异步任务 + 轮询），完成后回读展示
-      const r = await screenplayApi.generate(novelId, chapterNo, { projectName: projectKey });
-      if (!r?.task_id) throw new Error(t('wb.screenplayStartFailed'));
-      setSpLoading(false);
-      setSpGenerating(true);
-      await pollGenerationTask(r.task_id, isCurrent);
-      if (!isCurrent()) return;
-      const done = await screenplayApi.get(novelId, chapterNo, projectKey);
-      if (!done.exists || !done.markdown) throw new Error(t('wb.screenplayNotGenerated'));
-      setSpContent(done.markdown);
-      // 2026-10-04 需求：文学剧本无需人工确认 —— 生成（轮询到 completed）后立即
-      // 自动改写为分镜剧本，等价于旧版自动点「确认无误」按钮。先落 spGenerating
-      // 再进改写，弹窗底部状态条才能依次显示「生成中 → 自动改写中 → 已完成」。
-      // 改写失败由 runScreenplayRewrite 内部落在 spError，不进本层 catch。
-      setSpGenerating(false);
-      await runScreenplayRewrite(chapterNo, isCurrent);
-    } catch (err) {
-      if (isCurrent()) {
-        setSpError(err instanceof Error ? err.message : t('wb.screenplayGenerateFailed'));
-      }
-    } finally {
-      if (isCurrent()) {
-        setSpLoading(false);
-        setSpGenerating(false);
-      }
-    }
-  };
-
-  /** 两段式第二步：以文学剧本为原文重写成结构化分镜剧本。
-   *  2026-10-04 起无需人工确认：「生成文学剧本」轮询到 completed 后由 openScreenplay
-   *  自动调用本函数（等价于旧版自动点「确认无误」按钮）；弹窗底部确认按钮已改为
-   *  流程状态展示，不再有手动入口。
-   *  - chapter 显式传参：自动链路里同批 setState 尚未落地，读 spEpisode 会拿到旧章号；
-   *  - stillCurrent 令牌守卫：自动链路传 openScreenplay 的 isCurrent，用户切章后迟到的
-   *    改写结果不再动 UI；防重入由 spRewriting 兜底（改写中不允许再次触发）。 */
-  const runScreenplayRewrite = async (chapter: number, stillCurrent?: () => boolean) => {
-    if (!novelId || spRewriting) return;
-    const alive = stillCurrent ?? (() => spAliveRef.current);
-    setSpRewriting(true);
-    setSpError('');
-    setSpRewritten(false);
-    try {
-      const r = await episodesApi.generate(novelId, { chapters: [chapter], use_screenplay: true });
-      // 兼容同步/异步两种返回：带 task_id 则轮询到完成
-      const taskId = r?.task_id;
-      if (taskId) {
-        await pollGenerationTask(String(taskId), alive, t('wb.screenplayRewriteFailed'), t('wb.screenplayRewriteTimeout'));
-      }
-      if (!alive()) return;
-      toast.success(t('wb.screenplayRewriteDone'));
-      // 成功后弹窗保持打开，底部状态条显示「✅ 分镜剧本已生成」；剧集列表在背后刷新
-      setSpRewritten(true);
-      fetchEpisodes();
-    } catch (err) {
-      if (alive()) setSpError(err instanceof Error ? err.message : t('wb.screenplayRewriteFailed'));
-    } finally {
-      setSpRewriting(false);
+      if (Date.now() > deadline) throw new Error(timeoutMsg || t('wb.actionFailed'));
     }
   };
 
@@ -1241,7 +1145,7 @@ function OverviewTab({
     } catch (err) {
       if (isCurrent()) toast.error(err instanceof Error ? err.message : t('wb.sceneRedoFailed'));
     } finally {
-      // 与 openScreenplay 同款：组件已卸载（切标签页）就不再 setState / 刷新
+      // 与场次重做同款：组件已卸载（切标签页）就不再 setState / 刷新
       if (isCurrent()) {
         setRedoBusy(null);
         void fetchScenes(episodeNo, true);
@@ -1385,9 +1289,6 @@ function OverviewTab({
           )}
         </div>
 
-        {/* 文学剧本（人审层）：默认收起，展开才拉取；novel_id 拿不到时整个面板不渲染。
-            面板标题旁注明「此为人审稿」—— 下方「剧本内容」区块即改写后的结构化分镜剧本。 */}
-        <ScreenplayPanel novelId={novelId} episodeNo={selectedEpisode} />
 
         <div className="bg-surface rounded-lg border border-line p-6">
           <h4 className="font-semibold text-ink-1 mb-4">{t('wb.scriptContent')}</h4>
@@ -1908,17 +1809,6 @@ function OverviewTab({
                         </div>
 
                         <div className="flex items-center gap-4">
-                          {/* 文学剧本（人审层）：查看/生成本章文学剧本，确认后可改写为分镜剧本。
-                              行本身是可点击的大按钮，这里必须 stopPropagation 防止误开详情 */}
-                          <button
-                            onClick={(e) => { e.stopPropagation(); openScreenplay(ep.episode_no); }}
-                            disabled={spGenerating && spEpisode === ep.episode_no}
-                            title={t('wb.screenplayRowHint')}
-                            className={`inline-flex shrink-0 items-center gap-1 rounded-md border border-line bg-surface-2 px-2 py-1 text-xs font-medium text-ink-2 transition-colors hover:bg-line hover:text-ink-1 disabled:opacity-60 ${FOCUS_RING}`}
-                          >
-                            <FileText className="h-3.5 w-3.5" />
-                            {t('wb.screenplay')}
-                          </button>
                           <div className="text-right">
                             <div className="text-sm text-ink-2">
                               {t('wb.shotsRatio', { done: ep.completed_shots, total: ep.shot_count })}
@@ -2050,189 +1940,11 @@ function OverviewTab({
         )}
       </div>
 
-      {/* 文学剧本弹窗（人审层）：展示/生成本章文学剧本；生成完成后自动改写为分镜剧本
-          （2026-10-04 起无需人工确认，弹窗底部为流程状态条而非确认按钮） */}
-      <ScreenplayModal
-        isOpen={spOpen}
-        episodeNo={spEpisode}
-        content={spContent}
-        loading={spLoading}
-        generating={spGenerating}
-        rewriting={spRewriting}
-        rewritten={spRewritten}
-        error={spError}
-        onClose={() => setSpOpen(false)}
-      />
     </div>
   );
 }
 
-// ========== 文学剧本弹窗（人审层，两段式第一步） ==========
-// 展示 / 生成本章文学剧本。正文为 Markdown 文本：项目无 markdown 渲染依赖
-// （package.json 仅 react/react-dom/react-router），按约定用 whitespace-pre-wrap
-// 的正文样式直接展示，不引入新依赖。
-// 2026-10-04 起两段式第二步自动化：生成完成后由 OverviewTab 自动触发改写，
-// 底部不再是「确认无误」按钮，而是流程状态条（生成中 → 自动改写中 → 已完成）；
-// 失败在正文上方红色块展示。回看已有剧本不自动改写，底部只留「关闭」。
-function ScreenplayModal({
-  isOpen,
-  episodeNo,
-  content,
-  loading,
-  generating,
-  rewriting,
-  rewritten,
-  error,
-  onClose,
-}: {
-  isOpen: boolean;
-  episodeNo: number | null;
-  content: string;
-  loading: boolean;
-  generating: boolean;
-  rewriting: boolean;
-  rewritten: boolean;
-  error: string;
-  onClose: () => void;
-}) {
-  const { t } = useApp();
-  return (
-    <Modal
-      isOpen={isOpen}
-      onClose={onClose}
-      preventClose={rewriting}
-      title={t('wb.screenplayModalTitle', { n: episodeNo ?? '' })}
-      description={t('wb.screenplayModalDesc')}
-      size="xl"
-      footer={
-        <div className="flex w-full flex-wrap items-center gap-2">
-          {/* 流程状态条：正在生成文学剧本… → 正在自动改写为分镜剧本… → ✅ 已生成
-              （三个状态互斥；失败走正文上方红色错误块，此处恢复只读「关闭」） */}
-          {generating && (
-            <span role="status" className="inline-flex items-center gap-1.5 text-sm text-ink-2">
-              <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-brand border-t-transparent" />
-              {t('wb.screenplayAutoGenerating')}
-            </span>
-          )}
-          {rewriting && (
-            <span role="status" className="inline-flex items-center gap-1.5 text-sm text-ink-2">
-              <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-brand border-t-transparent" />
-              {t('wb.screenplayAutoRewriting')}
-            </span>
-          )}
-          {!generating && !rewriting && rewritten && (
-            <span role="status" className="inline-flex items-center gap-1.5 text-sm font-medium text-success-strong">
-              <CheckCircle2 className="h-4 w-4 shrink-0" />
-              {t('wb.screenplayAutoDone')}
-            </span>
-          )}
-          <Button variant="secondary" onClick={onClose} disabled={rewriting} className="ml-auto">
-            {t('common.close')}
-          </Button>
-        </div>
-      }
-    >
-      <div className="space-y-3">
-        {error && (
-          <div className="p-3 bg-danger-subtle border border-danger/30 rounded-lg text-danger-strong text-sm break-words">
-            {sanitizeErrorMessage(error)}
-          </div>
-        )}
-        {loading ? (
-          <Loading size="md" label={t('common.loading')} />
-        ) : generating ? (
-          <Loading size="md" label={t('wb.screenplayGenerating')} />
-        ) : content ? (
-          <pre className="max-h-[60vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-surface-2 p-4 text-sm leading-6 text-ink-1">
-            {content}
-          </pre>
-        ) : (
-          <p className="text-sm text-ink-2">{t('wb.screenplayNotGenerated')}</p>
-        )}
-      </div>
-    </Modal>
-  );
-}
 
-// ========== 文学剧本折叠面板（单集详情，人审层） ==========
-// 默认收起、展开才拉取（与资产沉淀/服装变体面板同款 fail-open：接口异常降级为
-// 一行提示，绝不打断详情主体）。novel_id 拿不到时整个面板不渲染，零报错。
-// 下方既有「剧本内容」区块即改写后的结构化分镜剧本，两者关系在标题旁注明。
-function ScreenplayPanel({ novelId, episodeNo }: { novelId?: string; episodeNo: number | null }) {
-  const { t } = useApp();
-  const [open, setOpen] = useState(false);
-  const [markdown, setMarkdown] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  // t27（F6）：这个错误态此前是裸渲染的一行文字，没有重试入口 —— 而 useEffect
-  // 只依赖 open/novelId/episodeNo，用户除了折叠再展开没有别的办法。加一个自增计数
-  // 当重试信号。
-  const [reloadTick, setReloadTick] = useState(0);
-
-  // 换集重置：上一集的剧本绝不能带进下一集
-  useEffect(() => {
-    setOpen(false);
-    setMarkdown('');
-    setError('');
-  }, [episodeNo]);
-
-  useEffect(() => {
-    if (!open || !novelId || episodeNo == null) return;
-    let alive = true;
-    setLoading(true);
-    setError('');
-    screenplayApi.get(novelId, episodeNo)
-      .then((d) => {
-        if (!alive) return;
-        if (d?.exists && d.markdown) setMarkdown(d.markdown);
-        else setError(t('wb.screenplayNotGenerated'));
-      })
-      .catch(() => { if (alive) setError(t('wb.screenplayLoadFailed')); })
-      .finally(() => { if (alive) setLoading(false); });
-    return () => { alive = false; };
-    // t 是 i18n 稳定引用；按 open/novelId/episodeNo/reloadTick 触发即可
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, novelId, episodeNo, reloadTick]);
-
-  if (!novelId || episodeNo == null) return null;
-
-  return (
-    <div className="bg-surface rounded-lg border border-line p-6">
-      <button
-        type="button"
-        onClick={() => setOpen(v => !v)}
-        aria-expanded={open}
-        className={`flex w-full items-center justify-between gap-2 rounded text-left ${FOCUS_RING}`}
-      >
-        <span className="flex min-w-0 flex-wrap items-center gap-2">
-          <FileText className="h-4 w-4 shrink-0 text-ink-2" />
-          <span className="font-semibold text-ink-1">{t('wb.screenplay')}</span>
-          <span className="text-xs font-normal text-ink-3">{t('wb.screenplayHumanTag')}</span>
-        </span>
-        <span className="shrink-0 text-xs text-ink-3">{open ? '−' : '+'}</span>
-      </button>
-      {open && (
-        <div className="mt-3">
-          {loading ? (
-            <div className="text-sm text-ink-3">{t('common.loading')}</div>
-          ) : error ? (
-            /* t27（F6）：裸渲染 {error} → 换成 ErrorState（可重试 + 统一脱敏）。
-               这里刻意用 description 承载原因、沿用默认标题，避免「未生成」与
-               「加载失败」两种来源共用一句不准确的标题。 */
-            <ErrorState
-              description={sanitizeErrorMessage(error)}
-              onRetry={() => setReloadTick((v) => v + 1)}
-            />
-          ) : (
-            <pre className="max-h-[50vh] overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-surface-2 p-4 text-sm leading-6 text-ink-1">
-              {markdown}
-            </pre>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // ========== Asset Card ==========
 function AssetCard({

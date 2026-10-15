@@ -69,7 +69,9 @@ logger = logging.getLogger(__name__)
 # from continuity_store import load_bible / save_bible（不再经过本模块）。
 from continuity_store import (  # noqa: F401
     CONTINUITY_VERSION, _now, _path, _safe, bible_path, continuity_root, load_bible,
-    load_json, save_bible, save_json)
+    load_json, save_bible, save_json,
+    # ⚠️ 2026-10-14 新增：第 0 阶段「项目规划」的读写（drama_plan.json）
+    drama_plan_path, load_drama_plan, save_drama_plan)
 
 
 SYSTEM_CONTINUITY = ("你是漫剧编剧组的『连贯性总监』，精通长篇小说改编中的跨集设定一致性、时间线锚点与伏笔管理，"
@@ -1550,6 +1552,141 @@ def ensure_camera_terms(continuity_dir: str, project_key: str) -> dict:
 
 # ===================== A②③ 生成期上下文（注入 prompt） =====================
 
+def _render_series_block(series: dict) -> str:
+    """渲染【全剧总纲】（主线 / 核心悬念 / 人物弧 / 伏笔账本 / 分集推进）供分集生成继承。
+
+    ⚠️ 2026-10-14 新增（对齐 doubao-creative-drama 技能的〈双层剧本结构〉）：
+    技能要求「项目级完整剧本」必须先确立（全剧主线、人物弧、伏笔账本、分集推进总纲），
+    「分集详细剧本」再据此落地 —— 两层缺一不可，不能用单集替代全局。
+    本系统的 build_bible 本来就是用**全书 outlines** 汇总（天然具备全局视野），
+    但此前只取角色/物品/场景三张清单，全局结构信息被丢弃，导致分集生成
+    「只见本集、不见全剧」：前后不连贯、伏笔埋了不收、人物弧断裂。
+    这里把 bible.series 渲染成文本，随设定库一起注入（novel_to_script 无需改动）。
+    """
+    s = series if isinstance(series, dict) else {}
+    if not s:
+        return ""
+    parts = []
+    if s.get("main_line"):
+        parts.append("主线：" + str(s["main_line"]))
+    if s.get("core_question"):
+        parts.append("核心悬念：" + str(s["core_question"]))
+    arcs = [a for a in (s.get("arcs") or []) if isinstance(a, dict)]
+    if arcs:
+        parts.append("人物弧：")
+        for a in arcs[:8]:
+            tps = a.get("turning_points")
+            tps_txt = ("；转折：" + " → ".join(str(t) for t in tps)) if isinstance(tps, list) and tps else ""
+            parts.append("  · %s：%s → %s%s" % (
+                a.get("character") or "?", a.get("from_state") or "?",
+                a.get("to_state") or "?", tps_txt))
+    fs = [f for f in (s.get("foreshadow") or []) if isinstance(f, dict)]
+    if fs:
+        parts.append("伏笔账本（埋设→回收；本集若是埋设点必须真的埋，若是回收点必须真的收）：")
+        for f in fs[:20]:
+            parts.append("  · [%s] %s（第%s集埋设 → 第%s集回收：%s）" % (
+                f.get("id") or "?", f.get("content") or "", f.get("setup_ep") or "?",
+                f.get("payoff_ep") or "?", f.get("note") or ""))
+    eo = [e for e in (s.get("episode_outline") or []) if isinstance(e, dict)]
+    if eo:
+        parts.append("分集推进总纲（作前后集承接依据；本集必须完成本行的目标/阻力/转折/兑现，并留下本行的结尾钩子）：")
+        for e in eo[:30]:
+            parts.append("  · 第%s集《%s》目标：%s；阻力：%s；转折：%s；兑现：%s；结尾状态：%s；钩子：%s" % (
+                e.get("ep") or "?", e.get("title") or "", e.get("goal") or "",
+                e.get("obstacle") or "", e.get("turn") or "", e.get("payoff") or "",
+                e.get("end_state") or "", e.get("hook") or ""))
+    if not parts:
+        return ""
+    return ("\n【全剧总纲（项目级完整剧本层，跨集锁定，**不得违背**）】\n"
+            "用途：本集是长剧的一环，必须服务全剧主线、推进人物弧、承接已埋伏笔；"
+            "**禁止**写出与全剧主线矛盾、与人物弧逆向、或遗忘已埋伏笔的情节。\n"
+            + "\n".join(parts))
+
+def _render_plan_block(plan: dict) -> str:
+    """渲染【项目规划】（drama_plan.json）供剧本与分镜继承。
+
+    ⚠️ 2026-10-14 新增（对齐 doubao-creative-drama 技能的〈第 0 阶段：项目规划〉）：
+    规划层回答「剧情靠什么持续发动 / 情绪怎么起伏 / 押注哪个卖点 / 主光与色彩什么倾向」——
+    这些判断必须在写台词之前锁定，否则会被台词牵着走。本系统此前没有这一层。
+    缺失/异常一律返回空串（fail-open）：没有规划时下游按原样生成，绝不阻断。
+    """
+    p = plan if isinstance(plan, dict) else {}
+    if not p:
+        return ""
+    parts = []
+    cm = p.get("creative_mechanism") or {}
+    if isinstance(cm, dict) and any(cm.get(k) for k in
+                                       ("core_watching_logic", "causal_engine", "payoff_proof")):
+        parts.append("【创意机制】（本剧靠什么持续发动、高潮靠什么证明）")
+        if cm.get("core_watching_logic"):
+            parts.append("  · 核心观看逻辑：" + str(cm["core_watching_logic"]))
+        if cm.get("causal_engine"):
+            parts.append("  · 因果发动：" + str(cm["causal_engine"]))
+        if cm.get("payoff_proof"):
+            parts.append("  · 高潮证明：" + str(cm["payoff_proof"]))
+    cp = p.get("creative_proposition") or {}
+    if isinstance(cp, dict) and any(cp.values()):
+        parts.append("【创作主张】")
+        for k, label in (("one_sentence_value", "价值/卖点"),
+                         ("core_dramatic_question", "核心戏剧问题"),
+                         ("emotional_reward", "情绪回报"), ("differentiation", "差异化")):
+            if cp.get(k):
+                parts.append("  · %s：%s" % (label, cp[k]))
+    op = p.get("opening_strategy") or {}
+    if isinstance(op, dict) and any(op.values()):
+        parts.append("【开场策略（首集首镜必须落实）】")
+        for k, label in (("first_observable_promise", "首镜可见承诺"),
+                         ("escalation_trigger", "行动触发"),
+                         ("payoff_or_rollover", "反馈改写观看关系")):
+            if op.get(k):
+                parts.append("  · %s：%s" % (label, op[k]))
+    ed = p.get("emotion_design") or {}
+    if isinstance(ed, dict) and any(ed.values()):
+        parts.append("【情绪曲线】类型：%s" % (ed.get("curve_type") or "未指定"))
+        for s in (ed.get("stages") or []):
+            if isinstance(s, dict) and s.get("stage"):
+                parts.append("  · %s（强度 %s/5）：%s" % (
+                    s.get("stage"), s.get("intensity") or "-", s.get("note") or ""))
+        for c in (ed.get("character_curves") or []):
+            if isinstance(c, dict) and c.get("character"):
+                parts.append("  · %s 情绪走向：%s" % (c.get("character"), c.get("curve") or ""))
+    rd = p.get("rhythm_design") or {}
+    if isinstance(rd, dict) and any(rd.values()):
+        parts.append("【节奏设计】")
+        nodes = rd.get("immutable_nodes") or []
+        if nodes:
+            parts.append("  · 不可移动节点（删掉就不成立，必须按序覆盖）："
+                         + " → ".join(str(x) for x in nodes))
+        seq = rd.get("intensity_sequence") or []
+        if seq:
+            parts.append("  · 分集强度（1-5）：" + "；".join(
+                "第%s集 %s" % (s.get("ep"), s.get("intensity"))
+                for s in seq if isinstance(s, dict)))
+        if rd.get("primary_downbeat"):
+            parts.append("  · 主要情绪重锤：" + str(rd["primary_downbeat"]))
+    sc = p.get("style_contract") or {}
+    if isinstance(sc, dict) and any(sc.values()):
+        parts.append("【风格合同（跨集一致的视觉/声音倾向，分镜须继承）】")
+        for k, label in (("lighting", "主光"), ("color", "色彩"), ("composition", "构图"),
+                         ("material", "材质"), ("camera_tendency", "运镜"),
+                         ("sound_tendency", "声音")):
+            if sc.get(k):
+                parts.append("  · %s：%s" % (label, sc[k]))
+        if sc.get("excluded"):
+            parts.append("  · 排除项（不要用）：" + "；".join(str(x) for x in sc["excluded"]))
+    hs = p.get("highlight_strategy") or {}
+    if isinstance(hs, dict) and any(hs.values()):
+        parts.append("【亮点策略】")
+        if hs.get("project_signature"):
+            parts.append("  · 项目记忆点：" + str(hs["project_signature"]))
+        if hs.get("highlight_pillars"):
+            parts.append("  · 亮点支柱：" + "；".join(str(x) for x in hs["highlight_pillars"]))
+    if not parts:
+        return ""
+    return ("\n【项目规划（第 0 阶段产物，跨集锁定，**不得违背**）】\n"
+            "本剧的创作意图与节奏基线；写本集时必须服务它，**禁止**偏离主线卖点或情绪曲线。\n"
+            + "\n".join(parts))
+
 def _render_bible_block(bible: dict) -> str:
     if not bible:
         return ""
@@ -1583,8 +1720,10 @@ def _render_bible_block(bible: dict) -> str:
             "仅当本集剧情明确发生换装时才可变化，且在画面或台词中说明原因。\n"
             f"角色：{json.dumps(chars, ensure_ascii=False)}\n"
             f"物品：{json.dumps(items, ensure_ascii=False)}\n"
-            f"场景：{json.dumps(scenes, ensure_ascii=False)}")
-
+            f"场景：{json.dumps(scenes, ensure_ascii=False)}"
+            # ⚠️ 2026-10-14 改版：把〈全剧总纲〉(bible.series) 拼在设定库尾部随行注入。
+            #    技能〈双层剧本结构〉要求分集剧本继承项目级全局层，详见 _render_series_block。
+            + _render_series_block(bible.get("series") if isinstance(bible.get("series"), dict) else {}))
 
 def _render_prev_block(prev_card: dict, prev_state: dict) -> str:
     if not prev_card and not prev_state:
@@ -1741,6 +1880,11 @@ def build_continuity_context(continuity_dir: str, project_key: str, episode_no: 
         "enabled": True,
         "version": CONTINUITY_VERSION,
         "project_key": project_key,
+        # ⚠️ 2026-10-14 新增：第 0 阶段「项目规划」。
+        #    continuity_dir 一并回传 —— 规划需要**落盘**（drama_plan.json），
+        #    而生成端 convert_chapter_to_script 只拿到 ctx，拿不到 continuity_dir。
+        "continuity_dir": continuity_dir,
+        "plan_block": _render_plan_block(load_drama_plan(continuity_dir, project_key)),
         "episode_no": int(episode_no),
         "prev_episode_no": int(episode_no) - 1 if prev_card or prev_state else None,
         # 优化#5：外观锚点块拼在 bible_block 尾部（随行注入，生成端无需单独接线）
@@ -2106,7 +2250,7 @@ def rewrite_shots_for_issues(client, script: dict, issues: list, episode_no: int
      'audio_cues', 'characters_in_shot', 'items_in_shot', 'prompt_h3')} for s in target], ensure_ascii=False)}
 【输出要求】严格只输出一个 JSON 对象：
 {{"shots": [{{"shot_id": 镜头号（必须与输入一致）, "camera": "景别与运镜（取自运镜术语表）", "location": "场景名",
-  "description": "修正后的画面描述（**不设字数上下限**，内容需要多长就写多长；把主体、关键动作分解（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座）、外貌衣着、环境与光线、构图与景别都写清楚，不要为凑字数堆砌背景）",
+  "description": "修正后的画面描述（⭐ **只改问题点，不要扩写**：篇幅保持与原描述大致相当，**允许更短**。写清主体、关键动作分解（用→连接的 2~4 步）、关键构图位置即可；**不要**为了「更完整」而追加外貌衣着、环境光线、背景铺陈 —— 那些不是本次要修的问题，扩写会拖长剧本并稀释剧情节奏）",
   "visual_detail": "画面补充细节（可选；光源方向/时间天气/动作过程等更细的描写写这里，≤120 字；没有就写空字符串）",
   "dialogue": [{{"speaker": "角色名", "text": "台词"}}],
   "emotion": "情绪", "audio_cues": "音效", "characters_in_shot": ["角色名"], "items_in_shot": ["物品名"],
@@ -2137,10 +2281,26 @@ def rewrite_shots_for_issues(client, script: dict, issues: list, episode_no: int
             continue
         # 注意：**不回写 prompt_h3**。视频提示词由生成期 h3_prompt_kit 按当次参考图规范构建，
         # 这里若是把模型现写的英文描述写回去，会再次出现「薄英文顶掉结构化构建器」的老问题。
+        # ⚠️ 2026-10-14 新增【长度保护】（治「剧本反复重写后体积膨胀」）：
+        #    实测：剧本质检闭环跑 2 轮（每轮改全部镜头）后，剧本从 47.6 KB 涨到 128 KB ——
+        #    因为模型重写 description 时倾向「写得更完整」，两轮叠加就把内容撑大一倍。
+        #    重写的目的是**修问题**，不是**扩写**。故对易膨胀字段做保护：
+        #    新值明显长于旧值时保留旧值（只接受等长、更短或小幅波动的修正）。
+        #    阈值 1.3 倍 + 20 字余量：放行正常改写波动，拦住成倍膨胀。
+        #    ⚠️ 只对 description 生效；camera/location/emotion/audio_cues 是短字段，不设限。
+        _LEN_GUARD = ("description",)
         _prev_cam = str(old.get("camera") or "").strip()
         for k in ("camera", "location", "description", "emotion", "audio_cues"):
-            if str(r.get(k) or "").strip():
-                old[k] = str(r.get(k)).strip()[:400]
+            _nv = str(r.get(k) or "").strip()
+            if not _nv:
+                continue
+            if k in _LEN_GUARD:
+                _ov = str(old.get(k) or "")
+                if _ov and len(_nv) > int(len(_ov) * 1.3) + 20:
+                    notes.append("shot%s.%s 重写后变长（%d→%d 字）已保留原值" % (
+                        sid, k, len(_ov), len(_nv)))
+                    continue
+            old[k] = _nv[:400]
         # 审计 P1-9（2026-09-29）：重写只回写 camera 复合串，但下游取景别/运镜的
         # 权威入口优先读 shot_type / camera_motion（comfyui_client.shot_framing、
         # h3_prompt_kit._camera_en/_camera_move_en）—— 不同步刷新的话，重写给出的
@@ -2257,15 +2417,12 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
                                     style: str = "3D动漫渲染", target_shots: int = 0,
                                     episode_no: int = 1, save_dir: str = None,
                                     enable_rewrite: bool = True,
-                                    progress_cb=None, force_refresh_assets: bool = False,
-                                    screenplay_text: str = None) -> dict:
+                                    progress_cb=None, force_refresh_assets: bool = False) -> dict:
     """A/B/C/D 全流程单集生成：资产加载 → 上下文注入生成 → state 抽取 → 校验 → 必要时局部重写 → 落盘。
 
     返回：{script, script_path, state, summary, validation, assets, events, elapsed_sec}
 
     参数：
-    - screenplay_text: 文学剧本改写稿（若存在）。用作 coverage 与 script_consistency 的比对基准；
-      剧本生成仍以原著 chapter 为准，质检初筛保留原著基准。
     """
     t0 = time.time()
     events = []
@@ -2279,8 +2436,7 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
 
     # 原著章节正文（剧本生成、质检初筛基准）
     seg = (novel_text or "")[int(chapter.get("start") or 0):int(chapter.get("end") or 0)]
-    # 文学剧本改写稿（coverage / script_consistency 基准）：存在时覆盖，为空则回退原著
-    ref_text = screenplay_text if (screenplay_text and screenplay_text.strip()) else seg
+    ref_text = seg   # 2026-10-13 文学剧本层移除后，基准一律回到原著章节正文
 
     # ---- 1) 项目级资产：bible / style_guide / quotes / voice_dict / camera_terms
     bible = load_bible(continuity_dir, project_key)
@@ -2525,8 +2681,9 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
     # ---- 8.6) 剧本↔原著一致性校验（P0-3：章节锚定 / 元信息泄漏 / 要素覆盖 + 定向修复闭环）
     #      泄漏走局部重写、要素缺失走定向补生成（只增不删），绝不整集重生成；
     #      章节锚定偏差根因在章节切分（P0-1 面），只记告警、不自动改。
-    #      coverage 与 script_consistency 的比对基准改为文学剧本改写稿（ref_text）；
-    #      剧本生成、质检初筛仍以原著 seg 为准。
+    #      coverage 与 script_consistency 的比对基准 = ref_text（2026-10-13 起
+    #      文学剧本层已整体移除 → ref_text 恒等于原著章节正文 seg，覆盖率恢复
+    #      对原著的真实监督意义，不再自我指涉）。剧本生成、质检初筛同以 seg 为准。
     consistency_summary = {}
     try:
         import script_consistency as sc_mod

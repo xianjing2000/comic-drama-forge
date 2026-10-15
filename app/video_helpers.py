@@ -143,6 +143,189 @@ def _stamp() -> str:
         return ""
 
 
+def _batch_segs_by_shot(_segs_in, _max_segs):
+    """按**镜头边界**聚簇切批（t10b，2026-10-13 用户口径）。
+
+    背景：t10 把单次提交压到 ≤N 段是为控制总超时（实测 56 段 = 24.3h 超时窗口，
+    且一次质检不达标就换种子整批重跑），但实现是 _segs[i:i+N] 的**裸切片** ——
+    段名虽带镜头号（shot_{seq:02d}），切批时却没用，于是批边界会从**镜头中间**
+    切开：多段长镜的 shot_07_a/_b/_c 可能一半在批 1、一半在批 2。
+
+    ⚠️ 为什么必须按镜对齐：H3 的「段间引导」由插件按 continuityFromPrev = (i > 0)
+    **在同一次提交内**完成（上一段尾 continuityOverlapFrames 帧钉进下一段
+    conditioning 后裁掉前缀）。批与批是彼此独立的 workflow 提交 → 新批第 1 段
+    i=0 **拿不到**上一批的尾帧，批间只能用 concat **硬拼**（无引导）。
+    故批边界一旦落在镜头内部，该镜就丢掉段内引导、出现画面跳变；落在镜头之间
+    则只损失「镜头间」引导 —— 那一层本来由上一镜分镜图挂进本镜参考承担，是设计内的。
+
+    约定：_max_segs 是**软上限** —— 尽量装满，但绝不切开一个镜头；单镜本身段数
+    就 > _max_segs 时该镜独占一批（否则无解）。
+    返回批列表；段名解析不出镜头号（老数据/异常）时按原裸切片回退。
+    """
+    import re as _re_bs2
+
+    def _shot_of(_s):
+        _m2 = _re_bs2.match(r"shot_(\d+)", str((_s or {}).get("name") or ""))
+        return _m2.group(1) if _m2 else ""
+
+    if not any(_shot_of(_s) for _s in (_segs_in or [])):
+        # 段名里一个镜头号都没有 → 保持旧行为（裸切片），不在这里造新语义
+        _old_n = max(1, int(_max_segs or 1))
+        _lst = list(_segs_in or [])
+        return [_lst[_i:_i + _old_n] for _i in range(0, len(_lst), _old_n)]
+    _out2, _cur2, _cur_shots2 = [], [], set()
+    for _s2 in (_segs_in or []):
+        _sk2 = _shot_of(_s2)
+        # 当前批已装满 且 本段属于**新镜头** → 换批（镜头内段永不被切开）
+        if (_cur2 and len(_cur2) >= _max_segs
+                and _sk2 and _sk2 not in _cur_shots2):
+            _out2.append(_cur2)
+            _cur2, _cur_shots2 = [], set()
+        _cur2.append(_s2)
+        if _sk2:
+            _cur_shots2.add(_sk2)
+    if _cur2:
+        _out2.append(_cur2)
+    return _out2
+
+def _apply_video_lessons(_segs, project_name, style=""):
+    """按「本场段提示词集合」召回 kind='video' 的历史质检修正建议（消费端补全，2026-10-13）。
+
+    背景：沉淀端 `_record_qc_lesson(project_name, "video", _seg_blob[:2000], rec)` 早已存在，
+    但**消费端从未实现** —— `learned_prompt(kind="video")` 全项目零调用，于是整集质检
+    不达标只会换随机种子重跑（自述注释里的「瞎撞」）。本函数补上这个消费端。
+
+    为什么按「整场段集合」而不是逐段召回：沉淀端的 key 就是整场段提示词拼接
+    （见 _record_qc_lesson 调用处的 _seg_blob 注释），召回必须同口径才能命中。
+
+    安全三条（与分镜重试路径的既有纪律一致）：
+      ① 任何异常 → 原样返回（召回绝不阻断出片）；
+      ② 无命中（learned == 原 blob）→ 原样返回；
+      ③ **逐段做 H3 结构复检**，不合格的段弃用建议 —— H3 提示词结构缺段是出片跑偏的
+         根因（prompt_qc._check_h3 判 fatal），绝不能把结构不合规的提示词送进 Director。
+    """
+    try:
+        if not _segs:
+            return _segs
+        import prompt_memory as _pm
+        import h3_prompt_kit as _hk
+        _blob = "\n".join((s.get("prompt") or "") for s in _segs)[:2000]
+        if not _blob.strip():
+            return _segs
+        _learned = _pm.learned_prompt(
+            kind="video", prompt=_blob, project=project_name,
+            root_dir=PROJECT_OUTPUT_DIR, max_hints=1, style=style or "")
+        if not _learned or _learned == _blob:
+            return _segs
+        _suffix = _learned[len(_blob):] if _learned.startswith(_blob) else ""
+        if not _suffix.strip():
+            return _segs
+        _applied = _skipped = 0
+        _out = []
+        for _s in _segs:
+            _cand = (_s.get("prompt") or "") + _suffix
+            try:
+                _ok = bool(_hk.validate(_cand).get("valid"))
+            except Exception:  # noqa: BLE001
+                _ok = False
+            if _ok:
+                _s = dict(_s)
+                _s["prompt"] = _cand
+                _s["video_lesson_applied"] = True
+                _applied += 1
+            else:
+                _skipped += 1
+            _out.append(_s)
+        if _applied:
+            logger.info("[视频教训召回] 已按历史质检教训改写 %d/%d 段提示词"
+                        "（结构复检不合格 %d 段弃用）", _applied, len(_segs), _skipped)
+        return _out
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[视频教训召回] 失败（忽略，不影响出片）：%s", _e)
+        return _segs
+
+
+def _optimize_segments_from_verdict(_segs, _verdict, project_name, style=""):
+    """按**本轮**整片质检的具体缺陷，逐段用 LLM 即时改写提示词（对齐分镜的即时优化，2026-10-13）。
+
+    与 _apply_video_lessons 的分工（两者串联，不是二选一）：
+      · 构建期 _apply_video_lessons：召回**跨轮次的历史**泛化教训（兜底）；
+      · 重试期本函数：用**本轮** verdict 的具体 issues 精准改写（主攻）。
+
+    段归属：整片 issues 通常带 [Shot NN] 前缀（教训库实录：「[Shot 08] 手机邮箱屏出现…」），
+    据此归到具体段；解析不出归属的 issue 视为整片性问题，附加到所有段。
+
+    安全（与 _apply_video_lessons 同款）：
+      ① 任何异常 → 返回 None（调用方保持原 segments，绝不阻断重试）；
+      ② 无 issues → None；
+      ③ 逐段结构复检（h3_prompt_kit.validate），不合格的段弃用改写。
+    """
+    try:
+        if not _segs or not isinstance(_verdict, dict):
+            return None
+        _issues = []
+        for _k in ("issues", "critical_issues", "style_issues"):
+            _issues += [str(x).strip() for x in (_verdict.get(_k) or []) if str(x).strip()]
+        _reason = str(_verdict.get("reason") or "").strip()
+        if not _issues and _reason:
+            _issues = [_reason]
+        if not _issues:
+            return None
+        import re as _re_v
+        from storyboard_helpers import _optimize_prompt_from_qc  # 延迟导入：它反向 import 本模块
+        import h3_prompt_kit as _hk
+        _by_shot, _global = {}, []
+        for _it in _issues:
+            _m = _re_v.search(r"\[Shot\s*(\d+)\]", _it)
+            if _m:
+                try:
+                    _by_shot.setdefault(int(_m.group(1)), []).append(_it)
+                except (TypeError, ValueError):
+                    _global.append(_it)
+            else:
+                _global.append(_it)
+        _changed = 0
+        _out = []
+        for _s in _segs:
+            _p = str((_s or {}).get("prompt") or "")
+            _seq = None
+            _m2 = _re_v.match(r"shot_(\d+)", str((_s or {}).get("name") or ""))
+            if _m2:
+                try:
+                    _seq = int(_m2.group(1))
+                except (TypeError, ValueError):
+                    _seq = None
+            _mine = list(_by_shot.get(_seq) or []) if _seq is not None else []
+            _mine += _global          # 整片性问题对所有段都适用
+            if not _mine or not _p:
+                _out.append(_s)
+                continue
+            _opt = None
+            try:
+                _opt = _optimize_prompt_from_qc(
+                    "h3", _p, {"issues": _mine, "reason": _reason}, style=style or "")
+            except Exception as _oe:  # noqa: BLE001
+                logger.warning("[视频即时优化] 段 %s 改写失败（忽略该段）：%s",
+                               (_s or {}).get("name"), _oe)
+            if _opt and _opt != _p:
+                try:
+                    if bool(_hk.validate(_opt).get("valid")):
+                        _s = dict(_s)
+                        _s["prompt"] = _opt
+                        _s["video_prompt_optimized"] = True
+                        _changed += 1
+                except Exception:  # noqa: BLE001
+                    pass
+            _out.append(_s)
+        if not _changed:
+            return None
+        logger.info("[视频即时优化] 已按本轮质检缺陷改写 %d/%d 段提示词", _changed, len(_segs))
+        return _out
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("[视频即时优化] 整体失败（忽略，用原提示词）：%s", _e)
+        return None
+
+
 def _scene_index(videos_dir: str) -> dict:
     """扫磁盘上的场次成片 → {场号: 路径}（命名见按场次生成：scene_NN.mp4）。"""
     import re as _re_c
@@ -621,6 +804,8 @@ def _video_retry_shot_impl():
     # H3 的结构缺段只有生成端能重建（必须有每张参考图的用途），所以这里做「验证 + 安全追加」，
     # 命中致命缺陷就直接拦：缺段的 H3 提示词等于出片跑偏，而一次视频生成的代价远大于一次判断。
     # ⚠️ 逐子段预检：任一子段不合格即整镜拦截（与主链路 worker 内的逐子段预检口径一致）。
+    # autopilot 延迟导入：本模块顶层导入它会与 pipeline → autopilot 形成循环依赖
+    import autopilot
     for _ri, _rseg in enumerate(_rs_segs):
         _rp2, _pf_v, _pgate_v = _prompt_preflight(
             "h3", _rseg["prompt"], ctx=shot,
@@ -1596,6 +1781,7 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 #   · 纯 LLM/CPU，只构建提示词，不提交 ComfyUI、不烧 GPU、不写教训库；
                 #   · daemon 线程 + 抓异常：预热失败绝不影响主线；
                 #   · 复用 _build_shots_for / _shot_segment（与正式跑同一实现，缓存 key 不漂移）。
+                import time  # 本函数作用域内未导入（模块顶层也没有）→ 缺它会让预热直接 NameError
                 _pw_t0 = time.perf_counter()
                 _pw_segs, _pw_metas = _build_shots_for(list(range(len(shots))))
                 logger.info("[视频提示词预热] 已构建 %d 段 h3 提示词（%d 镜，耗时 %.1fs），"
@@ -2137,6 +2323,11 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                             raise RuntimeError(f"视频提示词为空（scene_{_sn:02d}）")
                     # t10：每场开头同时复位两个作用域键 —— 批内异常退出时也不会把
                     #      上一批的「本批镜头」残留到下一场（下一场会重新覆盖）。
+                    # ⭐ 2026-10-13：视频质检闭环**消费端**补全 —— 按本场段集合召回
+                    #   kind="video" 的历史质检教训（沉淀端早已存在、消费端从未实现，
+                    #   见 _apply_video_lessons 的说明）。必须先于设 _qc_scope，
+                    #   否则本场质检作用域拿到的仍是未召回版本。
+                    _ssegs = _apply_video_lessons(_ssegs, project_name, eff_style)
                     _qc_scope["segs"] = _ssegs
                     _qc_scope["shots"] = None
 
@@ -2202,12 +2393,30 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                         logger.info("[episode][per-scene] 第 %d 场 %d 段：分批已关闭"
                                     "（MJSCXT_H3_BATCH_SEGMENTS=0）→ 单次提交（旧行为）",
                                     _sn, len(_ssegs))
+                    _batches = None
                     if _batch_segs > 0 and len(_ssegs) > _batch_segs:
-                        _batches = [_ssegs[_bi2:_bi2 + _batch_segs]
-                                    for _bi2 in range(0, len(_ssegs), _batch_segs)]
-                        logger.info("[episode][per-scene] 第 %d 场 %d 段 → 分 %d 批渲染"
-                                    "（MJSCXT_H3_BATCH_SEGMENTS=%d；批边界为硬切）",
-                                    _sn, len(_ssegs), len(_batches), _batch_segs)
+                        # ⭐ t10b（2026-10-13 用户口径）：按**镜头边界**切批，不再裸切片。
+                        #   段名 shot_{seq:02d} 自带镜头号，据此聚簇可保证批边界永不落在
+                        #   镜头内部 —— 从而让 H3「段间引导」（同一次提交内按
+                        #   continuityFromPrev=(i>0) 串行把上一段尾帧钉进下一段）不被批切断。
+                        #   裸切片的问题是：多段长镜（shot_07_a/_b/_c）可能被劈到两批，
+                        #   批间只有 concat 硬拼 → 该镜内部跳变。
+                        _batches = _batch_segs_by_shot(_ssegs, _batch_segs)
+                        if len(_batches) <= 1:
+                            # 单镜独占：该镜段数本就 > 上限，切开只会让它丢段内引导，
+                            #   还多一次无意义的批间 concat → 退回单次提交路径。
+                            logger.info("[episode][per-scene] 第 %d 场 %d 段：段数超上限 %d，"
+                                        "但按镜头对齐后仅 1 批（单镜独占）→ 单次提交（不分批）",
+                                        _sn, len(_ssegs), _batch_segs)
+                            _batches = None
+                        else:
+                            _over = sum(1 for _b in _batches if len(_b) > _batch_segs)
+                            logger.info("[episode][per-scene] 第 %d 场 %d 段 → 分 %d 批渲染"
+                                        "（MJSCXT_H3_BATCH_SEGMENTS=%d 段为软上限；"
+                                        "批边界按**镜头**对齐，不切开任何镜头%s）",
+                                        _sn, len(_ssegs), len(_batches), _batch_segs,
+                                        ("；%d 批为单镜超限独占" % _over) if _over else "")
+                    if _batches:
                         _bfiles, _berr = [], ""
                         for _bi, _bseg in enumerate(_batches):
                             # ⭐ t10（2026-10-13）P0 修复：**批级 QC 作用域**。
@@ -2263,7 +2472,12 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                                 qc_stop_cb=(_ep_qc_stop_cb if qc_on else None),
                                 common_refs=[c["path"] for c in _common if c.get("path")],
                                 common_ref_audios=_common_audio_paths,
-                                common_prompt=_common_prompt)
+                                common_prompt=_common_prompt,
+                                # ⭐ 2026-10-13：整片重试前按**本轮**质检缺陷即时改写段提示词
+                                #   （对齐分镜的即时优化；历史召回在构建期已做过一轮）
+                                on_qc_retry=lambda _a, _sg, _vd: _optimize_segments_from_verdict(
+                                    _sg, _vd, project_name, eff_style),
+                                )
                             # t10：无论本批成功/失败都复位为整场作用域（后续逻辑按整场）
                             _qc_scope["segs"] = _ssegs
                             _qc_scope["shots"] = None
@@ -2311,7 +2525,12 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                             qc_stop_cb=(_ep_qc_stop_cb if qc_on else None),
                             common_refs=[c["path"] for c in _common if c.get("path")],
                             common_ref_audios=_common_audio_paths,
-                            common_prompt=_common_prompt)
+                            common_prompt=_common_prompt,
+                            # ⭐ 2026-10-13：整片重试前按**本轮**质检缺陷即时改写段提示词
+                            #   （对齐分镜的即时优化；历史召回在构建期已做过一轮）
+                            on_qc_retry=lambda _a, _sg, _vd: _optimize_segments_from_verdict(
+                                _sg, _vd, project_name, eff_style),
+                            )
                         _sf = (_sres or {}).get("files") or []
                     if not _sf or not os.path.isfile(_sf[0]):
                         _scene_reports.append({
@@ -2413,7 +2632,7 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 try:
                     import keyframe as _kf
                     _kf.export_episode_end_frame(
-                        dst, _ep_dir(os.path.join(KEYFRAMES_DIR, project_name), _rs_ep))
+                        dst, _ep_dir(os.path.join(KEYFRAMES_DIR, project_name), _epn))
                 except Exception as _xe:  # noqa: BLE001 - 增强特性，失败绝不影响出片
                     logger.warning("[跨集串帧] 缓存本集成片末帧失败（忽略）：%s", _xe)
                 with lock:

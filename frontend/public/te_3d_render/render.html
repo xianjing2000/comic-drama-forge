@@ -405,6 +405,7 @@ async function run() {
   const entities = sceneDef.entities || [];
   const charEnts = entities.filter((e) => e && e.type === 'character');
   const charRoots = [];       // 骨骼模式要遍历这些 root 取关节世界坐标
+  const charNames = [];       // 与 charRoots 一一对应的角色名（2026-10-13：质检按名字取 box）
   const camEnt = entities.find((e) => e && e.type === 'camera') || null;
 
   /* ---------- 道具（2026-10-13 接入官方 addProp 口径）----------
@@ -585,6 +586,7 @@ async function run() {
     });
     scene.add(inst);
     charRoots.push(root);
+    charNames.push(String(ent.name || ''));
     diag.chars += 1;
     // 骨架实体（官方 kind='skeleton' / openPosePlane）：隐藏实体网格，只留骨架线
     if (String(ent.kind) === 'skeleton' || ent.openPosePlane) {
@@ -629,6 +631,45 @@ async function run() {
   diag.target = target;
   diag.fov = fov;
 
+  /* ---------- 人偶屏幕包围盒（2026-10-13）----------
+   * 质检判「人偶是否出画」必须只看**人偶本身**：此前用色度掩码触边，
+   * 而场景背板（40m 高的真实照片 billboard）会铺满整幅画面并被掩码计入，
+   * 导致永远判 top 贴边、自愈拉多远都无效（实测机位 1m -> 10m、
+   * 人偶像素占比 34.8% -> 13.9%，而 h_ratio 恒为 1.00、触边恒为 top）。
+   * 背板不是人偶。这里把每个角色 root 的世界包围盒 8 个角投影到 NDC
+   * （-1..1，x 右正、y 上正），交给 te_3d_qc 判触边。 */
+  try {
+    const _cboxes = [];
+    for (let _ci = 0; _ci < charRoots.length; _ci++) {
+      const _root = charRoots[_ci];
+      if (!_root) continue;
+      const _bb = new THREE.Box3().setFromObject(_root);
+      if (!_bb || _bb.isEmpty()) continue;
+      let _x1 = Infinity, _y1 = Infinity, _x2 = -Infinity, _y2 = -Infinity;
+      for (let _i = 0; _i < 8; _i++) {
+        const _nv = new THREE.Vector3(
+          (_i & 1) ? _bb.max.x : _bb.min.x,
+          (_i & 2) ? _bb.max.y : _bb.min.y,
+          (_i & 4) ? _bb.max.z : _bb.min.z
+        ).project(camera);
+        if (_nv.x < _x1) _x1 = _nv.x;
+        if (_nv.x > _x2) _x2 = _nv.x;
+        if (_nv.y < _y1) _y1 = _nv.y;
+        if (_nv.y > _y2) _y2 = _nv.y;
+      }
+      if (isFinite(_x1) && isFinite(_y1) && isFinite(_x2) && isFinite(_y2)) {
+        _cboxes.push({
+          name: charNames[_ci] || '',
+          box: [+_x1.toFixed(4), +_y1.toFixed(4), +_x2.toFixed(4), +_y2.toFixed(4)],
+        });
+      }
+    }
+    diag.charBoxes = _cboxes;
+  } catch (_cbErr) {
+    diag.charBoxes = null;
+    diag.charBoxesError = String(_cbErr);
+  }
+
   renderer.render(scene, camera);
   diag.tris = renderer.info.render.triangles;
   diag.calls = renderer.info.render.calls;
@@ -664,6 +705,39 @@ async function run() {
     body: JSON.stringify({ png: window.__te_3d_render__(), diag }),
   });
   document.title = 'POSTED';
+
+  // ⚠️ 2026-10-14：回传完成后**主动释放 GPU 资源**（不依赖进程退出才回收）。
+  //    无头浏览器每次渲染都会新建 WebGL 上下文 + three.js 场景（几何/贴图/材质/renderer），
+  //    正常由服务端 _terminate 杀进程回收；一旦终止失败（超时/异常），残留进程会继续
+  //    占用显存，实测会让后续渲染从 1.4s 退化到 47~89s。这里显式 dispose 尽早归还，
+  //    与服务端 taskkill /T 构成双保险。
+  try {
+    if (typeof scene !== 'undefined' && scene && scene.traverse) {
+      scene.traverse(function (o) {
+        try {
+          if (o.geometry && o.geometry.dispose) o.geometry.dispose();
+          var m = o.material;
+          if (m) {
+            (Array.isArray(m) ? m : [m]).forEach(function (mm) {
+              try {
+                ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap', 'alphaMap']
+                  .forEach(function (k) { if (mm && mm[k] && mm[k].dispose) mm[k].dispose(); });
+                if (mm && mm.dispose) mm.dispose();
+              } catch (e) {}
+            });
+          }
+        } catch (e) {}
+      });
+    }
+    if (typeof renderer !== 'undefined' && renderer) {
+      try { renderer.dispose(); } catch (e) {}
+      try {
+        var gl = renderer.getContext && renderer.getContext();
+        var lose = gl && gl.getExtension && gl.getExtension('WEBGL_lose_context');
+        if (lose) lose.loseContext();
+      } catch (e) {}
+    }
+  } catch (e) {}
 }
 
 run().catch(async (err) => {

@@ -228,7 +228,14 @@ def _build_asset_index(assets: list, project_name: str, kind: str) -> dict:
                  #   此前 entry 只有 name/image/_dir/url —— 剧本里的 surface_text 到了索引层
                  #   就丢了，导致 qc_helpers._text_item_closeup 永远判不出「文字道具」，
                  #   提权逻辑形同虚设（实测提权 0/60）。
-                 "surface_text": str(payload.get("surface_text") or "").strip()}
+                 "surface_text": str(payload.get("surface_text") or "").strip(),
+                 # ⭐ 2026-10-15：把剧本里的 appearance（外貌锁定）带进索引 ——
+                 #   此前 entry 只到 surface_text，`appearance`（例如「短寸黑发」）
+                 #   在索引层就丢了，导致 qc_helpers._allocate_storyboard_refs 无法
+                 #   在参考图职责文案里复述外观，模型只能猜，实测主角被同场景群像
+                 #   （长发）带偏成「长发带须」。同 surface_text 的先例：字段必须在
+                 #   索引层保留，下游才能用。
+                 "appearance": str(payload.get("appearance") or "").strip()}
         # 2026-09-25 景别对档：把**逐视角**路径也挂进来，供 `_pick_char_view`
         # 按镜头景别取「半身档 / 全身档」。角色资产自 sheet_split 改造后是
         # front/left/right/back/half 五个独立文件（少任何一个都合法）。

@@ -21,6 +21,7 @@ from comfyui_client import (ComfyUIClient, camera_spec as _camera_spec,
                             BLOCKING_REF_MARK as _BLOCKING_REF_MARK,
                             IDENTITY_GRID_REF_MARK as _IDENTITY_GRID_REF_MARK)
 from config import (
+    ENABLE_STORYBOARD_SCENE_REF as _SB_SCENE_REF,
     COMFYUI_URL, PROJECT_ROOT_DIR, PROJECT_DATA_DIR, PROJECT_OUTPUT_DIR, SCRIPT_DIR,
     CHARACTERS_DIR, ITEMS_DIR, SCENES_DIR, STORYBOARDS_DIR, KEYFRAMES_DIR, VIDEOS_DIR, FINAL_DIR,
     PROJECT_TRASH_DIR,
@@ -394,6 +395,12 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
         _zoom = "半身近景" if _want_half else "全身"
         # 编号按「已占用槽位数」算：文字道具提权后角色会顺延，文案必须跟着对
         _slot = len(refs) + 1
+        # ⚠️ 2026-10-15 撤销：曾在此处注入剧本 appearance（「外貌锁定：…短寸黑发…」），
+        #   但官方 Qwen-Image-2.1 协议**明令禁止用文字重述五官** —— 一旦重述，任务就从
+        #   「保持这个人」变成「重新画一个符合这些描述的人」，反而降低 likeness
+        #   （见 comfyui_client.build_storyboard_prompt 的官方要点 3）。
+        #   且该文案经 _ref_label_purpose() 的「中文关键词→英文短语」映射后本就会被丢弃，
+        #   实测提示词中从未出现。角色身份问题应从参考图冲突侧解决，不在此处加描述。
         if _slot == 1:
             refs.append(("主角色",
                          f"参考图1（<image1>）是角色「{name}」的身份锚点（{_zoom}视图）："
@@ -415,6 +422,13 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
     #    连 `_resolve_scene_entry` 的未匹配告警都不会触发（它只在「名字匹配不上」时报）。
     #    改成按「解析出的场景名」判定，与角色侧同口径。
     scene_img = _pick_scene_view(_sc_entry, shot) if scene_name else None
+    # ⭐ 2026-10-15（用户口径）：默认不再单独注入场景图 —— 3D 构图基准图（<image1>）
+    #    本身已含完整场景（建筑/石阶/石灯笼/材质/光影），再补一张属冗余信号，
+    #    且会与基准图的场景互相拉扯。见 config.ENABLE_STORYBOARD_SCENE_REF（默认 False）。
+    if scene_img and not _SB_SCENE_REF:
+        logger.info("[分镜参考图] shot=%s 场景参考图已按开关关闭（3D 基准图已含场景）：%s",
+                    shot.get("shot_id"), scene_name)
+        scene_img = None
     if scene_img and scene_img in used_paths:
         # ⭐ t16 P0-③：场景锚点被「角色参考图占位」挤掉时原先静默置 None
         #    （实测从未发生 —— 场景图与角色图不会是同一文件，但一旦发生就是无声降级）。

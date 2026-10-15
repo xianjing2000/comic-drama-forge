@@ -463,13 +463,6 @@ DEFAULT_CONFIG = {
     #    （只填 prompt_enhance 的进程内缓存，零 GPU、不落产物）。正式生成时命中缓存秒过。
     #    env MJSCXT_PREWARM_ASSET_PROMPT=0 可强制关闭。
     "prewarm_asset_prompt": True,
-    # ⭐ 2026-10-10（用户指定「文学剧本无需人审」）：文学剧本自动生成，默认开。
-    #    True = 剧本步骤开始时若文学剧本不存在，自动用 LLM 生成（约 2-3 分钟），
-    #    产物落盘 output/screenplays/<项目>/第N集_文学剧本.md 供前端查看。
-    #    ⚠️ 只产出文件，**不改变生产输入** —— 是否以它为原文由 use_screenplay 决定
-    #    （默认 false = 用章节原文；多一层 LLM 改写会多一次精确文本被压缩的风险）。
-    #    env MJSCXT_AUTO_SCREENPLAY=0 可强制关闭。
-    "auto_screenplay": True,
     # ---- 各环节开关 ----
     "enable_assets": True,
     "enable_video": True,
@@ -533,12 +526,12 @@ def normalize_config(raw: dict, default_project_key: str = "") -> dict:
         except (TypeError, ValueError):
             cfg[k] = DEFAULT_CONFIG[k]
     # 布尔开关：前端可能传字符串/0/1（JSON 类型不可信）→ 统一收敛为 bool。
-    # ⚠️ 2026-10-12 修复（音频链路 T4）：原先只有 prewarm_*/auto_screenplay 走
+    # ⚠️ 2026-10-12 修复（音频链路 T4）：原先只有 prewarm_* 走
     #    「字符串真值解析」，enable_* 等开关另有一个 bool(v) 循环 —— 于是前端传
     #    "false"/"0" 会被 bool("false") 静默当成**开启**（实测 enable_tts_pre="false"
     #    归一化后仍为 True：用户以为关掉了参考音色，实际照跑一遍 TTS）。
     #    所有布尔开关现在一律走同一套解析，不再有第二条真相。
-    for k in ("prewarm_next_script", "prewarm_asset_prompt", "auto_screenplay",
+    for k in ("prewarm_next_script", "prewarm_asset_prompt",
               "enable_assets", "enable_video", "enable_final",
               "enable_tts", "enable_mix", "enable_tts_pre",
               "enable_upscale", "require_consistency",
@@ -750,6 +743,64 @@ def _nonempty(path: str) -> bool:
         return False
 
 
+def _char_setting_stale(project_name: str, name: str, asset_dir: str) -> bool:
+    """角色资产图是否**过期**（剧本设定变了，但图没重建）。
+
+    ⚠️ 2026-10-14 实现背景（真实 bug，用户报「分镜人物与角色资产对不上」）：
+    剧本重新生成后 characters[].appearance / reference_prompt_zh 变了
+    （实测「羡进」从「黑发长垂及腰 / 青白弟子长袍」改成
+    「黑色短发微乱 / 琥珀色眼瞳 / 灰白粗布短衫」），但
+    assets/characters/<角色>/base.png 仍在 —— 而 probe_assets 的判据只是
+    「有没有非空图」→ 判「就绪」→ **永不重建**。
+    结果分镜拿到**旧设定**的参考图（长发长袍）配上**新设定**的文字提示词
+    （短发短衫），两个权威源打架，出图成了「浅蓝长袍 + 束发」的四不像。
+
+    判据：比对 base.png.meta.json 里记录的 prompt 与**当前**剧本设定，在
+    「发型」「瞳色」两个维度上做归一化比较（复用 asset_prompt_kit 的词表/归一，
+    与分镜侧的收敛口径完全一致）。
+
+    ⚠️ 只在**两侧都能提取到该项**时才比较 —— 任一侧提取失败就跳过该项，
+    避免词表未覆盖的写法（如「琥珀色」当前提不出瞳色）造成误报、导致每轮重建。
+    一切异常 fail-open：读不到就返回 False（保持旧行为，绝不阻断资产生产）。
+    """
+    try:
+        # ⚠️ 资产 meta 有两种落盘命名（实测并存）：base.meta.json 与
+        #    base.png.meta.json —— 两个都试，取存在的那个。
+        meta_path = ""
+        for _cand in ("base.meta.json", "base.png.meta.json"):
+            _p = os.path.join(asset_dir, _cand)
+            if os.path.isfile(_p):
+                meta_path = _p
+                break
+        if not meta_path:
+            return False
+            return False
+        with open(meta_path, "r", encoding="utf-8") as f:
+            meta_prompt = str((json.load(f) or {}).get("prompt") or "")
+        if not meta_prompt:
+            return False
+        from character_helpers import _find_script_character  # noqa: PLC0415
+        cur = _find_script_character(project_name, name) or {}
+        cur_text = str(cur.get("reference_prompt_zh")
+                       or cur.get("appearance") or "").strip()
+        if not cur_text:
+            return False
+        import asset_prompt_kit as _K  # noqa: PLC0415
+        for _extract, _key in ((_K.hair_zh, _K._hair_key), (_K.eye_zh, _K._eye_key)):
+            _a = _extract(cur_text) or ""
+            _b = _extract(meta_prompt) or ""
+            if not _a or not _b:
+                continue                      # 任一侧提取不到 -> 该项不判（防误报）
+            if _key(_a) != _key(_b):
+                logger.info("[资产过期] 角色「%s」的设定已变（%r -> %r）-> 需重建资产图",
+                            name, _a, _b)
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001  过期检测是增强，绝不阻断资产生产
+        logger.debug("[资产过期] 检测失败（按未过期处理）：%s: %s", name, e)
+        return False
+
+
 def _playable(path: str) -> bool:
     """G7：视频产物「可播放性」判据（取代「文件存在 + size>0」）。
 
@@ -814,6 +865,11 @@ def probe_assets(ctx) -> dict:
                 if _nonempty(os.path.join(d, cand)):
                     hit = cand
                     break
+            # ⚠️ 2026-10-14：图存在**不等于**就绪 —— 设定变了但图没重建时，
+            #    必须当成「缺失」触发重建，否则分镜会拿**旧设定**的参考图配
+            #    **新设定**的文字提示词（详见 _char_setting_stale 的实现背景）。
+            if hit and kind == "character" and _char_setting_stale(ctx["project_name"], n, d):
+                hit = None
             if not hit:
                 # 目录扫描兜底：任何一张非空图都算就绪
                 if os.path.isdir(d):
@@ -1012,6 +1068,21 @@ def probe_tts(ctx) -> dict:
     p = dub_manifest_path(ctx)
     if not _nonempty(p):
         return {"total": 0, "ready": 0, "done": False, "file": p}
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            mf = json.load(f) or {}
+    except Exception as e:  # noqa: BLE001
+        # B-08 P1-10：manifest 损坏/解析失败 → fail-loud（不再静默 done:False），
+        # 否则 TTS 步骤会误判「未就绪」而重烧整集配音。
+        logger.warning("配音 manifest 解析失败（项目 %s 第 %s 集）：%s",
+                       ctx["project_name"], int(ctx["episode_no"]), e)
+        return {"total": 0, "ready": 0, "done": False, "file": p,
+                "error": f"manifest 损坏或不可解析：{e}"}
+    lines = [l for l in (mf.get("lines") or []) if isinstance(l, dict)]
+    ok = [l for l in lines if l.get("ok") and _nonempty(l.get("out_path") or "")]
+    return {"total": len(lines), "ready": len(ok),
+            "done": bool(lines) and len(ok) == len(lines), "file": p,
+            "missing": [l.get("line_id") for l in lines if l not in ok]}
 
 _SCENE_FILE_RE = re.compile(r"^scene_(\d+)\.mp4$")
 
@@ -1292,22 +1363,6 @@ def _try_per_scene_upscale(ctx, scene_srcs, out_path) -> bool:
                 chunk_sec if chunk_sec > 0 else "off")
     return True
 
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            mf = json.load(f) or {}
-    except Exception as e:  # noqa: BLE001
-        # B-08 P1-10：manifest 损坏/解析失败 → fail-loud（不再静默 done:False），
-        # 否则 TTS 步骤会误判「未就绪」而重烧整集配音。
-        logger.warning("配音 manifest 解析失败（项目 %s 第 %s 集）：%s",
-                       ctx["project_name"], int(ctx["episode_no"]), e)
-        return {"total": 0, "ready": 0, "done": False, "file": p,
-                "error": f"manifest 损坏或不可解析：{e}"}
-    lines = [l for l in (mf.get("lines") or []) if isinstance(l, dict)]
-    ok = [l for l in lines if l.get("ok") and _nonempty(l.get("out_path") or "")]
-    return {"total": len(lines), "ready": len(ok),
-            "done": bool(lines) and len(ok) == len(lines), "file": p,
-            "missing": [l.get("line_id") for l in lines if l not in ok]}
-
 
 def mix_output_path(ctx) -> str:
     """混音产物路径（流水线固定命名，便于幂等探测）"""
@@ -1363,92 +1418,21 @@ PROBES = {
 #                          "error": str, "detail": {...}, "artifact": str}
 
 
-def _auto_screenplay(ctx: dict) -> None:
-    """文学剧本自动生成（2026-10-10 用户指定「无需人审」）。
-
-    原设计（2026-10-03 两段式）：文学剧本是**人审层**，只在界面上手动点「生成」——
-    用户明确要求「文学剧本无需人审」，故改为自动产出：本函数在剧本步骤**最开头**
-    （probe_script 早返回**之前**）执行，缺则生成、已存在则跳过，
-    写盘 output/screenplays/<项目>/第N集_文学剧本.md 供前端查看/留档。
-
-    ⚠️ **不改生产输入**：只产出文学剧本文件；分镜剧本仍按 config.use_screenplay
-    决定是否以它作为「原文」（默认 false = 用章节原文）。刻意保持这个分离 ——
-    多一层 LLM 改写就多一次精确文本（如规则条款）被压缩的风险，是否启用应由用户决定。
-
-    ⚠️ fail-open：任何失败只记日志，绝不影响主流程。
-    开关：env MJSCXT_AUTO_SCREENPLAY=0，或计划字段 auto_screenplay=false。
-    """
-    try:
-        import os as _os
-        if str(_os.environ.get('MJSCXT_AUTO_SCREENPLAY') or '1').strip().lower() \
-                in ('0', 'false', 'off', 'no'):
-            return
-        cfg = ctx.get('config') or {}
-        _flag = cfg.get('auto_screenplay')
-        if _flag is not None:
-            if isinstance(_flag, str):
-                if _flag.strip().lower() in ('0', 'false', 'off', 'no', ''):
-                    return
-            elif not _flag:
-                return
-        import novel_screenplay as _ns
-        key = str(ctx.get('project_key') or '')
-        ep = int(ctx.get('episode_no') or 1)
-        if not key:
-            return
-        if _ns.load_screenplay(key, ep):
-            return   # 已存在 → 幂等跳过
-        client = _A()._current_llm_client()
-        if not client or not getattr(client, 'configured', False):
-            logger.warning('文学剧本自动生成：文本模型未配置，跳过')
-            return
-        chapter = ctx.get('chapter') or {}
-        meta = ctx.get('novel_meta') or {}
-        text = str(chapter.get('text') or '')
-        if not text:
-            # ⚠️ 2026-10-10 修 bug（用户发现「第 1 集剧本里有后续章节的内容」）：
-            #    原写法直接回退到 **整本小说**（read_novel_text 返回全文，实测 51268 字），
-            #    于是第 1 集的文学剧本里混进了第 2 章的 2704、第 3 章的楼层变化、
-            #    第 4 章的疗养院（陈默 / 林栖 / 陈护士等后续角色全部提前出场）。
-            #    正确做法与 convert_chapter_to_script 一致：拿全文后**按本章 start/end 切片**。
-            full = _A().read_novel_text(_A().NOVELS_DIR, meta.get('novel_id')) or ''
-            try:
-                _s = int(chapter.get('start') or 0)
-                _e = int(chapter.get('end') or 0)
-            except (TypeError, ValueError):
-                _s, _e = 0, 0
-            if _e > _s >= 0:
-                text = full[_s:_e]
-                logger.info('文学剧本自动生成：按章节边界取正文（第%s章 %d~%d，%d 字）',
-                            chapter.get('index'), _s, _e, len(text))
-            else:
-                text = full
-                logger.warning('文学剧本自动生成：章节缺少 start/end 边界，'
-                               '退化为整本小说（%d 字），可能混入多章内容', len(text))
-        if not text:
-            logger.warning('文学剧本自动生成：章节正文为空，跳过')
-            return
-        try:
-            ctx['progress']('生成文学剧本（自动，无需人审）…', 2, phase='script:screenplay')
-        except Exception:  # noqa: BLE001
-            # 
-            from degradation import note as _dg_note
-            _dg_note('pipeline.py:933', 'noqa: BLE001')
-        md = _ns.generate_screenplay(
-            client, str(meta.get('title') or meta.get('novel_id') or ''),
-            str(chapter.get('title') or ''), text, cfg.get('style') or '')
-        path = _ns.save_screenplay(_ns.screenplay_path(key, ep), md)
-        logger.info('文学剧本已自动生成：第%s集 %d 字 → %s', ep, len(md), path)
-    except Exception as e:  # noqa: BLE001  文学剧本失败绝不影响主流程
-        logger.warning('文学剧本自动生成失败（不影响主流程）：%s', e)
-
-
-
 #: 剧本质检不通过时，按缺陷清单回传重写的最大轮数（2026-10-10 新增闭环）。
 #: 为什么需要：此前 qc_client.check_script 的结果**只记日志/透传前端**，其 issues 与
 #: suggestions 从未回传给 LLM 去改——质检发现了问题却没有闭环修正。
-MAX_QC_SCRIPT_REWRITE_ROUNDS = 2
-
+#: ⚠️ 2026-10-14 **暂设为 0（关闭重写闭环）** —— 这是一次**止血**，不是最终方案。
+#:    原因（实测记录）：剧本质检对同一份剧本连续给出 score=95/96/97/98/99 **但 passed=False**
+#:    （问题 7~12 条，全部是「描述臃肿 / 对白驱动率 / 景别节奏 / 与原文不符」这类**主观**问题）。
+#:    于是每集必然跑满 2 轮重写（每轮改全部镜头）→ 剧本被反复改写后**体积膨胀一倍**
+#:    （实测 47.6 KB → 122~132 KB），越改越长、越改越偏 —— 重写在这里是**净损失**。
+#:    已同步做的两处质检修正（见 qc_client）：
+#:      ① _finalize_verdict 增加「客观分数兜底」：无客观关键缺陷且分数达线 → 按分数判通过；
+#:      ② check_script 的关键缺陷只取**客观层**（结构/引用/时长），AI 主观问题不再单独阻断。
+#:    但实测仍出现 passed=False，说明还有未定位的判定路径（待查）。
+#:    在定位清楚之前**先关掉重写**，保证产出的是「一次成型的干净剧本」而不是「被改肥的剧本」。
+#:    ⚠️ 恢复条件：定位到剩余判定路径并验证「一次成型的剧本能直接通过质检」后，改回 2。
+MAX_QC_SCRIPT_REWRITE_ROUNDS = 0
 
 def _qc_script_feedback_rewrite(client, script: dict, ctx: dict, cfg: dict):
     """剧本质检 → 缺陷回传 LLM 重写 → 复检（2026-10-10 用户要求补上的闭环）。
@@ -1482,6 +1466,9 @@ def _qc_script_feedback_rewrite(client, script: dict, ctx: dict, cfg: dict):
         return script, info
     ep = int(ctx.get("episode_no") or 1)
     style = cfg.get("style") or ""
+    # ⚠️ 2026-10-14 诊断日志：确认运行时读到的重写轮数（0 = 只质检、不重写）。
+    logger.info("剧本质检闭环启动：MAX_QC_SCRIPT_REWRITE_ROUNDS=%d（0=只查不重写）",
+                int(MAX_QC_SCRIPT_REWRITE_ROUNDS))
     for rnd in range(1, int(MAX_QC_SCRIPT_REWRITE_ROUNDS) + 1):
         try:
             r = _qcc.check_script(script_data=script, style=style, cfg=qc_cfg)
@@ -1537,9 +1524,6 @@ def _qc_script_feedback_rewrite(client, script: dict, ctx: dict, cfg: dict):
 def step_script(ctx) -> dict:
     """章节正文 → 结构化剧本（含原文覆盖率守门 + 跨集连贯性编排）"""
     A = _A()
-    # 文学剧本自动生成（2026-10-10 用户指定「无需人审」）——必须放在
-    #    probe_script 早返回之前，否则剧本已存在的断点续跑永远不会生成它。
-    _auto_screenplay(ctx)
     if probe_script(ctx) and not ctx["config"].get("overwrite_script"):
         return {"ok": True, "skipped": True, "artifact": _script_path(ctx),
                 "detail": {"note": "剧本已存在，跳过（断点续跑）"}}
@@ -1571,23 +1555,11 @@ def step_script(ctx) -> dict:
         ctx["progress"](f"第{ctx['episode_no']}集剧本：{msg}", 4 + int((pct or 0) * 0.14),
                         phase=f"script:{phase}")
 
-    # 文学剧本改写稿：用作 coverage 与 script_consistency 比对基准（若存在）
-    screenplay_text = cfg.get("screenplay_text")
-    # ⚠️ 生成输入必须同步替换为文学剧本（2026-10-06 实录 bug）：continuity 是从
-    # novel_text 里按 chapter.start/end 切片的（novel_text[start:end]）。run_episode
-    # 已把 chapter 覆盖成 {start:0, end:len(剧本)}，但 novel_text 若还是**小说全文**，
-    # 切出来的就是「小说开头 len(剧本) 字」——第 1 集碰巧近似第 1 章正文，第 2 集起
-    # 就是完全错误的文本，且与 coverage 基准（文学剧本）系统性错位 → 补生成/修复
-    # 回路高频触发、耗时翻倍。手动路由（app._episodes_worker 的 _conv_text）一直是
-    # 「文本+区间成对替换」的正确口径，这里对齐它。
-    if screenplay_text:
-        text = screenplay_text
 
     conv = A.continuity.convert_chapter_with_continuity(
         client, ctx["novel_meta"], text, chapter, ctx["project_key"], A.CONTINUITY_DIR,
         style=cfg.get("style") or "", target_shots=int(cfg.get("target_shots") or 0),
         episode_no=ctx["episode_no"], save_dir=A.SCRIPT_DIR, progress_cb=_cb,
-        screenplay_text=screenplay_text,
     )
     script = conv.get("script") or {}
     cov = conv.get("coverage") or {}
@@ -2674,7 +2646,30 @@ def backfill_style_from_ai_settings(config: dict, project_name: str,
         logger.warning("AI 总控风格设定读取失败（本集沿用默认风格）：%s", e)
         return ""
     if not brief:
-        return ""
+        # ⚠️ 2026-10-14 新增【项目 config.json 兜底】（治「剧本 style 为空 → 风格链路断裂」）：
+        #    实测：托管 plan.json 的 style 为空、project_settings.json 根本不存在 →
+        #    原实现「无源即返回空」→ 剧本顶层 style 落空 →
+        #      · 质检报「style 字段为空字符串，风格一致性与画面/服化道无判定依据」；
+        #      · 下游提示词全部回落硬编码默认「3D动漫渲染」，与用户建项目时选的风格不符
+        #        （实测用户选的是「3D写实CG仙侠风」）。
+        #    而**项目 config.json 里明明有 style**，只是全链路上没人读它。此处补上该来源，
+        #    使风格优先级为：config.style → project_settings.style_brief → 项目 config.json。
+        try:
+            # ⚠️ 2026-10-14 修正：`PROJECTS_DIR` 在 **config** 模块里，不在 `app`（A）——
+            #    原先写成 `_A().PROJECTS_DIR` 会抛 AttributeError，被 except 吞掉后静默回落，
+            #    风格链路依旧断。这里改用 A.PROJECT_OUTPUT_DIR（app 模块确有该属性）拼接。
+            _cfgp = os.path.join(getattr(A, "PROJECT_OUTPUT_DIR", ""),
+                                 "projects", project_name, "config.json")
+            if os.path.isfile(_cfgp):
+                with open(_cfgp, "r", encoding="utf-8") as _f:
+                    brief = str((json.load(_f) or {}).get("style") or "").strip()
+                if brief:
+                    logger.info("第%s集：风格回填自【项目 config.json】：%s",
+                                episode_no, brief)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("项目 config.json 风格读取失败（沿用默认风格）：%s", e)
+        if not brief:
+            return ""
     norm = _A().style_kit.normalize_style(brief) or brief
     config["style"] = norm
     logger.info("第%s集：风格回填自 AI 总控设定（托管计划未带 style）：%s",
@@ -2724,12 +2719,6 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
         _ep_log(project_name, int(episode_no), "progress", message,
                 percent=p, phase=phase)
 
-    # 文学剧本改写接入：config.screenplay_text 存在时覆盖 chapter 文本
-    _screenplay_text = config.get("screenplay_text")
-    if _screenplay_text:
-        # 用文学剧本文本覆盖 chapter 文本
-        chapter_text = _screenplay_text
-        chapter = {**chapter, "text": _screenplay_text, "start": 0, "end": len(_screenplay_text)}
     ctx = {
         "config": config, "project_name": project_name,
         "project_key": config.get("project_key") or project_name,
@@ -2763,7 +2752,6 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
             f"开始生产第{int(episode_no)}集",
             chapter_title=(chapter or {}).get("title"),
             style=(config.get("style") or ""),
-            screenplay_used=bool(config.get("screenplay_text")),
             grid_mode=bool(getattr(A, "SCENE_GRID_MODE", False)))
 
     # ⭐ t1（2026-10-12）：开跑先取走「上一次执行体失联」留痕 —— 有则告警一次并落集级

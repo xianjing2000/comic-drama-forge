@@ -72,9 +72,6 @@ export default function AutonomousPanel({
     // ⭐ 资产提示词预热：本批资产生成期间后台把**全部**资产的增强提示词先算好
     //    （只填 prompt_enhance 缓存，纯 LLM 零 GPU）。默认开启。
     prewarm_asset_prompt: true,
-    // ⭐ 文学剧本自动生成（用户指定「无需人审」）：剧本步骤开始时自动产出，
-    //    只落盘供查看，不改变生产输入（是否用它做原文由 use_screenplay 决定）
-    auto_screenplay: true,
   });
 
   const load = useCallback(async () => {
@@ -209,7 +206,6 @@ export default function AutonomousPanel({
               // ⭐ 集间流水线：本集烧 GPU 时后台预热下一集剧本（见后端 prewarm_next_script）
               ['prewarm_next_script', t('auto.optPrewarmNextScript')],
               ['prewarm_asset_prompt', t('auto.optPrewarmAssetPrompt')],
-              ['auto_screenplay', t('auto.optAutoScreenplay')],
             ] as const).map(([k, label]) => (
               <label key={k} className="flex cursor-pointer items-center gap-1.5 text-xs text-ink-2">
                 <input

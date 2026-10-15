@@ -43,6 +43,16 @@ _MASK_MIN_CHROMA = 25
 _MIN_CHAR_RATIO = 0.004
 
 #: 站位档位：声明值 -> (质心 x 下限, 上限)
+#: ⚠️ 2026-10-13 **暂停作为否决判据**（_SLOT_ENFORCE=False）：
+#:    真实 70 镜日志统计出的落位是**错乱的** —— 声明 center 实测 0.68~0.82（偏右）、
+#:    声明 left 0.52、声明 right 0.50~0.58（left/right 几乎重叠）。
+#:    即渲染侧没有把站位世界坐标映射到屏幕水平位置（实测把 px 从 0 移到 20 米，
+#:    屏幕中心只移动 0.31 而理论应为 4.8）。
+#:    此时若按 _SLOT_BAND 判决，会把**正确构图判成不合格** → 本镜不注入基准图 →
+#:    反而拉低质量（与「不能影响质量」相悖）。
+#:    保留档位表与 _refit_slot（自愈仍可按名义档位平移），但**不再让它否决基准图**。
+#:    待渲染侧映射定位并标定后，把 _SLOT_ENFORCE 改回 True 即恢复判定。
+_SLOT_ENFORCE = False
 _SLOT_BAND = {
     "left": (0.0, 0.42), "左": (0.0, 0.42),
     "center": (0.34, 0.66), "centre": (0.34, 0.66), "中": (0.34, 0.66),
@@ -166,8 +176,104 @@ def qc_blocking_image(shot: dict, png_path: str, diag: Optional[dict] = None,
     else:
         add("char_count", None, "无渲染诊断，跳过（降级判据）")
 
-    # ---- 是否被画面裁掉（2026-10-13 实测触发：体型大的角色近景里头顶出画）----
-    if stats.get("clipped"):
+    # ---- 是否被画面裁掉 ----
+    # ⭐ 2026-10-13 改为**优先按「人偶的屏幕包围盒」**判（render.html 输出 diag.charBoxes）：
+    #    此前用「整图色度掩码触边」，而场景背板（40m 高的真实照片 billboard）会铺满
+    #    整幅画面并被掩码计入 → 永远判 top 贴边、自愈把机位拉多远都无效
+    #    （实测机位 1m → 10m、人偶像素占比 34.8% → 13.9%，而 h_ratio 恒为 1.00、
+    #    触边恒为 top）。背板不是人偶 —— 判「人偶是否出画」必须只看人偶本身。
+    #    旧图 / 渲染页未输出该字段时，退回原掩码判据（零回归）。
+    _cbx = (diag or {}).get("charBoxes") if isinstance(diag, dict) else None
+    # ⭐ 2026-10-13 兼容两种形状：[x1,y1,x2,y2] 或 {name, box}（带角色名，供站位判定用）
+    _boxes_by_name = {}
+    _box_list = []
+    if isinstance(_cbx, list):
+        for _b in _cbx:
+            _bb2 = _b.get("box") if isinstance(_b, dict) else _b
+            if not (isinstance(_bb2, (list, tuple)) and len(_bb2) == 4):
+                continue
+            try:
+                _v = [float(x) for x in _bb2]
+            except (TypeError, ValueError):
+                continue
+            _box_list.append(_v)
+            if isinstance(_b, dict) and str(_b.get("name") or "").strip():
+                _boxes_by_name[str(_b["name"]).strip()] = _v
+    # ⚠️⚠️ 2026-10-14：**景别判据（h_ratio）也必须改用 charBoxes**。
+    #    原因与上面「被裁」判定完全相同，但此前漏改了这里：
+    #    h_ratio 来自 _char_mask_stats 的色度掩码（"有颜色即算人偶"），
+    #    而场景背板（山崖/天空/地面/40m billboard 全景图）全是彩色像素 →
+    #    整个画面都被算作人偶 → **h_ratio 恒为 1.00**。
+    #    实测对比（shot15 中景，机位 8.532m，本地实渲）：
+    #      · charBoxes 口径：角色 y 跨度 0.639 NDC / 全高 2 = **0.32**（完全符合预期）
+    #      · 掩码口径      ：**1.00**（且自愈拉远到 8.5m 仍报 1.00）
+    #    后果：中景这类"本来就该装下全身"的镜头被反复判「竖直占比超标 0.8」，
+    #    自愈怎么拉远都不收敛，最后"质量=未交付"——**纯属白跑一轮 GPU**。
+    #    charBoxes 是 three.js 按角色包围盒投影出的 NDC 坐标（y ∈ [-1, 1]），
+    #    既准确又与背景无关。没有 charBoxes（旧图/未输出）时保持旧口径，零回归。
+    if _box_list:
+        try:
+            _ys = [float(_v[1]) for _v in _box_list] + [float(_v[3]) for _v in _box_list]
+            _y0, _y1n = min(_ys), max(_ys)
+            if _y1n > _y0:
+                _hr_box = (_y1n - _y0) / 2.0          # NDC 全高 = 2
+                if _hr_box > 0:
+                    stats = dict(stats)
+                    stats["h_ratio_mask"] = stats.get("h_ratio")
+                    stats["h_ratio"] = round(_hr_box, 4)
+                    stats["h_ratio_src"] = "charBoxes"
+        except (TypeError, ValueError, IndexError):
+            pass
+    if _box_list:
+        _eps = 0.02
+        # ⭐ 2026-10-13：**近景/特写允许下半身出画** —— 那是镜头语言，不是构图错误。
+        #    近景的视线落点在胸部以上，本来就该裁掉下半身；此前一律要求「整个人偶
+        #    在画内」，把正确的特写判成不合格（实测 shot3 近景：y2=0.52、y1=-4.11，
+        #    即画面里是胸部以上，正是近景语义），自愈因此永远修不好那一类镜头。
+        #    全景/远景/中景/中近景仍要求完整轮廓（那些档位本来就该装下全身）。
+        # 注意传入的可能是原始机位串（如「近景固定」），必须先归一化成景别档位，
+        # 否则判据永不命中（实测踩坑：cam_key='近景固定' 时 _allow_bottom 恒为 False）。
+        try:
+            from shot_camera import camera_key as _ckf  # noqa: PLC0415
+            _ck_now = str(_ckf(str(cam_key or "")) or "").strip()
+        except Exception:  # noqa: BLE001
+            _ck_now = str(cam_key or "").strip()
+        _allow_bottom = _ck_now in ("特写", "近景")
+        # ⭐ 2026-10-14：「局部」档位**完全跳过贴边判定**。
+        #    「局部」= 只拍手部/道具的插入镜（见提示词对 shot_type 的定义），
+        #    镜头本来就只对准人偶的某一小块 —— 头顶/脚底/左右必然出画，
+        #    这是镜头语言而非构图错误。此前未豁免，实测 shot9（局部）：
+        #    h_ratio=3.27（人偶比画面高 3.27 倍）、被判 "bottom/top 贴边"，
+        #    而自愈只会把机位拉远 —— 拉远就不再是局部特写了，永远收敛不了，
+        #    最后 "质量=未交付" 白跑一轮 GPU。
+        #    近景/特写只豁免下半身（它们仍需露出上半身），局部则四条边都豁免。
+        _skip_clip = _ck_now == "局部"
+        _sides = []
+        for _b in _box_list:
+            if _skip_clip:
+                continue                      # 局部镜：人偶出画属正常，不判贴边
+            _x1, _y1, _x2, _y2 = _b
+            if _x1 <= -1.0 + _eps:
+                _sides.append("left")
+            if _x2 >= 1.0 - _eps:
+                _sides.append("right")
+            if _y1 <= -1.0 + _eps and not _allow_bottom:      # NDC y 向上：y1 = 底边
+                _sides.append("bottom")
+            if _y2 >= 1.0 - _eps:       # y2 = 顶边
+                _sides.append("top")
+                _sides.append("top")
+        _sides = sorted(set(_sides))
+        # ⚠️ 2026-10-13：把**新判据**算出的触边方向写回 stats —— 自愈端
+        #    (_refit_clipped) 读的就是 stats["clipped_sides"]，若不同步，
+        #    它拿到的还是旧色度掩码的结果（实测出现「新判据没触边、自愈却按
+        #    旧的 bottom 去修」以及「贴边：-」这种空方向，导致空修 / 白跑一轮）。
+        stats["clipped_sides"] = list(_sides)
+        stats["clipped"] = bool(_sides)
+        if _sides:
+            add("clipped", False, "人偶贴到画面边缘（%s）—— 会被裁掉" % "/".join(_sides))
+        else:
+            add("clipped", True, "人偶完整在画内（未触边）")
+    elif stats.get("clipped"):
         add("clipped", False,
             "人偶贴到画面边缘（%s）—— 会被裁掉" % "/".join(stats.get("clipped_sides") or []))
     else:
@@ -201,9 +307,30 @@ def qc_blocking_image(shot: dict, png_path: str, diag: Optional[dict] = None,
     else:
         add("pose_applied", None, "命中动作但无渲染诊断，跳过")
 
-    # ---- 站位（只对单角色镜头有意义）----
+    # ---- 站位 ----
+    # ⭐ 2026-10-13：由「只对单角色镜头有意义」升级为**多角色也能判** —— 借助
+    #    render.html 输出的 diag.charBoxes（每个角色各自的屏幕包围盒），取该角色的
+    #    水平中心与**它自己**的声明档位比较（过去只有一个整图质心，多角色时是混合
+    #    质心，无法对应到某个角色，故当时直接跳过）。
     blk = (shot or {}).get("blocking")
-    if len(chars) == 1 and isinstance(blk, list) and blk:
+    _slot_judged = 0
+    if isinstance(blk, list) and blk and _boxes_by_name:
+        for _it in blk:
+            if not isinstance(_it, dict):
+                continue
+            _nm = str(_it.get("name") or "").strip()
+            _decl = str(_it.get("x") or _it.get("side") or "").strip().lower()
+            _band = _SLOT_BAND.get(_decl)
+            _bx = _boxes_by_name.get(_nm) if _nm else None
+            if not _band or not _bx:
+                continue
+            _ncx = ((_bx[0] + _bx[2]) / 2.0 + 1.0) / 2.0     # NDC(-1..1) → 归一(0..1)
+            add("slot", (_band[0] <= _ncx <= _band[1]) if _SLOT_ENFORCE else None,
+                "声明站位 %s·%s（水平中心应落在 %.2f~%.2f），实测 %.2f%s"
+                % (_nm, _decl, _band[0], _band[1], _ncx,
+                   "" if _SLOT_ENFORCE else "【映射未标定，本项仅记录、不否决】"))
+            _slot_judged += 1
+    if not _slot_judged and len(chars) == 1 and isinstance(blk, list) and blk:
         decl = ""
         for it in blk:
             if isinstance(it, dict) and str(it.get("name") or "").strip() == chars[0]:
@@ -212,11 +339,17 @@ def qc_blocking_image(shot: dict, png_path: str, diag: Optional[dict] = None,
         band = _SLOT_BAND.get(decl)
         if band:
             cx = float(stats["cx"])
-            add("slot", band[0] <= cx <= band[1],
-                "声明站位 %s（质心应落在 %.2f~%.2f），实测质心 %.2f" % (decl, band[0], band[1], cx))
+            add("slot", (band[0] <= cx <= band[1]) if _SLOT_ENFORCE else None,
+                "声明站位 %s（质心应落在 %.2f~%.2f），实测质心 %.2f%s"
+                % (decl, band[0], band[1], cx,
+                   "" if _SLOT_ENFORCE else "【映射未标定，本项仅记录、不否决】"))
         else:
             add("slot", None, "本镜无显式站位声明，跳过")
-    else:
+    elif not _slot_judged:
+        # ⚠️ 2026-10-13：必须带 _slot_judged 前置 —— 否则上面的多角色分支已经
+        #    add 了 slot 结果，这里又 add 一条 ok=None，by_name["slot"] 被后者覆盖，
+        #    repair_plan 的 _refit_slot 条件永不成立（实测：站位偏差明明报了，
+        #    自愈却"修复=[]"整轮不动手）。
         add("slot", None, "多角色或无站位声明，跳过（质心口径不适用）")
 
     # ---- 景别 ----
@@ -236,7 +369,10 @@ def qc_blocking_image(shot: dict, png_path: str, diag: Optional[dict] = None,
         add("framing", None, "未声明景别，跳过")
 
     reasons = [c["detail"] for c in checks if c["ok"] is False]
-    return {"ok": not reasons, "checks": checks, "reasons": reasons, "stats": stats}
+    return {"ok": not reasons, "checks": checks, "reasons": reasons, "stats": stats,
+            # ⭐ 2026-10-13：把「每个角色的屏幕包围盒」一并带出，供 repair_plan 做
+            #    多角色站位修正（此前只有一个整图质心，多角色无法定位到具体角色）。
+            "charBoxes": _box_list, "charBoxesByName": _boxes_by_name}
 
 
 # ===================== 自愈：按质检发现的问题修正渲染计划，重渲 =====================
@@ -251,19 +387,155 @@ _SLOT_GAIN = 4.0
 _SLOT_MAX_DX = 2.0
 
 
-def _refit_clipped(plan: dict, stats: dict) -> str:
-    """人偶被画面裁掉 → 把机位拉远（保高度），让它整个进画。"""
-    cam = plan.get("camera") or {}
-    pos = list(cam.get("position") or [])
-    tgt = list(cam.get("target") or [])
-    if len(pos) < 3 or len(tgt) < 3:
-        return ""
-    scale = 1.28
-    new_pos = [tgt[i] + (pos[i] - tgt[i]) * scale for i in range(3)]
-    new_pos[1] = pos[1]
-    cam["position"] = [round(float(v), 3) for v in new_pos]
+def _cam_entity(plan: dict):
+    """本镜的相机 entity —— 官方 scene_json 里相机是 scene.entities 中的一项。
+
+    ⚠️ 2026-10-13 修复（自愈一直空转的真根因）：此前两个 refit 改的是
+    plan["camera"]，而 plan 就是 scene_json 本身（te_3d_render 直接把它写成
+    payload），该键**根本不存在** → 两个函数每次都直接 return ""，自愈等于没做。
+    生产实证：同一镜头连渲 3 轮，竖直占比 0.85 → 0.85 纹丝不动，纯白烧三次渲染。
+    渲染侧只认 entity：render.html 里 camEnt = entities.find(e => e.type === 'camera')。
+    """
+    for e in (plan.get("scene") or {}).get("entities") or []:
+        if isinstance(e, dict) and e.get("type") == "camera":
+            return e
+    return None
+
+
+def _look_target(plan: dict, cam_pos: list) -> list:
+    """视线目标点：优先顶层 viewCamera.target；缺失时回落「场地中心」。
+
+    本模块的角色恒以场地中心为构图中心（见 _position_for_index），故该回落与
+    真实视线方向一致；纯几何量，不依赖渲染侧。
+    """
+    vc = plan.get("viewCamera")
+    if isinstance(vc, dict):
+        t = vc.get("target") or vc.get("lookTarget")
+        if isinstance(t, (list, tuple)) and len(t) >= 3:
+            return [float(t[0]), float(t[1]), float(t[2])]
+    return [0.0, float(cam_pos[1]) * 0.5, 0.0]
+
+
+def _pull_back(plan: dict, scale: float) -> bool:
+    """沿视线把机位推拉 scale 倍（保持机位高度）。
+
+    ⚠️ 必须**两条路径都写**（2026-10-13 实测踩坑，这是自愈长期空转的真根因）：
+      · 渲染页**优先**用顶层 plan["camera"]（含 position + target）；
+      · scene.entities 里的相机**只是 fallback**
+        （render.html 的判据是：pc.position 是三元组就用它，否则才用 camEnt）。
+    只改其中一处，另一处仍是旧值 → 渲染出来的图**逐像素不变**。
+    实测证据：只改 entity 时相机 z 3.842→5.588，但两张 PNG 的 sha1 完全相同。
+    """
+    cam = plan.get("camera")
+    if not isinstance(cam, dict):
+        cam = None
+    ent = _cam_entity(plan)
+
+    pos = None
+    tgt = None
+    if cam is not None:
+        _p = cam.get("position")
+        if isinstance(_p, (list, tuple)) and len(_p) >= 3:
+            pos = [float(v) for v in _p]
+            _t = cam.get("target")
+            if isinstance(_t, (list, tuple)) and len(_t) >= 3:
+                tgt = [float(_t[0]), float(_t[1]), float(_t[2])]
+    if pos is None:
+        if ent is None:
+            return False
+        _p = (ent.get("transform") or {}).get("position")
+        if not (isinstance(_p, (list, tuple)) and len(_p) >= 3):
+            return False
+        pos = [float(v) for v in _p]
+    if tgt is None:
+        tgt = _look_target(plan, pos)
+
+    new_pos = [tgt[i] + (pos[i] - tgt[i]) * float(scale) for i in range(3)]
+    new_pos[1] = pos[1]          # 只推拉距离，保持机位高度（免得钻地/飞天）
+    new_pos = [round(float(v), 3) for v in new_pos]
+
+    wrote = False
+    if cam is not None:
+        cam["position"] = list(new_pos)
+        if not (isinstance(cam.get("target"), (list, tuple)) and len(cam["target"]) >= 3):
+            cam["target"] = [round(float(v), 3) for v in tgt]
+        plan["camera"] = cam
+        wrote = True
+    if ent is not None:
+        ent.setdefault("transform", {})["position"] = list(new_pos)
+        wrote = True
+    return wrote
+
+
+def _tilt_target(plan: dict, dy: float = 0.0, dx: float = 0.0) -> bool:
+    """平移**视线目标**（改变取景中心），把出画的一侧拉回画面内。
+
+    ⚠️ 为什么必须有它（2026-10-13 实测）：_pull_back 沿视线推拉且**保持机位高度**，
+    当角色贴近相机（近景档位 dist≈1.0m）时，人偶的脚就在相机下方很近处 ——
+    进退相机对它几乎无作用（实测 charBoxes 底边 y=-4.11，连拉 4 轮都不收敛）。
+    这种情形必须改变**视线方向**而不是距离：target 往出画那一侧挪，
+    画面内容就整体朝反方向移动（下移 target → 内容上移 → 底部进画）。
+
+    只写 plan["camera"]["target"]（渲染页优先读它；entity 无 target 字段）。
+    """
+    if not dy and not dx:
+        return False
+    cam = plan.get("camera")
+    if not isinstance(cam, dict):
+        return False
+    _t = cam.get("target")
+    if isinstance(_t, (list, tuple)) and len(_t) >= 3:
+        tgt = [float(_t[0]), float(_t[1]), float(_t[2])]
+    else:
+        _p = cam.get("position")
+        if not (isinstance(_p, (list, tuple)) and len(_p) >= 3):
+            return False
+        tgt = _look_target(plan, [float(v) for v in _p])
+    cam["target"] = [round(tgt[0] + float(dx), 3), round(tgt[1] + float(dy), 3),
+                     round(tgt[2], 3)]
     plan["camera"] = cam
-    return "机位拉远 x%.2f（人偶贴边：%s）" % (scale, "/".join(stats.get("clipped_sides") or []))
+    return True
+
+
+def _refit_clipped(plan: dict, stats: dict) -> str:
+    # ⚠️ 2026-10-13 力度上调 1.28 → 1.45：实测「人偶下半身大幅出画」时，
+    #    1.28 倍在三轮累积后（1.28^3≈2.1）仍修不回来；1.45 配合上面的**累积修复**
+    #    （每轮在上一轮结果上继续）能在 1~2 轮内把整个人偶拉回画面内。
+    #    判据一字未放宽 —— 只是让机位真的退到装得下。
+    # ⚠️ 2026-10-13 力度 1.28 → 1.45 → 1.7（实测收敛数据驱动）：
+    #    shot4 实测「脚下触底边像素」随累积拉远为 176 → 149 → 65，
+    #    判定阈值是 max(12, n×1%)（该图 n=3256 → 33）。1.45 三轮收不到 33 以下，
+    #    1.7 配合累积（最多 4 轮）才有足够余量把脚拉离底边。
+    #    判据一字未放宽 —— 只是让机位退到人偶整个进画。
+    _sides = [str(s) for s in (stats.get("clipped_sides") or [])]
+    _moved = _pull_back(plan, 1.7)
+    # ⚠️ 2026-10-13：拉远之外**再调整视线目标** —— 贴着相机的人偶（近景 dist≈1m）
+    #    靠推拉距离解决不了，必须改变视线方向（见 _tilt_target 的说明）。
+    #    方向：bottom 触边 → 视线下移（内容上移）；top 触边 → 视线上移；左右同理。
+    # ⚠️ 2026-10-13：同一轴**两侧都触边**（top+bottom）说明人偶比画面还高 ——
+    #    这时调视线只会顾此失彼（底边修好又冒出顶边，实测 shot4 第1轮
+    #    "bottom/top" 反复），此时只能靠拉远，故该轴不调视线。
+    _dy = 0.0
+    if not ("bottom" in _sides and "top" in _sides):
+        if "bottom" in _sides:
+            _dy = -0.35
+        elif "top" in _sides:
+            _dy = 0.35
+    _dx = 0.0
+    if not ("left" in _sides and "right" in _sides):
+        if "left" in _sides:
+            _dx = -0.35
+        elif "right" in _sides:
+            _dx = 0.35
+    _tilted = _tilt_target(plan, dy=_dy, dx=_dx)
+    if not _moved and not _tilted:
+        return ""
+    _how = []
+    if _moved:
+        _how.append("拉远 x1.7")
+    if _tilted:
+        _how.append("视线调整 dy%+.2f/dx%+.2f" % (_dy, _dx))
+    return "机位%s（人偶贴边：%s）" % ("+".join(_how), "/".join(_sides) or "-")
 
 
 def _refit_camera(plan: dict, cam_key: str, h_ratio: float) -> str:
@@ -282,23 +554,66 @@ def _refit_camera(plan: dict, cam_key: str, h_ratio: float) -> str:
     #    就必须把机位**拉近**，所以倍率 = 实测占比 / 目标占比（小于 1 = 拉近）。
     #    单轮限幅 [0.4, 2.5]，靠多轮逐步逼近，避免一次甩到人脸前或飞到天边。
     scale = max(0.4, min(2.5, h_ratio / max(target, 1e-3)))
-    cam = plan.get("camera") or {}
-    pos = list(cam.get("position") or [])
-    tgt = list(cam.get("target") or [])
-    if len(pos) < 3 or len(tgt) < 3:
+    if not _pull_back(plan, scale):
         return ""
-    new_pos = [tgt[i] + (pos[i] - tgt[i]) * scale for i in range(3)]
-    new_pos[1] = pos[1]                      # 只拉近/推远，保持机位高度（免得钻地/飞天）
-    cam["position"] = [round(float(v), 3) for v in new_pos]
-    plan["camera"] = cam
     return "机位缩放 x%.2f（竖直占比 %.2f → 目标 %.2f）" % (scale, h_ratio, target)
 
 
-def _refit_slot(plan: dict, shot: dict, cx: float) -> str:
-    """站位越档 → 按声明档位中心平移该角色（仅单角色镜头，质心口径才成立）。"""
-    chars = _on_screen_chars(shot)
+def _refit_slot(plan: dict, shot: dict, cx: float, boxes_by_name: dict = None) -> str:
+    """站位越档 → 按声明档位平移对应角色。
+
+    ⭐ 2026-10-13：支持**多角色** —— 有 diag.charBoxes（每个角色各自的屏幕包围盒）时，
+    按「该角色自己的水平中心」与它自己的声明档位比较，逐个平移；此前只有一个整图
+    质心，多角色时是混合质心，无法对应到具体角色，所以那时只对单角色生效。
+    """
     blk = (shot or {}).get("blocking")
-    if len(chars) != 1 or not isinstance(blk, list):
+    if not isinstance(blk, list) or not blk:
+        return ""
+    ents = [e for e in (plan.get("scene") or {}).get("entities") or []
+            if isinstance(e, dict) and e.get("type") == "character"]
+    if not ents:
+        return ""
+
+    def _shift(name: str, dx: float) -> bool:
+        """把名字匹配的角色沿 x 平移 dx（群演展开成 name#1/name#2，一并平移）。"""
+        hit = False
+        for e in ents:
+            en = str(e.get("name") or "")
+            if en == name or en.startswith(name + "#"):
+                tf = e.setdefault("transform", {})
+                p = list(tf.get("position") or [0, 0, 0])
+                p[0] = round(float(p[0]) + dx, 3)
+                tf["position"] = p
+                hit = True
+        return hit
+
+    # ---- 多角色路径：按角色名逐个体检、逐个平移 ----
+    if boxes_by_name:
+        notes = []
+        for it in blk:
+            if not isinstance(it, dict):
+                continue
+            nm = str(it.get("name") or "").strip()
+            decl = str(it.get("x") or it.get("side") or "").strip().lower()
+            band = _SLOT_BAND.get(decl)
+            bx = boxes_by_name.get(nm) if nm else None
+            if not band or not bx:
+                continue
+            ncx = ((bx[0] + bx[2]) / 2.0 + 1.0) / 2.0      # NDC(-1..1) → 归一(0..1)
+            target_cx = (band[0] + band[1]) / 2.0
+            dx = (target_cx - ncx) * _SLOT_GAIN
+            dx = max(-_SLOT_MAX_DX, min(_SLOT_MAX_DX, dx))
+            if abs(dx) < 0.05:
+                continue
+            if _shift(nm, dx):
+                notes.append("%s x%+.2f" % (nm, dx))
+        if notes:
+            return "站位平移（%s）" % "、".join(notes)
+        return ""
+
+    # ---- 单角色退回路径（旧行为，逐字不变）----
+    chars = _on_screen_chars(shot)
+    if len(chars) != 1:
         return ""
     decl = ""
     for it in blk:
@@ -313,13 +628,7 @@ def _refit_slot(plan: dict, shot: dict, cx: float) -> str:
     dx = max(-_SLOT_MAX_DX, min(_SLOT_MAX_DX, dx))
     if abs(dx) < 0.05:
         return ""
-    for e in (plan.get("scene") or {}).get("entities") or []:
-        if isinstance(e, dict) and e.get("type") == "character":
-            tf = e.setdefault("transform", {})
-            p = list(tf.get("position") or [0, 0, 0])
-            p[0] = round(float(p[0]) + dx, 3)
-            tf["position"] = p
-            break
+    _shift(chars[0], dx)
     return "站位平移 x%+.2f（质心 %.2f → 档位中心 %.2f）" % (dx, cx, target_cx)
 
 
@@ -357,18 +666,29 @@ def repair_plan(shot: dict, plan: dict, qc: dict) -> Tuple[Optional[dict], List[
         cam_key = ""
     new = copy.deepcopy(plan or {})
     notes: List[str] = []
+    # ⚠️ 2026-10-13 修正收敛性：clipped / framing / slot 三者都直接改**机位或角色位置**，
+    #    同一轮里一起改会互相抵消 —— 实测：拉远使人偶变小、质心回中，紧接着站位平移
+    #    又把它推回去甚至推出画外，于是 5 轮都收敛不了（日志里「bottom + 站位」
+    #    反复同时出现，正是这个症状）。
+    #    改为**按优先级短路**：先把「人偶是否完整在画内」解决掉，它过了才谈景别，再谈站位。
+    #    姿势（改关节，与上面三者不同维度）不受影响，照常一起修。
+    _geo_fixed = False
     if by_name.get("clipped", {}).get("ok") is False:
         n = _refit_clipped(new, stats)
         if n:
             notes.append(n)
-    if by_name.get("framing", {}).get("ok") is False:
+            _geo_fixed = True
+    if not _geo_fixed and by_name.get("framing", {}).get("ok") is False:
         n = _refit_camera(new, cam_key, float(stats.get("h_ratio") or 0.0))
         if n:
             notes.append(n)
-    if by_name.get("slot", {}).get("ok") is False:
-        n = _refit_slot(new, shot, float(stats.get("cx") or 0.5))
+            _geo_fixed = True
+    if not _geo_fixed and by_name.get("slot", {}).get("ok") is False:
+        n = _refit_slot(new, shot, float(stats.get("cx") or 0.5),
+                        qc.get("charBoxesByName") or None)
         if n:
             notes.append(n)
+            _geo_fixed = True
     if by_name.get("pose_applied", {}).get("ok") is False:
         n = _refit_pose(new, shot)
         if n:
@@ -396,6 +716,11 @@ def qc_and_repair(shot: dict, png_path: str, cam_key: Optional[str] = None,
         R = None
     diag = R.read_render_diag(path) if R is not None else None
     last_qc: Dict[str, object] = {}
+    #: 累积修复计划：每轮在**上一轮的结果**上继续修，而不是每次从原始计划重来。
+    #: ⚠️ 2026-10-13 修复（自愈三轮原地打转的真根因）：此前每轮都 build_render_plan
+    #: 重建**原始**计划、再各修一次 1.28 倍 —— 三轮得到的计划逐字节相同，渲染命中
+    #: 同一张图，实测值永远不动（生产实证：「人偶贴到画面边缘」连报三轮、数值一模一样）。
+    _cum_plan = None
     for rnd in range(int(max_rounds) + 1):
         last_qc = qc_blocking_image(shot, path, diag=diag, cam_key=cam_key)
         rounds.append({"round": rnd, "ok": last_qc["ok"],
@@ -405,12 +730,16 @@ def qc_and_repair(shot: dict, png_path: str, cam_key: Optional[str] = None,
             break
         try:
             import te_3d_director as D  # noqa: PLC0415
-            plan = D.build_render_plan(shot, aspect=aspect, width=width,
-                                       target_size=target_size)
+            if _cum_plan is not None:
+                plan = _cum_plan          # 在上一轮修复结果上继续修（累积收敛）
+            else:
+                plan = D.build_render_plan(shot, aspect=aspect, width=width,
+                                           target_size=target_size)
         except Exception as _pe:  # noqa: BLE001
             rounds[-1]["repair"] = ["重建渲染计划失败：%s" % _pe]
             break
         fixed, notes = repair_plan(shot, plan, last_qc)
+        _cum_plan = fixed if fixed is not None else plan
         rounds[-1]["repair"] = notes
         if not fixed:
             break

@@ -170,6 +170,7 @@ def _dub_prompt_preflight(lines: list, project_name: str = "") -> dict:
                 # ln["prompt_qc"]，不进教训库）；键用自愈前的原文 text。
                 if project_name:
                     try:
+                        from lesson_helpers import _record_preflight_lesson  # 定义在 lesson_helpers，本函数未导入
                         _record_preflight_lesson(project_name, text, pf,
                                                  prompt_qc.prompt_qc_gate(pf, cfg))
                     except Exception as _dub_lesson_err:  # noqa: BLE001

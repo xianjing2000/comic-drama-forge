@@ -193,7 +193,6 @@ PLAN_DEFAULTS = {
     # ⭐ 2026-10-10：集间流水线开关（界面「一键启动」参数区可勾选）。
     #    True = 本集烧 GPU 时后台并行预热下一集剧本（纯 LLM，零 GPU，不抢卡）。
     "prewarm_next_script": True,
-    "auto_screenplay": True,
     # video_mode 已废弃（2026-10-01 起视频只有整集模式，pipeline 会强制归一为 episode）
     "enable_assets": True,
     "enable_video": True,
@@ -1377,16 +1376,6 @@ def prewarm_next_script(project: str, plan: dict, cur_episode: int) -> bool:
 
         def _pw_run():
             try:
-                # 文学剧本改写：与 _produce 同口径（文件存在即用）
-                try:
-                    import novel_screenplay
-                    _md = novel_screenplay.load_screenplay(project, int(nxt_no))
-                    if _md:
-                        config.setdefault("screenplay_text", _md)
-                except Exception:  # noqa: BLE001 设定缺失不影响主流程
-                    # 
-                    from degradation import note as _dg_note
-                    _dg_note('autopilot.py:1290', 'noqa: BLE001 设定缺失不影响主流程')
                 ctx = {
                     "config": config, "project_name": project,
                     "project_key": config.get("project_key") or project,
@@ -1494,15 +1483,6 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
     try:
         config = pipeline.normalize_config({**plan, "novel_id": meta.get("novel_id") or ""},
                                            default_project_key=project)
-        # 文学剧本改写接入：文件存在即改写，无需人工审阅
-        # ⚠️ 本模块不能引用 app（app 顶层 import 本模块，反向导入是循环；且本模块
-        #    作用域里没有 app 这个名字，写了就是 NameError——2026-10-06 第1集整批
-        #    秒败实录）。模块内日志一律走 logger。
-        import novel_screenplay
-        _md = novel_screenplay.load_screenplay(project, episode_no)
-        if _md:
-            logger.info("集 %s 使用文学剧本改写（文件存在）", episode_no)
-            config.setdefault("screenplay_text", _md)
         result = pipeline.run_episode(
             config, project, episode_no, meta, chapter,
             progress_cb=_cb, should_stop=_halt_requested)

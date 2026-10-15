@@ -8,9 +8,10 @@ novel_to_script 等叶子模块，以及 routes/_shared.py 里的助手
 （_novels_stats / _safe_upload_name / _resolve_novel_project / _optional_llm_client ...）。
 
 ⚠️ URL 规则与响应体一字不改，只把 @app.route 换成 @novels_bp.route。
-⚠️ 本批**不含**三生成类路由（screenplay/generate、screenplay/<集>、episodes/generate）——
-   它们牵着 _screenplay_worker / _episodes_worker / generation_state / lock，
+⚠️ 本批**不含** episodes/generate —— 它牵着 _episodes_worker / generation_state / lock，
    留给下一批单独搬，避免把状态机一起搅动。
+   （2026-10-13：文学剧本层已整体移除；原 screenplay/generate 与 screenplay/<集>
+     两个路由连同 _screenplay_worker 一并删除。）
 """
 import os
 import time

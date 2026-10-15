@@ -30,6 +30,7 @@ import threading
 import time
 from datetime import datetime
 
+import config  # noqa: F401  需要**模块对象**本身：下方 dir(config) 动态枚举目录常量名
 from config import (
     PROJECT_OUTPUT_DIR, SCRIPT_DIR, ASSETS_DIR, CHARACTERS_DIR, ITEMS_DIR, SCENES_DIR,
     STORYBOARDS_DIR, VIDEOS_DIR, FINAL_DIR, UPSCALE_DIR, DUB_DIR, QC_DIR,

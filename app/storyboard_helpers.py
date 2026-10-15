@@ -127,6 +127,9 @@ _REF_CANVAS_CACHE: dict = {}
 #: 从产物**加不回来**源路径；而 manifest 里要记的是「哪个道具的哪张图」这种稳定身份。
 #: 只在进程内累积（生成期一次跑完就用完），不落盘 —— 落盘的证据是 manifest 的 refs 身份串。
 _REF_CANVAS_ORIGIN: dict = {}
+#: 身份基准网格的**内容缓存**（2026-10-13）：同一批角色 + 同尺寸 + 同布局 → 逐像素相同，
+#: 复用已拼好的网格文件；key 含各源图 mtime_ns，角色设定图更新即自动失效。
+_IDENTITY_GRID_CACHE: dict = {}
 
 
 _TE3D_RENDER_LOCK = threading.Lock()
@@ -1159,6 +1162,27 @@ def _build_identity_ref_grid(char_paths: list, out_path: str, target_size=None,
     """
     from PIL import Image
 
+    # ⭐ 2026-10-13 按「内容」缓存（用户口径：身份基准网格按角色缓存）：
+    #    out_path 按 shot 序号命名，但网格内容只取决于「角色视图 + 尺寸 + 布局」——
+    #    同一批角色的镜头内容逐像素相同，此前每镜都重拼（实测 0.5s/镜）。
+    #    key 含各源图 mtime：角色设定图一旦更新，缓存自动失效。
+    _cache_key = None
+    try:
+        _srcs = [p for _g in (rows_paths or []) for p in (_g or [])]
+        if not _srcs:
+            _srcs = list(char_paths or [])
+        _cache_key = (
+            tuple((os.path.normcase(os.path.abspath(p)), int(os.stat(p).st_mtime_ns))
+                  for p in _srcs if p and os.path.isfile(p)),
+            tuple(int(_x) for _x in (target_size or (0, 0))),
+            int(cols), int(rows), bool(repeat),
+        )
+        _hit = _IDENTITY_GRID_CACHE.get(_cache_key)
+        if _hit and os.path.isfile(_hit):
+            return _hit
+    except Exception:  # noqa: BLE001  缓存是加速手段，任何异常都退回正常拼接
+        _cache_key = None
+
     # ---- 新路径（2026-10-13）：按「角色分行 × 视图分列」铺网格（剧情驱动）----
     if rows_paths:
         groups = []
@@ -1186,6 +1210,8 @@ def _build_identity_ref_grid(char_paths: list, out_path: str, target_size=None,
                     (xs[_c], ys[_r]))
         os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
         sheet.save(out_path, "PNG")
+        if _cache_key is not None:
+            _IDENTITY_GRID_CACHE[_cache_key] = out_path
         return out_path
 
     # ---- 旧路径：按去重后的图循环/截断填充（九宫格输出，行为逐字不变）----
@@ -1212,6 +1238,8 @@ def _build_identity_ref_grid(char_paths: list, out_path: str, target_size=None,
         sheet.paste(im, (xs[c], ys[r]))
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     sheet.save(out_path, "PNG")
+    if _cache_key is not None:
+        _IDENTITY_GRID_CACHE[_cache_key] = out_path
     return out_path
 
 
@@ -2245,6 +2273,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         #    注意：② 是 ① 的**子集**，只更保守（不插 ref / 少调一次渲染），不会分叉。
         #    ⚠️ `has_characters` 提示词参数仍只取 ①（declared）—— 见下方与 L2817。
         from config import ENABLE_3D_BLOCKING_IMAGE
+        from config import ENABLE_STORYBOARD_IDENTITY_GRID as _SB_IDENTITY_GRID
         # ⭐ T20：本镜是否走九宫格 —— 收尾镜（场末镜）降级单帧，**本函数唯一判据**，
         #   供三处消费：身份基准网格（3×3 九格只对九宫格输出有意义）/
         #   提示词构建（九宫格版 vs 单帧版）/ 3D 构图基准段。
@@ -2265,7 +2294,11 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         #    角色」（服务于 3D 人偶基准图与无人物镜禁令），而局部特写镜（shot=13 只拍手/
         #    膝头、无完整人脸）会被判 False，却照样需要角色外观锚点：实测这正是收尾镜拿不到
         #    身份基准网格的真因（日志「身份基准网格=0.0s」）。门槛改由「视图数 ≥2」把关。
-        if True:
+        # ⭐ 2026-10-15（用户口径）：身份基准网格默认关闭 —— 见 config.ENABLE_STORYBOARD_IDENTITY_GRID。
+        #    用户实测认定：把多角色拼成一张参考图会让特征串味（每角色仅占 1/2~1/3 面积、
+        #    面部像素被摊薄），权威性反而盖过逐角色单张三视图，是角色不一致的诱因。
+        #    设 True 可完整回退旧行为。
+        if _SB_IDENTITY_GRID:
             # ⭐ T20b（2026-10-13 用户口径）：
             #   ① 收尾镜**也要**身份基准网格 —— T20 补齐把条件从 _sb_grid_mode 收紧为
             #      _p_grid 后，10 个收尾镜一并失去这层锚定（实测 shot=13「身份基准网格=0.0s」）；
@@ -2413,7 +2446,10 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         _t3d_body.set_scene_images(_te3d_scene_images(project_name, episode_no))
                     except Exception as _bp_e:  # noqa: BLE001
                         logger.debug("[3D导演台] 体型登记失败（忽略）：%s", _bp_e)
-                    _blk_out_dir = os.path.join(QC_DIR, project_name, "te3d_blocking")
+                    # ⚠️ 只传「项目 QC 目录」—— te_3d_render 内部会再拼 te3d_blocking 子目录。
+                    #    此前这里又拼了一次，基准图会落到 <项目>/te3d_blocking/te3d_blocking/
+                    #    （双层，2026-10-13 从 qc 目录结构里发现）。
+                    _blk_out_dir = os.path.join(QC_DIR, project_name)
                     # ⚠️ 并发纪律（2026-10-06 预取改造）：render_blocking 不可并发重入
                     #    （回传服务是进程级单例且只有一个 inbox 槽位、浏览器 profile
                     #    目录共享 —— 并发渲染会互相抢回传），预取线程与主循环都可能
@@ -2423,17 +2459,23 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     #    确定 —— 跳过会让预取出的提示词整体作废、预检白跑。锁内自带
                     #    计划哈希 PNG 缓存，同镜重复调用零成本。
                     with _TE3D_RENDER_LOCK:
-                        _blocking_ref_path = te_3d_render.render_blocking(
-                            shot_p, _blk_out_dir,
-                            aspect=":".join(map(str, _sb_style_res.get("ratio") or ("16", "9"))),
-                            width=_sb_size[0],
-                            # ⭐ 按目标像素对齐（2026-10-02）：裸 aspect 字符串在本仓
-                            #    有双语义（style_kit 的 (16,9)＝横屏，而 te_3d_director
-                            #    收 "16:9" 会算成 684 高）→ 基准图 1216×684 ≠ 分镜 1216×672，
-                            #    作 <image1> 定画布会把错的画幅带进分镜图。
-                            #    传 _sb_size 保证逐像素一致（G2 存量失败的真因）。
-                            target_size=_sb_size,
-                        ) or ""
+                        if _p_grid:
+                            # 2026-10-15（用户口径）：九宫格镜头改用「3D 构图基准网格」——
+                            #    逐格渲染 9 个候选机位并拼成 3x3，与输出的九宫格逐格对应，
+                            #    模型照着 3D 网格摆位（比单张站位图强得多）。
+                            #    取景由 te_3d_render.GRID_BLOCKING_CELLS 决定，故不传 aspect/width。
+                            #    返回 None 时静默回落单张 render_blocking（fail-open）。
+                            _blocking_ref_path = te_3d_render.render_blocking_keyframes(
+                                shot_p, _blk_out_dir,
+                                target_size=_sb_size,
+                            ) or ""
+                        if not _blocking_ref_path:
+                            _blocking_ref_path = te_3d_render.render_blocking(
+                                shot_p, _blk_out_dir,
+                                aspect=":".join(map(str, _sb_style_res.get("ratio") or ("16", "9"))),
+                                width=_sb_size[0],
+                                target_size=_sb_size,
+                            ) or ""
                 if _blocking_ref_path:
                     # ⭐ 2026-10-13（用户要求）：**生成前先质检这张基准图**，不通过就不注入。
                     #    基准图是分镜的 <image1> 强先验：人偶人数/站位/景别/姿势错了，分镜图
@@ -2461,7 +2503,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                 target_size=_sb_size, width=_sb_size[0],
                                 out_dir=_blk_out_dir,
                                 render_fn=te_3d_render.render_blocking_from_plan,
-                                max_rounds=2)
+                                max_rounds=4)
                             _bq_hist = "；".join(
                                 "第%d轮 %s" % (int(r.get("round") or 0) + 1,
                                               "通过" if r.get("ok")
@@ -2501,6 +2543,10 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     #    这里显式再归一一次，把「插入顺序」这个隐患彻底封死。
                     refs = _unify_ref_canvas(refs, _sb_size, project_name)
                     labels = [r[1] for r in refs]
+                    # [REFDEBUG 2026-10-15 临时诊断] 打印真实 labels，定位编号偏移
+                    logger.warning("[REFDEBUG] shot=%s refs=%d | %s",
+                                   shot_p.get("shot_id"), len(refs),
+                                   " || ".join("%d:%s" % (i + 1, str(x)[:46]) for i, x in enumerate(labels)))
             except Exception as _3d_e:  # noqa: BLE001
                 logger.warning("[3D导演台] shot=%s 渲染失败（降级为纯文字站位）：%s",
                                    shot_p.get("shot_id"), _3d_e)

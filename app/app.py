@@ -51,7 +51,6 @@ from comfyui_client import (ComfyUIClient, camera_spec as _camera_spec,
                             IDENTITY_GRID_REF_MARK as _IDENTITY_GRID_REF_MARK)
 import comfyui_job_store  # 崩溃免重渲检查点（2026-09-29）：种子沿用判据 + 台账查询
 import preview_gate  # 两级生产（2026-09-29）：预演不可交付 + 预演批准
-import novel_screenplay  # 文学剧本层（2026-10-03 两段式生产：文学剧本→改写为分镜表）
 import quality_stage  # 四层质量状态（2026-09-29：预演也记 A/B 层）
 # ⚠️ 注意：本文件里 `comfyui_client` 这个名字是**实例**（见下方 `comfyui_client = ComfyUIClient()`），
 # 不是模块。因此**模块级函数**（camera_spec / camera_key / get_call_stats 等）必须像上面这样
@@ -282,7 +281,7 @@ from routes.storyboards_api import (
     api_generate_storyboards, api_storyboard_manifest, api_storyboard_file,
     api_storyboard_scratch_file)  # noqa: F401
 from routes.novels_api import (
-    api_novel_screenplay_generate, api_novel_screenplay_get, api_novel_episodes_generate)  # noqa: F401
+    api_novel_episodes_generate)  # noqa: F401
 from routes.video_api import (
     api_video_retry_shot, api_video_retry_shots_batch, api_generate_videos,
     api_video_file, api_video_preview_approve)  # noqa: F401
@@ -400,9 +399,6 @@ from workers.audio import (_audio_line_expect_sec, _audio_qc_lines,  # noqa: F40
 # 2026-10-11 worker 下沉（第二批）：分集批量生成已迁至 workers/episodes.py。
 from workers.episodes import _episodes_worker, _salvage_episode_script  # noqa: F401, E402
 
-# 2026-10-11 worker 下沉（第一批）：本函数已迁至 workers/screenplay.py。
-#   这里保留名字再导出，既有 app._screenplay_worker 调用表面零改动。
-from workers.screenplay import _screenplay_worker  # noqa: F401, E402
 import job_state
 from job_state import (generation_state, lock)  # noqa: F401
 from routes.keyframes import (_keyframes_dir, api_keyframes_file, api_keyframes_generate, api_keyframes_list, api_keyframes_plan)  # noqa: F401

@@ -348,12 +348,17 @@ def build_pose(text: str, extra: Optional[Dict[str, float]] = None,
     #    而剧本 LLM 本来就知道这一镜人物在做什么，让它从固定清单里选一个，命中率接近 100%。
     #    字段缺失/非法 → 回落关键词（老剧本零回归）。
     _hint = str(pose_hint or "").strip()
-    if _hint in PRESETS:
+    # ⭐ 2026-10-15（用户口径「站位动作要按照剧情」）：「stand」是**没指定动作的同义词**，
+    #    不该当成显式声明去压制关键词分析 —— 实测剧本 LLM 给 34/36 镜都填了偷懒的
+    #    pose="stand"，于是「抬手指向」（应命中 point）、「手缓缓握拳」（应命中 fist）、
+    #    「捧腹大笑并抬手点指」等动作全被跳过，人偶 46 镜永远一个站姿。
+    #    改为：只有**非 stand** 的显式预设才压制文本；stand 视同未指定，继续走关键词。
+    if _hint in PRESETS and _hint != "stand":
         text = ""
     else:
         _hint = ""
     preset, over, why = resolve_pose(text)
-    if _hint:
+    if _hint and _hint != "stand":
         preset, why = _hint, ("pose字段:" + _hint)
     values: Dict[str, float] = {}
     if why or extra:

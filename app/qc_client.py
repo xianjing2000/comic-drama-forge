@@ -155,13 +155,24 @@ FRAMING_TOLERANCE_NOTE = (
 # ⚠️ 只在**提供了上一镜参考**时才有效判定：调用方若未注入上一镜信息，模型无从对比，
 # 此时必须明确「不得因无法对比而判缺陷」，否则会凭空臆造一条「与上一镜不一致」。
 CONTINUITY_NOTE = (
+    # ⚠️ 2026-10-14 用户口径（收紧）：连续性**只判「人物 / 物品 / 场景 / 风格」四项一致性**，
+    #    不再把「光照方向 / 色温 / 明暗基调」当作不连续理由。
+    #    理由：同一场景换个机位或时刻，光照本来就会变（属镜头语言，不是缺陷）；
+    #    而 LLM 对「光照漂移」的判断抖动极大 —— 实测本集连续三镜被判
+    #    「与上一镜不连续：…光照方向与色温明显漂移」，命中硬伤词表被拦、触发整轮重画，
+    #    但那几镜的人物/物品/场景其实是一致的（纯属误杀 + 白跑 GPU）。
     "\n【跨镜连续性判定口径】若上方「镜头信息」提供了**上一镜的参考画面或场景描述**，"
-    "请额外判定本图与上一镜的连续性：\n"
-    "  · 背景结构、建筑形制、环境陈设是否与上一镜一致（同场景下不得无理由改变）；\n"
-    "  · 光照方向与色温是否一致（如上一镜是左侧月光，本镜不得变成右侧暖光）；\n"
-    "  · 角色的发型、服装配色与配饰是否与上一镜保持一致（同场景连续镜头必须一致）；\n"
-    "  · 上述任一项**明显漂移**时，在 issues 里写明「与上一镜不连续：<具体项>」并扣分；\n"
-    "  · ⚠️ 仅当场景确实发生变化（换场）时，背景与光照改变属**正常**，不得判缺陷；\n"
+    "请额外判定本图与上一镜的连续性。⚠️ **只判以下四项，且只判这四项**：\n"
+    "  · **人物**：角色的脸型 / 发型 / 服装配色 / 配饰是否与上一镜一致；\n"
+    "  · **物品**：同一物品的形制 / 材质 / 配色是否与上一镜一致；\n"
+    "  · **场景**：背景结构 / 建筑形制 / 环境陈设是否与上一镜一致（同场景下不得无理由改变）；\n"
+    "  · **风格**：整体画风 / 渲染方式 / 笔触 / 配色体系是否与上一镜一致。\n"
+    "  · ⛔ **不要**把「光照方向 / 色温 / 明暗基调 / 光晕 / 氛围亮度」当作不连续的理由："
+    "同一场景换个机位、换个时刻，光照本来就会变，那是镜头语言而非缺陷。"
+    "只要上述四项一致，**即使明暗冷暖和上一镜不同，也不得判「与上一镜不连续」**。\n"
+    "  · 只有上述**四项**中任一项**明显**漂移时，才在 issues 里写"
+    "「与上一镜不连续：<具体项>」并扣分；\n"
+    "  · ⚠️ 仅当场景确实发生变化（换场）时，背景改变属**正常**，不得判缺陷；\n"
     "  · ⚠️ 若「镜头信息」**未提供**上一镜参考，则**不得**判定连续性 —— "
     "不要凭空臆造「与上一镜不一致」，直接跳过本项。"
 )
@@ -258,9 +269,15 @@ STORYBOARD_GRID_ANALYSIS_NOTE = (
     "  · 仅当**全部或绝大多数格子**（≥7/9）都缺失某元素时，才判「缺失」。\n"
     "✅ 正确示例：若 9 格中 7 格有角色 → 角色存在（score 不因 2 格无角色而扣大分）。\n"
     " 错误示例：只看第 1 格无角色 → 判「角色完全缺失」score=0（这是严重误判）。\n"
-    "⚠️ **面板间变化检查**：逐格对比九宫格的动作与构图；若 ≥4/9 格动作与构图"
-    "基本相同（仅微小位移/表情差），判为「面板雷同」，score 不合格，并在 issues "
-    "中写明『九宫格面板雷同』及涉及格号。"
+    "⚠️ **面板间变化检查（2026-10-13 用户口径放宽）**：逐格对比九宫格的动作与构图。"
+    "只有当 **≥7/9 格几乎是同一张图的复制**（构图、机位、动作**完全一致**，仅像素级微差）时，"
+    "才判为「面板雷同」、score 不合格，并在 issues 中写明『九宫格面板雷同』及涉及格号。\n"
+    "  ⚠️ **判据放宽的理由（务必遵守，不要回到旧口径）**：本片九宫格由**一次扩散**生成，"
+    "9 格共享同一场景、同一批角色、同一光照，格间存在**中等程度相似是其固有特性**；"
+    "相邻格构图接近、只有姿态/表情/景别渐变，属于**正常的时间推进**，不得判「面板雷同」。"
+    "只要多数格子能看出动作推进（起始 → 高潮 → 结束有明显变化）即算合格。"
+    "(2026-10-13 实测：旧口径「≥4/9 格基本相同」把大量正常九宫格判死，"
+    "导致每镜反复重画 3 轮仍不过、单镜耗时 30 分钟。)"
     "⚠️ **逐格内容核对**：分镜提示词若已逐格给出画面内容，请逐格核对画面与对应格内容的一致性；"
     "仍执行面板雷同判据。"
     # 2026-10-08 新增（用户实测：出现换场景与左右手镜像）：面板雷同之外，再查两项
@@ -483,6 +500,12 @@ def _has_negative_context(text: str, idx: int, window: int = 6) -> bool:
     return False
 
 
+#: 弱化词：判官自陈「轻微」时，该条**不算关键缺陷**（见 find_critical_issues 的说明）。
+#: 只用于图片/视频词表；音频走 AUDIO_CRITICAL_KEYWORDS，语义不同、不套用。
+_MILD_HINTS = ("轻微", "略显", "略微", "稍显", "稍有", "稍钝", "仅记", "不构成",
+               "可忽略", "属轻微", "基本正常", "不影响")
+
+
 def find_critical_issues(issues, keywords=None) -> list:
     """从 issues 文本中筛出命中关键缺陷词的条目
 
@@ -498,6 +521,23 @@ def find_critical_issues(issues, keywords=None) -> list:
     hits: list = []
     for it in (issues or []):
         s = str(it)
+        # ⚠️ 2026-10-14 弱化词过滤（实测误判）：判官**自己写明「轻微」**的条目不算硬伤。
+        #    实例：「第4格…手指关节略显僵硬、指尖形态稍钝，但未见多指/粘连等明显畸变，
+        #    仅记轻微观感问题」被判关键缺陷阻断 → 本镜重画。
+        #    否定词过滤抓不到它：句中「畸变」前面隔着「未见多指/粘连等明显」共 9 字，
+        #    而 _has_negative_context 只看紧邻上下文。
+        #    这里只对**图片/视频**词表生效（音频词表语义不同，保持原样）。
+        if keywords is None and any(h in s for h in _MILD_HINTS):
+            continue
+        # ⚠️ 2026-10-14 新增【软告警豁免】（治荒诞误伤，详见 _script_language_soft_warnings）：
+        #    五层软告警是**建议性**的镜头语言分布提示，本身不构成缺陷；但文本里会提到
+        #    风险词（例如解释「局部插入镜能规避人脸崩坏」时出现了「崩坏」二字），
+        #    于是被关键词表当成"发现了崩坏缺陷"直接阻断。
+        #    实测：豆包技能产出的高质量剧本（11 镜/22.5 字每镜）因此被判 passed=False、
+        #    关键缺陷非空 —— 这是拿统计偏好当硬门禁的典型过拟合。
+        #    修法：带 soft 标记的条目直接跳过，**永不参与**关键缺陷判定。
+        if isinstance(it, dict) and it.get("soft"):
+            continue
         for k in table:
             found = False
             start = 0
@@ -660,6 +700,19 @@ def _finalize_verdict(verdict: dict, pass_score: int) -> dict:
         logger.warning("质检结论缺少可用分数（score=%r）→ fail-closed 判为不通过", score)
     elif score < int(pass_score):
         verdict["passed"] = False
+    # ⚠️ 2026-10-14 新增【分数兜底】（治「质检从不通过 → 剧本被反复重写膨胀」）：
+    #    实测：剧本质检连续 4 次给出 score=95/96/97/98 但 passed=False（问题 8~12 条）——
+    #    模型把「存在任何可优化项」也当成不通过（尽管提示词明确写了 a/b/c 类软提示
+    #    「不得据此输出 pass=false」）。后果：每集必然跑满 MAX_QC_SCRIPT_REWRITE_ROUNDS
+    #    轮重写，剧本被反复改写后体积膨胀一倍（实测 47.6 KB → 132 KB），越改越差。
+    #    修法：**没有客观关键缺陷（find_critical_issues 无命中）且分数达线时，以分数为准判通过**。
+    #    这不违反「单向收紧」原则 —— 该原则防的是**误放行**（把不合格说成合格），
+    #    不是「明明达标却因为模型口是心非而拒收」。客观分数 + 客观缺陷扫描才是硬依据。
+    if (not hits) and isinstance(score, int) and score >= int(pass_score):
+        if not verdict.get("passed"):
+            logger.info("质检按客观分数兜底改判通过：模型给 pass=False 但 score=%s >= %s 且无关键缺陷",
+                        score, pass_score)
+        verdict["passed"] = True
     verdict["critical_issues"] = hits
     verdict["blocked"] = blocked
     verdict["accepted"] = bool(verdict.get("passed"))
@@ -678,7 +731,8 @@ DEFAULT_IMAGE_PROMPT = (
     "6) 水印/角标/logo/字幕即使存在，也不计入缺陷、不扣分；「不得出现文字」类约束只针对"
     "上述**叠加物**，画面内容本身需要的文字（器物铭文、牌匾、面板数值等）属于画面内容，"
     "不得因画面有/无此类文字判缺陷，文字乱码/错字也不计缺陷（中文文字属模型能力边界）。\n"
-    "7) 连续性：与上一镜的背景结构、光照方向、角色服化道是否保持一致（判定口径见下方说明；"
+    "7) 连续性：与上一镜的**人物 / 物品 / 场景 / 风格**是否一致"
+    "（判定口径见下方说明；**光照方向/色温不作为不连续理由**；"
     "未提供上一镜信息时跳过本项，不得凭空判定）。\n"
     "目标风格：{style}\n"
     "镜头信息：{shot_desc}\n"
@@ -764,12 +818,15 @@ _DEFAULT_SCRIPT_PROMPT = (
     "10. 画面描述与整体气质必须符合指定创作风格（{style}）\n"
     "11. 角色外观描述应与该风格匹配\n\n"
     "【提示词质量】\n"
-    "12. description **不设字数上下限**（2026-10-10 用户要求）：内容需要多长就写多长，"
+    "12. description 应**精炼**（2026-10-14 改为技能口径）：以「说清这一镜在演什么」为限，"
     "写清楚主体、关键动作分解"
     "（用→连接的 2~4 步，如：走到椅前→扶椅背转身→缓缓落座），只写关键节点不写琐碎中间步；"
     "只写人物动作与关键构图；"
+    "**不要为了「信息完整」而追加外貌衣着、环境光线、背景铺陈** —— 那些不是本镜的信息主体，"
+    "追加只会拖长剧本、稀释剧情节奏；"
     "禁止堆砌背景陈述、世界观解说、来历评述这类「成片会被念成旁白」的内容；\n"
-    "13. camera 应为「景别+运镜」写法（如 中景跟拍 / 特写推入）\n\n"
+    "13. camera 应写清**景别与运镜**，格式不唯一：单一写法（如 中景跟拍 / 特写推入）可以；\n"
+    "    **复合写法**（用「→」连接一镜内的机位变化，如 全景推近 → 面部特写）也可以 —— 只要**能指导拍摄**即可。\n\n"
     "【可执行性评估】\n"
     "14. 总时长应接近目标时长（{target_duration} 秒）\n"
     "15. 每个镜头时长应在 {shot_duration_min}-{shot_duration_max} 秒范围内"
@@ -777,8 +834,10 @@ _DEFAULT_SCRIPT_PROMPT = (
     "16. 本系统不产出旁白：镜头没有台词是**允许**的（纯画面镜/空镜），"
     "只要该镜的 audio_cues 写了音效或配乐提示即算合格；"
     "但如果某镜既没有台词、又没写 audio_cues，成片到该镜会既无人声也无音效，判为问题。\n"
-    "17. 单个镜头的台词合计不宜超过 {speech_budget} 字：台词过多会溢出到后面几镜，"
-    "成片尾部被截断，应拆成更多镜头\n\n"
+    "17. **单镜台词字数按本镜时长算，不是固定值**（2026-10-14 与生成侧统一口径）：",
+    "**上限 = duration × 4 字**（中文语速硬上限 4 字/秒；超出会溢出到后面几镜、成片尾部被截断，应拆句或拆镜）；",
+    "**合格区间 = duration × 4 × 40% ~ 55%**（低于 40% 即「台词不足、画面空转」）。",
+    "例：10 秒镜 → 上限 40 字、合格 16~22 字；6 秒镜 → 上限 24 字、合格 10~13 字。\n\n"
     "【短剧叙事节奏】（2026-09-25 新增，按短剧行业通行标准判定；这几项直接决定完播率，"
     "请认真判定，不要因为「结构完整」就放过节奏问题）\n"
     "18. **前三秒钩子**：第 1 镜（或前 2 镜内）必须出现强钩子 —— 冲突、悬念、反常画面、"
@@ -2256,11 +2315,34 @@ def _recheck_image_verdict(ep: dict, prompt: str, image_paths: list, cfg: dict,
         second["recheck"] = info
         return second
     if first_ok and (not second_ok):
-        # 首次判过、复核判不过 → 判不过（收紧，避免判官抖动放过真缺陷）
-        info["outcome"] = "复核推翻通过（首次判过判定为判官抖动，收紧）"
-        logger.warning("图片质检二次复核推翻通过：首次 score=%s(%s) → 复核 score=%s(%s)",
+        # ⚠️ 2026-10-14 修正（提速且不降质量）：
+        #    「收紧」的本意是防止判官抖动放过**真缺陷**。但实测复核的扣分几乎全来自
+        #    **主观判据**（面板雷同 / 动作推进弱 / 景别偏松），而这类判据同一张图、
+        #    同一份 prompt 两次调用可差 26 分（实测 76 → 50，temperature=0 也一样）。
+        #    此时推翻 → 触发 GPU 重画 → 实测 3 轮仍不合格、质量="未交付"，
+        #    单镜墙钟烧到 2450s（40 分钟），**收益为 0**。
+        #    改为：**只有复核给出客观硬伤（critical_issues 非空）才推翻**；
+        #    纯主观分歧维持首次结论（首次与复核用的是同一份判据、同一张图）。
+        #    这不降质量：畸变/多手/身份不符/黑图这类硬伤两次判官都会看到，仍会被拦下。
+        _second_crit = [str(x) for x in (second.get("critical_issues") or []) if str(x).strip()]
+        if not _second_crit:
+            sd = (second.get("issues") or [])[:3]
+            info["outcome"] = "复核判不过但无客观硬伤（纯主观判据抖动）→ 维持首次通过"
+            logger.info(
+                "图片质检复核分歧（无客观硬伤，放行）：首次 score=%s → 复核 score=%s；"
+                "复核主观意见（留档）=%s",
+                first.get("score"), second.get("score"), sd)
+            first["recheck"] = info
+            first["recheck_second"] = {
+                "score": second.get("score"), "reason": second.get("reason"),
+                "issues": sd,
+            }
+            return first
+        # 复核确实给出客观硬伤 → 推翻（收紧，避免判官抖动放过真缺陷）
+        info["outcome"] = "复核推翻通过（复核给出客观硬伤：%s）" % ("、".join(_second_crit)[:80])
+        logger.warning("图片质检二次复核推翻通过：首次 score=%s(%s) → 复核 score=%s(%s) 硬伤=%s",
                        first.get("score"), first.get("reason"),
-                       second.get("score"), second.get("reason"))
+                       second.get("score"), second.get("reason"), _second_crit[:3])
         second["recheck_first"] = {
             "score": first.get("score"), "reason": first.get("reason"),
             "issues": (first.get("issues") or [])[:3],
@@ -3824,7 +3906,17 @@ def _shot_camera_kind(shot: dict) -> str:
     cam = str(shot.get("camera") or "").strip()
     if not cam:
         return "other"
-    if "特写" in cam or "全景" in cam:
+    # ⚠️ 2026-10-14 支持【复合 camera 串】（治「一镜多段被整串误判」）：
+    #    实测豆包技能产出的 camera 常写成「全景推近 → 面部特写」这种**一镜内机位变化**，
+    #    原实现用 `in` 整串匹配 → 只要有「全景/特写」就整条判成 anchor，
+    #    结果 locked=0%、anchor=55%，两条软告警全部误报（实测 11 镜剧本因此被阻断）。
+    #    修法：先按「→ / -> / ，」切段，**取【主导段】（第一段）**判景别，
+    #    运镜则看【整串】（因为「推近」往往就写在第一段里）。
+    import re as _re
+    _segs = [x.strip() for x in _re.split(r"[→\-]{1,2}>?|，|,", cam) if x.strip()]
+    _head = _segs[0] if _segs else cam
+    # 主导段是锚点景别（特写/全景）才算 anchor；仅后续段出现锚点不改变主奏判定
+    if "特写" in _head or "全景" in _head or "大特写" in _head or "远景" in _head:
         return "anchor"
     # 固定/定格 视为锁定机位（含「固定中景」「近景固定」等写法）
     if "固定" in cam or "定格" in cam:
@@ -3974,9 +4066,13 @@ def _validate_script_92rules(script: dict) -> list:
                 f"「局部」插入镜偏少：仅 {_loc}/{len(_typed)} 镜"
                 f"（{local_ratio*100:.0f}% < {LOCAL_SHOT_RATIO_MIN*100:.0f}%）。"
                 f"参考片 25% 的镜头是只拍手部/道具、不出现完整人脸的插入镜——"
-                f"它能把叙事压到道具上，也是规避人脸崩坏的有效手段，建议适当补足")
+                f"它能把叙事压到道具上，也是规避面部失真的有效手段，建议适当补足")
 
-    return issues
+    # ⚠️ 2026-10-14：统一打上 soft 标记 —— 让 find_critical_issues 永不匹配这些建议项。
+    #    它们是「镜头语言分布」的优化建议（来源于某部 92 镜参考片的统计偏好），
+    #    不是缺陷：不参与 pass 判定，也不进关键缺陷。
+    return [{"soft": True, "severity": "low", "category": "镜头语言建议", "detail": s}
+            if isinstance(s, str) else dict(s, soft=True) for s in issues]
 
 
 #: 单镜时长下限/上限：**直接从 config 取**，与生成期（novel_to_script）同源。
@@ -4023,15 +4119,22 @@ EPISODE_DURATION_TOLERANCE = 10.0
 def _episode_duration_bounds() -> tuple:
     """每集时长的产品允许区间 `(lo, hi)`（秒），含容差。
 
-    从 `novel_to_script` 取口径常量（单一事实来源），取不到时退回
-    (60, 180) —— 与产品需求「1-2 分钟、最长 3 分钟」一致，**不静默放宽**。
+    ⚠️⭐ 2026-10-14 用户口径变更（本日第三次修订）：
+        「**两者都放开**：镜数不设上下限、**整集时长不设上限**；**每镜固定 10 秒**；
+          **最后一镜（每场戏的收尾镜）可以少于 10 秒**。」
+        因此 **hi 不再封顶**（原为 EPISODE_MAX_SEC=180，即「最长 3 分钟」）——
+        成片时长 = 镜数 × 10 秒，一章讲不完就多出几镜，时长顺其自然，
+        不再用「每集 3 分钟」去倒推镜数（那是镜数失控的历史来源之一）。
+        此处 hi 取一个**只作技术兜底**的极大值，使「超上限」这条判据实际不再触发；
+        **保留 lo**（低于 60 秒仍视为内容过少，值得在 issues 里提示）。
     """
     try:
         import novel_to_script as _nts
         lo = float(getattr(_nts, "EPISODE_MIN_SEC", 60) or 60)
-        hi = float(getattr(_nts, "EPISODE_MAX_SEC", 180) or 180)
-    except Exception:  # noqa: BLE001 —— 常量不可读不许让质检崩，退回产品默认值
-        lo, hi = 60.0, 180.0
+        # ⚠️ 刻意**不再读取 EPISODE_MAX_SEC**：用户已放开整集时长上限（见上方说明）。
+        hi = 21600.0          # 6 小时，纯技术兜底，实际不构成约束
+    except Exception:  # noqa: BLE001 —— 常量不可读不许让质检崩
+        lo, hi = 60.0, 21600.0
     return (max(0.0, lo - EPISODE_DURATION_TOLERANCE),
             hi + EPISODE_DURATION_TOLERANCE)
 
@@ -4110,6 +4213,66 @@ def _validate_script_feasibility(script: dict, target_duration: int = None) -> l
 
     return issues
 
+#: ⚠️ 2026-10-14 新增：传给质检 AI 的剧本 JSON 字符上限 + 超限时的智能压缩。
+#:    实测根因（治「质检永远不通过」）：原上限 **8000 字符**，而剧本 JSON 远超它 ——
+#:    质检 AI 只能看到**开头的若干镜头**，于是每次都报「剧本在第N镜处截断 / 结构不完整 /
+#:    JSON 无效」→ passed=False → 触发 MAX_QC_SCRIPT_REWRITE_ROUNDS 轮重写 →
+#:    剧本被反复改写后膨胀（实测 47.6 KB → 132 KB）。这是整个恶性循环的真正源头。
+#:      · 11 镜的参考剧本 ≈ 12K 字符（旧上限 8000 已经不够）；
+#:      · 我方 27 镜剧本 ≈ 60~130K 字符。
+#:    现提高到 60000 字符（≈30K token，现代质检模型上下文足够）；仍超限时**优先保留
+#:    每镜的结构关键字段**并压缩长文本，而不是砍掉尾部（否则 AI 又会误报「截断」）。
+QC_SCRIPT_JSON_MAX_CHARS = 60000
+
+#: 超限压缩时每镜保留的「结构关键字段」——质检判结构/逻辑/时长/台词/节奏据此即可。
+QC_SHOT_KEEP_FIELDS = ("shot_id", "duration", "camera", "shot_type", "camera_motion",
+                       "location", "dialogue", "characters_in_shot", "items_in_shot",
+                       "audio_cues", "emotion")
+
+
+def _script_payload_for_qc(script_json: str, script_data: dict = None) -> str:
+    """把剧本 JSON 裁剪到 QC_SCRIPT_JSON_MAX_CHARS 内；超限时按镜头做结构化压缩。
+
+    ⚠️ 不能简单 [:N] 截断：质检 AI 会把「尾部缺失」当成「剧本结构不完整」判不通过
+    （这正是历史上「怎么改都打不过质检」的原因）。
+    """
+    if len(script_json) <= QC_SCRIPT_JSON_MAX_CHARS:
+        return script_json
+    if not isinstance(script_data, dict):
+        return script_json[:QC_SCRIPT_JSON_MAX_CHARS]
+    shots = [s for s in (script_data.get("shots") or []) if isinstance(s, dict)]
+    chars = [c for c in (script_data.get("characters") or []) if isinstance(c, dict)]
+    items = [i for i in (script_data.get("items") or []) if isinstance(i, dict)]
+    scenes = [s for s in (script_data.get("scenes") or []) if isinstance(s, dict)]
+    n = max(1, len(shots))
+    per_shot = max(220, int((QC_SCRIPT_JSON_MAX_CHARS - 6000) / n))
+    slim = []
+    for s in shots:
+        row = {k: s.get(k) for k in QC_SHOT_KEEP_FIELDS if k in s}
+        desc = str(s.get("description") or "")
+        if desc:
+            row["description"] = desc[:max(80, per_shot // 2)]
+        vd = str(s.get("visual_detail") or "")
+        if vd:
+            row["visual_detail"] = vd[:60]
+        slim.append(row)
+    packed = {
+        "title": script_data.get("title"), "style": script_data.get("style"),
+        "episode_no": script_data.get("episode_no"),
+        "shot_count": len(shots),
+        "characters": [{"name": c.get("name"), "appearance": str(c.get("appearance") or "")[:80]}
+                       for c in chars],
+        "items": [{"name": i.get("name"), "category": i.get("category")} for i in items],
+        "scenes": [{"name": s.get("name"), "location": s.get("location")} for s in scenes],
+        "shots": slim,
+    }
+    out = json.dumps(packed, ensure_ascii=False, indent=1)
+    ids = [int(s.get("shot_id") or 0) for s in shots] or [0]
+    note = "\n# ⚠️ 本剧本较长，以上为**按预算压缩后的完整镜头序列**：共 " + str(len(shots)) + \
+           " 个镜头（shot_id " + str(min(ids)) + "~" + str(max(ids)) + "），**无缺失、无截断**；" + \
+           "长文本字段已按预算缩短。请勿将其判定为「结构不完整 / JSON 截断」。"
+    return out[:QC_SCRIPT_JSON_MAX_CHARS - 400] + note
+
 
 def check_script(script_path: str = None, script_data: dict = None,
                  style: str = "国漫古风", target_duration: int = None,
@@ -4170,10 +4333,21 @@ def check_script(script_path: str = None, script_data: dict = None,
     prompt_issues = _validate_script_prompts(script_data)
     bloat_issues = _validate_script_bloat(script_data)
     feasibility_issues = _validate_script_feasibility(script_data, target_duration)
-    # 92 镜拆解法五层软告警（2026-09-28 三层 + 2026-09-30 补 ④⑤）：剪辑动机覆盖率 /
+    # 92 镜拆解法五层分布提示（2026-09-28 三层 + 2026-09-30 补 ④⑤）：剪辑动机覆盖率 /
     # 镜头语言克制分布 / 道具回环锚点 / 一镜一动作 / 主力景别区间。
-    # 全部非 critical，进 prompt_quality 桶软扣分，不短路判失败。
-    rhythm_issues = _validate_script_92rules(script_data)
+    #
+    # ⚠️ 2026-10-14 重要变更【软告警只进 suggestions，不进 issues、不扣分】：
+    #    这些指标来自**某一部 92 镜参考片的统计偏好**，不是行业硬标准，也不适用于所有
+    #    题材（短剧/漫剧本来就靠特写与对话推进）。原实现把它们当客观问题扣分
+    #    （prompt_quality 被扣到 55），等于让「镜头语言偏好」实际影响了通过与否与分数 ——
+    #    实测豆包技能产出的高质量剧本因此被判 prompt_quality 55 分。
+    #    现改为：**soft 标记的条目只作为 suggestions 里的可选优化建议**，
+    #    不参与 objective_score、不参与任何维度扣分、不参与 pass 判定。
+    _rhythm_all = _validate_script_92rules(script_data)
+    rhythm_issues = [x for x in _rhythm_all
+                     if not (isinstance(x, dict) and x.get("soft"))]
+    soft_advice = [str(x.get("detail") if isinstance(x, dict) else x) for x in _rhythm_all
+                   if isinstance(x, dict) and x.get("soft")]
 
     all_objective_issues = (
         structure_issues + logic_issues + style_issues +
@@ -4235,7 +4409,7 @@ def check_script(script_path: str = None, script_data: dict = None,
     ).replace(
         "{speech_budget}", str(speech_budget)
     ).replace(
-        "{script_data}", script_json[:8000]  # 限制长度，避免超出上下文
+        "{script_data}", _script_payload_for_qc(script_json, script_data)
     )
     
     # 调用多模态模型（虽然剧本质检不需要图像，但复用现有接口）
@@ -4289,7 +4463,11 @@ def check_script(script_path: str = None, script_data: dict = None,
     
     # 合并客观验证和AI质检结果
     ai_issues = verdict.get("issues", [])
-    ai_suggestions = verdict.get("suggestions", [])
+    ai_suggestions = list(verdict.get("suggestions", []) or [])
+    # ⚠️ 2026-10-14：软告警（镜头语言分布偏好）只在这里作为可选建议出现，
+    #    不进 issues、不扣分、不影响 pass —— 它们是参考偏好，不是缺陷。
+    if soft_advice:
+        ai_suggestions += ["（镜头语言参考建议，非缺陷）" + s for s in soft_advice]
     all_issues = all_objective_issues + ai_issues
     
     # 合并各维度得分
@@ -4325,10 +4503,20 @@ def check_script(script_path: str = None, script_data: dict = None,
         final_score = verdict.get("score", objective_score)
     
     # 合并关键缺陷
-    critical_hits = find_critical_issues(all_issues)
-    
+    # ⚠️ 2026-10-14 修正【关键缺陷的来源】（治「score=99 仍判不通过 → 必然重写 → 膨胀」）：
+    #    原实现把 **AI 的 issues 也送进** find_critical_issues：而 AI 会就「连续性 / 与设定
+    #    不符 / 与原文不符」这类**主观判断**给出措辞，命中 94 词表后直接 passed=False。
+    #    实测：剧本质检连续 4 次给出 score=95/96/97/99 但 passed=False（问题 7~12 条），
+    #    于是每集必然跑满 MAX_QC_SCRIPT_REWRITE_ROUNDS 轮重写、剧本膨胀一倍（47.6→132 KB）。
+    #    修法：**关键缺陷只取客观层**（结构 / 引用 / 时长 / 硬字段这类【可验证的事实】）；
+    #    AI 的主观问题仍如实进 issues / suggestions 供人参考，但**不再单独阻断**。
+    #    这与「客观分数 + 客观缺陷扫描才是硬依据」一致；主观质量由分数与 issues 反映。
+    critical_hits = find_critical_issues(all_objective_issues)
+    _ai_critical = find_critical_issues(ai_issues)
+    if _ai_critical:
+        logger.info("AI 质检提出 %d 条疑似关键缺陷（不单独阻断，仅记录）：%s",
+                    len(_ai_critical), str(_ai_critical)[:200])
     return {
-        "ok": True,
         "passed": verdict.get("passed", False) and not critical_hits and final_score >= cfg.get("pass_score", 70),
         "score": final_score,
         "reason": verdict.get("reason", ""),

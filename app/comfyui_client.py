@@ -938,6 +938,70 @@ def h3_cache_name(project_name, ep, scene, batch=None) -> str:
     return "__".join(parts)
 
 
+
+
+
+
+#: 群像成员的**差异维度**（确定性展开）——保证画面里是「多个不同的人」，
+#: 而不是同一个人的复制。每条 = (体型描述, 姿态, 神情)。
+#: ⚠️ 2026-10-14（用户报「群像还是一个人」，并给出期望模板）：
+#:    「群像合影，{N}个人物并排站立，从左到右依次是：{角色1描述}、{角色2描述}…」
+#:    此前只把名单长度当人数，而名单里往往只有**一个集合名词**（外门弟子群像）——
+#:    模型只拿到一份描述，于是把同一个人复制 N 遍（实测三张脸完全一致）。
+#:    这里为每个位置给一组互不相同的体型/姿态/神情，让第 N 位是「另一个人」。
+_CROWD_MEMBER_VARIANTS = (
+    ("身材高挑、体型偏瘦", "抱臂而立、下巴微抬", "神情轻蔑"),
+    ("中等个头、体形敦实", "双手叉腰", "嘴角下撇、面露讥笑"),
+    ("身高偏矮、肩膀厚实", "一手搭在同伴肩上", "咧嘴起哄"),
+    ("身形瘦削、脖子略长", "双手拢在袖中", "眼神游移、与人交头接耳"),
+    ("体格壮硕、肩背宽厚", "抱胸站着", "眉头拧起、满脸不耐"),
+    ("中等偏瘦、背略驼", "一手扶着腰", "低声嘀咕"),
+    ("高个宽肩、动作外放", "双臂张开比划", "高声附和"),
+    ("矮个精瘦、圆脸", "缩着脖子", "偷偷张望"),
+)
+
+
+def _crowd_member_descriptions(n: int) -> str:
+    """按用户给的模板，为群像合影生成 n 位**互不相同**成员的描述。
+
+    ⚠️ 关键：必须逐位给出差异（体型/姿态/神情），否则模型会把同一个人复制 N 遍。
+    返回形如：「从左到右依次是：第1位：…；第2位：…」。
+    """
+    n = max(1, int(n or 1))
+    _items = []
+    for i in range(n):
+        body, pose, mood = _CROWD_MEMBER_VARIANTS[i % len(_CROWD_MEMBER_VARIANTS)]
+        _items.append("第%d位（%s，%s，%s）" % (i + 1, body, pose, mood))
+    return ("从左到右依次是：%s。" % "；".join(_items) +
+            "**这几位必须是长相、体型、神情各不相同的人**（同一门派弟子的不同个体），"
+            "绝不能是同一个人物的复制或多角度视图。")
+
+
+def _strip_sheet_phrases(text: str) -> str:
+    """剥离基础提示词里的「三视图横排」类**版面要求**（档位版式会另给版面）。
+
+    ⚠️ 2026-10-14（用户报「群像只生成了一个人」「林清雪没有细节三视图」的深层原因）：
+    reference_prompt_zh 模板统一写了「正面、侧面、背面三张全身视图横排，从头到脚完整入画，
+    身高比例一致」，而 minor（单张立绘）/ crowd（多人合影）档要的是**别种版面**。
+    实测只在后面**追加**新版式不起作用 —— 模型听前面那句：
+      · minor 档 prompt =「…三视图横排…。单人全身立绘，正面朝向…」→ 仍画三视图；
+      · crowd 档 prompt =「…三视图横排…。群像合影，5 位人物…」→ 画成「同一个人的多角度」。
+    故这里先按分句剥离含「视图」的版面描述，再由调用方追加档位版式。
+
+    只剥离**版面句**（含三视图/视图横排等词的分句），不碰角色外观描述 ——
+    「黑色短发」这类特征句里不含这些词，不会被误删。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return s
+    _parts = re.split(r"(?<=[。；;！!？?])", s)
+    _kept = [p for p in _parts
+             if not any(w in p for w in ("三视图", "视图横排", "三张全身视图",
+                                          "正面、侧面", "正面,侧面", "正、侧、背"))]
+    out = "".join(_kept).strip()
+    return out or s
+
+
 class ComfyUIClient:
     """ComfyUI API 客户端"""
 
@@ -1198,6 +1262,151 @@ class ComfyUIClient:
                     named["cache_name"] = str(cache_name)
                     n += 1
         return n
+
+    # ===================== 分镜工作流「代码生成」（2026-10-15 用户口径） =====================
+    # 背景：分镜工作流原先依赖手工维护的 JSON 模板（分镜生成_Qwen21.json，从早期参考
+    # 工作流演进而来），**固定 9 个参考图槽位**，每次改结构都要手工编辑 JSON ——
+    # 实测因此踩过两次坑（KSampler 参数因 widgets_values 顺序错位、节点数量与实参不符）。
+    # 用户明确要求：「你就不能直接用代码生成 json，控制拼接成工作流吗」。
+    # 本函数即为按需生成：**槽位数量由 ref_count 决定**，没有固定 9 槽、也没有尾部清理。
+
+    @staticmethod
+    def build_storyboard_workflow_api(ref_count: int, *,
+                                      unet_name: str,
+                                      clip_name: str,
+                                      vae_name: str,
+                                      steps: int = 40,
+                                      cfg: float = 1.0,
+                                      seed: int = 0,
+                                      denoise: float = 1.0,
+                                      sampler_name: str = "euler",
+                                      scheduler: str = "simple",
+                                      attention: str = "sageattn",
+                                      megapixels: float = 1.0,
+                                      aspect_ratio: str = "16:9 (Widescreen)",
+                                      multiple: int = 32,
+                                      filename_prefix: str = "Qwen_image_2.1",
+                                      enable_cache_node: bool = True) -> dict:
+        """按参考图数量生成分镜工作流的 **API prompt**（不再读 JSON 模板）。
+
+        :param ref_count: 参考图槽位数量（= 本次实际要喂的图片数）。
+            传 4 就只有 4 个 LoadImageOutput/ImageScaleToTotalPixels —— 不存在多余槽位，
+            因此也就没有「清空/删除尾部槽位」那套三步联动清理。
+        :returns: 可直接 POST /prompt 的 API 字典（结构见下方节点编号表）。
+
+        节点编号（固定语义，便于排障）：
+          1 UNETLoader / 2 CLIPLoader / 3 VAELoader / 4 TESpeed / 5 Cache(可选)
+          6 KSampler / 7 TextEncodeQwenImage21（prompt+negative+latent 三输出）
+          100+i LoadImageOutput（第 i 张参考图，i 从 0 起）
+          200+i ImageScaleToTotalPixels（与 100+i 一一对应）
+          300 VAEDecode / 301 SaveImageAdvanced / 302 ResolutionSelector
+        """
+        n = max(1, int(ref_count or 0))
+        api: dict = {}
+        api["1"] = {"class_type": "UNETLoader",
+                    "inputs": {"unet_name": unet_name, "weight_dtype": "default"}}
+        api["2"] = {"class_type": "CLIPLoader",
+                    "inputs": {"clip_name": clip_name, "type": "qwen_image",
+                               "device": "default"}}
+        api["3"] = {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}}
+        # TE-Speed 加速：attention 必须是 sageattn（kitchen_int8 等于关掉加速器，实测慢 1.5 倍）
+        api["4"] = {"class_type": "TESpeedQwenImage21",
+                    "inputs": {"model": ["1", 0], "attention": attention,
+                               "step_cache": "te_predictor", "reuse_threshold": 0.06,
+                               "start_percent": 0, "end_percent": 0,
+                               "predictor_error_limit": 0.08, "verbose": True}}
+        model_src = ["4", 0]
+        if enable_cache_node:
+            api["5"] = {"class_type": "QwenImage21Cache",
+                        "inputs": {"model": ["4", 0], "device": "auto", "dtype": "default"}}
+            model_src = ["5", 0]
+        # 参考图槽位：按 ref_count 动态生成，编号 100+i / 200+i
+        image_links: dict = {}
+        for i in range(n):
+            lid, sid = str(100 + i), str(200 + i)
+            api[lid] = {"class_type": "LoadImageOutput", "inputs": {"image": ""}}
+            api[sid] = {"class_type": "ImageScaleToTotalPixels",
+                        "inputs": {"image": [lid, 0], "upscale_method": "nearest-exact",
+                                   "megapixels": megapixels, "resolution_steps": multiple}}
+            image_links["images.image_%d" % (i + 1)] = [sid, 0]
+        # 正向编码节点：clip + 全部参考图槽 + 负向词 + 一段式 latent（三输出）
+        te_inputs: dict = {"clip": ["2", 0]}
+        te_inputs.update(image_links)
+        te_inputs.update({"vae": ["3", 0], "prompt": "", "negative_prompt": "",
+                          "resolution": 0})
+        api["7"] = {"class_type": "TextEncodeQwenImage21", "inputs": te_inputs}
+        api["6"] = {"class_type": "KSampler",
+                    "inputs": {"model": model_src, "positive": ["7", 0],
+                               "negative": ["7", 1], "latent_image": ["7", 2],
+                               "seed": int(seed), "steps": int(steps), "cfg": float(cfg),
+                               "sampler_name": sampler_name, "scheduler": scheduler,
+                               "denoise": float(denoise)}}
+        api["300"] = {"class_type": "VAEDecode",
+                      "inputs": {"samples": ["6", 0], "vae": ["3", 0]}}
+        api["301"] = {"class_type": "SaveImageAdvanced",
+                      "inputs": {"images": ["300", 0], "filename_prefix": filename_prefix,
+                                 "format": "png", "format.bit_depth": "8-bit",
+                                 "format.input_color_space": "sRGB"}}
+        api["302"] = {"class_type": "ResolutionSelector",
+                      "inputs": {"aspect_ratio": aspect_ratio,
+                                 "megapixels": megapixels, "multiple": multiple}}
+        return api
+
+    @staticmethod
+    def _find_ref_slot_nodes(api: dict) -> list:
+        """列出代码生成工作流里的参考图槽位节点 id（LoadImageOutput / ImageScale）与编码键。"""
+        loads = sorted([int(k) for k, v in api.items()
+                        if v.get("class_type") == "LoadImageOutput"])
+        scales = sorted([int(k) for k, v in api.items()
+                         if v.get("class_type") == "ImageScaleToTotalPixels"])
+        return loads, scales
+
+    @staticmethod
+    def _extract_storyboard_params(api: dict) -> dict:
+        """从（旧模板转换来的）API prompt 里提取生成参数，供代码重建时复用。"""
+        def first(ct: str):
+            for v in api.values():
+                if v.get("class_type") == ct:
+                    return v.get("inputs") or {}
+            return {}
+        un = first("UNETLoader"); cl = first("CLIPLoader"); va = first("VAELoader")
+        ks = first("KSampler"); rs = first("ResolutionSelector")
+        sc = first("ImageScaleToTotalPixels"); te = first("TESpeedQwenImage21")
+        cache = any(v.get("class_type") == "QwenImage21Cache" for v in api.values())
+        return {
+            "unet_name": un.get("unet_name") or "",
+            "clip_name": cl.get("clip_name") or "",
+            "vae_name": va.get("vae_name") or "",
+            "steps": int(ks.get("steps") or 40),
+            "cfg": float(ks.get("cfg") if ks.get("cfg") is not None else 1.0),
+            "sampler_name": ks.get("sampler_name") or "euler",
+            "scheduler": ks.get("scheduler") or "simple",
+            "denoise": float(ks.get("denoise") if ks.get("denoise") is not None else 1.0),
+            "attention": te.get("attention") or "sageattn",
+            "megapixels": float(rs.get("megapixels") or sc.get("megapixels") or 1.0),
+            "aspect_ratio": rs.get("aspect_ratio") or "16:9 (Widescreen)",
+            "multiple": int(rs.get("multiple") or 32),
+            "enable_cache_node": bool(cache),
+        }
+
+    def _rebuild_storyboard_workflow(self, api: dict, ref_count: int) -> dict:
+        """用代码重建分镜节点图（槽位 = ref_count），参数沿用传入 api 里的取值。
+
+        为什么这样做（2026-10-15 用户口径）：原实现直接用手工维护的 JSON 模板，
+        固定 9 槽 + 需要「尾部槽位三步联动清理」，历史上因此出过 KSampler 参数错位、
+        节点数量与实参不符等问题。改为**参数从模板取、结构由代码生成** ——
+        既保留用户可调参数的便利，又让槽位数量天然正确、不再需要清理逻辑。
+        """
+        try:
+            params = self._extract_storyboard_params(api)
+            rebuilt = self.build_storyboard_workflow_api(max(1, int(ref_count)), **params)
+            logger.info("[分镜工作流] 代码重建：槽位=%d（原模板 %d 槽）节点 %d → %d",
+                        max(1, int(ref_count)),
+                        len(self._find_ref_slot_nodes(api)[0]), len(api), len(rebuilt))
+            return rebuilt
+        except Exception as e:  # noqa: BLE001 —— 重建失败回落原模板，绝不阻断出图
+            logger.warning("[分镜工作流] 代码重建失败（回落 JSON 模板）：%s", e)
+            return api
 
     def load_workflow(self, workflow_file: str, return_meta: bool = False,
                       cache_name: str = None):
@@ -2420,6 +2629,45 @@ class ComfyUIClient:
             logger.info(f"[风格冲突清理] 负向提示词已修正 {len(changed)} 处: {changed}")
         return changed
 
+    #: ⚠️ 2026-10-14 新增：提示词里的「无X / 没有X」类**否定短语**——图像模型会把它画成字。
+    #:    实测：物品「筑基丹」的正向提示词含「边缘圆润**无**棱角」「构图稳定，**无**畸形」，
+    #:    出图在画面正中画了一个**大号汉字「无」**（三个物品资产全部中招，用户报障）。
+    #:    根因：扩散模型不擅长理解否定语义 —— 提示词**只能写「要什么」，不能写「不要什么」**。
+    #: ⚠️ 二次修正（2026-10-14）：否定词可以**紧跟在汉字之后**（「边缘圆润**无**棱角」），
+    #:    所以不能要求前面必须是标点 —— 初版要求 `^` 或标点前缀，实测漏掉了最主要的那个
+    #:    「无棱角」。现改为**只吸收否定词本身 + 其后 1~6 字**，不吞前面的正向描述。
+    _NEG_PHRASE_RE = re.compile(
+        r"(?:无|没有|不带|不含|不得)[\u4e00-\u9fa5A-Za-z0-9]{1,6}")
+
+    @classmethod
+    def strip_negation_phrases(cls, prompt_zh: str) -> str:
+        """删掉提示词里的「无X / 没有X」否定短语（幂等），避免图像模型把否定词画成字。
+
+        只删**否定短语本身**，保留该分句的正向内容：
+            「边缘圆润无棱角」    → 「边缘圆润」      （信息未丢：正向描述已说清）
+            「构图稳定，无畸形」  → 「构图稳定」
+
+        ⚠️ 为什么整段删而不改写：图像模型看的是「画面里有什么」；把「不要什么」改写成
+        「要什么」需要图像语义知识、容易改错。而留下的正向描述本来就已完整表达了该特征
+        （说了「边缘圆润」就不必再说「无棱角」）。
+        """
+        text = (prompt_zh or "").strip()
+        if not text or not cls._NEG_PHRASE_RE.search(text):
+            return text
+        out = cls._NEG_PHRASE_RE.sub("", text)
+        out = re.sub(r"[，,]{2,}", "，", out)
+        out = re.sub(r"[，,、]\s*([。;；])", r"\1", out)
+        out = re.sub(r"\s{2,}", " ", out).strip().strip("，,、").strip()
+        # ⚠️ 过度删除保护：若净化后**不足原文 40% 且少于 12 字**，说明原文几乎全是否定句
+        #    （如「无文字、无水印、无logo的画面」），净化会把有效信息也带走 —— 此时回退原文。
+        #    宁可让模型画出「无」，也不能把资产描述清空（后者会直接毁掉出图）。
+        if len(out) < 12 and len(out) < len(text) * 0.4:
+            return text
+        if out != text:
+            logger.info("已剥离提示词里的否定短语（防模型画出「无」字）：%s → %s",
+                        text[:60], out[:60])
+        return out or text          # 全被删空则回退原文（绝不返回空）
+
     @classmethod
     def sanitize_scene_prompt(cls, prompt_zh: str) -> str:
         """场景提示词去人物（P0：场景资产带人）**且幂等**（2026-09-29 修正）
@@ -2553,6 +2801,14 @@ class ComfyUIClient:
         # 场景资产去人
         if asset_type == "scene":
             prompt_zh = self.sanitize_scene_prompt(prompt_zh)
+        # ⚠️ 2026-10-14 新增【否定短语剥离】——所有资产类型（item/character/scene）都要过。
+        #    实测：物品「筑基丹」正向提示词含「边缘圆润无棱角」「构图稳定，无畸形」，
+        #    出图在画面正中画了一个**大号汉字「无」**（三个物品资产全部中招）。
+        #    扩散模型不擅长理解否定语义，会把「无」当成画面内容。
+        #    放在这里是因为 `_generate_base_image` 是**所有资产基础图的唯一公共入口**
+        #    （generate_item_base / generate_character_base / generate_scene_base 都走它），
+        #    这样不必在三个调用方各改一遍、也不会漏掉任何一条链路。
+        prompt_zh = self.strip_negation_phrases(prompt_zh)
         # 只写「承载正向文本的那一个字段」：
         #   老模板 CLIPTextEncode → text ；TextEncodeQwenImageEditPlus → prompt ；
         #   QwenImage2.1 TextEncodeQwenImage21 → prompt（同节点另有 negative_prompt）。
@@ -2868,7 +3124,9 @@ class ComfyUIClient:
         marker = "单人全身立绘"
         if marker in text or "人物设定表" in text or "character sheet" in text:
             return text
-        base = style_kit.with_reference_style(text, style) if style else text
+        # ⚠️ 2026-10-14：**先剥离**基础提示词里的「三视图横排」版面句，
+        #    否则它与下面的「单人全身立绘」自相矛盾，模型会听前面那句画成三视图。
+        base = _strip_sheet_phrases(style_kit.with_reference_style(text, style) if style else text)
         if marker in base or "人物设定表" in base or "character sheet" in base:
             return base
         labels = ComfyUIClient._extract_trait_labels(text)
@@ -2895,13 +3153,38 @@ class ComfyUIClient:
         marker = "群像合影"
         if marker in text or "人物群像设定图" in text:
             return text
-        base = style_kit.with_reference_style(text, style) if style else text
+        # ⚠️ 2026-10-14：**先剥离**基础提示词里的「三视图横排」版面句，
+        #    否则它与下面的「群像合影」自相矛盾 —— 实测模型会画成
+        #    「同一个人的多角度」（而不是多个不同的人并排）。
+        base = _strip_sheet_phrases(style_kit.with_reference_style(text, style) if style else text)
         if marker in base or "人物群像设定图" in base:
             return base
         _names = [str(n).strip() for n in (names or []) if str(n).strip()]
-        names_part = ("、".join(_names)) if _names else "剧本中出场的诸位群像人物"
+        # ⚠️ 2026-10-14 修正（用户报「群像也只生成了一个人，而且群像没必要出三视图」）：
+        #    名单里的名字可能是**集合名词**（外门弟子群像 / 外门围观弟子 / 众门人…），
+        #    它本身代表一群人、而不是一个人。旧实现直接拿 len(_names) 当人数 ——
+        #    名单只有 1 个集合名词时 count=1，版式便要求「并列展示 1 位人物」，
+        #    模型照做画出一个人（实测日志：「走【群像合影】版式（1 人）」）。
+        #    现在：集合名词按语义折算成多人，并把「这是一个群体」明写进版式，
+        #    免得模型把集合名词当成人名去画单个角色。
+        _GROUP_WORDS = ("群像", "群演", "众", "一群", "众人", "群众", "人群",
+                        "们）", "弟子群", "围观")
+        _is_group = bool(_names) and all(any(w in n for w in _GROUP_WORDS) for n in _names)
+        if _is_group:
+            # 集合名词：给合理的中等人数（看得出是「一群人」，又不至于糊成一片）
+            _count = max(4, min(8, 3 + 2 * len(_names)))
+            # ⚠️ 2026-10-14（用户报「还是一个人」并给出期望模板）：
+            #    只给人数不够 —— 名单里往往只有一个集合名词，模型只拿到一份描述，
+            #    于是把同一个人复制 N 遍。这里按用户模板**逐位给出不同的成员描述**：
+            #    「群像合影，{N}个人物并排站立，从左到右依次是：{角色1描述}、{角色2描述}…」
+            names_part = ("、".join(_names) +
+                          "（下面的名字是**群体**，请画出该群体里的多名不同成员）。" +
+                          _crowd_member_descriptions(_count))
+        else:
+            _count = max(1, len(_names))
+            names_part = "、".join(_names) if _names else "剧本中出场的诸位群像人物"
         suffix = (ComfyUIClient._CROWD_SHEET_CN_LAYOUT
-                  .replace("{count}", str(max(1, len(_names))))
+                  .replace("{count}", str(_count))
                   .replace("{names_part}", names_part))
         base = base.rstrip("。，,.;； ")
         sep = "" if base.endswith((".", "！", "?", "？")) else "。"
@@ -3865,6 +4148,50 @@ class ComfyUIClient:
     _GRID_CHAR_CLOSEUP_MARK = "已替换为该角色头部特写"
 
     @staticmethod
+    def _grid_ref_roles_section(ref_labels: List[str] = None) -> str:
+        """生成九宫格模板的「参考图职责对照」段。
+
+        背景（2026-10-15 定位）：生产实测提示词**只声明了角色身份锚点**（<image3..N>），
+        对 3D 构图基准图与角色身份基准网格**完全零声明**。而 Qwen-Image 的 image_1 是
+        「编辑目标 / latent 来源」—— 模型拿到一张**无面人偶**当画布、又没人告诉它
+        「这只定义构图、外观不得复刻」，只能自由发挥 → 角色串脸、发型漂移。
+        本段逐张声明职责；编号一律用**最终槽位号**（位置即真相）。
+        """
+        labels = [str(x or "") for x in (ref_labels or [])]
+        if not labels:
+            return "（本镜未注入参考图。）"
+        lines = []
+        for pos, raw in enumerate(labels, start=1):
+            body = _ref_label_body(raw, pos)
+            if not body:
+                continue
+            if BLOCKING_REF_MARK in body:
+                lines.append(
+                    f"`<image{pos}>` = **3D 构图基准图**：只定义机位、人数、前后左右站位与朝向。"
+                    "图中人偶是没有面部特征的色块模型，其头部、五官、体型、服装**一律不得复刻**；"
+                    "角色的长相与穿着只能取自下面的角色设定参考图。")
+            elif IDENTITY_GRID_REF_MARK in body:
+                lines.append(
+                    f"`<image{pos}>` = **角色身份基准网格**：本镜各角色外观的可信来源，"
+                    "与下方角色设定条目的参考图互相印证。")
+            elif "身份锚点" in body:
+                continue  # 角色已在下方「角色设定」逐条声明，不重复
+            elif any(k in body for k in ("场景", "环境", "地点")):
+                lines.append(
+                    f"`<image{pos}>` = **场景环境参考**：只提供地点、陈设、光线与氛围；"
+                    "其中出现的人物不得当作角色身份来源。")
+            elif any(k in body for k in ("物品", "道具")):
+                lines.append(
+                    f"`<image{pos}>` = **物品/道具参考**：只提供该道具的形状、材质与颜色。")
+            else:
+                lines.append(
+                    f"`<image{pos}>` = **辅助参考**（{body[:40]}）：只作构图或氛围参考，"
+                    "不得作为任何角色的身份来源。")
+        if not lines:
+            return "（本镜参考图仅角色身份图，无其他辅助参考。）"
+        return "\n".join(f"- {x}" for x in lines)
+
+    @staticmethod
     def _grid_characters_section(shot: dict, ref_labels: List[str] = None,
                                  has_characters: bool = True) -> str:
         """按参考图标签生成九宫格主模板的「角色设定」段（用户范本第 2 段）。
@@ -4036,6 +4363,7 @@ class ComfyUIClient:
         try:
             zh = prompt_templates.render(
                 "storyboard_grid_main",
+                ref_roles_section=ComfyUIClient._grid_ref_roles_section(ref_labels),
                 style=style_clean,
                 shot_summary=shot_summary,
                 characters_section=str(characters_section),
@@ -4388,7 +4716,19 @@ class ComfyUIClient:
                 body[0] += (" It defines the framing and the spatial layout of the frame, "
                             "not any character's appearance.")
             if identity_lines:
-                body.append("IDENTITY: " + " ".join(identity_lines))
+                # ⭐ 2026-10-15：身份来源唯一性（解决「主角被同场景群像带偏」）。
+                #   实测根因：赵天霸的资产图明确是「短寸黑发」，但他被画成「长发带须」，
+                #   且换 Turbo/Viggle/PDD 任何模型都复现 —— 因为同镜参考图里还有一张
+                #   群像（外门弟子，披散长发），模型把「本场景成年男性长什么样」的统计
+                #   印象盖过了单人设定图。官方协议禁止用文字重述五官（要点 3），
+                #   所以正确解法是**收紧身份的来源**，而不是补外观描述。
+                body.append("IDENTITY: " + " ".join(identity_lines)
+                            + " Identity for each named character comes ONLY from that"
+                              " character's own dedicated reference image. Figures"
+                              " appearing in any other reference image — bystanders,"
+                              " crowds, generic extras — MUST NOT contribute facial"
+                              " identity, hairstyle, age, or body type to any named"
+                              " character.")
             if role_lines:
                 body.append("REFERENCE ROLES: " + " ".join(role_lines)
                             + " Do not merge or transfer attributes between the reference "
@@ -4654,6 +4994,11 @@ class ComfyUIClient:
         """
         wf_name = WORKFLOW_TEMPLATE["storyboard_gen"]
         api_prompt, _meta = self.load_workflow(wf_name, return_meta=True)
+        # ⭐ 2026-10-15（用户口径）：「直接用代码生成 json，控制拼接成工作流」——
+        #    从模板取出模型/步数/加速等参数，**用代码重建节点图**，槽位数量 = 实际参考图数。
+        #    这样不再依赖固定 9 槽的模板结构，也就不需要尾部槽位清理那套逻辑。
+        #    重建失败会在内部回落原模板（fail-open），不阻断出图。
+        api_prompt = self._rebuild_storyboard_workflow(api_prompt, len(ref_images or []))
         seed_changed = self._inject_seed(api_prompt, seed)
         if seed_changed:
             logger.info(f"分镜采样种子已注入: {seed_changed}")
@@ -4830,6 +5175,7 @@ class ComfyUIClient:
         build_only: bool = False,
         save_build_to: str = None,
         cache_name: str = None,
+        on_qc_retry=None,   # 可选：on_qc_retry(attempt, segs, verdict) -> 新 segs | None（整片重试前调用）
     ) -> dict:
         """H3 整集视频生成（N 段一个工作流，原生 H3ContinuousSeamlessJoinV14 衔接）
         + 整片 QC 门控。
@@ -4893,9 +5239,27 @@ class ComfyUIClient:
         #   "ComfyUI returned no video file" (pure transport) and changed the seed
         #   AGAIN, wasting scene 1 a second time. ~6h GPU burned across retries.
         retry_kind = "quality"
+        # ⭐ 2026-10-13：上一轮质检 verdict（供 on_qc_retry 回调按本次缺陷即时改写段提示词）。
+        _last_verdict: dict = {}
 
         for attempt in range(max_retries + 1):
             attempts_used = attempt + 1
+            # ⭐ 2026-10-13：整片重试前，给调用方一次「按上一轮质检缺陷**即时改写**段提示词」的机会。
+            #   此前重试只换种子、提示词一字不变 —— 同一份提示词换骰子重投，QC 大概率仍不通过
+            #   （自述注释里的「瞎撞」）。分镜/资产链路的做法是「用本次 issues 让 LLM 即时改写
+            #   提示词再重试」，视频此前缺这一步；这里补上回调挂点，改写策略由调用方决定。
+            #   fail-open：回调异常 / 返回非法值 → 用原 segments，绝不阻断重试。
+            if attempt > 0 and on_qc_retry is not None and _last_verdict:
+                try:
+                    _ns = on_qc_retry(attempt, segs, _last_verdict)
+                    if isinstance(_ns, list) and _ns:
+                        segs = _ns
+                        logger.info(
+                            "[H3-episode] 第 %d 次重试前已按本轮质检缺陷即时改写段提示词"
+                            "（%d 段）", attempt + 1, len(segs))
+                except Exception as _oe:  # noqa: BLE001
+                    logger.warning(
+                        "[H3-episode] 重试前改写段提示词失败（忽略，用原提示词）：%s", _oe)
             if attempt > 0 and retry_kind == "transport":
                 logger.info("[H3-episode] attempt %d retry (transport failure, KEEPING seed %s "
                             "so the already-finished segments stay cached)",
@@ -5007,6 +5371,7 @@ class ComfyUIClient:
                         break
                 # QC 不通过 = 质量层失败：换种子才是正确的（换骰子）
                 retry_kind = "quality"
+                _last_verdict = _v   # 供下一次 attempt 的 on_qc_retry 使用
                 logger.warning(f"[H3-episode] 第 {attempt + 1} 次整片 QC 不通过"
                                f"（reason={(_v.get('reason') or '-')})，"
                                f"{'重试' if attempt < max_retries else '放弃'}")

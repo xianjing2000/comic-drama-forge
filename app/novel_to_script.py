@@ -140,7 +140,14 @@ def _env_float(name: str, default: float, floor: float = 0.0, ceiling: float = 1
     return val
 
 
-EPISODE_MAX_SEC = _env_pos_int("MJSCXT_EPISODE_MAX_SEC", 180, floor=30)
+#: ⚠️⭐ 2026-10-14 用户口径变更（本日第三次修订）：**整集时长不设上限**。
+#:    「**两者都放开**：镜数不设上下限、整集时长不设上限；每镜固定 10 秒；最后一镜可短。」
+#:    因此本值默认放到 **2 小时** —— 实际**不再触发拆集**（成片时长 = 镜数 × 10 秒，
+#:    一章讲不完就多出几镜，不再把「一章」按 3 分钟上限拆成多集）。
+#:    保留该机制只作两层兜底：① 极端超长章（>2 小时）仍能拆；② 环境变量
+#:    `MJSCXT_EPISODE_MAX_SEC` 可显式覆盖回旧行为。
+#:    ⚠️ 下游一致性：质检的「超单集上限」判据同步放开（见 qc_client._episode_duration_bounds）。
+EPISODE_MAX_SEC = _env_pos_int("MJSCXT_EPISODE_MAX_SEC", 7200, floor=30)
 EPISODE_TARGET_SEC = _env_pos_int("MJSCXT_EPISODE_TARGET_SEC", 90, floor=10)
 EPISODE_MIN_SEC = _env_pos_int("MJSCXT_EPISODE_MIN_SEC", 60, floor=5)
 
@@ -274,7 +281,9 @@ SYSTEM_BIBLE = ("你是资深漫剧编剧与 AI 绘画提示词工程师，精�
 #:   历史注释：早期实测模型产出是引导值的 4 倍，故两者差一个量级；本仓库当前
 #:   实测（2026-10-05）模型**基本照办**（目标 38 → 产出 40），故这里如实按目标值设定。
 #: 回滚：`MJSCXT_CHARS_PER_SHOT=120`。
-CHARS_PER_SHOT = _env_pos_int("MJSCXT_CHARS_PER_SHOT", 240, floor=30)
+#: ⭐ 2026-10-14：每镜时长 5~6 秒 → **10 秒**，每镜承载原文同步翻倍（240 → 480）。
+#:    本值同时是覆盖率容量校验与拆集规划的口径来源，改它即可让全链路一致缩放。
+CHARS_PER_SHOT = _env_pos_int("MJSCXT_CHARS_PER_SHOT", 480, floor=30)
 SHOTS_PER_CHUNK_MIN = 6       # 单块分镜数下限（再短的块也至少这么多镜）
 
 # t81（2026-10-12 回归防护）：剧本正文（description+visual_detail+dialogue_text）相对
@@ -963,6 +972,316 @@ def _prev_tail_block(prev_chunk: dict, prev_outline: dict) -> str:
     return "\n".join(lines)
 
 
+#: ===================== 第 0 阶段：项目规划（2026-10-14 新增） =====================
+#: ⚠️ 对齐 doubao-creative-drama 技能的〈第 0 阶段：项目规划〉：
+#:   该技能把「规划」作为剧本之前的**强制前置**，产出 drama_plan.json 承载
+#:   创意机制 / 一句话价值 / 开场策略 / 情绪曲线 / 节奏设计 / 风格合同 / 亮点支柱，
+#:   并把「目标、受众、卖点、策略、风格、规模、风险和验收方法」变成结构化合同。
+#:   本系统此前没有这一层 —— 直接从小说进剧本，于是「剧情靠什么持续发动」「情绪怎么起伏」
+#:   「押注哪个卖点」「主光与色彩倾向」全靠模型临场发挥，质量因此不稳定。
+#: ⚠️ 与技能的唯一差异：技能要求参数确认表**等待用户确认**；本系统按用户口径
+#:   （2026-10-14「不要人工操作」）改为**全自动推断 + 记录推断依据**，不做人工确认。
+PLAN_PROMPT = """【任务】为长篇小说《{novel_title}》做**开拍前的项目规划**（第 0 阶段）。
+规划只锁「目标 / 卖点 / 策略 / 情绪 / 节奏 / 风格」，**不写完整剧情、不写台词、不写分镜**。
+【风格基调】{style}
+【预计集数】{episodes}（若为 0，表示总集数尚未确定：请按【分段提炼结果】的内容总量，
+推断一个合理的分集数并据此给出 intensity_sequence；**不要**因为集数未定就留空）
+【分段提炼结果（全书）】
+{digest_json}
+【输出要求】严格只输出一个 JSON 对象，不要 markdown 代码块、不要解释文字，结构如下：
+{{
+  "creative_mechanism": {{
+    "core_watching_logic": "**核心观看逻辑**——用一句问句写出观众因什么持续看，如「主角能否在身份暴露前拿回证据」（35 字以内）。只写题材/背景/情绪不算机制",
+    "causal_engine": "**因果发动方式**：什么样的选择会引出下一轮阻力（40 字以内）",
+    "payoff_proof": "**高潮证明方式**：观众最终通过什么**可见**的行动/证据/关系结果确认答案（40 字以内）"
+  }},
+  "creative_proposition": {{
+    "one_sentence_value": "一句话价值/卖点（30 字以内）",
+    "core_dramatic_question": "核心戏剧问题（25 字以内）",
+    "emotional_reward": "情绪回报：观众看完获得什么情绪（25 字以内）",
+    "differentiation": "与同类内容的差异点（30 字以内）"
+  }},
+  "opening_strategy": {{
+    "first_observable_promise": "开场第一镜给观众的**具体可见承诺**（30 字以内；不得用空镜/滤镜/音效假装钩子）",
+    "escalation_trigger": "让主角采取行动或暴露目标的触发（30 字以内）",
+    "payoff_or_rollover": "反馈如何改写观看关系（信息差/权力/危险/焦点至少一项变化，30 字以内）"
+  }},
+  "emotion_design": {{
+    "curve_type": "曲线类型，只允许「逆袭爽感」「悬疑揭晓」「情感治愈」「热血清算」「压抑爆发」之一",
+    "stages": [{{"stage": "阶段名（如 铺垫/压抑/爆发/反转/兑现/余韵）", "intensity": "1-5 的整数（该阶段情绪强度）", "note": "该阶段观众情绪与剧情依据（25 字以内）"}}],
+    "character_curves": [{{"character": "角色名（须与设定库一致）", "curve": "该角色的情绪/处境走向（40 字以内）"}}]
+  }},
+  "rhythm_design": {{
+    "immutable_nodes": ["**不可移动的剧情节点**（删掉就不成立的那种），按剧情先后给 3-6 条，每条 20 字以内"],
+    "intensity_sequence": [{{"ep": "集号（整数，1 起）", "intensity": "1-5 的整数", "note": "本集强度的理由（20 字以内）"}}],
+    "primary_downbeat": "全剧最主要的情绪重锤落在哪一集、是什么（30 字以内）"
+  }},
+  "style_contract": {{
+    "lighting": "全剧主光倾向（20 字以内）",
+    "color": "色彩倾向（20 字以内）",
+    "composition": "构图倾向（20 字以内）",
+    "material": "材质/质感倾向（20 字以内）",
+    "camera_tendency": "运镜倾向（20 字以内）",
+    "sound_tendency": "声音倾向（20 字以内）",
+    "excluded": ["明确**排除**的风格机制（如「一律暗调」「慢推掩盖生成问题」），2-4 条"]
+  }},
+  "highlight_strategy": {{
+    "project_signature": "项目记忆点/招牌（30 字以内）",
+    "highlight_pillars": ["亮点支柱 2-4 条，每条 20 字以内"]
+  }}
+}}
+【硬性约束】
+- 全部字段必须基于上方【分段提炼结果】的**既有事实**推断，**不得虚构**原文没有的人物/事件/器物。
+- 情绪曲线与节奏强度必须来自剧情本身（哪几段是压制、哪几段是爆发），
+  **不要套固定秒数、固定爽点比例或固定反转频率**（技能明文禁止用固定秒数代替剧情判断）。
+- 集号必须是 1 起的整数：当【预计集数】> 0 时落在 1~{episodes} 之间；
+  为 0（未确定）时按你推断的分集数给出**覆盖全书**的完整强度序列。
+- intensity 必须是 1-5 的整数（写字符串也接受，程序会归一）。
+- 若某字段确实无法从原文判断：字符串写空串、数组写 []，**绝不编造**。
+【格式红线】直接以 {{ 作为输出的第一个字符；严禁输出推理过程、markdown 代码块标记或前后缀解释。"""
+
+
+def _norm_plan(raw) -> dict:
+    """规范化【项目规划】——结构清洗 + 长度收敛 + 取值归一；异常返回 {}。
+
+    ⚠️ 只做结构清洗与确定性归一（强度取整回 1-5、集号回 1..episodes），
+    **不改写内容、不编造缺失项**：模型没给的项留空，由渲染端按「缺失即跳过」处理。
+    """
+    if not isinstance(raw, dict):
+        return {}
+
+    def _s(v, n):
+        return str(v or "").strip()[:n]
+
+    def _i(v, lo=1, hi=5):
+        try:
+            return max(lo, min(hi, int(float(v))))
+        except Exception:  # noqa: BLE001
+            return 0
+
+    out = {}
+    cm = raw.get("creative_mechanism")
+    if isinstance(cm, dict):
+        d = {k: _s(cm.get(k), 200) for k in ("core_watching_logic", "causal_engine", "payoff_proof")}
+        if any(d.values()):
+            out["creative_mechanism"] = d
+    cp = raw.get("creative_proposition")
+    if isinstance(cp, dict):
+        d = {k: _s(cp.get(k), 160) for k in
+             ("one_sentence_value", "core_dramatic_question", "emotional_reward", "differentiation")}
+        if any(d.values()):
+            out["creative_proposition"] = d
+    op = raw.get("opening_strategy")
+    if isinstance(op, dict):
+        d = {k: _s(op.get(k), 160) for k in
+             ("first_observable_promise", "escalation_trigger", "payoff_or_rollover")}
+        if any(d.values()):
+            out["opening_strategy"] = d
+    ed = raw.get("emotion_design")
+    if isinstance(ed, dict):
+        d = {}
+        ct = _s(ed.get("curve_type"), 40)
+        if ct:
+            d["curve_type"] = ct
+        st = [{"stage": _s(s.get("stage"), 40), "intensity": _i(s.get("intensity")),
+               "note": _s(s.get("note"), 120)}
+              for s in (ed.get("stages") or []) if isinstance(s, dict) and _s(s.get("stage"), 40)]
+        if st:
+            d["stages"] = st[:12]
+        cc = [{"character": _s(c.get("character"), 60), "curve": _s(c.get("curve"), 200)}
+              for c in (ed.get("character_curves") or [])
+              if isinstance(c, dict) and _s(c.get("character"), 60)]
+        if cc:
+            d["character_curves"] = cc[:12]
+        if d:
+            out["emotion_design"] = d
+    rd = raw.get("rhythm_design")
+    if isinstance(rd, dict):
+        d = {}
+        nodes = [_s(x, 80) for x in (rd.get("immutable_nodes") or []) if _s(x, 80)]
+        if nodes:
+            d["immutable_nodes"] = nodes[:10]
+        seq = []
+        for s in (rd.get("intensity_sequence") or []):
+            if not isinstance(s, dict):
+                continue
+            try:
+                ep = int(float(s.get("ep") or 0))
+            except Exception:  # noqa: BLE001
+                ep = 0
+            if ep <= 0:
+                continue
+            seq.append({"ep": ep, "intensity": _i(s.get("intensity")), "note": _s(s.get("note"), 100)})
+        if seq:
+            d["intensity_sequence"] = sorted(seq, key=lambda x: x["ep"])[:60]
+        pdb = _s(rd.get("primary_downbeat"), 160)
+        if pdb:
+            d["primary_downbeat"] = pdb
+        if d:
+            out["rhythm_design"] = d
+    sc = raw.get("style_contract")
+    if isinstance(sc, dict):
+        d = {k: _s(sc.get(k), 80) for k in
+             ("lighting", "color", "composition", "material", "camera_tendency", "sound_tendency")}
+        if any(d.values()):
+            ex = [_s(x, 60) for x in (sc.get("excluded") or []) if _s(x, 60)]
+            if ex:
+                d["excluded"] = ex[:6]
+            out["style_contract"] = d
+    hs = raw.get("highlight_strategy")
+    if isinstance(hs, dict):
+        sig = _s(hs.get("project_signature"), 160)
+        pil = [_s(x, 80) for x in (hs.get("highlight_pillars") or []) if _s(x, 80)]
+        if sig or pil:
+            out["highlight_strategy"] = ({"project_signature": sig} if sig else {}) | (
+                {"highlight_pillars": pil[:6]} if pil else {})
+    return out
+
+def _norm_series(raw) -> dict:
+    """规范化【全剧总纲】（build_bible 输出的 series 字段）——落盘前清洗，异常返回 {}。
+
+    ⚠️ 2026-10-14 新增（对齐 doubao-creative-drama 技能的〈双层剧本结构〉）：
+    技能要求项目级完整剧本必须先确立（全剧主线 / 人物弧 / 伏笔账本 / 分集推进总纲），
+    分集详细剧本再据此落地。本函数只做**结构清洗**与长度收敛，**绝不编造**内容 ——
+    模型没写的项就留空（编造的全剧总纲会让分集生成整体跑偏，比没有更糟）。
+    落盘后由 continuity._render_series_block 渲染进分集提示词。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    if str(raw.get("main_line") or "").strip():
+        out["main_line"] = str(raw["main_line"]).strip()[:200]
+    if str(raw.get("core_question") or "").strip():
+        out["core_question"] = str(raw["core_question"]).strip()[:120]
+    arcs = []
+    for a in (raw.get("arcs") or []):
+        if not isinstance(a, dict) or not str(a.get("character") or "").strip():
+            continue
+        tps = [str(t).strip()[:60] for t in (a.get("turning_points") or []) if str(t).strip()]
+        arcs.append({"character": str(a["character"]).strip(),
+                     "from_state": str(a.get("from_state") or "").strip()[:60],
+                     "to_state": str(a.get("to_state") or "").strip()[:60],
+                     "turning_points": tps[:8]})
+    if arcs:
+        out["arcs"] = arcs
+    fs = []
+    for f in (raw.get("foreshadow") or []):
+        if not isinstance(f, dict) or not str(f.get("content") or "").strip():
+            continue
+        fs.append({"id": str(f.get("id") or "").strip()[:16],
+                   "content": str(f["content"]).strip()[:120],
+                   "setup_ep": f.get("setup_ep") or "",
+                   "payoff_ep": f.get("payoff_ep") or "",
+                   "note": str(f.get("note") or "").strip()[:100]})
+    if fs:
+        out["foreshadow"] = fs[:40]
+    eo = []
+    for e in (raw.get("episode_outline") or []):
+        if not isinstance(e, dict):
+            continue
+        try:
+            ep = int(e.get("ep") or 0)
+        except Exception:  # noqa: BLE001
+            ep = 0
+        if ep <= 0:
+            continue
+        eo.append({"ep": ep, "title": str(e.get("title") or "").strip()[:40],
+                   "goal": str(e.get("goal") or "").strip()[:80],
+                   "obstacle": str(e.get("obstacle") or "").strip()[:80],
+                   "turn": str(e.get("turn") or "").strip()[:100],
+                   "payoff": str(e.get("payoff") or "").strip()[:80],
+                   "end_state": str(e.get("end_state") or "").strip()[:80],
+                   "hook": str(e.get("hook") or "").strip()[:80]})
+    if eo:
+        out["episode_outline"] = sorted(eo, key=lambda x: x["ep"])[:60]
+    return out
+
+def build_plan(client, outlines: list, novel_title: str, style: str, episodes: int,
+               events: list = None) -> dict:
+    """第 0 阶段：从**全书分段提炼结果**推断项目级创作规划（drama_plan.json 的实体）。
+
+    ⚠️ 2026-10-14 新增（对齐 doubao-creative-drama 技能的〈第 0 阶段：项目规划〉）：
+    技能把规划作为剧本的强制前置，先锁「目标/卖点/策略/情绪/节奏/风格/风险/验收」，
+    再做剧本 —— 因为「剧情靠什么持续发动、情绪怎么起伏、押注哪个卖点」这些判断
+    一旦拖到写台词时再想，就会被台词牵着走。本系统此前完全没有这一层。
+
+    ⚠️ 全自动：技能要求「参数确认表等待用户确认」，本系统按用户口径
+    （2026-10-14「不要人工操作」）改为自动推断，不阻塞流水线。
+    异常/失败一律返回 {}（fail-open）—— 规划缺失时下游按「无规划」正常生成，
+    绝不允许因为规划失败而卡住剧本生产。
+    """
+    digest = []
+    for o in outlines:
+        if not isinstance(o, dict):
+            continue
+        digest.append({
+            "段": o.get("_chunk", {}).get("index"),
+            "摘要": str(o.get("summary") or "")[:400],
+            "情节要点": (o.get("key_beats") or [])[:6],
+            "人物": [str(c.get("name") or "") for c in (o.get("characters") or [])
+                     if isinstance(c, dict) and c.get("name")][:8],
+        })
+    if not digest:
+        logger.warning("项目规划：无分段提炼结果，跳过规划阶段")
+        return {}
+    try:
+        prompt = PLAN_PROMPT.format(
+            novel_title=novel_title, style=style or "（未指定）", episodes=int(episodes or 1),
+            digest_json=json.dumps(digest, ensure_ascii=False))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("项目规划：提示词渲染失败（%s），跳过规划阶段", e)
+        return {}
+    raw = _robust_json(
+        client, prompt,
+        system="你是短剧项目的总策划。只依据给定的分段提炼结果做判断，绝不虚构原文没有的人物与事件；"
+               "只输出一个 JSON 对象。",
+        temperature=0.5, max_tokens=6000, events=events,
+        label="项目规划(第0阶段)")
+    plan = _norm_plan(raw)
+    if plan:
+        logger.info("项目规划完成：机制=%s；情绪曲线=%s；不可移动节点 %d 条；强度序列 %d 集",
+                    (plan.get("creative_mechanism") or {}).get("core_watching_logic") or "-",
+                    (plan.get("emotion_design") or {}).get("curve_type") or "-",
+                    len((plan.get("rhythm_design") or {}).get("immutable_nodes") or []),
+                    len((plan.get("rhythm_design") or {}).get("intensity_sequence") or []))
+    else:
+        logger.warning("项目规划：模型未返回有效规划，按「无规划」继续")
+    return plan
+
+def _ensure_project_plan(client, outlines, novel_title, style, episodes,
+                         continuity_ctx, events) -> dict:
+    """确保项目级【创作规划】存在：已落盘则复用，否则生成并落盘（项目级只做一次）。
+
+    ⚠️ 2026-10-14 新增。为什么需要这层「确保」而不是直接调 build_plan：
+    `convert_chapter_to_script` 是**每集**调用的，而规划是**项目级**产物 ——
+    直接调会导致每一集都重跑一次全书规模的规划（既慢，又可能每集结果不同，
+    反而破坏跨集一致性）。因此：落盘文件存在就复用，不存在才生成。
+    异常一律 fail-open：读不到就重新生成，写不进就只在内存生效，绝不阻断剧本生产。
+    """
+    ctx = continuity_ctx if isinstance(continuity_ctx, dict) else {}
+    cdir = str(ctx.get("continuity_dir") or "")
+    pkey = str(ctx.get("project_key") or "")
+    if cdir and pkey:
+        try:
+            import continuity_store as _cs  # noqa: PLC0415
+            _existing = _cs.load_drama_plan(cdir, pkey)
+            if _existing:
+                logger.info("项目规划：复用已落盘的 drama_plan.json（%d 集强度、%d 条不可移动节点）",
+                            len((_existing.get("rhythm_design") or {}).get("intensity_sequence") or []),
+                            len((_existing.get("rhythm_design") or {}).get("immutable_nodes") or []))
+                return _existing
+        except Exception as e:  # noqa: BLE001
+            logger.debug("项目规划：读取已落盘规划失败（将重新生成）：%s", e)
+    plan = build_plan(client, outlines, novel_title, style, episodes, events=events)
+    if plan and cdir and pkey:
+        try:
+            import continuity_store as _cs  # noqa: PLC0415
+            _cs.save_drama_plan(cdir, pkey, plan)
+            logger.info("项目规划：已落盘 %s", _cs.drama_plan_path(cdir, pkey))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("项目规划：落盘失败（本次仍在内存中生效）：%s", e)
+    return plan
+
 def build_bible(client, outlines: list, novel_title: str, style: str, episodes: int,
                 target_shots: int, events: list = None, continuity_ctx: dict = None,
                 cache_dir: str = "") -> dict:
@@ -1004,6 +1323,13 @@ def build_bible(client, outlines: list, novel_title: str, style: str, episodes: 
   "characters": [{{"name": "姓名", "gender": "性别，只允许「男」或「女」两个值；必须按原文的人物称谓/代词/姓名线索推断后明确给出，禁止留空或写「未知」", "age": "年龄", "identity": "身份/阵营（15 字以内）", "appearance": "静态外貌定妆（含发色/瞳色/脸型/体格/标志特征等**不随剧情变化的特征**，**必须包含性别（如「女性」「男子」）**，**不含会逐集变化的服饰/配饰——那些写进 outfit**，60 字以内；若上方设定库已锁定则该字段必须与锁定值逐字一致）", "outfit": "本集服装状态（**动态特征：逐集可变的服饰/配饰，与静态 appearance 解耦**——appearance 是定妆照约束的静态外貌，outfit 是分镜画面约束的本集服装），20 字以内，与上集结尾一致；若本集确有换装必须体现原因", "personality": "性格（30 字以内）", "voice_style": "配音风格（15 字以内）", "reference_prompt_zh": "中文参考图提示词：角色三视图设定图，60 字以内，**必须写明角色性别（如开头写「女性角色，」「男性角色，」）**，只写画面可见的具体特征——发色发型、瞳色、脸型、服装款式与材质配色、标志配饰、三视图版式（**必须写明「正面、侧面、背面三张全身视图横排，从头到脚完整入画、同一角色身高比例一致」**，不要写成半身/胸像）；**严禁写任何风格词/画风词/质量词**（如「国漫」「3D渲染」「电影级」「高清」「精致」）", "reference_prompt_en": "English prompt for a character reference sheet with three full-body views (front, side, back laid out horizontally, head-to-toe, consistent body proportions), under 45 words, must explicitly state the character's gender (e.g. 'a woman,' / 'a man,'), comma-separated CONCRETE visual keywords (hair color and style, eye color, face shape, outfit material and colors, signature accessories, view layout). It MUST be an accurate translation of reference_prompt_zh. Never romanize Chinese concepts into invented pinyin (「国漫」 must become 'Chinese animated style', NOT 'xuanxuan'); never write style or quality words — the program appends them"}}],
   "items": [{{"name": "物品名", "category": "武器/法宝/道具/服饰", "appearance": "外观（50 字以内）＋**结构三要素**（功能端/尾端/使用朝向，见硬约束）", "structure": "**结构三要素**（每项 8 字以内）：①功能端＝哪一端是使用端（吹嘴/刃口/接口/开口）②尾端＝哪一端是尾（系绳/握把/底座）③使用朝向＝用起来时功能端朝哪儿（如「吹嘴贴唇、腔体朝外」）——**同一致命细节**：道具在多帧/多角度运动中必须保持该朝向，否则会画反（实测：旧哨子被画成反吹）", "reference_prompt_zh（只写物品本体：造型/材质/颜色/纹样/尺寸感 + **必须写明功能端与尾端各在哪一侧、系绳系在哪一端**）", "owner": "持有人", "owner_photo": "布尔值 true/false：该物品表面是否承载某人的肖像（证件照/头像/画像/悬赏告示上的人像/屏幕里的人像）；物品有归属主人但本体不含人像时填 false。⭐ 填 true 时，reference_prompt_zh **必须**写明「印有 {{owner}} 本人的正面免冠证件照／头像，五官与 {{owner}} 一致」，**严禁**自行描写表情或五官（如「异常睁眼笑脸」「狰狞笑容」「诡异微笑」）——那会让出图模型画出一张与角色无关的陌生脸（用户已反馈：证件照上是个陌生怪笑脸）；该物品的主人须与 owner 字段一致", "surface_text": "该物品表面**确切**要呈现的文字，**必须把画面上出现的每一个字都逐字给出**（如工牌抬头「安保部」、告示标题「注意安全」）。⭐ **只要该物品表面存在任何可读文字（书名/告示/牌匾/卡片/标签/证件/屏幕/横幅/刻字/正文/条目/编号），本字段就必须完整填写、不得留空**——留空会让出图模型自行编造汉字，实测必出乱码（形似汉字的错字）。⭐⭐⭐ **正文与条目也必须写全，不能只写标题**：若 appearance / reference_prompt_zh 里写了「编号列 N 条规则」「正文若干行」「分条说明」「表格」「清单」这类**需要逐字呈现**的内容，本字段就必须给出这 N 条的**逐条文字**（紧凑写法，条间用空格隔开，如「1禁止奔跑 2保持安静 3随手关门」），**严禁**只给标题而把正文留给模型想象——那必然乱码。⭐ **反向自洽（同等重要）**：本字段**没有**覆盖到的文字，**不得**在 appearance / reference_prompt_zh 里要求「可读」；若某段文字确实不该被阅读（背景虚化文本、远距离标识），请在 appearance 里明确写「文字虚化不可辨」，而不是让模型去编。⭐ **忠实原文（最重要）**：本字段必须是**小说原文的照抄**，不是你的概括。原文怎么写就怎么写，**不得改写、不得压缩、不得只写标题**（2026-10-10 用户要求「剧本还原小说」——实测曾把八条规则压缩成「1禁止乘电梯 2禁止离岗…」的改写版，与原文不符，属不合格输出）。⭐ **不设字数上限**：原文有多长就写多长（实测八条守则约 203 字，请全部照抄）。⭐ 程序会自行决定**呈现层级**：道具设定图只渲染标题与最关键的短条款，完整正文由分镜特写镜头与台词/字幕承载 —— **你只管忠实抄全，不必为画面可读性做取舍**。⭐ 本字段的值会被**逐字放进出图提示词的引号内**做文字渲染，因此**必须填可直接印刷的原文本身**（如「楼层安全守则」、「1禁止奔跑 2保持安静」），**严禁**填「标题」「小字」「告示文字」「手写内容」这类**描述性词语**"", "importance": "重要/临时。判定三问（任一答案为「是」即判临时）：①删掉它剧情还成立吗？②它只是随手用的日常物品吗？③它只是场景陈设吗？", "reference_prompt_zh": "中文参考图提示词，50 字以内，只写形制、材质、颜色、纹样与磨损状态；**严禁写风格词/画风词/质量词**", "reference_prompt_en": "English prompt for an item prop sheet, under 40 words, comma-separated concrete visual keywords (shape, material, color, pattern, wear). Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"}}],
   "scenes": [{{"name": "场景名", "location": "地点类型（**同一个场所的不同机位、朝向或景别一律视作同一个 location**，不要重复建场景；只有当边界、入口、功能区或固定结构真的不同时才算新地点）", "appearance": "环境与氛围（70 字以内）：把「压抑/肃杀/温暖」翻译成**已有依据的空间选择**——通道宽窄、光比强弱、材质反射、空气状态（雾/尘/雪/烟）、色温关系；不得为造气氛而新增剧情事故、封锁出口或搬动固定结构。并点明此空间能承载的戏：谁掌控入口、座位与视线高点，谁会被阻拦、围观或逼入死角，哪件道具可被交接、摔碎或藏匿（撑不起对抗、羞辱、救援、揭露与反转的空间，不要写成核心场景）", "fixed_structure": "该场景**跨镜头不变**的固定结构（40 字以内，**必须具体到材质与颜色**）：入口与门框的形制/材质/颜色、地面材质、墙面材质与颜色、天花板形制。例：「斑驳木质门框、水磨石地面、米黄色涂料墙面、方形吊顶」。\u2b50 这是**同一空间多点位保持结构一致**的硬依据 —— 若本场景与另一场景属于**同一空间的不同位置**（如房间内外、走廊与门口），两边对门框 / 地面 / 墙面的描述**必须一致**；禁止「现代风格」「老旧」这类抽象词（对出图模型没有约束力，正是同空间结构对不上的直接原因）", "space_group": "该场景所属**空间组**标识：**同一物理空间的不同位置**、或**由同一条动线连接的连续空间**，用**同一个**标识（如「27F-2704」）；确实独立的空间填场景名自身", "refs": ["出图时应参考的**同组**场景名，最多 2 个，按参考优先级排序；该组的结构基准（最外层通道/入口）优先；没有就给空数组 []。\u26a0\ufe0f 只在**同一空间的不同位置**之间填 —— 参考图引力较强，错挂会让两个无关场景互相污染"], "scene_lighting": "该场景的**统一光影基调**（30 字以内）：整个场景所有镜头共享的主光源/时间/色温（如「黄昏暖调逆光」「冷蓝月光」「正午顶光」），用于消除同场景内逐镜光影漂移；无明确光源倾向时写「自然漫射光」。此字段只写光影，不写风格词/画风词/质量词，也不要出现人物", "int_ext": "本场景内外景（只填「内景」「外景」「内外景」三值之一：封闭空间＝内景、露天＝外景、跨内外＝内外景）", "time_of_day": "本场景时间（8 字以内，如「黄昏」「夜」「清晨」「雨夜」「正午」；必须与 scene_lighting 的时间口径一致）", "surface_text": "该场景中**确切**要呈现的文字，**必须把画面上出现的每一个字都逐字给出**（如告示/招牌/标识/门牌/守则/铭牌/横幅/屏幕上的字）。⭐ **只要场景里存在任何可读文字（告示、招牌、门牌、安全守则、楼层号、标语、屏幕文字等），本字段就必须完整填写、不得留空**——留空会让出图模型自行编造汉字，实测必出乱码（形似汉字的错字）。⭐⭐⭐ **正文与条目也必须写全，不能只写标题**：若写了「安全守则若干条」「疏散指引」「注意须知」这类**需要逐字呈现**的内容，本字段就必须给出**逐条文字**（紧凑写法，条间空格隔开，如「1禁止吸烟 2禁止奔跑 3保持安静」）；**严禁**只给标题把正文留给模型想象。⭐ **反向自洽**：本字段没覆盖的文字，**不得**在 appearance / reference_prompt_zh 里要求「可读」；背景虚化的文字请注明「文字虚化不可辨」。⭐ **忠实原文（最重要）**：本字段必须是**小说原文的照抄**，不得改写、压缩或只写标题；**不设字数上限**，原文有多长就写多长。程序会自行决定呈现层级（设定图只渲染标题与最关键短句，完整正文由分镜特写与台词/字幕承载）——**你只管忠实抄全**。⭐ 会被逐字放进提示词引号内做渲染，**必须填可直接印刷的原文本身**，**严禁**填「标题」「小字」「告示文字」这类描述性词语"", "reference_prompt_zh": "中文参考图提示词，90 字以内，**地理优先**：用「从哪个入口看向哪个方向、前中后景分别是什么、锚点在彼此哪一侧」的两两关系来写，不堆装饰清单。必写：①空间身份与功能；②观察方向与可见边界；③入口与通道如何连通；④1-3 个固定锚点及其左右前后相对关系；⑤前景/中景/背景层次与一处尺度参照；⑥墙地顶材质与主次色。最后写时间天气与光源方向。**严禁写风格词/画风词/质量词，且不要出现人物**（保持空场，才能作为地理参考被后续镜头反复复用）", "reference_prompt_en": "English prompt for an environment concept art sheet, under 60 words, comma-separated concrete visual keywords. Geography-first: state the viewpoint and what falls in foreground, midground and background, then entrance and circulation, then one to three fixed anchors as pairwise relations (what sits left or right of what), then materials and palette, then time, weather and light direction. Spatial layout, architecture, no decoration inventory, no people. Accurate translation of reference_prompt_zh; no invented pinyin, no style or quality words"}}],
+  "series": {{
+    "main_line": "全剧主线（一句话，40 字以内）：主角是谁、要什么、谁在阻挠、最终如何收束",
+    "core_question": "全剧核心悬念/问题（25 字以内，观众追下去的钩子）",
+    "arcs": [{{"character": "角色名（必须是上方 characters 里的名字）", "from_state": "起点状态（15 字以内）", "to_state": "终点状态（15 字以内）", "turning_points": ["3-5 个关键转折，每个 20 字以内，按剧情先后排序"]}}],
+    "foreshadow": [{{"id": "F1", "content": "伏笔内容（30 字以内）", "setup_ep": 埋设集号（整数）, "payoff_ep": 回收集号（整数）, "note": "回收方式（25 字以内）"}}],
+    "episode_outline": [{{"ep": 集号（整数，从 1 开始，必须覆盖全部 {episodes} 集）, "title": "本集标题（10 字以内）", "goal": "本集主角目标（25 字以内）", "obstacle": "本集阻力（25 字以内）", "turn": "本集转折/核心事件（30 字以内）", "payoff": "本集兑现给观众的爽点/情绪落点（25 字以内）", "end_state": "本集结束时主角的处境（25 字以内）", "hook": "下一集钩子（25 字以内；最后一集可留空）"}}]
+  }},
   "production_notes": {{"style_guide": "画面与叙事风格说明（60 字以内）"}}
 }}
 【硬性约束】characters / items / scenes **不设数量上限**——原文有多少就登记多少，不得为省篇幅合并或丢弃条目；characters 按戏份从大到小排序；纯背景路人（无台词、无独立动作、不推进情节，如老人甲、村民若干）不登记，但共同推进情节的一方阵营／敌群／首领或群像（有共同称谓、各自开腔或行动）必须登记——有具名首领就登首领，只有共同称谓的群体就登记为一个群像角色（name 用群体称谓如「正道群敌」，role 标敌方，appearance 写可辨识代表形象）；items 仍按三问过滤（①删掉它剧情还成立吗？②只是随手用的日常物品吗？③只是场景陈设吗？任一答案为「是」即剔除，临时道具不得进 items）；不要输出示例里的占位文字。若上方提供了「项目级设定库」，则已登记角色的 name / gender / appearance / personality 必须与该库完全一致（禁止改名、禁止改性别、禁止改外观），只允许更新 outfit（当前服装状态）。
@@ -1237,7 +1563,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         #    且 shots_target 是**按字数**估出来的（estimate_shots_for_chars = 字数/240），
         #    等于变相按字数定镜数。现改为：shots_target 只用于技术预算（shots_cap，
         #    防单次响应体过大），**不写进提示词**；提示词口径与「无下限」分支完全一致。
-        _shots_min_text = "数量由你按「每镜时长 5~6 秒」判定（**不设上下限**）"
+        _shots_min_text = "数量由你按「每镜时长 10 秒」判定（**不设上下限**）"
         _shots_range_text = ("shots 数组元素个数**不设上下限**"
                              "（既无「至少 N 镜」，也无「不得超过 N 镜」）")
         _shots_targeting_text = (f"本块镜数**下限 {shots_target} 个、不设上限**"
@@ -1245,7 +1571,7 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     else:
         # 无下限：cap 仅作技术护栏（防单次响应体过大），不写进提示词。
         shots_cap = max(12, min(120, int(math.ceil(SHOT_GRANULARITY_MAX_SHOTS * SHOT_CAP_GROWTH))))
-        _shots_min_text = "数量由你按「每镜时长 5~6 秒」判定（**不设上下限**）"
+        _shots_min_text = "数量由你按「每镜时长 10 秒」判定（**不设上下限**）"
         _shots_range_text = ("shots 数组元素个数**不设上下限**"
                              "（既无「至少 N 镜」，也无「不得超过 N 镜」）")
         # ⚠️ 2026-10-10（用户追加口径）：「不预设镜数」不等于「随便切多细」。
@@ -1258,12 +1584,12 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
         #   与密度锚点（锚点取自 CHARS_PER_SHOT，随 env 同步变化，不写死）。
         _shots_targeting_text = (
             # ⭐ 2026-10-13 用户最终口径：**切分依据是「每镜时长」，不是字数** ——
-            #    一镜 = 能在成片 5~6 秒里演完的一个完整内容单元；原文有多少个这样的
+            #    一镜 = 能在成片 10 秒里演完的一个完整内容单元；原文有多少个这样的
             #    单元就切多少镜（不设上下限）。
             #    上一版写「按原文信息密度判定」是**错的**：它会让模型按字数切
             #    （实测 2478 字 → 61 镜被判"过碎" → 重切到 10 镜，两头都不对）。
             "**切分依据是「每镜时长」，不是字数、也不是镜数配额**："
-            "成片每镜 5~6 秒，**一个镜头 = 能在 5~6 秒里演完的一个完整内容单元**"
+            "成片每镜 10 秒，**一个镜头 = 能在 10 秒里演完的一个完整内容单元**"
             "（一段有起止的完整动作过程 / 一句或一组连贯的台词 / 一次明确的情绪推进）。"
             "**原文包含多少个这样的完整单元，就切多少个镜头**——"
             "既没有「至少 N 镜」，也没有「不得超过 N 镜」。\n"
@@ -1284,13 +1610,13 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
             #    却被单镜 5 秒下限硬撑 → 每镜空转 3.5 秒，合计空转 72.7 秒（占总时长
             #    26%）。根因是**按「画面」切镜**而不是按「能演满 5 秒的内容单元」切：
             #    「只拍地砖上的影子」「纸面特写填满画面」这类静态描述各占一镜。
-            "  · ⛔ **静态画面不许单独成镜**：一个镜头必须能在 **5~6 秒**里演出"
+            "  · ⛔ **静态画面不许单独成镜**：一个镜头必须能在 **10 秒**里演出"
             "**完整内容** —— 一段有起止的完整动作过程、一句（或一组连贯的）台词、"
             "或一次明确的情绪推进。「只拍某物特写」「某个静止画面」「一处空景」这类"
             "**既无动作过程也无台词**的画面，只能并入相邻镜头作为它的一部分，"
             "不许自成一镜（它是相邻镜的**画面细节**，不是独立的一镜）。\n"
-            "  · 每个镜头的**内容要撑得起它的时长**：成片单镜 5~6 秒。"
-            "若你切出的某镜只有静态画面、内容演不满 5 秒，那就是切得太碎，"
+            "  · 每个镜头的**内容要撑得起它的时长**：成片单镜 10 秒。"
+            "若你切出的某镜只有静态画面、内容演不满 10 秒，那就是切得太碎，"
             "应把它并回相邻镜。\n"
             "  · **无台词的纯画面镜头占比不宜超过三成**：连续多个无台词镜会让整集"
             "变成幻灯片；空镜用于转场或情绪留白即可，不要用它承载信息。\n"
@@ -1332,6 +1658,9 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
                      or (bible.get('production_notes') or {}).get('style_guide') or ''),
         prev_block=_ctx_line(continuity_ctx, 'prev_block'),
         bible_block=_ctx_line(continuity_ctx, 'bible_block'),
+        # ⚠️ 2026-10-14 新增：第 0 阶段「项目规划」（创意机制/情绪曲线/节奏/风格合同）。
+        #    与 bible_block 同样走「随行注入」——生成端无需接线，模板里用 {plan_block} 取用。
+        plan_block=_ctx_line(continuity_ctx, 'plan_block'),
         contract_block=_ctx_line(continuity_ctx, 'contract_block'),
         style_block=_ctx_line(continuity_ctx, 'style_block'),
         camera_block=_ctx_line(continuity_ctx, 'camera_block'),
@@ -2063,7 +2392,18 @@ def apply_episode_schema(script: dict, duration_per_shot: float = None) -> dict:
     if duration_per_shot:
         for sh in shots:
             if isinstance(sh, dict):
-                sh["duration"] = round(float(duration_per_shot) * 2) / 2.0
+                # ⚠️ 2026-10-14 修正（「55 镜每镜硬撑 10 秒」的真根因）：
+                #    旧实现把**每一镜**的 duration 一律覆盖成 duration_per_shot（项目配置的
+                #    目标时长），把 estimate_shot_duration 的逐镜精算结果整个丢掉 ——
+                #    于是「每镜 10 秒」被实现成「所有镜都写 10 秒」：
+                #    实测 53~55 镜里 73% 的镜头台词不足 4 秒（内容只够演 3~5 秒）、
+                #    每镜空转，而镜数也没降下来（内容单元数没变，只是被拉长）。
+                #    正确语义：duration_per_shot 是**目标/切分依据**，单镜实际时长必须按
+                #    **该镜自己的内容量**估算（台词 4.5 字/秒 + 动作/画面加成，
+                #    见 estimate_shot_duration，内部已夹在 [SHOT_DURATION_MIN, MAX] 内）。
+                #    这里只补「缺失」的时长，绝不覆盖已有值。
+                if not sh.get("duration"):
+                    sh["duration"] = round(float(duration_per_shot) * 2) / 2.0
     stats = build_episode_stats(shots)
     script["shot_count"] = stats["shot_count"]
     script["episode_duration_sec"] = stats["duration_sec"]
@@ -2170,7 +2510,14 @@ def _match_known_names(raw_names, known: list, field: str,
 
 #: 画面文本字段（补全 characters_in_shot 时的扫描面）——这些字段都会被写进
 #: 生成端提示词，模型看得见里面的人名，就有概率把那个人画出来。
-_CAST_SCAN_FIELDS = ("description", "visual_detail", "first_frame", "last_frame", "motion")
+_CAST_SCAN_FIELDS = ("description", "visual_detail", "first_frame", "last_frame", "motion",
+                     # ⭐ 2026-10-14 新增 dialogue_text（台词）：实测 shot2 的 description 只写
+                     #    赵天霸，而台词是「赵天霸：羡进!你还有脸来这儿?」，
+                     #    characters_in_shot 因此漏掉被喊话的羡进 → 3D 导演台不渲他 →
+                     #    用户看到的正是「第二个分镜里怎么没有主角」。
+                     #    对话戏里被喊话的一方几乎必然在场（同框或正反打），补进来才对；
+                     #    说话人本身通常已在 characters_in_shot 里，补全逻辑只增不减，无副作用。
+                     "dialogue_text")
 
 
 def augment_cast_from_text(row: dict, chars: list, shot_id=None) -> list:
@@ -4153,6 +4500,22 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
 
     # ② 汇总本集设定
     report("bible", len(sampled) + 1, total_steps, f"第{episode_no}集 汇总人物 / 物品 / 场景设定…", 65)
+    # ⚠️ 2026-10-14 新增：第 0 阶段「项目规划」——必须在写分镜之前锁定创作意图
+    #    （创意机制 / 情绪曲线 / 节奏设计 / 风格合同 / 开场策略），否则这些判断
+    #    会被随后的台词牵着走。生成后**就地注入 continuity_ctx**，本集分镜提示词
+    #    通过 {plan_block} 取用（详见 _ensure_project_plan 与 continuity._render_plan_block）。
+    #    ⚠️ 就地修改 ctx 是安全的：该 ctx 由 build_continuity_context 每集新建。
+    #    ⚠️ 集数传 0：本系统的生产是「逐章生成」，此处拿不到全书总集数；
+    #    传 0 让规划按【全书分段提炼结果的内容量】自行推断分集数与强度序列，
+    #    比硬传当前集号更接近「全剧总纲」的语义（详见 PLAN_PROMPT 的集数约定）。
+    _project_plan = _ensure_project_plan(client, outlines, novel_title, style, 0,
+                                         continuity_ctx, trunc_events)
+    if _project_plan and isinstance(continuity_ctx, dict):
+        try:
+            from continuity import _render_plan_block as _render_plan  # noqa: PLC0415
+            continuity_ctx["plan_block"] = _render_plan(_project_plan)
+        except Exception as _pe:  # noqa: BLE001
+            logger.warning("项目规划：渲染注入块失败（本集按无规划继续）：%s", _pe)
     bible = _as_dict(build_bible(client, outlines, f"{novel_title}·{chapter_title}", style, 1,
                                  target_shots, events=trunc_events,
                                  continuity_ctx=continuity_ctx, cache_dir=cache_dir))
@@ -4168,6 +4531,55 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
                        ["name", "category", "appearance", "owner", "owner_photo",
                         "surface_text", "importance",
                         "reference_prompt_zh", "reference_prompt_en"])
+    # ⚠️ 2026-10-14 新增【实体分类校正】（实测第 1 集：物品里混进「逆天系统」、
+    #    角色里混进「筑基丹」，各自多生出一张错误资产图，白烧 GPU 又污染参考图库）。
+    #    根因：模型在 bible 提炼阶段会把「系统 / 功法 / 丹药」这类**非人实体**误登到
+    #    characters，也会把「XX系统 / XX宗门」这类**宏观设定**误登到 items。
+    #    这里用确定性规则纠正（不指望模型自觉）：
+    #      ① 名字像【物品】却登记为角色的 → 移入 items（角色里消失，避免生成「丹药角色立绘」）；
+    #      ② 名字像【宏观设定】却登记为物品的 → 从 items 移除（它没有可拍的外形）；
+    #      ③ 同名同时出现在两处 → 按①/②判定后只保留一处。
+    #    ⚠️ 保守原则：只处理**高置信**的名字（贴合下表后缀/宏观词），拿不准一律不动 ——
+    #    宁可多一张图，也不要把真正的角色（如「李剑」）误当物品移走。
+    _ITEM_SUFFIX = ("丹", "诀", "经", "剑", "刀", "枪", "棍", "鞭", "弓", "石", "玉", "符",
+                    "卷", "鼎", "珠", "戒", "铃", "盘", "镜", "书", "籍", "令牌", "甲", "冠")
+    _MACRO_WORDS = ("系统", "宗门", "门派", "世界", "大陆", "帝国", "王朝", "王朝", "家族",
+                    "势力", "联盟", "公会", "法则", "天道", "气运")
+    try:
+        _moved, _dropped = [], []
+        _item_names = {str(i.get("name") or "") for i in items if isinstance(i, dict)}
+        _keep_chars = []
+        for c in characters:
+            if not isinstance(c, dict):
+                continue
+            _nm = str(c.get("name") or "").strip()
+            _looks_item = (len(_nm) <= 4 and _nm.endswith(_ITEM_SUFFIX)
+                           and not any(w in _nm for w in _MACRO_WORDS))
+            if _looks_item:
+                _moved.append(_nm)
+                if _nm not in _item_names:
+                    items.append({"name": _nm,
+                                  "category": "杂物",
+                                  "appearance": str(c.get("appearance") or "")[:60]})
+                    _item_names.add(_nm)
+                continue
+            _keep_chars.append(c)
+        characters = _keep_chars
+        _keep_items = []
+        for i in items:
+            if not isinstance(i, dict):
+                continue
+            _nm = str(i.get("name") or "").strip()
+            if any(w in _nm for w in _MACRO_WORDS) and not _nm.endswith(_ITEM_SUFFIX):
+                _dropped.append(_nm)
+                continue
+            _keep_items.append(i)
+        items = _keep_items
+        if _moved or _dropped:
+            logger.info("第%s集：实体分类已校正 —— 角色中移出的物品 %s；物品中移除的宏观设定 %s",
+                        episode_no, _moved or "无", _dropped or "无")
+    except Exception as _ce:  # noqa: BLE001
+        logger.warning("实体分类校正失败（忽略，保持原样）：%s", _ce)
     scenes = normalize_scenes_meta(_norm_list(
         bible.get("scenes"), None,
         ["name", "location", "appearance", "scene_lighting", "int_ext", "time_of_day",
@@ -4203,7 +4615,14 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
              "theme": str(bible.get("theme") or "")[:200],
              "style": eff_style[:60],
              "characters": characters, "items": items, "scenes": scenes,
-             "production_notes": bible.get("production_notes") or {}}
+             "production_notes": bible.get("production_notes") or {},
+             # ⚠️ 2026-10-14 改版（对齐 doubao-creative-drama 技能的〈双层剧本结构〉）：
+             #    项目级完整剧本层（主线/核心悬念/人物弧/伏笔账本/分集推进总纲）。
+             #    ⚠️ 必须在此显式登记 —— 上面三组资产走 _norm_list 白名单，
+             #    未登记的字段会被**静默丢弃**（本文件既有注释已多次踩该坑），
+             #    而 series 是分集生成继承「全剧视野」的唯一来源，丢了就退回
+             #    「只见本集、不见全剧」。落盘后由 continuity._render_series_block 注入。
+             "series": _norm_series(bible.get("series"))}
 
     # ③ 逐块写分镜（每块镜头数按该块原文体量自动扩展，不再按 target_shots 摊薄砍内容）
     all_shots = []

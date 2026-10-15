@@ -362,20 +362,40 @@ def _lateral_spread(aspect: str, cam_key: str, n: int = 1) -> float:
     return round(min(max(base, need), limit), 4)
 
 
-def build_camera(cam_key: str, cam_angle: str, center_x: float = 0.0, center_z: float = 0.0):
+def build_camera(cam_key: str, cam_angle: str, center_x: float = 0.0, center_z: float = 0.0,
+                 need_w: float = 0.0, need_h: float = 0.0, aspect: str = "16:9"):
     """由景别 + 机位角度推导机位（世界坐标）。
 
-    返回 ``(position, target, fov)``：
+    返回 (position, target, fov)：
 
-      * ``position`` = 主体中心水平位置 + 绕 Y 旋转 ``yaw`` 后的水平后退距离 ``d``，
+      * position = 主体中心水平位置 + 绕 Y 旋转 yaw 后的水平后退距离 d，
         y = 视线落点高度 + 高度偏移；
-      * ``target``   = 视线落点（主体中心，高度由景别决定）；
-      * ``fov``      = 垂直视场角（度），与 ``d`` 联合决定取景范围。
+      * target   = 视线落点（主体中心，高度由景别决定）；
+      * fov      = 垂直视场角（度），与 d 联合决定取景范围。
 
-    ⚠️ ``d`` 与 ``fov`` **成对定义在** ``_FRAMING_SHOT`` 里，别单独改一个 —— 改距离不改 FOV
+    ⚠️ d 与 fov **成对定义在** _FRAMING_SHOT 里，别单独改一个 —— 改距离不改 FOV
     等于把景别整体缩放；两者一起改才能保持「特写只框住头肩」这类语义。
+
+    ⭐ 2026-10-13（A 方案）：**景别之外再叠加「装得下」下限**。
+    此前距离只由景别决定（近景 dist≈1.0m），多人同框时人偶必然被裁掉，
+    而基准图出画会被质检拦下（实测 shot3：人偶底边在 NDC y=-4.11，
+    连拉 4 轮不收敛）。这里在 need_w/need_h 给定时取
+    dist = max(景别距离, 装下宽度所需, 装下高度所需)。
+    注意**只抬高下限、不压低**：单人特写的 need 传 0，取景语义逐字不变
+    （特写本来就该裁掉下半身）。
     """
     dist, focus_h, fov = _FRAMING_SHOT.get(cam_key) or _FRAMING_UNSPEC
+    if (need_w or need_h) and dist:
+        _tan = math.tan(math.radians(float(fov)) / 2.0)
+        try:
+            _aw, _ah = [float(x) for x in str(aspect).replace("：", ":").split(":")[:2]]
+        except (TypeError, ValueError):
+            _aw, _ah = 16.0, 9.0
+        _ar = (_aw / _ah) if (_ah and math.isfinite(_aw) and math.isfinite(_ah)) else 16.0 / 9.0
+        if _tan > 0:
+            _d_h = (float(need_h) / (2.0 * _tan * 0.86)) if need_h else 0.0
+            _d_w = (float(need_w) / (2.0 * _tan * _ar * 0.86)) if (need_w and _ar > 0) else 0.0
+            dist = max(float(dist), _d_h, _d_w)
     yaw_deg, v_off = _ANGLE_SHOT.get(cam_angle or "平视", _ANGLE_SHOT["平视"])
     yaw = math.radians(yaw_deg)
     # 机位在 +Z 侧（角色面朝 +Z）；yaw 让机位绕到主体侧方
@@ -426,13 +446,24 @@ def _blocking_lookup(shot: dict, chars: List[str]) -> Dict[str, dict]:
     return out
 
 
-def _blocking_pose(spec: dict, spread: float, idx: int, total: int):
-    """由站位条目推 (position, rotation)；字段缺失的维度沿用旧的按序推导。"""
+def _blocking_pose(spec: dict, spread: float, idx: int, total: int, half_w: float = 0.0):
+    """由站位条目推 (position, rotation)；字段缺失的维度沿用旧的按序推导。
+
+    ⚠️ 2026-10-13 新增 half_w：**单人镜头**的横向档位必须按该景别的**可见半宽**取比例。
+    此前 px = xk × max(0.15, spread)，而 _lateral_spread 对 n≤1 恒返回 0（单人恒居中），
+    于是 px 被钉死在 0.15m；近景可见半宽仅 ≈0.33m，0.15m 只够偏到画面中央附近 ——
+    生产实测「声明 right，水平中心 0.50~0.54」，而档位要求 0.58~1.00，
+    单角色镜头因此永远过不了站位判据。
+    """
     base_pos = _position_for_index(idx, total, spread)
     base_rot = _rotation_for_index(idx, total)
     xk = _X_SLOT.get(spec.get("x") or "")
-    px = round(xk * max(0.15, float(spread)), 3) if xk is not None else base_pos[0]
-    pz = base_pos[2]
+    # 档位偏移基准：多人用铺开半宽；单人用该景别的可见半宽
+    # ⚠️ half_w 直接用 _side_room 的值、**不再打折**（它就是「最外侧中心位置」）：
+    #    打折后可能低于 0.15 下限而被吞掉（实测 ×0.55 → 0.133 < 0.15，px 仍是 0.15，
+    #    站位照旧落在中央，白改一轮）。
+    _basis = max(float(spread), float(half_w), 0.15)
+    px = round(xk * _basis, 3) if xk is not None else base_pos[0]
     dk = _DEPTH_Z.get(spec.get("depth") or "")
     if dk is not None:
         pz = dk
@@ -512,7 +543,8 @@ def build_scene_json(
     _crowd_map: Dict[str, int] = {}
     for idx, name in enumerate(chars, start=1):
         if name in _blk:
-            pos, rot = _blocking_pose(_blk[name], spread, idx - 1, total)
+            pos, rot = _blocking_pose(_blk[name], spread, idx - 1, total,
+                                      half_w=_side_room(aspect, _cam_key))
         else:
             pos = _position_for_index(idx - 1, total, spread)
             rot = _rotation_for_index(idx - 1, total)
@@ -554,7 +586,23 @@ def build_scene_json(
 
     # ---- 机位 entity（camera）----
     cx, cz = _subject_center(chars, spread)
-    cam_pos, cam_target, _cam_fov = build_camera(_cam_key, _cam_angle, cx, cz)
+    # ⭐ 2026-10-13（A 方案）：多人同框时给机位一个「装得下」下限 ——
+    #    此前距离只由景别决定（近景 dist≈1.0m），两个人偶同框必然被裁掉，
+    #    基准图出画又被质检拦下（实测 shot3 底边 NDC y=-4.11、连拉 4 轮不收敛）。
+    #    单人镜头传 0：特写/近景本来就该裁掉下半身，取景语义逐字不变。
+    #    身高直接取**已构建的人偶 entity**（其 height = TARGET_CHARACTER_HEIGHT * heightScale）。
+    _need_w = 0.0
+    _need_h = 0.0
+    if len(chars) >= 2:
+        _hs_all = [float(_e.get("height") or TARGET_CHARACTER_HEIGHT)
+                   for _e in entities
+                   if isinstance(_e, dict) and _e.get("type") == "character"]
+        _maxh = max(_hs_all) if _hs_all else TARGET_CHARACTER_HEIGHT
+        _need_w = 2.0 * float(spread) + 0.9      # 横向铺开总宽 + 单偶轮廓宽
+        _need_h = _maxh + 2.6                    # 人偶高 + 地面/视线差余量（build_scene_json 分支）
+    cam_pos, cam_target, _cam_fov = build_camera(
+        _cam_key, _cam_angle, cx, cz,
+        need_w=_need_w, need_h=_need_h, aspect=aspect)
     cam_rot = _camera_rotation(_cam_angle)
     cam_id = _entity_id("cam", 1)
     entities.append({
@@ -810,7 +858,11 @@ _PROP_IN_HAND = ("手中", "手里", "握着", "手持", "掌中", "抓住")
 # 而参考图与剧本说的是"一群人"，人数判据直接给错信息。这里按景别横向容量把它展开成阵列
 # （纵深交错），并把展开登记写进 scene.crowdMap，供质检核对人数。
 _CROWD_KEYWORDS = ("围观", "群众", "人群", "众人", "百姓", "弟子们", "门人", "族人",
-                   "喽啰", "手下", "侍卫", "士兵", "人群", "众人")
+                   "喽啰", "手下", "侍卫", "士兵", "人群", "众人",
+                   # ⚠️ 2026-10-13 补充（实测缺陷）：剧本把群体写成「外门弟子群像」这类
+                   #    **名词化群体名**，此前不在表内 → 被当成单个角色只渲 1 个人偶
+                   #    （diag.crowdMembers=0），基准图里"一群人"变成"一个人"。
+                   "群像", "群演", "众弟子", "弟子群", "群体", "众门人")
 _CROWD_MAX = 6
 
 
@@ -836,7 +888,13 @@ def _crowd_count(shot: dict, aspect: str, cam_key: str, others: int) -> int:
         cap = 3
     room = cap - int(others)
     if room < 2:
-        return 1
+        # ⚠️ 2026-10-13 修复（实测缺陷）：此前空间紧张时直接 return 1（= 不展开），
+        #    于是「2 个主角 + 1 个群像」的全景镜头（shot 1/2 实测）里，
+        #    剧本明写「一群弟子」却只渲 1 个人偶（diag.crowdMembers=0）。
+        #    该角色既已被判为**群演角色**，渲 1 人在语义上必然错误 ——
+        #    故空间紧张时也**至少展开 2 人**；阵列会按 spread 自行横向压缩贴合，
+        #    不靠「退回 1 人」规避拥挤。
+        return 2
     return max(2, min(_CROWD_MAX, room))
 
 
@@ -1135,9 +1193,57 @@ def build_render_plan(shot: dict, aspect: str = "9:16", width: int = 768,
     # ⚠️ 主体中心必须用**与 build_scene_json 相同的 spread** 计算（同画幅 + 同景别 + 同人数），
     #    否则机位会偏离主体。
     spread = _lateral_spread(aspect, cam_key, len(chars))
-    # 瞄准点取**场景实体**均值：显式站位生效后位置会变，用旧的按序均值会瞄偏
-    cx, cz = _scene_center(scene)
-    position, target, fov = build_camera(cam_key, cam_angle, cx, cz)
+    # ⚠️ 2026-10-13 修正（「声明 right 却总在画面中央」的真根因）：
+    #    此前瞄准点取**角色位置均值**，单角色镜头时均值就是该角色本身 →
+    #    机位正对着他 → 无论声明 left/center/right 都被摆在画面正中
+    #    （生产实测：声明 right，水平中心恒为 0.50~0.54，而档位要求 0.58~1.00；
+    #     单角色镜头因此永远过不了站位判据，自愈也修不动）。
+    #    blocking 的 x 档位（_X_SLOT）**本来就是相对舞台中心定义的**，
+    #    所以瞄准点必须取舞台中心（原点）。多角色镜头下同样成立：
+    #    各角色按各自档位对称铺开，均值本就≈0。
+    cx, cz = 0.0, 0.0
+    # ⭐ 2026-10-13（A 方案·源头修复）：多人同框时给机位一个「装得下」下限 ——
+    #    此前距离只由景别决定（近景 dist≈1.0m），两个人偶同框必然被裁掉，
+    #    基准图出画又被质检拦下（实测 shot3/4 底边 NDC y < -4、自愈连拉 4 轮不收敛）。
+    #    单人镜头传 0：特写/近景本来就该裁掉下半身，取景语义逐字不变。
+    _need_w = 0.0
+    _need_h = 0.0
+    # ⚠️ 2026-10-13 修正：条件从「人数 ≥2」改为「**该景别本来就该装下全身**」——
+    #    中景/全景/远景的语义就是完整人偶，单人镜头同样要装下（实测 shot9 单人中景
+    #    竖直占比 1.00、判据要求 0.16~0.8，人偶占满整幅）；特写/近景/中近景才是
+    #    「框住局部」，保持 need=0、取景语义逐字不变。
+    _FULL_BODY_FRAMING = ("中景", "全景", "远景", "大全景")
+    _need_full = str(cam_key or "").strip() in _FULL_BODY_FRAMING
+    # ③ 声明了**左右档位**（left/right）—— 角色会离开画面中心，太近就会横向出画。
+    #    实测单角色近景声明 right：px=0.241 把右边缘推到 NDC 1.247（被裁）。
+    _need_side = False
+    for _it in ((shot or {}).get("blocking") or []):
+        if isinstance(_it, dict):
+            _xk = _X_SLOT.get(str(_it.get("x") or _it.get("side") or "").strip())
+            if _xk is not None and abs(float(_xk)) >= 0.99:
+                _need_side = True
+                break
+    # ⚠️ 三个条件**取或**，缺一不可：
+    #    ① 该景别本来就该装下全身（中景/全景/远景）；
+    #    ② 同框人数 ≥2（近景/特写多人时也必须把所有人放进画面，否则必然被裁）；
+    #    ③ 声明了左右档位（否则站位偏移会把人推出画）。
+    #    只用①会漏「多人近景」（机位从 6.26 退回 1.02）；漏③则单角色近景声明 right 必炸。
+    if (_need_full or len(chars) >= 2 or _need_side) and chars:
+        _hs_all = []
+        for _nm in chars:
+            try:
+                _hs_all.append(float((char_body(str(_nm)) or (1.0, 1.0))[0]))
+            except Exception:  # noqa: BLE001
+                _hs_all.append(1.0)
+        _maxh = TARGET_CHARACTER_HEIGHT * (max(_hs_all) if _hs_all else 1.0)
+        _need_w = max(2.0 * float(spread) + 0.9, 1.5)   # 横向铺开总宽 + 单偶轮廓宽（含站位偏移余量）
+        # ⚠️ 2026-10-14：该景别「本来就该装下全身」时给更大的余量。
+        #    实测中景 +2.6 时竖直占比仍 0.94（要求 ≤0.8）、自愈要跑 3~5 轮才收敛；
+        #    +3.2 后占比约 0.31，1 轮即过。（此前这条判断被后续编辑覆盖，故重写并核对镜像。）
+        _need_h = _maxh + (3.2 if _need_full else 2.6)
+    position, target, fov = build_camera(cam_key, cam_angle, cx, cz,
+                                         need_w=_need_w, need_h=_need_h, aspect=aspect)
+    # （旧写法保留备查：position, target, fov = build_camera(cam_key, cam_angle, cx, cz)）
     # ⭐ 优先按**目标像素**定尺寸（唯一无歧义口径，见 fit_pixel_size）；
     #    未给 target_size 时才回落到比例字符串（兼容既有调用方/守卫）。
     if target_size:

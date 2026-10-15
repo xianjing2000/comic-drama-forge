@@ -986,11 +986,9 @@ export const episodesApi = {
     ),
   // 审计 P2：后端 api_novel_episodes_generate 必须带 chapters（章节号数组）或
   // start/end —— 空包体一律 400「未选择有效章节」（旧签名无 body，接线即坏）
-  // use_screenplay=true：以「文学剧本」为原文改写成结构化分镜剧本；
-  // 不传 / false 则沿用原文（小说正文）。可能以异步任务返回（带 task_id）。
   generate: (
     novelId: string,
-    body: { chapters?: number[]; start?: number; end?: number; use_screenplay?: boolean }
+    body: { chapters?: number[]; start?: number; end?: number }
   ) =>
     request<{ success: boolean; episode_count: number; task_id?: string }>(
       `/novels/${encodeURIComponent(novelId)}/episodes/generate`,
@@ -998,44 +996,6 @@ export const episodesApi = {
     ),
 };
 
-// --- Screenplay（文学剧本：人审层；1章=1集，episode_no 即章号） ---
-// GET  /api/novels/<novel_id>/screenplay/<episode_no>?project=<project_key>
-//      → {exists, markdown, path, project_key}
-// POST /api/novels/<novel_id>/screenplay/generate
-//      body {chapter, project_id?/project_name?, style?} → {task_id, project_key, episode_no}
-//      异步任务：轮询 generation/status/<task_id> 至 completed 后再 GET 取正文。
-export interface ScreenplayDoc {
-  exists: boolean;
-  markdown: string;
-  path?: string;
-  project_key?: string;
-}
-
-export const screenplayApi = {
-  get: (novelId: string, episodeNo: number, projectKey?: string) => {
-    const q = projectKey ? `?project=${encodeURIComponent(projectKey)}` : '';
-    return request<ScreenplayDoc>(
-      `/novels/${encodeURIComponent(novelId)}/screenplay/${episodeNo}${q}`
-    );
-  },
-  generate: (
-    novelId: string,
-    chapter: number,
-    opts?: { projectId?: string; projectName?: string; style?: string }
-  ) =>
-    request<{ success?: boolean; task_id: string; project_key?: string; episode_no?: number }>(
-      `/novels/${encodeURIComponent(novelId)}/screenplay/generate`,
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          chapter,
-          project_id: opts?.projectId,
-          project_name: opts?.projectName,
-          style: opts?.style,
-        }),
-      }
-    ),
-};
 
 /** 前置解析结果（人物档案 + 故事梗概 + 关键事件 + 人物情绪） */
 export interface ChapterPreflightResult {

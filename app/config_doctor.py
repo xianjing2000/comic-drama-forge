@@ -76,7 +76,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'continuity.MAX_REWRITE_ROUNDS',
     },
     'max_qc_script_rewrite_rounds': {
-        'default': 2, 'type': 'int', 'range': (0, 10), 'group': '质检闭环',
+        'default': 0, 'type': 'int', 'range': (0, 10), 'group': '质检闭环',
         'desc': '剧本质检不通过时，按缺陷回传重写的最大轮数（2026-10-10 新增闭环）',
         'owner': 'pipeline.MAX_QC_SCRIPT_REWRITE_ROUNDS',
     },
@@ -90,11 +90,6 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'default': 0, 'type': 'int', 'range': (0, 2000), 'group': '基础配置',
         'desc': '显式传 4~40 仍可按题材指定下限（如悬疑推理 18~30）。',
         'owner': 'config.NOVEL_DEFAULT_SHOTS',
-    },
-    'auto_screenplay': {
-        'default': True, 'type': 'bool', 'range': None, 'group': '剧本',
-        'desc': '文学剧本自动生成（用户指定「无需人审」）',
-        'owner': 'pipeline.DEFAULT_CONFIG.auto_screenplay',
     },
     'prewarm_next_script': {
         'default': True, 'type': 'bool', 'range': None, 'group': '预热',
@@ -950,7 +945,8 @@ def naming_report() -> Dict[str, Any]:
     import re as _re
     base = os.path.dirname(os.path.abspath(__file__))
     pat = _re.compile(r'^([A-Z][A-Z0-9_]{2,})\s*(?::\s*[^=]+)?=\s*(.+)$')
-    names: List[Dict[str, str]] = []
+    names: list[dict[str, str]] = []   # 用内置泛型：本模块只有 `from __future__ import annotations`，
+                                       # 并没导入 typing.List —— 旧写法会被 pyflakes 报 undefined name
     try:
         for fn in sorted(os.listdir(base)):
             if not fn.endswith('.py') or fn.startswith('_'):

@@ -392,15 +392,33 @@ def count_action_beats(text: str) -> int:
 #   处置（用户选定「减镜增时长」）：下限 2.0 → 5.0 秒，配套三处「加镜」机制关掉
 #   （见下方 `SHOT_GRANULARITY_*` 与 novel_to_script 的 REF_INSERT_RATIO /
 #    SPLIT_ACTION_BEATS / CHARS_PER_SHOT）。回滚 = 把本值改回 2.0 并关掉那三处。
-SHOT_DURATION_MIN = 5.0            # 单镜最短秒数（用户口径：每镜 5~6 秒）
-SHOT_DURATION_MAX = 8.0            # 单镜最长秒数（留余量给长台词；>6 秒的镜属长尾）
+SHOT_DURATION_MIN = 10.0           # 单镜最短秒数（⭐ 2026-10-14 用户最终口径：每镜 10 秒）
+#: ⭐⭐ 2026-10-14 用户最终口径（第三次修订，取代当日的「方案 B 弹性时长」）：
+#:    「**两者都放开**：镜数不设上下限、整集时长不设上限；**每镜固定 10 秒**；
+#:      **最后一镜可以少于 10 秒**。」
+#:    · 镜数 / 整集时长 **都不设限** —— 不再用「每集 3 分钟」「目标 18 镜」去倒推镜数；
+#:      一章讲不完就多出几镜，时长顺其自然（成片时长 = 镜数 × 10 秒）。
+#:    · **每镜就是 10 秒**（不再 5~12 弹性）：MIN 与 MAX 同时锁到 10.0，
+#:      消除「模型按内容量把镜头切碎/拉长」的自由度 —— 那正是镜数失控的来源。
+#:    · **收尾镜例外**：每场戏的最后一镜允许更短（见 SHOT_DURATION_MIN_TAIL = 2.5），
+#:      因为悬念定格/静态收尾撑不满 10 秒是正常的。
+#:    ⚠️ 历史教训（本轮实测数据，勿再回退到弹性时长）：
+#:      放开 5~12 秒弹性后，模型把「内容少的镜就短」误读成「可以多切镜」，
+#:      镜数 26 → 47（体积 47.6 → 66.5 KB）；而锁死 10 秒时镜数由**内容单元**决定，
+#:      配合「合并优先于拆分」的口径反而收敛。
+SHOT_DURATION_MAX = 10.0           # 单镜最长秒数（与 MIN 同锁 10.0；收尾镜见 SHOT_DURATION_MIN_TAIL）
 SHOT_DURATION_SILENT = 0.6         # 无台词纯画面镜头的基准秒数（旧值 3.0s）
 #: ⭐ 2026-10-13（用户口径）：**收尾镜 = 每场戏的最后一镜**（连续 run 口径，见下方
 #:   tail_shot_indexes）。这类镜常是静态定格 / 悬念定格，硬套「5 秒 × 9 宫格」会逼模型
 #:   重复构图或编造元素（实测第1集 shot_13 连打 3 轮质检不过）。
 #:   分镜侧配套降级为单帧（storyboard_helpers 的 _shot_grid）。
 SHOT_DURATION_MIN_TAIL = 2.5       # 收尾镜允许的更低时长下限
-CHARS_PER_SECOND = 4.5             # 中文配音语速基准（字/秒），按台词长度推算时长
+CHARS_PER_SECOND = 4.0             # 中文配音语速基准（字/秒），按台词长度推算时长
+#: ⚠️ 2026-10-14 改版（对齐 doubao-creative-drama 技能的〈对白时长预算〉口径）：
+#:    该技能标准为「中文台词 2-4 汉字/秒，**硬上限 4 字/秒**」。旧值 4.5 **高于**其硬上限，
+#:    按 4.5 估算出的镜头时长偏短 —— 而配音是按镜头时间轴铺的，超出部分会被成片尾部静默截掉。
+#:    改到 4.0 后：10 秒 ≈ 40 字（原 45 字），预算更保守，不再出现截断。
+#:    影响面：novel_to_script 的 speak_sec = len(spoken) / CHARS_PER_SECOND（拆镜判定）。
 BEAT_CLIMAX_BONUS_SEC = 0.7        # 「高潮」节拍镜的画面停留加成（旧值 2.0s）
 #: 画面描述带来的时长加成上限（旧值 2.0s）+ 折算系数（每多少字给 1 秒）
 SHOT_DURATION_DESC_SEC_MAX = 0.5
@@ -429,9 +447,11 @@ SHOT_SPEECH_BUDGET_CHARS = 16
 #      · REF_SHOT_DURATION_MAX = 8.0（原 6.5）          ← 长台词拆镜只在真溢出时触发
 #    改任一处前先读该处注释里的实测数据（桌面版第 1 集：56 镜 / 平均 2.82 秒，其中
 #    **16 镜是补出来的「局部」插入镜**、**34 镜卡在 2.0 秒下限**）。
-SHOT_GRANULARITY_TARGET_SHOTS = 25      # 每集目标镜数（20~30 的中值）
-SHOT_GRANULARITY_MAX_SHOTS = 30         # 每集镜数上限（超过即视为「又切细了」，诊断时点名）
-SHOT_GRANULARITY_TARGET_SEC = 5.5       # 每镜目标秒数（5~6 的中值）
+#: ⭐ 2026-10-14 用户口径：「镜数与整集时长都放开」——下面两项**只作诊断参考，不作门禁**。
+#:    成片时长 = 镜数 × 10 秒，不再有「每集目标 X 镜 / 上限 Y 镜」的收敛目标。
+SHOT_GRANULARITY_TARGET_SHOTS = 18      # 参考值（10 秒/镜 × 180s）；**非目标、不写进提示词**
+SHOT_GRANULARITY_MAX_SHOTS = 24         # 参考上限；**非门禁**（用户明确要求镜数不设上限）
+SHOT_GRANULARITY_TARGET_SEC = 10.0      # 每镜目标秒数（⭐ 2026-10-14 用户口径：10 秒）
 
 
 def tail_shot_indexes(shots) -> set:
@@ -1065,6 +1085,19 @@ ENABLE_BLOCKING_ANNOTATION = _env_bool("ENABLE_BLOCKING_ANNOTATION", True)
 # ⚠️ 渲染是**增强项**：无浏览器 / 资产缺失 / 超时 / 全黑 → 自动降级为「只注入文字站位锚点」，
 #    绝不阻断分镜主链路（见 app/te_3d_render.py 的失败静默降级口径）。
 ENABLE_3D_BLOCKING_IMAGE = _env_bool("ENABLE_3D_BLOCKING_IMAGE", True)
+
+# 分镜参考图精简（2026-10-15 用户口径，两处独立开关）：
+# ① 身份基准网格（ENABLE_STORYBOARD_IDENTITY_GRID）：旧行为把本镜多个角色的基准图
+#    **拼成一张** 3x3 / 2x2 参考图作靠前参考。用户实测认定这会让特征串味 ——
+#    拼图里每个角色只占 1/2~1/3 面积、面部像素被摊薄，权威性反而盖过单角色三视图，
+#    是「角色不一致」的诱因之一。默认 False = 不拼网格，只用逐角色单张三视图。
+# ② 场景参考图（ENABLE_STORYBOARD_SCENE_REF）：3D 构图基准图（<image1>）**本身已含
+#    完整场景**（建筑 / 石阶 / 石灯笼 / 材质 / 光影，实测信息量已过剩），
+#    再单独注入一张场景图属冗余信号，且会与基准图的场景互相拉扯。
+#    默认 False = 不再单独注入场景图（基准图承担构图 + 场景 + 光影）。
+# 两者都设 True 可完整回退到 2026-10-15 之前的行为。
+ENABLE_STORYBOARD_IDENTITY_GRID = _env_bool("ENABLE_STORYBOARD_IDENTITY_GRID", False)
+ENABLE_STORYBOARD_SCENE_REF = _env_bool("ENABLE_STORYBOARD_SCENE_REF", False)
 
 # 多视角生成配置
 #

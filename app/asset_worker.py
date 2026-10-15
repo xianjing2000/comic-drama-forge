@@ -172,10 +172,20 @@ def _character_tier(project_name: str, char: dict, episode_no=None) -> str:
         if not name:
             return "unknown"
         import shared_episode
-        script = shared_episode._load_script_for(project_name, episode_no)
-        if not isinstance(script, dict):
+        # ⚠️ 2026-10-14 修正（用户口径「角色评级要根据整本小说来」）：
+        #    原实现 shared_episode._load_script_for(project_name, episode_no) 在缺集号时
+        #    **取第一集**，于是评级只看第一集（详见 _all_project_shots 的注释）。
+        #    现汇总该项目全部已生成集；汇总失败才退回旧的单集口径（fail-open）。
+        _shots_all = _all_project_shots(project_name)
+        if _shots_all is None:
+            script = shared_episode._load_script_for(project_name, episode_no)
+            if not isinstance(script, dict):
+                return "unknown"
+            shots = [s for s in (script.get("shots") or []) if isinstance(s, dict)]
+        else:
+            shots = _shots_all
+        if not shots:
             return "unknown"
-        shots = [s for s in (script.get("shots") or []) if isinstance(s, dict)]
         if not shots:
             return "unknown"
         # 2) ⭐ 强群像词优先：名字本身就是集合名词（外门围观弟子 / 路人甲 / 群众…）
@@ -205,6 +215,44 @@ def _character_tier(project_name: str, char: dict, episode_no=None) -> str:
     except Exception as e:  # noqa: BLE001 - 判定失败按旧行为（生成），不拦资产
         logger.debug("角色级别判定失败（按正常生成处理）：%s", e)
         return "unknown"
+
+
+def _all_project_shots(project_name: str):
+    """汇总该项目**全部已生成集**的镜头（角色评级用）；读不到时返回 None。
+
+    ⚠️ 2026-10-14 新增（用户口径「角色评级要根据整本小说来」）：
+    评级原先走 shared_episode._load_script_for(project_name, None)，而它
+    「缺集号时取该项目第一集」—— 于是评级只统计第一集：
+      · 第 2 集之后才登场的主角，第 1 集「一镜未出」→ 被判 crowd（多人合影）；
+      · 「第 1 集只 3 镜、之后是主要角色」的配角 → 被判 minor（单张立绘）。
+    实测本项目：林清雪第 1 集 3 镜 2 台词 → minor，资产只出单张立绘、缺全部细节区。
+
+    返回 None 表示「汇总失败」（调用方退回旧的单集口径，fail-open）；
+    返回 [] 表示「该项目一集剧本都没有」（调用方按 unknown 处理）。
+    """
+    try:
+        import novel_to_script  # noqa: PLC0415
+        import project_store  # noqa: PLC0415
+        from config import SCRIPT_DIR  # noqa: PLC0415
+        key = project_store.safe_key(project_name)
+        eps = novel_to_script.list_episodes(SCRIPT_DIR, key)
+        if not eps:
+            return []
+        out = []
+        for e in eps:
+            epno = e if isinstance(e, int) else (e.get("episode_no") or 0)
+            if not epno:
+                continue
+            try:
+                sc = novel_to_script.load_episode_script(SCRIPT_DIR, key, int(epno))
+            except Exception:  # noqa: BLE001  单集读失败不影响其它集
+                continue
+            if isinstance(sc, dict):
+                out.extend(s for s in (sc.get("shots") or []) if isinstance(s, dict))
+        return out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("汇总项目全部剧本失败（退回单集口径）：%s", e)
+        return None
 
 
 def _crowd_names_for(project_name: str, episode_no=None) -> list:
@@ -876,6 +924,15 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     #    `if not base_files: ... break` 会把空结果当「基础图生成失败」，
                     #    故失败时**在本 attempt 内立即回落纯 T2I** 产出图片；连续失败达 2 次
                     #    置 degraded，并自第 3 次起**不再尝试**参考图链路（纯 T2I）。
+                    # ⚠️ 2026-10-14 修复 UnboundLocalError（实测第2集 item 资产失败、整集中断）：
+                    #    `_base_kw` 原先只在最后的 `else:`（character/scene）分支里定义，
+                    #    而下方通用的分级/群像 QC 取值处写的是 `(_base_kw or {}).get(...)`。
+                    #    作者以为 `or {}` 能兜住"未定义"，但 **UnboundLocalError 是编译期
+                    #    判定的** —— 只要函数体里存在对该名字的赋值，其它路径上引用它就必崩。
+                    #    item 资产走上面两个分支 → 崩在 QC 取值处 → 该资产永远生不出来
+                    #    → probe 永远缺 1 个 → **整集在生产里反复失败并卡死**（实测停止在 ep2）。
+                    #    修法：在三分支之前**统一初始化**，所有路径都安全。
+                    _base_kw = {}
                     if asset_type == 'item' and _item_ref_img and _item_ref_fail < 2:
                         _ref_files = []
                         try:
@@ -1015,6 +1072,28 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                                          "白色帆布鞋变蓝灰），判为关键缺陷，kinds 记「配色异常」；"
                                          "**即使与目标风格的色调描述一致也判缺陷** ——"
                                          "色调只作用于画面氛围，不是改变固有色。")
+                    # ⚠️ 2026-10-14 新增（用户报「群像也只生成了一个人，而且群像没必要出三视图」）：
+                    #    四档分级的版式是**硬约束**，不能只靠 prompt 里的「严禁」——
+                    #    实测群像版式的 prompt 已写明「严禁把任何一个人画成单独的三视图」，
+                    #    但成图仍可能画成单人立绘。这里把档位对应的形态要求写进质检判据，
+                    #    不满足就驳回重画（与上面物品/颜色两条专项判据同一挂载方式）。
+                    _tier_qc = str((_base_kw or {}).get("tier") or "").strip().lower()
+                    _crowd_qc = list((_base_kw or {}).get("crowd_names") or [])
+                    if _crowd_qc or _tier_qc == "crowd":
+                        _qc_desc_base = (str(_qc_desc_base) +
+                                         "\n\n【群像合影专项判据】本图是**多人合影**（群像角色的资产图）："
+                                         "必须在一张画面内并列出现**多名不同人物**（至少 3 名），"
+                                         "他们是同一群体，且处于同一光线、同一色调、同一画风下。"
+                                         "若画面里**只有一个人物**，或把群体画成了**单人的三视图/**"
+                                         "**四区设定表**（正/侧/背分格、或带面部特写+配色板+局部细节的版面），"
+                                         "判为关键缺陷，kinds 记「群像人数不符」。")
+                    elif _tier_qc == "minor":
+                        _qc_desc_base = (str(_qc_desc_base) +
+                                         "\n\n【单人立绘专项判据】本图是**次要角色的单张正面全身立绘**："
+                                         "画面里只应有**一个**人物，正面朝向镜头、全身完整入画。"
+                                         "若出现多个人物、或画成了三视图/四区设定表（正/侧/背分格、"
+                                         "或带面部特写+配色板+局部细节的版面），"
+                                         "判为关键缺陷，kinds 记「版式不符」。")
                     verdict = qc_client.check_image(scratch_base, _qc_desc_base, qc_cfg, style=gen_style)
                     logger.info(f"[资产质检] base {asset_type}/{name} 第{attempt + 1}次 → "
                                     f"{verdict.get('call_url')} model={verdict.get('model')} "

@@ -68,6 +68,31 @@ def load_bible(continuity_dir: str, project_key: str) -> dict:
     return data
 
 
+def drama_plan_path(continuity_dir: str, project_key: str) -> str:
+    return _path(continuity_dir, project_key, "drama_plan.json")
+
+
+def load_drama_plan(continuity_dir: str, project_key: str) -> dict:
+    """读项目级【创作规划】（drama_plan.json）；缺失/损坏返回 {}。
+
+    ⚠️ 2026-10-14 新增（对齐 doubao-creative-drama 技能的**第 0 阶段：项目规划**）：
+    该技能把「规划」作为剧本之前的强制前置，产出 drama_plan.json 承载
+    创意机制 / 一句话价值 / 开场策略 / 情绪曲线 / 节奏设计 / 风格合同 / 亮点支柱。
+    本系统此前没有这一层 —— 直接从小说进剧本，于是「剧情靠什么持续发动」
+    「情绪怎么起伏」「押注哪个卖点」全靠模型临场发挥，质量不稳定。
+    ⚠️ 与技能不同的是：技能要求「参数确认表等待用户确认」，本系统按用户口径
+    （2026-10-14「不要人工操作」）改为**全自动推断 + 记录推断依据**。
+    """
+    data = load_json(drama_plan_path(continuity_dir, project_key), None)
+    return data if isinstance(data, dict) else {}
+
+
+def save_drama_plan(continuity_dir: str, project_key: str, plan: dict) -> str:
+    plan = dict(plan or {})
+    plan["version"] = CONTINUITY_VERSION
+    plan["updated_at"] = _now()
+    return save_json(drama_plan_path(continuity_dir, project_key), plan)
+
 def save_bible(continuity_dir: str, project_key: str, bible: dict) -> str:
     bible = dict(bible or {})
     bible["version"] = CONTINUITY_VERSION

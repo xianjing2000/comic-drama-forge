@@ -575,12 +575,6 @@ def api_autopilot_run_once():
                         "error": f"该小说没有第{ep}集（共 {len(chapters)} 章 / {_n_units} 集）"}), 400
     cfg = pipeline.normalize_config({**plan, 'novel_id': meta.get('novel_id')},
                                     default_project_key=project)
-    # 文学剧本改写接入（run-once）：文件存在即使用，无需人工审阅
-    import novel_screenplay
-    _md = novel_screenplay.load_screenplay(project, ep)
-    if _md:
-        _app_logger().info("run-once 集 %s 使用文学剧本改写（文件存在）", ep)
-        cfg.setdefault("screenplay_text", _md)
     # 2026-09-30：已被判定「需人工介入」的集，在**入口**就挡住并把原因回给调用方。
     # 旧行为是放它进后台、由 run_episode 立刻返回 needs_human，总控只拿到 200 started，
     # 用户这边什么都看不到（第1集 401 那次就是这样静默掉的）。现在总控能当场拿到 409+原因。

@@ -557,7 +557,6 @@ def render_blocking_from_plan(plan: dict, out_dir: str, timeout: float = None,
             except Exception:  # noqa: BLE001
                 pass
             _profile_dir = ""
-
     try:
         # 全景/场景背板：把本地图内联成 dataUrl（渲染页只经 HTTP 取 payload，
         # 不再为场景图单开一条文件服务）
@@ -652,9 +651,31 @@ def read_render_diag(png_path: str) -> Optional[dict]:
 
 
 def _terminate(proc: subprocess.Popen) -> None:
-    """结束浏览器进程（先 terminate，超时再 kill）。"""
+    """结束浏览器进程**及其全部子进程**。
+
+    ⚠️ 2026-10-14（两次修正，均由实测驱动）：
+    1) 真根因：3D 渲染服务用的是 **Edge**（msedge.exe，见 _browser_exe()），
+       它启动后会 fork 出 renderer / GPU / utility / crashpad 等多个子进程；
+       而 terminate() / kill() **只结束主进程**，子进程会变成孤儿继续存活并占用
+       GPU 与内存 —— 实测一晚累积出 9~14 个残留进程，让基准图渲染从 1.4s 退化到 47~89s。
+    2) **顺序很关键**（实测踩坑）：若先 terminate() 让父进程退出，子进程会被系统
+       重新挂载，此时 taskkill /T 已经**追溯不到**它们（实测：仍残留 9 个）。
+       因此必须**在父进程还活着时先按进程树杀**，再回退到 terminate/kill。
+    3) taskkill 只按 **PID** 精确指定（/T 作用于该进程树），绝不按进程名匹配，
+       因此不会影响用户自己打开的浏览器。
+    """
     if proc is None:
         return
+    _pid = getattr(proc, "pid", None)
+    # ① 先杀进程树（父进程还在，/T 才能追溯全部子进程）
+    if _pid and os.name == "nt" and proc.poll() is None:
+        try:
+            subprocess.run(["taskkill", "/PID", str(_pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=15, check=False)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.debug("[3D站位图] 清理浏览器进程树失败（回退 terminate）：%s", e)
+    # ② 回退：进程树清理未成功时，逐级 terminate -> kill
     try:
         if proc.poll() is None:
             proc.terminate()
@@ -664,7 +685,7 @@ def _terminate(proc: subprocess.Popen) -> None:
                 proc.kill()
                 proc.wait(timeout=5)
     except (OSError, subprocess.TimeoutExpired) as e:
-        logger.debug("[3D站位图] 结束浏览器进程失败（忽略）：%s", e)
+        logger.debug("[3D站位图] 结束浏览器主进程失败（忽略）：%s", e)
 
 
 def render_blocking(shot: dict, out_dir: str, aspect: str = "9:16", width: int = 768,
@@ -721,10 +742,17 @@ GRID_BLOCKING_CELLS = (
     ("近景", "斜侧"),
 )
 
+#: 九宫格「单镜 9 关键帧」→ 逐格渲染用的机位角度序列（2026-10-15 用户口径）。
+#: 与 GRID_BLOCKING_CELLS（9 个**不同景别**的候选构图）不同：本表**景别一律取本镜自身**，
+#: 只用机位角度区分 9 格 —— 因为输出九宫格是「同一镜头随时间的 9 个关键帧」，不是 9 个景别；
+#: 锁定本镜景别还能保证 fits 判据必然通过（本镜人数必然适配本镜景别），
+#: 否则特写/大特写会因「人数超横向容量」被跳过，9 格只剩 1 格（实测）。
+_KEYFRAME_ANGLES = ("平视", "平视", "斜侧", "斜侧", "过肩", "过肩", "仰拍", "俯拍", "平视")
+
 
 def render_blocking_variant(shot, cam_key, cam_angle,
                             out_dir, target_size=None,
-                            root_dir=None, timeout=None):
+                            root_dir=None, timeout=None, ignore_fit=False):
     """按**指定景别/机位**渲染某格候选构图的 3D 站位基准图（九宫格逐格构图基准用）。
 
     与 :func:`render_blocking` 的区别：`render_blocking` 的取景从 `shot.camera`
@@ -743,7 +771,12 @@ def render_blocking_variant(shot, cam_key, cam_angle,
         logger.warning("[3D站位图] 逐格渲染计划失败（降级）：%s: %s", type(e).__name__, e)
         return None
     # 同 render_blocking 的 fits 判据（空舞台/未指定取景/人数超容量 → 跳过）。
-    if not plan.get("fits", True) or not _has_character(plan):
+    # ⭐ ignore_fit=True（2026-10-15）：关键帧九宫格场景用 —— 那是**同一镜头的机位预演**，
+    #    9 格共用本镜景别，不需要按「该景别能容几个人」逐格卡（否则 3 人镜头的
+    #    中近景/近景/特写会被全数跳过，实测 shot=2 中近景 9 格全灭）。
+    if not ignore_fit and (not plan.get("fits", True) or not _has_character(plan)):
+        return None
+    if not _has_character(plan):
         return None
     return render_blocking_from_plan(plan, out_dir, timeout=timeout, root_dir=root_dir)
 
@@ -765,7 +798,15 @@ def render_blocking_grid(shot, out_dir, target_size=None,
         shot, out_dir, target_size=target_size, root_dir=root_dir, timeout=timeout)
     if not cells or not any(cells):
         return None
-    # 拼 3x3 联系表（格序即九宫格格序）。
+    return _assemble_grid(cells, shot, out_dir)
+
+def _assemble_grid(cells, shot, out_dir):
+    """把 9 格 PNG 拼成 3x3 联系表并保存，返回路径；Pillow 缺失/保存失败返回 None。
+
+    格序即九宫格格序（左上→右下）。单格为 None 时留空底色，不阻断其余格。
+    """
+    if not cells or not any(cells):
+        return None
     try:
         from PIL import Image  # noqa: PLC0415
     except Exception as e:  # noqa: BLE001
@@ -785,12 +826,48 @@ def render_blocking_grid(shot, out_dir, target_size=None,
             logger.warning("[3D站位图] 拼贴格 %d 失败（跳过该格）：%s", i + 1, e)
     try:
         os.makedirs(os.path.join(out_dir, "te3d_blocking"), exist_ok=True)
-        dst = os.path.join(out_dir, "te3d_blocking", f"grid_{plan_cache_key({'shot': str(shot.get('shot_id'))})}.png")
+        dst = os.path.join(out_dir, "te3d_blocking",
+                           f"grid_{plan_cache_key({'shot': str(shot.get('shot_id'))})}.png")
         sheet.save(dst, "PNG")
         return dst
     except Exception as e:  # noqa: BLE001
         logger.warning("[3D站位图] 九宫格基准图保存失败（降级）：%s", e)
         return None
+
+
+def render_blocking_keyframes(shot, out_dir, target_size=None,
+                              root_dir=None, timeout=None):
+    """渲染「**单镜 9 关键帧**」的 3D 构图基准网格（3x3），返回路径；不可用返回 None。
+
+    与 :func:`render_blocking_grid` 的区别（2026-10-15 用户口径）：
+      * 后者按 ``GRID_BLOCKING_CELLS`` 渲 **9 个不同景别**的候选构图，用于「候选选择」
+        场景；特写/大特写会因「人数超过该景别横向容量」被 fits 判据跳过 ——
+        实测 3 人镜头 9 格只剩 1 格；
+      * 本函数**锁定本镜自身景别**，只用机位角度区分 9 格，与输出九宫格（同一镜头内
+        随时间推进的 9 个关键帧）语义一致，且必然通过 fits（本镜人数必然适配本镜景别）。
+
+    失败降级：单格失败留空、全部失败返回 None（调用方回退单张站位图）。绝不抛异常。
+    """
+    if not available(root_dir):
+        return None
+    cam_key = ""
+    try:
+        from shot_camera import camera_key as _ck  # noqa: PLC0415
+        cam_key = _ck(str(shot.get("camera") or "")) or ""
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[3D站位图] 本镜景别解析失败（回落中景）：%s", e)
+    if not cam_key:
+        cam_key = "中景"
+    cells = []
+    for ang in _KEYFRAME_ANGLES:
+        cells.append(render_blocking_variant(
+            shot, cam_key, ang, out_dir, ignore_fit=True,
+            target_size=target_size, root_dir=root_dir, timeout=timeout))
+    ok = sum(1 for c in cells if c)
+    logger.info("[3D站位图] 关键帧九宫格：景别=%s 成功 %d/9 格", cam_key, ok)
+    if not any(cells):
+        return None
+    return _assemble_grid(cells, shot, out_dir)
 
 
 def render_blocking_grid_cells(shot, out_dir, target_size=None,

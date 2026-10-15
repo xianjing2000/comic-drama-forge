@@ -42,11 +42,6 @@ REGISTRY = {
                       "shot_duration_max", "shot_duration_silent",
                       "speech_budget", "script_data"],
     },
-    "screenplay_generate": {
-        "title": "文学剧本生成指令（场次剧本改写，人审层）",
-        "file": "screenplay_generate.txt",
-        "variables": [],
-    },
     "script_generate": {
         "title": "分镜批量生成",
         "file": "script_generate.txt",
@@ -61,7 +56,7 @@ REGISTRY = {
                       # 由 novel_to_script 算好后传入；目标是不再让一个默认数字把内容摊薄。
                       "shots_min_text", "shots_range_text", "shots_targeting_text",
                       "style", "style_guide",
-                      "prev_block", "bible_block", "contract_block", "style_block",
+                      "prev_block", "bible_block", "plan_block", "contract_block", "style_block",
                       "camera_block", "preflight_block", "prev_tail",
                       "char_brief_json", "item_brief_json", "scene_brief_json",
                       "chunk_text", "outline_summary", "key_beats_json",
@@ -146,7 +141,7 @@ def _strip_header(text: str) -> str:
     """剥掉模板文件**开头**的 `#` 头注释块与其后的空行（头注释是文档，不进提示词）。
 
     只处理文件最前面的注释行；正文里任何位置的 `#` 一律不动
-    （screenplay_generate 的正文就含「用 ## 做大标题」字样）。
+    （script_generate 的正文就含「用 ## 做大标题」字样）。
     无头注释的文件原样返回；全文件都是注释 → 返回 ""（调用方视为「非空校验失败」）。
     """
     if not text:

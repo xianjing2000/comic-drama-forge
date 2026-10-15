@@ -24,14 +24,22 @@ from config import NOVELS_DIR
 from novel_parser import read_novel_text
 from shared_novel import _episode_units_for_chapters
 from shared_project import _novel_key
-from workers.screenplay import _current_llm_client
 import chapter_preflight
 import continuity
 import dialogue_utils
 import json
-import novel_screenplay
 import project_store
 logger = logging.getLogger(__name__)
+
+def _current_llm_client():
+    """延迟取当前 LLM 客户端（原 workers.screenplay 的转发实现）。
+
+    2026-10-13 文学剧本层整体移除后，该转发从 workers/screenplay.py 搬到这里 ——
+    保持同样的「函数内延迟 import shared_ai」口径，避免 workers 与 routes 的
+    模块级循环依赖。
+    """
+    from shared_ai import _current_llm_client as _impl
+    return _impl()
 
 def _salvage_episode_script(path: str, episode_no: int):
     """任务报错后检查剧本产物是否其实可用（**以产物为准**，避免误报失败）
@@ -70,8 +78,7 @@ def _salvage_episode_script(path: str, episode_no: int):
 
 
 def _episodes_worker(task_id: str, novel_meta: dict, chapters: list, style: str,
-                     target_shots: int, overwrite: bool, project_key: str = None,
-                     use_screenplay: bool = False):
+                     target_shots: int, overwrite: bool, project_key: str = None):
     key = _novel_key(novel_meta, project_key)
     # 拍摄单元：超长章按语义边界拆成多集
 # （⚠️ 2026-10-09 起单集镜数**不再设上限**：生产改为按场次渲染，详见 novel_to_script 同名注释）
@@ -149,29 +156,11 @@ def _episodes_worker(task_id: str, novel_meta: dict, chapters: list, style: str,
                             pass
                 except Exception as _pfe:  # noqa: BLE001
                     logger.warning("第%s集前置解析失败（跳过注入，不阻塞）：%s", ep, _pfe)
-                # 两段式生产（2026-10-03 ②）：use_screenplay=true 时以「文学剧本」为
-                # 原文走改写链路 —— 合成 chapter 使 start/end 覆盖剧本全文（continuity
-                # 与覆盖率校验只消费传入的 novel_text[start:end]，零内部改动即生效）。
-                # 文学剧本缺失时回退章节原文并告警（fail-open，不阻塞批量）。
-                _conv_text = text
-                _conv_chapter = chapter
-                if use_screenplay:
-                    _md = novel_screenplay.load_screenplay(
-                        key, int(unit.get("episode_no") or 0))
-                    if _md:
-                        _conv_text = _md
-                        _conv_chapter = {"index": chapter.get("index"),
-                                         "title": chapter.get("title"),
-                                         "start": 0, "end": len(_md)}
-                    else:
-                        logger.warning(
-                            "第%s集：文学剧本不存在，回退章节原文（建议先调用 "
-                            "/api/novels/<id>/screenplay/generate）",
-                            unit.get("episode_no"))
+                # 2026-10-13：**文学剧本层已整体移除** —— 原文一律取「章节正文」。
                 # 跨集连贯性（A/B/C/D）：项目级 bible + 上集摘要卡 + 衔接契约 + state 锚点
                 # + 相邻集六类校验 + 命中高危问题时的局部重写，全部由 continuity 编排
                 conv = continuity.convert_chapter_with_continuity(
-                    client, novel_meta, _conv_text, _conv_chapter, key, CONTINUITY_DIR,
+                    client, novel_meta, text, chapter, key, CONTINUITY_DIR,
                     style=style, target_shots=target_shots, episode_no=ep,
                     save_dir=SCRIPT_DIR, progress_cb=cb,
                 )

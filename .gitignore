@@ -285,3 +285,9 @@ orrec2_*/
 
 # 工具路径参数为 undefined 时产生的垃圾目录（禁止入库）
 undefined/
+
+# 2026-10-15 优化前基线存档时排除：临时实验目录 / 工作流备份 / 导出测试包
+.handover/
+tmp*/
+workflows/_backup_*/
+导出_6图测试/

@@ -1,8 +1,8 @@
 {
   "id": "67357be1-f78f-45bd-9eed-bc582dd1f147",
   "revision": 0,
-  "last_node_id": 12,
-  "last_link_id": 13,
+  "last_node_id": 13,
+  "last_link_id": 15,
   "nodes": [
     {
       "id": 1,
@@ -41,7 +41,7 @@
           "name": "MODEL",
           "type": "MODEL",
           "links": [
-            1
+            14
           ]
         }
       ],
@@ -52,7 +52,7 @@
         "models": [
           {
             "name": "qwen_image_2.1_int8_convrot.safetensors",
-            "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors",
             "directory": "diffusion_models"
           }
         ]
@@ -193,127 +193,6 @@
       }
     },
     {
-      "id": 4,
-      "type": "TESpeedQwenImage21",
-      "pos": [
-        620,
-        0
-      ],
-      "size": [
-        280,
-        270
-      ],
-      "flags": {},
-      "order": 3,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 1
-        },
-        {
-          "name": "attention",
-          "type": "COMBO",
-          "widget": {
-            "name": "attention"
-          },
-          "link": null
-        },
-        {
-          "name": "step_cache",
-          "type": "COMBO",
-          "widget": {
-            "name": "step_cache"
-          },
-          "link": null
-        },
-        {
-          "name": "reuse_threshold",
-          "type": "FLOAT",
-          "widget": {
-            "name": "reuse_threshold"
-          },
-          "link": null,
-          "shape": 7
-        },
-        {
-          "name": "start_percent",
-          "type": "FLOAT",
-          "widget": {
-            "name": "start_percent"
-          },
-          "link": null,
-          "shape": 7
-        },
-        {
-          "name": "end_percent",
-          "type": "FLOAT",
-          "widget": {
-            "name": "end_percent"
-          },
-          "link": null,
-          "shape": 7
-        },
-        {
-          "name": "predictor_error_limit",
-          "type": "FLOAT",
-          "widget": {
-            "name": "predictor_error_limit"
-          },
-          "link": null,
-          "shape": 7
-        },
-        {
-          "name": "verbose",
-          "type": "BOOLEAN",
-          "widget": {
-            "name": "verbose"
-          },
-          "link": null,
-          "shape": 7
-        }
-      ],
-      "outputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "links": [
-            2
-          ]
-        },
-        {
-          "name": "status",
-          "type": "STRING",
-          "links": []
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.37.0",
-        "Node name for S&R": "TESpeedQwenImage21",
-        "aux_id": "tl2012tl/TE-Speed-QwenImage21"
-      },
-      "widgets_values": [
-        "kitchen_int8",
-        "te_predictor",
-        0.06,
-        0,
-        0,
-        0.08,
-        true
-      ],
-      "widgets_values_named": {
-        "attention": "kitchen_int8",
-        "step_cache": "te_predictor",
-        "reuse_threshold": 0.06,
-        "start_percent": 0,
-        "end_percent": 0,
-        "predictor_error_limit": 0.08,
-        "verbose": true
-      }
-    },
-    {
       "id": 5,
       "type": "KSampler",
       "pos": [
@@ -331,7 +210,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 2
+          "link": 15
         },
         {
           "name": "positive",
@@ -479,7 +358,7 @@
           "widget": {
             "name": "prompt"
           },
-          "link": 13
+          "link": null
         },
         {
           "name": "negative_prompt",
@@ -824,292 +703,128 @@
       ]
     },
     {
-      "id": "12",
-      "type": "TE_Qwen_Image_2_1_Prompt_Enhancer",
+      "id": 13,
+      "type": "TESpeedQwenImage21",
       "pos": [
-        490,
-        190.0
+        200.0,
+        140.0
       ],
       "size": [
-        417,
-        620
+        280,
+        270
       ],
       "flags": {},
-      "order": 0,
+      "order": 3,
       "mode": 0,
       "inputs": [
         {
-          "localized_name": "图片",
-          "name": "图片",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "localized_name": "图片2",
-          "name": "图片2",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "localized_name": "图片3",
-          "name": "图片3",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "localized_name": "图片4",
-          "name": "图片4",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "localized_name": "图片5",
-          "name": "图片5",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "localized_name": "图片6",
-          "name": "图片6",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "localized_name": "图片7",
-          "name": "图片7",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "localized_name": "图片8",
-          "name": "图片8",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
-          "localized_name": "输入提示词",
-          "name": "输入提示词",
-          "type": "STRING",
-          "widget": {
-            "name": "输入提示词"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "任务模式",
-          "name": "任务模式",
-          "type": "COMBO",
-          "widget": {
-            "name": "任务模式"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "输出语言",
-          "name": "输出语言",
-          "type": "COMBO",
-          "widget": {
-            "name": "输出语言"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "增强方式",
-          "name": "增强方式",
-          "type": "COMBO",
-          "widget": {
-            "name": "增强方式"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "api_key",
-          "name": "api_key",
-          "type": "STRING",
-          "widget": {
-            "name": "api_key"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "api_base_url",
-          "name": "api_base_url",
-          "type": "STRING",
-          "widget": {
-            "name": "api_base_url"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "model",
           "name": "model",
-          "type": "STRING",
-          "widget": {
-            "name": "model"
-          },
-          "link": null
+          "type": "MODEL",
+          "link": 14
         },
         {
-          "localized_name": "文生图PE模型",
-          "name": "文生图PE模型",
+          "name": "attention",
           "type": "COMBO",
           "widget": {
-            "name": "文生图PE模型"
+            "name": "attention"
           },
           "link": null
         },
         {
-          "localized_name": "图生图PE模型",
-          "name": "图生图PE模型",
+          "name": "step_cache",
           "type": "COMBO",
           "widget": {
-            "name": "图生图PE模型"
+            "name": "step_cache"
           },
           "link": null
         },
         {
-          "localized_name": "主模型",
-          "name": "主模型",
-          "type": "COMBO",
+          "name": "reuse_threshold",
+          "type": "FLOAT",
           "widget": {
-            "name": "主模型"
+            "name": "reuse_threshold"
           },
-          "link": null
+          "link": null,
+          "shape": 7
         },
         {
-          "localized_name": "mmproj",
-          "name": "mmproj",
-          "type": "COMBO",
+          "name": "start_percent",
+          "type": "FLOAT",
           "widget": {
-            "name": "mmproj"
+            "name": "start_percent"
           },
-          "link": null
+          "link": null,
+          "shape": 7
         },
         {
-          "localized_name": "最大生成token",
-          "name": "最大生成token",
-          "type": "INT",
+          "name": "end_percent",
+          "type": "FLOAT",
           "widget": {
-            "name": "最大生成token"
+            "name": "end_percent"
           },
-          "link": null
+          "link": null,
+          "shape": 7
         },
         {
-          "localized_name": "上下文长度",
-          "name": "上下文长度",
-          "type": "INT",
+          "name": "predictor_error_limit",
+          "type": "FLOAT",
           "widget": {
-            "name": "上下文长度"
+            "name": "predictor_error_limit"
           },
-          "link": null
+          "link": null,
+          "shape": 7
         },
         {
-          "localized_name": "seed",
-          "name": "seed",
-          "type": "INT",
-          "widget": {
-            "name": "seed"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "生成后自动卸载模型",
-          "name": "生成后自动卸载模型",
+          "name": "verbose",
           "type": "BOOLEAN",
           "widget": {
-            "name": "生成后自动卸载模型"
+            "name": "verbose"
           },
-          "link": null
-        },
-        {
-          "localized_name": "启用思考",
-          "name": "启用思考",
-          "type": "BOOLEAN",
-          "widget": {
-            "name": "启用思考"
-          },
-          "link": null
+          "link": null,
+          "shape": 7
         }
       ],
       "outputs": [
         {
-          "localized_name": "增强提示词",
-          "name": "增强提示词",
-          "type": "STRING",
+          "name": "model",
+          "type": "MODEL",
           "links": [
-            13
+            15
           ]
+        },
+        {
+          "name": "status",
+          "type": "STRING",
+          "links": []
         }
       ],
       "properties": {
-        "aux_id": "tl2012tl/TE_MAN",
-        "Node name for S&R": "TE_Qwen_Image_2_1_Prompt_Enhancer"
+        "cnr_id": "comfy-core",
+        "ver": "0.37.0",
+        "Node name for S&R": "TESpeedQwenImage21",
+        "aux_id": "tl2012tl/TE-Speed-QwenImage21"
       },
       "widgets_values": [
-        "",
-        "文生图",
-        "中文",
-        "API",
-        "",
-        "http://127.0.0.1:31415/v1",
-        "auto",
-        "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
-        "qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors",
-        "Qwen3.5-4B-UD-Q4_K_XL.gguf",
-        "qwen3.5mmproj-BF16.gguf",
-        4096,
-        8192,
+        "sageattn",
+        "te_predictor",
+        0.06,
         0,
-        "randomize",
-        false,
-        false
+        0,
+        0.08,
+        true
       ],
       "widgets_values_named": {
-        "输入提示词": "",
-        "任务模式": "文生图",
-        "输出语言": "中文",
-        "增强方式": "API",
-        "api_key": "",
-        "api_base_url": "http://127.0.0.1:31415/v1",
-        "model": "auto",
-        "文生图PE模型": "qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors",
-        "图生图PE模型": "qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors",
-        "主模型": "Qwen3.5-4B-UD-Q4_K_XL.gguf",
-        "mmproj": "qwen3.5mmproj-BF16.gguf",
-        "最大生成token": 4096,
-        "上下文长度": 8192,
-        "seed": 0,
-        "生成后自动卸载模型": false,
-        "启用思考": false,
-        "control_after_generate": "randomize"
+        "attention": "sageattn",
+        "step_cache": "te_predictor",
+        "reuse_threshold": 0.06,
+        "start_percent": 0,
+        "end_percent": 0,
+        "predictor_error_limit": 0.08,
+        "verbose": true
       }
     }
   ],
   "links": [
-    [
-      1,
-      1,
-      0,
-      4,
-      0,
-      "MODEL"
-    ],
-    [
-      2,
-      4,
-      0,
-      5,
-      0,
-      "MODEL"
-    ],
     [
       3,
       2,
@@ -1191,12 +906,20 @@
       "IMAGE"
     ],
     [
-      13,
-      "12",
+      14,
+      1,
       0,
-      "6",
+      13,
+      0,
+      "MODEL"
+    ],
+    [
+      15,
+      13,
+      0,
       5,
-      "STRING"
+      0,
+      "MODEL"
     ]
   ],
   "groups": [],

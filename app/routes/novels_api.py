@@ -41,67 +41,11 @@ from routes._shared import _optional_llm_client
 from routes._shared import _project_style
 from routes._shared import _resolve_novel_project
 from workers.episodes import _episodes_worker
-from workers.screenplay import _screenplay_worker
-import novel_screenplay
 import project_store
 
 logger = logging.getLogger(__name__)
 
 novels_api_bp = Blueprint('novels_api', __name__)
-
-@novels_api_bp.route('/api/novels/<novel_id>/screenplay/generate', methods=['POST'])
-def api_novel_screenplay_generate(novel_id):
-    """生成某章的文学剧本（两段式生产 ①，异步）。body: {chapter, project_id/project_name?, style?, episode_no?}"""
-    try:
-        meta = get_novel(NOVELS_DIR, novel_id)
-    except NovelParseError as e:
-        return jsonify({"success": False, "error": str(e)}), 404
-    client = _current_llm_client()
-    if not client.configured:
-        return _ai_guide_response("尚未配置自定义 AI 接口，无法生成文学剧本")
-    data = request.json or {}
-    chapters = meta.get("chapters") or []
-    try:
-        ch_idx = int(data.get("chapter") or 1)
-    except (TypeError, ValueError):
-        ch_idx = 1
-    chapter = next((c for c in chapters if int(c.get("index") or 0) == ch_idx), None)
-    if chapter is None:
-        return jsonify({"success": False, "error": f"找不到章节 {ch_idx}"}), 404
-    proj = _resolve_novel_project(data, meta)
-    key = _novel_key(meta, proj["dir_key"])
-    try:
-        episode_no = max(1, int(data.get("episode_no") or ch_idx))
-    except (TypeError, ValueError):
-        episode_no = ch_idx
-    style = (data.get("style") or _project_style(proj["dir_key"]) or "3D动漫渲染")
-    task_id = f"screenplay_{novel_id}_{episode_no}_{int(time.time())}"
-    with lock:
-        generation_state[task_id] = {"status": "running", "progress": 2,
-                                     "phase": "prepare", "message": "准备章节正文…",
-                                     "novel_id": novel_id, "project_key": key}
-    threading.Thread(target=_screenplay_worker,
-                     args=(task_id, meta, chapter, key, style, episode_no),
-                     daemon=True).start()
-    return jsonify({"success": True, "task_id": task_id, "status": "started",
-                    "project_key": key, "episode_no": episode_no})
-
-
-@novels_api_bp.route('/api/novels/<novel_id>/screenplay/<int:episode_no>', methods=['GET'])
-def api_novel_screenplay_get(novel_id, episode_no):
-    """读取已生成的文学剧本（Markdown）。?project= 指定项目键（缺省按小说找项目）。"""
-    try:
-        meta = get_novel(NOVELS_DIR, novel_id)
-    except NovelParseError as e:
-        return jsonify({"success": False, "error": str(e)}), 404
-    pref = (request.args.get('project') or '').strip()
-    rec = project_store.get_project(pref) if pref else project_store.find_by_novel(novel_id)
-    key = _novel_key(meta, rec["dir_key"] if rec else None)
-    path = novel_screenplay.screenplay_path(key, episode_no)
-    md = novel_screenplay.load_screenplay(key, episode_no) if os.path.isfile(path) else ""
-    return jsonify({"success": True, "exists": bool(md), "markdown": md,
-                    "path": path, "project_key": key, "episode_no": int(episode_no)})
-
 
 @novels_api_bp.route('/api/novels/<novel_id>/episodes/generate', methods=['POST'])
 def api_novel_episodes_generate(novel_id):
@@ -247,17 +191,11 @@ def api_novel_episodes_generate(novel_id):
             "episode_dir": ep_dir,
         }
     threading.Thread(target=_episodes_worker,
-                     args=(task_id, meta, picks, style, target_shots, overwrite, key,
-                           # ⭐ 2026-10-06（用户指定）：默认开启「文学剧本→开拍剧本」两段式全自动生产。
-                           # 用户是**自动项目**，明确"文学剧本无需人审"——故默认 True：自动出文学剧本、
-                           # 自动改写成开拍剧本（分镜/台词），全程不插入人工审核。前端若显式传
-                           # use_screenplay=false 仍可回退"章节原文直接开拍"（保持兼容）。
-                           data.get('use_screenplay', True)),
+                     args=(task_id, meta, picks, style, target_shots, overwrite, key),
                      daemon=True).start()
     return jsonify({
         "success": True, "task_id": task_id, "status": "started",
         "novel_id": meta.get("novel_id"), "style": style, "target_shots": target_shots,
-        "use_screenplay": data.get('use_screenplay', True),
         "project_id": proj["id"], "project_key": key, "project_name": proj["name"],
         "episode_dir": ep_dir,
         "chapters": [{"index": c.get("index"), "title": c.get("title"),
