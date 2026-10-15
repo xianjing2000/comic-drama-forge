@@ -1275,6 +1275,8 @@ class ComfyUIClient:
                                       unet_name: str,
                                       clip_name: str,
                                       vae_name: str,
+                                      lora_name: str = "",
+                                      lora_strength: float = 1.0,
                                       steps: int = 40,
                                       cfg: float = 1.0,
                                       seed: int = 0,
@@ -1311,8 +1313,18 @@ class ComfyUIClient:
                                "device": "default"}}
         api["3"] = {"class_type": "VAELoader", "inputs": {"vae_name": vae_name}}
         # TE-Speed 加速：attention 必须是 sageattn（kitchen_int8 等于关掉加速器，实测慢 1.5 倍）
+        # LoRA（可选）：Qwen-Image-2.1-Fun-Acc-4Step 这类加速 LoRA。
+        #   挂在 UNETLoader 之后、TESpeed 之前 —— 加速器要作用在「已挂 LoRA」的模型上。
+        #   lora_name 为空则不生成该节点，行为与旧版**完全一致**（零变更）。
+        unet_src = ["1", 0]
+        if lora_name:
+            api["8"] = {"class_type": "LoraLoaderModelOnly",
+                        "inputs": {"model": ["1", 0], "lora_name": lora_name,
+                                   "strength_model": float(lora_strength)}}
+            unet_src = ["8", 0]
+        # TE-Speed 加速：attention 必须是 sageattn（kitchen_int8 等于关掉加速器，实测慢 1.5 倍）
         api["4"] = {"class_type": "TESpeedQwenImage21",
-                    "inputs": {"model": ["1", 0], "attention": attention,
+                    "inputs": {"model": unet_src, "attention": attention,
                                "step_cache": "te_predictor", "reuse_threshold": 0.06,
                                "start_percent": 0, "end_percent": 0,
                                "predictor_error_limit": 0.08, "verbose": True}}
@@ -1392,10 +1404,13 @@ class ComfyUIClient:
         ks = first("KSampler"); rs = first("ResolutionSelector")
         sc = first("ImageScaleToTotalPixels"); te = first("TESpeedQwenImage21")
         cache = any(v.get("class_type") == "QwenImage21Cache" for v in api.values())
+        lo = first("LoraLoaderModelOnly")
         return {
             "unet_name": un.get("unet_name") or "",
             "clip_name": cl.get("clip_name") or "",
             "vae_name": va.get("vae_name") or "",
+            "lora_name": lo.get("lora_name") or "",
+            "lora_strength": float(lo.get("strength_model") if lo.get("strength_model") is not None else 1.0),
             "steps": int(ks.get("steps") or 40),
             "cfg": float(ks.get("cfg") if ks.get("cfg") is not None else 1.0),
             "sampler_name": ks.get("sampler_name") or "euler",

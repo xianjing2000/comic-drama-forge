@@ -291,3 +291,6 @@ undefined/
 tmp*/
 workflows/_backup_*/
 导出_6图测试/
+
+# KT 方式对照实验（2026-10-16）：脚本 + 产物样本，不入库
+_kt_way/
