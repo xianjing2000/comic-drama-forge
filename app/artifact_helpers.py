@@ -257,16 +257,20 @@ def _purge_sb_refs(project: str) -> dict:
         # generate_storyboard 的命名：sb_ref_<filename_prefix 的 basename>_<idx>.png，
         # 分镜链路 filename_prefix 形如 `comic_drama_sb/<项目>_shot_NN[...]`，
         # 故前缀里含 `<项目>_shot_`。
-        pref = f"sb_ref_{_safe_project(project or '')}_shot_"
+        _pfx = _safe_project(project or "")
+        # sb_ref_ = 分镜参考图输入；sb_fix_ = 编辑式修复的画布（2026-10-15 新增）。
+        # 两者都是「上传给 LoadImageOutput 的中间件」，由本函数一并管辖 —— 漏掉 sb_fix
+        # 会让它每镜留一张 2MB+ 的 PNG 在 ComfyUI output 里只增不减。
+        prefs = (f"sb_ref_{_pfx}_shot_", f"sb_fix_{_pfx}_shot_")
         targets = []
         for fn in os.listdir(root):
-            if fn.startswith(pref) and fn.lower().endswith(".png"):
+            if fn.startswith(prefs) and fn.lower().endswith(".png"):
                 targets.append(os.path.join(root, fn))
         if not targets:
             return res
         res = _reject_artifact(targets, project=project,
-                               reason="分镜参考图上传残留（本轮分镜生成结束）",
-                               kind="sb_ref")
+                               reason="分镜参考图/编辑画布上传残留（本轮分镜生成结束）",
+                               kind="sb_ref/sb_fix")
     except Exception as e:  # noqa: BLE001
         logger.warning("[质检清理] sb_ref 清理失败（忽略，不影响生产）：%s: %s",
                            type(e).__name__, e)
