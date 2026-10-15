@@ -1286,7 +1286,8 @@ class ComfyUIClient:
                                       aspect_ratio: str = "16:9 (Widescreen)",
                                       multiple: int = 32,
                                       filename_prefix: str = "Qwen_image_2.1",
-                                      enable_cache_node: bool = True) -> dict:
+                                      enable_cache_node: bool = True,
+                                      base_image: bool = False) -> dict:
         """按参考图数量生成分镜工作流的 **API prompt**（不再读 JSON 模板）。
 
         :param ref_count: 参考图槽位数量（= 本次实际要喂的图片数）。
@@ -1335,9 +1336,27 @@ class ComfyUIClient:
         te_inputs.update({"vae": ["3", 0], "prompt": "", "negative_prompt": "",
                           "resolution": 0})
         api["7"] = {"class_type": "TextEncodeQwenImage21", "inputs": te_inputs}
+        # ---- 编辑式修复（2026-10-15 用户口径）----
+        # 质检不达标时**不再从零重画**：以「上一版失败的图」为画布（VAEEncode -> latent），
+        # 配低 denoise + 修复提示词做编辑式修复。
+        #    实测收益：全量重生成 530s vs 编辑式修复 26~56s（快 10~20 倍）；更重要的是
+        #    能保住已经正确的部分（构图/场景/其他角色/光线），只改质检指出的那一处缺陷 ——
+        #    从零重画会把对的部分一起丢掉，这正是「赵天霸发型越改越偏」的放大器。
+        # 节点 400 LoadImageOutput / 401 ImageScaleToTotalPixels / 402 VAEEncode，
+        #    图名由调用方（generate_storyboard）上传后填入。
+        if base_image:
+            api["400"] = {"class_type": "LoadImageOutput", "inputs": {"image": ""}}
+            api["401"] = {"class_type": "ImageScaleToTotalPixels",
+                          "inputs": {"image": ["400", 0], "upscale_method": "nearest-exact",
+                                     "megapixels": megapixels, "resolution_steps": multiple}}
+            api["402"] = {"class_type": "VAEEncode",
+                          "inputs": {"pixels": ["401", 0], "vae": ["3", 0]}}
+            latent_src = ["402", 0]
+        else:
+            latent_src = ["7", 2]
         api["6"] = {"class_type": "KSampler",
                     "inputs": {"model": model_src, "positive": ["7", 0],
-                               "negative": ["7", 1], "latent_image": ["7", 2],
+                               "negative": ["7", 1], "latent_image": latent_src,
                                "seed": int(seed), "steps": int(steps), "cfg": float(cfg),
                                "sampler_name": sampler_name, "scheduler": scheduler,
                                "denoise": float(denoise)}}
@@ -1389,7 +1408,8 @@ class ComfyUIClient:
             "enable_cache_node": bool(cache),
         }
 
-    def _rebuild_storyboard_workflow(self, api: dict, ref_count: int) -> dict:
+    def _rebuild_storyboard_workflow(self, api: dict, ref_count: int,
+                                    base_image: bool = False) -> dict:
         """用代码重建分镜节点图（槽位 = ref_count），参数沿用传入 api 里的取值。
 
         为什么这样做（2026-10-15 用户口径）：原实现直接用手工维护的 JSON 模板，
@@ -1399,7 +1419,8 @@ class ComfyUIClient:
         """
         try:
             params = self._extract_storyboard_params(api)
-            rebuilt = self.build_storyboard_workflow_api(max(1, int(ref_count)), **params)
+            rebuilt = self.build_storyboard_workflow_api(
+                max(1, int(ref_count)), base_image=base_image, **params)
             logger.info("[分镜工作流] 代码重建：槽位=%d（原模板 %d 槽）节点 %d → %d",
                         max(1, int(ref_count)),
                         len(self._find_ref_slot_nodes(api)[0]), len(api), len(rebuilt))
@@ -4547,7 +4568,7 @@ class ComfyUIClient:
     def generate_storyboard(self, prompt_zh: str, ref_images: List[str],
                             filename_prefix: str = "comic_drama_sb/shot",
                             seed: int = None, timeout: int = 3600,
-                            size=None) -> dict:
+                            size=None, base_image=None, denoise=None) -> dict:
         """使用 分镜生成_Qwen21.json（QwenImage2.1 参考图编辑）生成单张分镜图
 
         ref_images: 参考图列表（本地绝对路径或 /api/... HTTP 资源路径）。
@@ -4566,7 +4587,8 @@ class ComfyUIClient:
         #    从模板取出模型/步数/加速等参数，**用代码重建节点图**，槽位数量 = 实际参考图数。
         #    这样不再依赖固定 9 槽的模板结构，也就不需要尾部槽位清理那套逻辑。
         #    重建失败会在内部回落原模板（fail-open），不阻断出图。
-        api_prompt = self._rebuild_storyboard_workflow(api_prompt, len(ref_images or []))
+        api_prompt = self._rebuild_storyboard_workflow(
+            api_prompt, len(ref_images or []), base_image=bool(base_image))
         seed_changed = self._inject_seed(api_prompt, seed)
         if seed_changed:
             logger.info(f"分镜采样种子已注入: {seed_changed}")
@@ -4604,6 +4626,29 @@ class ComfyUIClient:
             uploaded.append(self.upload_image(local, name, image_type="output"))
         if not uploaded:
             raise RuntimeError("分镜参考图全部不可用（请先完成步骤2/3/4的资产生成）")
+        # ---- 编辑式修复：把「上一版失败的图」上传为画布 #400（2026-10-15 用户口径）----
+        #    质检不达标时不再从零重画，而是以失败图为底 + 低 denoise + 修复提示词做编辑。
+        #    与参考图走同一上传通道（image_type="output"），保证 LoadImageOutput 读得到。
+        #    任何失败都回落全量重生成（fail-open），绝不阻断出图。
+        if base_image:
+            try:
+                _bl = self.resolve_local_path(base_image) if isinstance(base_image, str) else None
+                if _bl and os.path.exists(_bl) and api_prompt.get("400"):
+                    _bn = "sb_fix_%s.png" % os.path.splitext(os.path.basename(filename_prefix))[0]
+                    _up = self.upload_image(_bl, _bn, image_type="output")
+                    api_prompt["400"]["inputs"]["image"] = _up
+                    logger.info("[编辑式修复] 画布已注入 #400=%s（源图 %s）",
+                                _up, os.path.basename(_bl))
+                else:
+                    logger.warning("[编辑式修复] 失败图不可用，回落全量重生成：%s", base_image)
+            except Exception as _be:  # noqa: BLE001
+                logger.warning("[编辑式修复] 画布上传失败（回落全量重生成）：%s", _be)
+        if denoise is not None:
+            _dn = max(0.0, min(1.0, float(denoise)))
+            for _v in api_prompt.values():
+                if isinstance(_v, dict) and _v.get("class_type") == "KSampler":
+                    _v["inputs"]["denoise"] = _dn
+            logger.info("[编辑式修复] denoise=%.2f（<1 才只改缺陷、不全量重画）", _dn)
 
         # 3) 逐个槽位替换参考图（不替换会残留模板里的他人图片名 → 400 Invalid image file）
         #    P0 修复（原 comfyui_client.py:870）：原实现 `uploaded[min(idx, len(uploaded) - 1)]`

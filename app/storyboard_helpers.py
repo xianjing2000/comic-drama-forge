@@ -2795,9 +2795,26 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                     seed = random.randint(1, 2 ** 31 - 1)
                     dst = os.path.join(out_dir, f"shot_{seq:02d}.png")
 
+                    # ⭐ 编辑式修复的画布（2026-10-15 用户口径）：attempt>0 时指向上一版失败的图，
+                    #    让重试走「以图改图」而不是「从零重画」。attempt==0 时为 None（正常生成）。
+                    _fix_base = None
                     for attempt in range(_rounds):
                         if attempt > 0:
                             seed = random.randint(1, 2 ** 31 - 1)
+                            # ⭐ 编辑式修复（2026-10-15 用户口径）：**不再从零重画**。
+                            #    画布 = 上一次尝试的图（scratch 目录按 shot_XX_try{N}.png
+                            #    命名，可直接推算上一轮），配低 denoise + 下面的修复
+                            #    提示词，只改质检指出的缺陷。
+                            #    实测：全量重生成 530s vs 编辑式修复 26~56s（快 10~20 倍）；
+                            #    更重要的是保住已正确的构图/场景/其他角色/光线 —— 从零
+                            #    重画会把对的部分一起丢掉，这正是「赵天霸发型越改越偏」的放大器。
+                            _fix_base = os.path.join(
+                                _storyboard_scratch_dir(project_name, _sb_ep),
+                                f"shot_{seq:02d}_try{attempt}.png")
+                            if not os.path.isfile(_fix_base):
+                                logger.warning("[编辑式修复] 上一版图不存在（%s），回落全量重生成",
+                                               os.path.basename(_fix_base))
+                                _fix_base = None
                             # G10：基准改为 self_healed_prompt（自愈后提示词）。
                             # 旧 bug：基准是 orig_prompt（自愈前），重试会回落到未自愈提示词，
                             # 导致首次自愈对后续重试不再生效。
@@ -2876,6 +2893,9 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                             filename_prefix=f"comic_drama_sb/{project_name}_shot_{seq:02d}",
                             seed=seed,
                             size=_sb_size,
+                            # 编辑式修复：有画布就只改缺陷（denoise<1），没有就全量生成
+                            base_image=_fix_base,
+                            denoise=(0.55 if _fix_base else None),
                         )
                         if not result["files"]:
                             # B 自愈（2026-10-08）：ComfyUI 离线时自动重启，重启成功则本镜头下一轮重跑
