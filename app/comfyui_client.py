@@ -4244,12 +4244,19 @@ class ComfyUIClient:
                     continue
                 # 身份锚点：官方句式 “Preserve the exact identity from <imageN>.”
                 if "身份锚点" in lab:
+                    # 官方 2.1 PE-I2I「Person into scene」标准配方（2026-10-15）：
+                    #   "Keep hairstyle, clothing, and facial features identical."
+                    # 实测差别很大：旧写法把 hairstyle 夹在 facial structure 后面当附属，
+                    # 被同镜环境图（群像/群众）的「本场景男性发型统计印象」盖过 ——
+                    # 赵天霸设定图明确是短寸黑发，成图却是中长蓬乱遮额，质检判官连续两轮报同一缺陷。
+                    # 官方配方把 hairstyle **前置为首个列举项**，故照搬，并补一条硬锁定句。
                     identity_lines.append(
-                        f"Preserve the exact identity from <image{pos}>: "
-                        f"{_ref_label_purpose(lab)}. "
-                        f"Keep the original facial structure, hairstyle and body "
-                        f"proportions of <image{pos}> — do NOT redraw or re-describe "
-                        f"the face.")
+                        f"Keep hairstyle, clothing, and facial features of <image{pos}> "
+                        f"identical ({_ref_label_purpose(lab)}). "
+                        f"Hairstyle of <image{pos}> is LOCKED: keep its exact length, "
+                        f"parting, and short/long tied/loose state — do NOT lengthen, "
+                        f"add bangs, or restyle it, and do NOT take hairstyle cues from "
+                        f"any other reference image.")
                 else:
                     role_lines.append(
                         f"Use <image{pos}> only for {_ref_label_purpose(lab)}.")
