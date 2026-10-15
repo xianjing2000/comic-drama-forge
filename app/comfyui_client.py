@@ -4326,6 +4326,19 @@ class ComfyUIClient:
                 body.append(
                     "Each referenced character must keep its own individual identity; "
                     "do not merge facial features, hairstyles or costumes between them.")
+            # ---- 参考图「版式」隔离（2026-10-15，用户口径 A）----
+            # 角色参考图是**设定图/三视图**：同一角色的正/侧/背多视角拼在一张、且全身。
+            # 实测（shot_21 10 次、shot_26 3 次全部失败）模型会把这张图的**版式**当成画面结构：
+            #   ① 同一角色在画面里重复出现（正面 + 背影同框）—— 与「始终没有回头」这类镜头描述直接冲突；
+            #   ② 跟着全身设定图取景 → 镜头要求「中景（腰部以上、严禁膝下与脚部）」却越档成全景。
+            # 官方口径：参考图是「身份供体」，不是构图模板；它的排布不得迁移到画面。
+            sections.append(
+                "REFERENCE LAYOUT IS NOT THE COMPOSITION: a character reference may be a "
+                "model sheet showing the SAME character from several angles (front / side / "
+                "back) in one image. It is an identity document only. Do NOT reproduce that "
+                "sheet's layout: never draw the same character twice in one frame to mirror "
+                "its angles, and never follow the sheet's full-body framing — the shot size "
+                "and camera are defined ONLY by the SHOT description below.")
             sections.append("\n".join(body))
             if blocking_pos:
                 sections.append(COMPOSITION_BASELINE_SECTION.format(pos=blocking_pos))
