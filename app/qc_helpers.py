@@ -244,6 +244,77 @@ def _text_item_closeup(shot: dict, item_idx: dict, items_in: list) -> str:
     _KEY = ("特写", "俯拍", "近景", "纸面", "屏幕", "填满", "推到", "推向")
     return hero if any(_k in _blob for _k in _KEY) else ""
 
+# ===================== 资产高清增强产物优先取用（2026-10-16） =====================
+# 背景：场景九宫格 grid.png @1.5MP 单格仅 554×309；角色三视图 base.png 单视图约 0.5MP，
+#      而分镜输出 1.5MP —— 参考图细节不足会锁死输出画质上限（实测数据见 _ab_test/）。
+# 做法：可由 app/asset_enhance.py 产出 <asset_dir>/hd/ 下的「切格 → 放大重绘」高清图；
+#      本处**只在分镜链路**优先取这些高清图，缺失时原样返回（fail-open，零行为变更）。
+# ⚠️ **视频链路不走这里** —— 视频用 asset_refs._pick_scene_view / _pick_char_view，
+#    仍取 grid.png / 三视图整图（用户 2026-10-16 口径）。
+# ⚠️ **物品不参与增强**，其取图路径完全不变。
+
+
+def _hd_dir_of(asset_dir: str) -> str:
+    return os.path.join(asset_dir or "", "hd")
+
+
+def _pick_hd_file(asset_dir: str, *names) -> str:
+    """在 <asset_dir>/hd/ 下按 names 顺序找第一个存在的 png；找不到返回空串。"""
+    d = _hd_dir_of(asset_dir)
+    if not asset_dir or not os.path.isdir(d):
+        return ""
+    for n in names:
+        p = os.path.join(d, n)
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+def prefer_hd_char_ref(original: str, payload: dict) -> str:
+    """分镜专用：角色参考图优先取 hd/ 下的高清单视角图。
+
+    三视图整图 → 增强为 hd/front.png（正面单张高清）。
+    取图优先级：hd/front.png → hd/side.png → hd/back.png → 原图。
+    角色身份锚点要的是「一张清晰的身份参考」，故优先正面高清图；
+    不再按景别选 half/front —— hd 产物本身已是满幅单视角、信息量远高于三视图整图。
+    """
+    if not original:
+        return original
+    _d = (payload or {}).get("_dir") or os.path.dirname(original or "")
+    hd = _pick_hd_file(_d, "front.png", "side.png", "back.png")
+    if hd:
+        logger.debug("[分镜参考图] 角色改用高清增强图：%s", hd)
+        return hd
+    return original
+
+
+def prefer_hd_scene_ref(original: str, payload: dict, shot) -> str:
+    """分镜专用：场景参考图按**镜头机位**取 hd/cellNN.png 高清机位图。
+
+    格序与 config.SCENE_GRID_VIEW_KEYS 一一对应（行优先）：
+      cell01=front 全景点 / cell02=wide 远景 / cell03=mid 中景 / cell04=near 近景
+      cell05=detail_a / cell06=detail_b / cell07=left45 / cell08=right45 / cell09=top 俯视鸟瞰
+    hd/ 不存在或该格缺失时原样返回。
+    """
+    if not original:
+        return original
+    _d = (payload or {}).get("_dir") or os.path.dirname(original or "")
+    if not os.path.isdir(_hd_dir_of(_d)):
+        return original
+    try:
+        _key = _scene_view_for_shot(shot)
+    except Exception:  # noqa: BLE001
+        _key = "front"
+    try:
+        _idx = list(SCENE_GRID_VIEW_KEYS).index(_key) + 1
+    except ValueError:
+        _idx = 1
+    hd = _pick_hd_file(_d, "cell%02d.png" % _idx, "cell01.png")
+    if hd:
+        logger.debug("[分镜参考图] 场景改用高清机位图(%s)：%s", _key, hd)
+        return hd
+    return original
+
 
 def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
                                project_name: str = None) -> list:
@@ -355,6 +426,8 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
         # 参考图优先取 outfits/<key>/ 的同档位图；解析不出/未生成回落主设定图。
         img = _pick_char_view(payload, _want_half,
                               _shot_outfit_dir(shot, name, payload.get("_dir") or ""))
+        # 2026-10-16：优先取资产高清增强产物（<asset_dir>/hd/front.png），缺失则原样回落
+        img = prefer_hd_char_ref(img, payload)
         if not img or img in used_paths:
             # ⭐ 2026-10-13（t16 P0-③，用户口径「静默降级容忍度极低」）：这里原先直接
             #    continue —— 角色**整条身份链**（身份锚点 / 服装锚点 / 身份基准网格）
@@ -422,6 +495,9 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
     #    连 `_resolve_scene_entry` 的未匹配告警都不会触发（它只在「名字匹配不上」时报）。
     #    改成按「解析出的场景名」判定，与角色侧同口径。
     scene_img = _pick_scene_view(_sc_entry, shot) if scene_name else None
+    # 2026-10-16：优先取高清机位图（<asset_dir>/hd/cellNN.png，按本镜机位选格）
+    if scene_img:
+        scene_img = prefer_hd_scene_ref(scene_img, _sc_entry, shot)
     # ⭐ 2026-10-15（用户口径）：默认不再单独注入场景图 —— 3D 构图基准图（<image1>）
     #    本身已含完整场景（建筑/石阶/石灯笼/材质/光影），再补一张属冗余信号，
     #    且会与基准图的场景互相拉扯。见 config.ENABLE_STORYBOARD_SCENE_REF（默认 False）。
@@ -857,7 +933,7 @@ def _qc_ref_images(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
         #    否则判官拿正面锚点去判一张俯拍分镜图，只会判「背景不一致」，
         #    把「机位档没生效」误报成「场景画错了」。
         _add(f"场景「{loc}」的空间结构与光照基调",
-             _pick_scene_view(_scene_e, shot))
+             prefer_hd_scene_ref(_pick_scene_view(_scene_e, shot), _scene_e, shot))
     if not out:
         # 兜底：本镜没登记角色/物品时，用生成侧实际用的那几张（至少保住场景锚点）
         # ⚠️ 2026-10-02 修复：必须**跳过构图基准图**。生成侧 refs 的第 1 项可能是
