@@ -88,7 +88,12 @@ BEAT_MAX_SEC = 6.0
 #    segment_durations 保证 duration <= max_sec 时**恒返回单段**，故把上限提到
 #    12.0（超过单镜最大 SHOT_DURATION_MAX=8）即等效「永不切段」。
 #    ⚠️ 保留该函数与常量（不删逻辑），需要恢复时把值调回 4.0 即可。
-H3_SEGMENT_MAX_SEC = 12.0
+# ⚠️ 2026-10-18（8G 显存应急，凌晨自动修复）：12.0 → 5.0 重新启用切段。
+#   原因：12.0 时每段 10 秒 / 243 帧，H3 的 VAE 解码在 8G 卡上显存死锁
+#   （实测 GPU 100% 但功耗仅 32W、20~35 分钟无任何输出、无 mp4 落盘）。
+#   切段后每段 ~120 帧，VAE 能解码；**成片总时长不变**（只是多几段拼接）。
+#   显存宽裕（>=12G）后可把值改回 12.0 恢复「不切段」口径。
+H3_SEGMENT_MAX_SEC = 5.0
 
 #: 切段时允许的**最小段长**（秒）。切成比这更短的碎段没有意义：
 #: 模型还没站稳就切下一段，反而引入更多接缝。故段数上限为
@@ -306,6 +311,15 @@ _SILENT_WORDS = ("极静", "寂静", "死寂", "安静", "无声", "全静", "�
                  "极细声", "极其细微", "几乎听不见", "微不可闻")
 
 
+#: 中日韩统一表意文字（用于判断某段文本是否已被英文化）
+_CJK_RE = re.compile(r"[一-鿿]")
+
+
+def _has_cjk(text: str) -> bool:
+    """文本里是否还有中文 —— 决定能否直接拼进英文散文。"""
+    return bool(_CJK_RE.search(str(text or "")))
+
+
 def _clean_sfx(text: str) -> str:
     """去掉音效串里的旁白/配乐标注与**静音类措辞**，只留真正要发声的环境与动作音。"""
     t = _PAREN_NOTE_RE.sub("", str(text or ""))
@@ -356,13 +370,27 @@ def build_soundscape(shot: dict, scene_hint: str = "") -> str:
     lines = dialogue_lines(shot.get("dialogue"))
     parts: List[str] = []
     if sfx:
-        parts.append(sfx)
+        # ⭐ 2026-10-19（用户实测「人物说话把场景描述也说出来了」的反面问题）：
+        #    audio_cues 现已纳入 englishize_shot 的英文化字段（h3_en_text._FIELDS）。
+        #    英文化成功后可以**原样拼入**，音景重新变得具体（风穿过远峰、丝幔轻响…）；
+        #    此前为防「中文被 H3 当台词念」只能写死占位句，代价是整段音景成了空话。
+        #    仍含中文时回落占位句（安全兜底，永不把中文音效送进模型）。
+        if _has_cjk(sfx):
+            parts.append("designed diegetic sound effects timed to the action in this shot")
+        else:
+            parts.append(sfx)
     if loc:
-        parts.append(f"the ambient room tone of {loc}")
+        # 地名同理：英文化后可直接具名（the ambient sound of Qingyun Sect Outer Plaza），
+        # 含中文时仍改泛化指代 —— 实测中文地名会被整句朗读（「正午，青石广场…」）。
+        if _has_cjk(loc):
+            parts.append("the ambient room tone of the location shown in frame")
+        else:
+            parts.append(f"the ambient sound of {loc}")
     elif emotion:
         parts.append("a quiet ambient room tone")
     if emotion:
-        parts.append(f"breathing and fabric rustle matched to the 「{emotion}」 mood")
+        # 情绪值同为中文，只表达强度、不写原文。
+        parts.append("breathing and fabric rustle matched to the character's inner state")
     if not parts:
         parts.append("a quiet ambient room tone, with breathing and fabric rustle clearly audible")
     # ⭐ 2026-10-11：显式要求「整段始终有可闻底噪」，防模型把安静场景渲染成静音
@@ -370,15 +398,17 @@ def build_soundscape(shot: dict, scene_hint: str = "") -> str:
                  "be rendered as pure silence")
     body = ", ".join(parts).rstrip("。；;，,")
     if lines:
-        # 2026-09-26：⚠️ 此前这里把台词前 12 字写成「The echo of "台词"」，导致台词
-        # 内容在提示词里出现**两次**（detailed_description 的 <d>台词</d> + 此处 echo
-        # 引用）—— H3 把两处都当台词念，实测「同一句台词被反复念」（用户反馈）。
-        # 手跑模板虽然也写 echo，但只取台词末尾 2 字关键词、风险低；此处前 12 字几乎
-        # 是完整台词、风险高。现彻底去掉台词引用，只保留「说话声混入环境音」的空间感
-        # —— 台词本体只留在 detailed_description 的 <d> 标签里（单一事实来源）。
-        where = loc or "the scene"
-        tail = (f"The spoken voice carries clearly through {where}, synced to the lip "
-                f"movement, and sits naturally on top of the ambient tone.")
+        # 对齐 001 的写法：取台词末尾 2-3 字做 echo（H3 靠它识别哪句是台词），
+        # 并去掉此前的强负面指令（「must never be read out」）。
+        _last = str((lines[-1] or {}).get("text") or "").strip()
+        # echo 不带标点（001 用的是「娶我」这种纯词）。
+        _bare = _last.rstrip("。！？!?.,，、；;：:…”’)） ")
+        _echo = _bare[-3:] if len(_bare) >= 3 else _bare
+        # 001 用 <Subject N> 指代说话人，不写角色名（中文名会被朗读）。
+        _vo = "the speaker's voice"
+        tail = (f"{_vo} carries clearly through the scene, synced to the lip movement, "
+                f"and sits naturally on top of the ambient tone, "
+                f"the echo of \"{_echo}\" lingering for a moment before dissolving.")
         return f"{body}. {tail}"
     # ⚠️ 2026-10-08（用户反馈「一会中文一会英文」）：实测「No one speaks」这种温和声明挡不住
     #    H3 —— 它在无声段仍会自制语音，而提示词是英文，于是出来英文/含糊英语。
@@ -467,14 +497,14 @@ def _beats(shot: dict, duration: float) -> List[Tuple[float, float, str]]:
             # 本地模板的收尾写法是「动作推进 → 说话 → 收束」，最后一拍必须
             # **为台词留出明确的开口时机**（「and then speaks」），否则 H3 会把
             # 台词当成背景旁白、人物嘴唇不动。
-            text = ("the movement settles and the posture stabilises, with the framing "
-                    "cutting cleanly from the previous moment")
+            text = ("the action decelerates and settles into its closing state, "
+                    "the camera easing to a stop on the final pose and expression")
             # 审计 P2-18（2026-09-29）：不再把旁白原文拼进提示词。「成片不产出旁白」是
             # 产品决策（DEPRECATED_SHOT_FIELDS 显式拒绝 narration），且这里一旦有人
             # 调大 H3_SEGMENT_MAX_SEC 越过 BEAT_MAX_SEC，旧剧本的旁白会借这条分支复活。
         else:
-            text = ("the action continues to advance, keeping the characters' appearance, "
-                    "wardrobe and scene lighting exactly consistent with the previous moment")
+            text = ("the action carries over from the previous beat without a cut, "
+                    "keeping the same characters, wardrobe, pose and scene lighting")
         beats.append((start, span, text))
     return beats
 
@@ -518,7 +548,8 @@ def _spoken_clause(lines: Sequence[Dict[str, str]], slots: Dict[str, str],
                    speak_lead: str = "",
                    subject_labels: Optional[Dict[str, str]] = None,
                    audio_labels: Optional[Dict[str, str]] = None,
-                   voice_descs: Optional[Dict[str, str]] = None) -> str:
+                   voice_descs: Optional[Dict[str, str]] = None,
+                   gender_map: Optional[Dict[str, str]] = None) -> str:
     """把「谁在说话」渲染成 I2V 提示词的**对白句**（本提示词里台词文本的唯一载体）。
 
     ⚠️⭐ 2026-10-08 修复（用户实测反馈「配音含糊不清」，且手跑 H3 测试声音正常）：
@@ -544,7 +575,11 @@ def _spoken_clause(lines: Sequence[Dict[str, str]], slots: Dict[str, str],
         speaker = str(ln.get("speaker") or "").strip()
         slot = slots.get(speaker, "")
         who = f"({slot}) " if slot else ""
-        lead = speak_lead or _SPEAK_LEAD.get(_guess_voice(speaker), "") or _SPEAK_LEAD[""]
+        # ⭐ 2026-10-18：性别优先用**角色 gender 字段**（经 audio_defs 传入 gender_map，
+        #    值 "男"/"女"）；没有才退回按名字猜（`_guess_voice`）。
+        _g_zh = str((gender_map or {}).get(speaker) or "").strip()
+        _gk = {"男": "male", "女": "female"}.get(_g_zh) or _guess_voice(speaker)
+        lead = speak_lead or _SPEAK_LEAD.get(_gk, "") or _SPEAK_LEAD[""]
         # ⭐ 2026-10-09 官方格式对齐（MiniMax-H3 技能 references/ref-en.txt §5.4）：
         #   <Subject N> (Sx) says in {音色/语速}, using the voice timbre referenced from
         #   <Audio N>, <d>[Chinese] 原文</d> {收口句}
@@ -552,21 +587,19 @@ def _spoken_clause(lines: Sequence[Dict[str, str]], slots: Dict[str, str],
         #    对照官方指南后确认**删错了** —— 官方示例正是这种写法。真正的病因是
         #    `<Audio N>` 音色参考**从未声明进六段**（H3 不知道参考音频是干什么的）。
         _vd = (voice_descs or {}).get(speaker, "") or lead
-        _al = (audio_labels or {}).get(speaker, "")
         _sl = (subject_labels or {}).get(speaker, "")
-        _head = (f"{_sl} " if _sl else "") + (f"({slot}) " if slot else "")
-        _mid = f"says in {_vd}"
-        _mid += (f", using the voice timbre referenced from {_al}," if _al else ",")
-        _close = _SPEAK_CLOSE.get(_guess_voice(speaker), _SPEAK_CLOSE[""])
-        # ⭐ 2026-10-08 修复：写出台词原文（官方格式 `<d>[Chinese] 原文</d>`）。
-        #    本处是整条提示词里台词文本的**唯一出现位置** —— 别处再写一次就会
-        #    重新触发「同一句被念两遍」。
-        # ⚠️ 2026-10-08（用户反馈「一会中文一会英文」）：去掉英文口语动词。
-        #    旧写法 "speaks — a clear voice at a measured spoken rate (S1) says <d>…</d>,
-        #    with the lips moving naturally in sync with the spoken words" 把英文的
-        #    speaks/says/voice 直接贴在台词标签旁，H3 会把英文一并念出来 → 中英混杂。
-        #    现在只保留「说话人槽位 + <d> 中文台词</d>」，唇形信号统一挪到句尾一句里。
-        spoken.append(f"{_head}{_mid} <d>[Chinese] {text}</d> {_close}")
+        _head = (f"{_sl} " if _sl else "")
+        _close = _SPEAK_CLOSE.get(_gk, _SPEAK_CLOSE[""])
+        # ⭐ 2026-10-18（对齐 10-06 手跑模板「台词正常」的写法）：模板是
+        #   「… speaks — {音色}, at a measured pace (Sx): <d>[Chinese] 原文</d> {收口}」。
+        #   与旧实现的差异：① 用 `speaks —` 引出（模板句式）；② (Sx) 放到**冒号前**；
+        #   ③ **删掉**台词句里的 `using the voice timbre referenced from <Audio N>` ——
+        #   模板没有这句，且它把「音色引用」和「要念的台词」挤在同一句，实测会让模型把
+        #   周围的画面描述也念出来。`<Audio N>` 的官方声明仍在 subject_definitions 里。
+        _vo = (f"{_vd}, at a measured pace" if _vd else "at a measured pace")
+        _slot2 = (f" ({slot})" if slot else "")
+        spoken.append(f"{_head}speaks — {_vo}{_slot2}: <d>[Chinese] {text}</d> {_close}")
+        # 台词文本只出现在 <d> 标签里（唯一载体）——别处再写一次就会「同一句被念两遍」。
     if not spoken:
         return ""
     # 收口语已逐句写在台词后面（官方格式），这里不再追加统一尾句。
@@ -720,6 +753,30 @@ _CAMERA_MOVE_EN = {
     "过肩": "shot over the subject's shoulder",
     "主观": "shot as the character's point of view",
 }
+
+def _english_motion_phrase(motion: str) -> str:
+    """运镜/运动字段 → 英文短语（B 方案，2026-10-19）。
+
+    10段模板的 detailed_description 是**全英文**；旧实现把 motion 中文原值
+    （如「摄影机固定；赵天霸抬起右手食指前点」）直接塞进英文句。这里：
+      · 已是英文（A 方案英文化产物）→ 原样返回；
+      · 中文 → 按分句找运镜词映射成英文短语，映射不到返回空串（省略一句，
+        优于把中文灌进英文句）。
+    """
+    t = str(motion or "").strip()
+    if not t:
+        return ""
+    if all(ord(c) < 128 for c in t):
+        return _strip_end(t)
+    for seg in re.split(r"[；;，,。]", t):
+        seg = seg.strip()
+        if not seg:
+            continue
+        for zh in sorted(_CAMERA_MOVE_EN, key=len, reverse=True):
+            if zh in seg:
+                return _CAMERA_MOVE_EN[zh]
+    return ""
+
 
 
 #: 机位/角度类词条（与「运镜」正交，二者可同时出现）。
@@ -915,6 +972,7 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
                                subject_labels: Optional[Dict[str, str]] = None,
                                audio_labels: Optional[Dict[str, str]] = None,
                                voice_descs: Optional[Dict[str, str]] = None,
+                               gender_map: Optional[Dict[str, str]] = None,
                                slots_override: Optional[Dict[str, str]] = None) -> str:
     """``detailed_description``：按 ``[Shot N]`` 逐节拍写画面（本地模板同格式）
 
@@ -977,7 +1035,8 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
 
     beats = _beats(shot, duration)
     spoken = _spoken_clause(lines, slots, subject_labels=subject_labels,
-                            audio_labels=audio_labels, voice_descs=voice_descs)
+                            audio_labels=audio_labels, voice_descs=voice_descs,
+                            gender_map=gender_map)
 
     # P0-1 首帧 / 运动三段锚点（借鉴 ViMax / CineGen）：
     # 读到三字段（旧剧本/模型未输出 → 空串，下面各段整块不出现，零回归）。
@@ -1011,7 +1070,11 @@ def build_detailed_description(shot: dict, duration: float, style: str = "",
             # 2026-10-09 官方对齐：本镜整体运动**内嵌进 [Shot 1] 句**（官方与本地模板
             # 都把运镜写在镜头句里，没有独立的 `Motion:` 元行）。
             if _motion:
-                head_parts.append(f"the guiding motion is {_strip_end(_motion)}")
+                # ⭐ 2026-10-19（B）：只接受英文（A 产物）或可映射成英文的运镜词；
+                #    中文原值绝不直塞（旧实现在这里把「摄影机固定；…」灌进英文句）。
+                _mot_en = _english_motion_phrase(_motion)
+                if _mot_en and _mot_en not in camera_move:
+                    head_parts.append(f"the guiding motion is {_mot_en}")
             head = (f"[Shot 1] {', '.join(head_parts)}: " if head_parts
                     else "[Shot 1] ")
         else:
@@ -1543,7 +1606,7 @@ def build_ref2va(shot: dict, picture_defs: Sequence[Tuple[str, str]],
             len(_audio_defs), _audio_cap, _audio_cap, _audio_cap,
             "、".join(str(_d.get("name") or "?") for _d in _audio_defs[_audio_cap:]))
         _audio_defs = _audio_defs[:_audio_cap]
-    _subj_labels, _audio_labels, _voice_descs = {}, {}, {}
+    _subj_labels, _audio_labels, _voice_descs, _gender_map = {}, {}, {}, {}
     for _i, _s in enumerate(subjects or [], start=1):
         _n = str(_s.get("name") or "").strip()
         if _n:
@@ -1556,6 +1619,8 @@ def build_ref2va(shot: dict, picture_defs: Sequence[Tuple[str, str]],
             _audio_labels[_n] = str(_d["label"])
         if _d.get("voice"):
             _voice_descs[_n] = str(_d["voice"])
+        if _d.get("gender"):
+            _gender_map[_n] = str(_d["gender"]).strip()
 
     # retention_analysis 里声明「本段出现在哪些镜头」，与模板 ``(appears in [Shot 1]…)``
     # 同构。单次调用只知道这一个 shot，故按节拍数折算（单节拍即 [Shot 1]）。
@@ -1589,7 +1654,7 @@ def build_ref2va(shot: dict, picture_defs: Sequence[Tuple[str, str]],
         ("detailed_description", build_detailed_description(
             shot, dur_f, style, pic_map, end_frame_ref, storyboard_ref_label,
             subject_labels=_subj_labels, audio_labels=_audio_labels,
-            voice_descs=_voice_descs,
+            voice_descs=_voice_descs, gender_map=_gender_map,
             slots_override={str(_d.get("name") or "").strip():
                             str(_d.get("speaker") or "").strip()
                             for _d in _audio_defs if _d.get("speaker")}) + _canon_cf),

@@ -44,7 +44,7 @@ from qc_helpers import (  # noqa: F401, E402
     _apply_closeup_ref_strategy, _cap_storyboard_refs, _closeup_char_crop,
     _normalize_scene_name, _on_screen_characters, _qc_brief,
     _qc_history_file_for, _qc_prev_shot_desc, _qc_prev_shot_ref,
-    _qc_prune_attempts, _qc_ref_images, _qc_retry_hopeless,
+    _is_detail_shot, _qc_prune_attempts, _qc_ref_images, _qc_retry_hopeless,
     _qc_shot_desc, _qc_style_of, _qc_summary,
     _sanitize_outfit_key, _shot_has_char_ref, _shot_has_on_screen,
     _shot_outfit_dir)
@@ -95,7 +95,7 @@ from datetime import datetime
 import dialogue_utils
 from job_state import (generation_state, lock)  # noqa: F401
 import json
-from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
+from flask import Flask, request, jsonify, send_file, abort, redirect, send_from_directory
 import os
 import prompt_memory
 import prompt_qc
@@ -166,6 +166,79 @@ def _te3d_body_profiles(project_name, episode_no):
 
 
 _TE3D_SCENE_CACHE: dict = {}
+
+
+#: 场景描述里的**人物词**：命中即该分句描述的是「谁在这」，不是「这地方长什么样」。
+#: 分镜的人物清单是严格由 characters_in_shot 驱动的（清单外一律不许出现），
+#: 所以场景描述里的这些人一律剔除，否则「弟子可四面围观」「由内门弟子把守」
+#: 会被模型当成画面内容 → 质检判「背景出现名单外人物」（镜 14 实测命中）。
+_SCENE_PEOPLE_RE = re.compile(
+    r"弟子|众人|人群|群众|守卫|侍卫|随从|护卫|路人|行人|人影|人们|百姓|围观|被围者|人群们")
+
+
+def _strip_people_from_scene(desc: str) -> str:
+    """去掉场景描述里「有谁在那里」的分句，只留「这地方长什么样」。"""
+    t = str(desc or "").strip()
+    if not t:
+        return t
+    parts = re.split(r"([，；。])", t)
+    out: List[str] = []
+    for seg in parts:
+        if not seg:
+            continue
+        if seg in "，；。":
+            out.append(seg)
+            continue
+        if _SCENE_PEOPLE_RE.search(seg):
+            continue
+        out.append(seg)
+    cleaned = "".join(out)
+    cleaned = re.sub(r"[，；]{2,}", "，", cleaned).strip("，；")
+    return cleaned
+
+
+def _scene_appearance_of(shot: dict, scene_idx: dict) -> str:
+    """本镜场景的**视觉描述**（scenes[].appearance）—— 分镜提示词的环境来源。
+
+    ⚠️ 2026-10-20（用户实测「场景缺失：背景为整片纯白空白」）：分镜提示词此前只会
+    拿到 shot['location'] 那**六个字的场景名**（如「青云宗外门广场」），
+    而剧本场景资产里写得很全的 appearance（「正午烈日下的宽阔青灰石坪，四周殿阁环立，
+    光比强烈石面反光刺目…」）**从来没进过提示词** —— 模型不知道这地方长什么样，
+    于是直接画成纯白背景，被质检判「场景缺失/场景不符」硬阻断（实测 5/14 镜报废）。
+
+    scene_idx 来自 _build_asset_index(script['scenes'], project, 'scene')，
+    其 entry 已带 appearance（见 asset_refs._build_asset_index 的 2026-10-15 注释）。
+    """
+    loc = str((shot or {}).get("location") or "").strip()
+    if not loc or not isinstance(scene_idx, dict):
+        return ""
+    entry = scene_idx.get(loc)
+    if isinstance(entry, dict):
+        return str(entry.get("appearance") or "").strip()
+    # 兜底：剧本场景名与镜头 location 不完全一致时按包含关系匹配（取最长命中）
+    best, best_len = "", 0
+    for nm, e in scene_idx.items():
+        if not isinstance(e, dict):
+            continue
+        n = str(nm or "")
+        if n and (n in loc or loc in n) and len(n) > best_len:
+            best, best_len = str(e.get("appearance") or "").strip(), len(n)
+    return best
+
+
+def _with_scene_appearance(shot: dict, scene_idx: dict) -> dict:
+    """给 shot 补上 scene_appearance（原地写，返回同一个 dict，便于链式调用）。"""
+    try:
+        if isinstance(shot, dict) and not str(shot.get("scene_appearance") or "").strip():
+            d = _scene_appearance_of(shot, scene_idx)
+            if d:
+                # ⭐ 2026-10-20：剔除场景描述里的人物分句（见 _strip_people_from_scene）
+                d = _strip_people_from_scene(d)
+            if d:
+                shot["scene_appearance"] = d
+    except Exception as _e:  # noqa: BLE001 - 绝不影响出图
+        logger.debug("[分镜场景] 场景描述注入失败（忽略）：%s", _e)
+    return shot
 
 
 def _te3d_scene_images(project_name, episode_no=None):
@@ -287,7 +360,7 @@ def _storyboard_retry_shot_impl():
       代价：批量任务在跑时手动重跑会排队等待（与「单 GPU 并发度 1」的设计一致；
       排队超过 30s 由 gpu_task_gate 打 warning，不静默）。
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project_name') or '')
     if err is not None:
@@ -307,6 +380,16 @@ def _storyboard_retry_shot_impl():
     item_idx = _build_asset_index(script.get("items") or [], project, "item")
     scene_idx = _build_asset_index(script.get("scenes") or [], project, "scene")
     refs = _allocate_storyboard_refs(shot, char_idx, item_idx, scene_idx, project)
+    # ⭐ 2026-10-20：同 _prep_shot —— 单镜重跑也必须带场景视觉描述。
+    _with_scene_appearance(shot, scene_idx)
+    # ⭐ 2026-10-18（借鉴同类项目「清单驱动·缺图不出图」）：本镜声明了出场角色、但某角色
+    #    没有任何可用参考图（按需生成也失败）→ 直接拒绝出图，提示先补资产。
+    _miss_c = list(shot.get("_sb_missing_char_refs") or [])
+    if _miss_c and _sb_require_char_refs():
+        return jsonify({"success": False, "char_refs_missing": _miss_c,
+                        "error": ("角色参考图缺失：%s —— 已按「缺图不出图」拒绝生成"
+                                  "（请先补齐这些角色的资产，再重跑本镜）")
+                                 % "、".join(_miss_c)}), 409
     # S6 修复：参考图匹配失败时，不再静默取首角色（旧行为会把"不存在的角色"当主角色），
     # 而是明确 400 + 具体错误。
     if not refs and shot.get("_no_reference"):
@@ -486,6 +569,16 @@ def _sb_critical_issues(*sources) -> list:
             if out:
                 return out
     return []
+
+
+def _sb_require_char_refs() -> bool:
+    """缺角色参考图时是否禁止出图（2026-10-18 借鉴同类项目；默认开）。
+
+    无身份锚点硬画必出「画错人/错服」（实测反复），停该镜让人先补资产，
+    比烧一遍 GPU 再被质检打回便宜。MJSCXT_SB_REQUIRE_CHAR_REFS=0 回到旧的降级出图。
+    """
+    return str(os.environ.get("MJSCXT_SB_REQUIRE_CHAR_REFS", "1")).strip().lower() not in (
+        "0", "false", "no", "off")
 
 
 def _sb_soft_accepted(item) -> bool:
@@ -683,6 +776,47 @@ def _sb_quality_tally(items, base_dir: str = "", use_artifact_meta: bool = True)
             "delivered_count": success + soft,
             "soft_shot_ids": soft_ids,
             "critical_shot_ids": crit_ids}
+
+
+def _sb_record_stage_analytics(project_name: str, episode_no, shots: list) -> None:
+    """把分镜逐镜 phase_secs / 墙钟聚合成一条 analytics 事件（Phase 0.4，fail-open）。
+
+    phase_secs 是 _prep_shot 落进每个 item 的「前置段逐阶段耗时」字典（增强/预检/
+    九宫格规划/3D 基准图…）。此前这些数字只写在日志里；这里按阶段求和并给出每镜
+    均值与「GPU 段≈墙钟−前置段」，写进 output/analytics/events.jsonl 的 meta，
+    供成本看板与后续提速分析（2026-10-13 减时分析）用。
+    统计是可观测性、不是业务：任何异常都不得影响分镜结果（调用点另加 try/except）。
+    """
+    import analytics   # 延迟导入：analytics→config，避免与加载期依赖顺序耦合
+    phase_sum: dict = {}
+    wall_secs, prep_secs = [], []
+    for it in shots or []:
+        ps = it.get("phase_secs")
+        if isinstance(ps, dict):
+            for k, v in ps.items():
+                try:
+                    phase_sum[k] = phase_sum.get(k, 0.0) + float(v or 0.0)
+                except (TypeError, ValueError):
+                    continue
+        for key, acc in (("elapsed_sec", wall_secs), ("phase_secs_total", prep_secs)):
+            try:
+                acc.append(float(it.get(key) or 0.0))
+            except (TypeError, ValueError):
+                continue
+    n = len(shots or [])
+    wall_total = round(sum(wall_secs), 1)
+    prep_total = round(sum(prep_secs), 1)
+    meta = {
+        "shots": n,
+        "phase_secs_sum": {k: round(v, 1) for k, v in sorted(phase_sum.items())},
+        "prep_secs_sum": prep_total,
+        "wall_secs_sum": wall_total,
+        "wall_secs_mean": round(wall_total / n, 1) if n else 0.0,
+        "gpu_secs_sum": round(max(wall_total - prep_total, 0.0), 1),
+    }
+    analytics.record_event("storyboard", project_name,
+                           f"第{int(episode_no or 1)}集分镜（阶段耗时）",
+                           duration_sec=wall_total, units=n, meta=meta)
 
 
 def _sb_manifest_quality_fields(tally: dict) -> dict:
@@ -1252,7 +1386,22 @@ def _ref_canvas_target(size):
     return (w, h) if w > 0 and h > 0 else None
 
 
-def _fit_ref_to_canvas(im, size):
+def _edge_bg_color(im):
+    """取图像边缘的背景主色（左右各 4% 宽竖条的中位 RGB；失败返回纯白）。"""
+    try:
+        import numpy as _np
+        _arr = _np.asarray(im.convert("RGB"))
+        _w = _arr.shape[1]
+        _e = max(2, int(_w * 0.04))
+        _strip = _np.concatenate(
+            [_arr[:, :_e].reshape(-1, 3), _arr[:, -_e:].reshape(-1, 3)], axis=0)
+        _med = _np.median(_strip, axis=0).astype(int)
+        return (int(_med[0]), int(_med[1]), int(_med[2]))
+    except Exception:  # noqa: BLE001
+        return (255, 255, 255)
+
+
+def _fit_ref_to_canvas(im, size, kind=""):
     """按 **cover** 把图缩放到恰好覆盖 size 画布并居中裁剪（内容充满、无条带）。
 
     ⚠️ 为什么用 cover 而不是 contain(letterbox)：2026-09-24 真图 A/B 实测
@@ -1271,7 +1420,40 @@ def _fit_ref_to_canvas(im, size):
     s = max(W / im.width, H / im.height)
     scaled = im.resize((max(W, int(round(im.width * s))),
                         max(H, int(round(im.height * s)))), Image.LANCZOS)
-    left, top = (scaled.width - W) // 2, (scaled.height - H) // 2
+    left = (scaled.width - W) // 2
+    # ⭐ 2026-10-16（t17）**竖构图人物图保头脸** —— 修复「参考图只剩腰」：
+    #   原实现一律居中裁剪。对 1:3 竖版角色立绘（例：资产增强产物 hd/front.png
+    #   736×2144）cover 到 1664×928 时垂直只保留 19%（2144→4848 后取中间 928），
+    #   **头和脸整个被裁掉**，只剩衣服下摆 —— 角色身份锚点直接失效。
+    #   实测证据：output/qc/<项目>/ref_canvas/front_*_1664x928.png 只有腰部。
+    #   改为「从头顶下方起裁」，保住头脸 + 上半身（分镜判定身份靠的正是这两处）。
+    #   仅对**人物类**且**明显竖构图**（高 > 宽×1.35）生效，场景/道具/横图行为不变。
+    _kind = str(kind or "")
+    _is_char = ("角色" in _kind) or _kind.lower().startswith("char")
+    # ⭐ 2026-10-18 **人物类竖图改为「按高度贴合 + 两侧自身模糊填充」**：
+    #   修复「参考图只剩一张脸」。实测：350×450 的半身立绘 cover 到 1664×928 时
+    #   放大 4.75×（高度 2138），再从头顶裁 928 → 只留头部；模型拿不到服装/体态，
+    #   于是把两个角色都画成同一张脸（QC 反复报「两个完全相同的羡进」）。
+    #   旧顾虑「模型模仿居中布局」用「自身模糊放大作底」规避：底是同一张图的模糊
+    #   版本，不是纯色带，模型不会把它当作分栏虚化带。
+    if _is_char and im.height > im.width * 1.15:
+        _s = H / im.height
+        _fg = im.resize((max(1, int(round(im.width * _s))), H), Image.LANCZOS)
+        if _fg.width >= W:
+            _l = (_fg.width - W) // 2
+            return _fg.crop((_l, 0, _l + W, H))
+        # 两侧背景（2026-10-18 二次修正）：**绝不用「自身模糊放大」当底** ——
+        #   实测那张模糊底在参考图里又出现了 1~2 个同款人物轮廓，模型照着画出了
+        #   「两个赵天霸 / 两个羡进」（质检反复判「人物重复」，尝试 3 次全挂）。
+        #   改为用**图像自身边缘的背景色**（角色设定图多为纯色/浅色底）填充：
+        #   不引入任何人物轮廓，同时保留「按高度贴合、不切头脸」的修复。
+        _bg = Image.new("RGB", (W, H), _edge_bg_color(im))
+        _bg.paste(_fg, ((W - _fg.width) // 2, 0))
+        return _bg
+    if _is_char and scaled.height > H * 1.35:
+        top = int((scaled.height - H) * 0.06)   # 头顶留 6% 余量，不切到发顶
+    else:
+        top = (scaled.height - H) // 2
     return scaled.crop((left, top, left + W, top + H))
 
 
@@ -1318,7 +1500,7 @@ def _unify_ref_canvas(refs: list, size, project_name: str = "") -> list:
                     if (_rgb.width, _rgb.height) == tgt:
                         unified.append(item)
                         continue
-                    fixed = _fit_ref_to_canvas(_rgb, tgt)
+                    fixed = _fit_ref_to_canvas(_rgb, tgt, kind)
                 _stem = os.path.splitext(os.path.basename(local))[0]
                 _h = hashlib.sha1(os.path.abspath(local).encode("utf-8")).hexdigest()[:8]
                 _dst = os.path.join(out_dir, f"{_stem}_{_h}_{tgt[0]}x{tgt[1]}.png")
@@ -2060,6 +2242,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 "pf_item": {}, "pgate_item": {}, "item_ref_notes": [],
                 "blocked": False, "refs_empty": False,
                 "no_reference": False, "ref_error": "", "error": "",
+                "char_refs_missing": [],
                 "identity_grid": "", "blocking_ref": ""}
         # ⭐ 2026-10-07 逐阶段计时（只加日志、不改行为）。
         # 动机：实测已排除「GPU 单图 45s」「3D 基准图 1.5s」「VLM 质检 5s」，
@@ -2069,6 +2252,19 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         _tprev = _t0
         _ph = {}
         refs = _allocate_storyboard_refs(shot_p, char_idx, item_idx, scene_idx, project_name)
+        # ⭐ 2026-10-20：把场景的视觉描述塞进 shot（见 _scene_appearance_of 的 docstring）——
+        #    否则分镜提示词只拿到「青云宗外门广场」六个字，模型画成纯白背景。
+        _with_scene_appearance(shot_p, scene_idx)
+        # ⭐ 2026-10-18（借鉴同类项目「清单驱动·缺图不出图」）：本镜声明了出场角色、但某角色
+        #    没有任何可用参考图（资产缺失且按需生成失败）→ 停该镜、给出可读原因。
+        _miss_chars = list(shot_p.get("_sb_missing_char_refs") or [])
+        if _miss_chars and _sb_require_char_refs():
+            logger.warning("[分镜参考图] shot=%s 缺角色参考图 → 按「缺图不出图」停止本镜：%s",
+                           shot_p.get("shot_id"), "、".join(_miss_chars))
+            pack["char_refs_missing"] = _miss_chars
+            pack["error"] = ("角色参考图缺失：%s —— 已按「缺图不出图」停止本镜"
+                             "（请先补齐这些角色的资产，再重跑本镜）" % "、".join(_miss_chars))
+            return pack
         # T3（2026-10-12）：道具槽位对齐到**固定参考图**（同一道具在任何镜头同一张图）。
         # 放在画幅统一之前：先定「用哪张图」，再统一它的画幅 —— 顺序反了会让身份串
         # 落在统一产物上（路径带哈希，换机器就变），manifest 无法比对。
@@ -2253,7 +2449,11 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         # 槽位纪律：工作流上限 9 张（builder MAX_REFERENCE_IMAGES=9），
         # 本插入点在 _cap_storyboard_refs 之后，故必须自己守住上限；
         # 满槽时宁可放弃衔接，也不能挤掉身份基准/场景等更强约束的参考图。
-        if _prev_sb_ref and os.path.isfile(_prev_sb_ref) and len(refs) < 9:
+        # ⭐ 2026-10-16：「局部」插入镜**不引入上一镜整图** —— 上一镜通常是**带脸的中近景**，
+        #    把它当参考图会把局部特写再次往「带脸构图」拽（与角色脸部锚点同理）。
+        #    局部镜只靠文字连续性口径保证道具/材质接续即可。
+        if (_prev_sb_ref and not _is_detail_shot(shot_p)
+                and os.path.isfile(_prev_sb_ref) and len(refs) < 9):
             refs.append((_prev_sb_ref, (
                 f"参考图【上一镜衔接】是**同一场景中上一镜已通过质检的分镜图**（"
                 f"{os.path.basename(_prev_sb_ref)}）：本镜九个面板必须与它在"
@@ -2321,13 +2521,23 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                             #    质检发现的问题重新生成吗」—— 基准图由我们**确定性渲染**，问题可
                             #    定位、参数可反推，所以走「质检 → 修计划重渲 → 再质检」闭环
                             #    （最多 2 轮修复）。仍不过才回落文字站位锚点。
+                            # ⚠️ 2026-10-16（v2 §5 红线 #1）：修复重渲必须**同一把
+                            #    _TE3D_RENDER_LOCK** 串行化 —— 此前 render_fn 直连
+                            #    render_blocking_from_plan，在锁**外**重渲，会与预取线程
+                            #    并发抢「进程级单例 + 单 inbox 槽位 + 共享 profile」的回传
+                            #    服务（正是该锁要防的竞态）。只锁「真正渲染」这一下，
+                            #    不把中间的 QC 判定也锁进来。
+                            def _bq_render_locked(*_a, **_k):
+                                with _TE3D_RENDER_LOCK:
+                                    return te_3d_render.render_blocking_from_plan(*_a, **_k)
+
                             _bq = te_3d_qc.qc_repair_and_alt_cameras(
                                 shot_p, _blocking_ref_path,
                                 cam_key=_bq_camk,
                                 aspect=":".join(map(str, _sb_style_res.get("ratio") or ("16", "9"))),
                                 target_size=_sb_size, width=_sb_size[0],
                                 out_dir=_blk_out_dir,
-                                render_fn=te_3d_render.render_blocking_from_plan,
+                                render_fn=_bq_render_locked,
                                 max_rounds=4)
                             _bq_hist = "；".join(
                                 "第%d轮 %s" % (int(r.get("round") or 0) + 1,
@@ -2393,6 +2603,26 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             "storyboard", prompt, ctx=shot_p,
             style=(shot_p.get("style") or _sb_style), ref_count=len(refs),
             project_name=project_name, cfg=qc_cfg)   # G13：复用 worker 级配置
+        # ---------- C-2（2026-10-16）：首建召回 kind="storyboard" 历史教训 ----------
+        # 背景：此前分镜**首建**只经 _prompt_preflight 召回 kind="prompt"（预检教训）；
+        #   而 kind="storyboard"（质检缺陷教训：面板雷同/景别/发型…）只在 attempt>0 的
+        #   重试轮（下方 _retry_base）与软放行后记账时召回 → 每个新镜头首建必然不复用
+        #   已沉淀的缺陷教训（结构性断裂，见 docs/优化方案_外部借鉴v2与落地_20261016.md G3）。
+        # 口径与重试轮一致：max_hints=1（教训是「上次失败的具体缺陷描述」，越注越长的
+        #   提示词与 H3 官方 Simple-and-Clear 相悖），style 用本集风格替换 {style} 占位。
+        # 位置：放在预检**之后**（不改预检语义、不改 orig_prompt 指纹键）；读的是
+        #   预检自愈后的提示词，与重试轮的 _retry_base 同口径。fail-open：记忆异常一律
+        #   按原提示词继续，绝不影响首建。
+        try:
+            _sb_learned = prompt_memory.learned_prompt(
+                kind="storyboard", prompt=prompt, project=project_name,
+                root_dir=PROJECT_OUTPUT_DIR, max_hints=1,
+                style=_qc_style_of(project_name))
+            if _sb_learned and _sb_learned != prompt:
+                prompt = _sb_learned
+                logger.info("分镜首建召回 storyboard 教训：shot=%s", shot_p.get("shot_id"))
+        except Exception as _lm_e:  # noqa: BLE001 —— 记忆读取失败绝不影响首建
+            logger.warning("分镜首建 storyboard 教训召回失败（忽略）：%s", _lm_e)
         # T3（2026-10-12）：异常物件首现镜的**过渡要求**注入（程序追加，不是模型自由文本）。
         # 放在预检之后：预检判的是构建器产出的提示词（口径不变）；追加后再走一次
         # 结构闸门 _storyboard_prompt_structurally_ok —— 缺协议段就撤回追加，
@@ -2599,6 +2829,7 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
             logger.warning("[视频提示词预热] 场次齐备判定失败（忽略）：%s", _vw_e)
 
     try:
+        _processed_ids = []
         for i, shot in enumerate(shots):
             shot_id = shot.get("shot_id", i + 1)
             seq = _shot_seq(shot_id, i + 1)
@@ -2662,6 +2893,10 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                 # T19：断点续跑复用的镜同样算「本镜已就绪」→ 推进场次齐备判定
                 _vw_after_shot(seq)
                 continue
+            # ⭐ 2026-10-19（L3 角色覆盖）：本镜将真正重新生成 → 记为「本轮已处理」。
+            #    断点续跑跳过的镜**不在此列**：它们上一轮的缺口必须保留在落盘记账里，
+            #    否则「补跑 3 镜」会把其余镜的旧缺口一笔勾销（验收门误报通过）。
+            _processed_ids.append(shot_id)
             with lock:
                 generation_state[task_id].update({
                     "current": i + 1,
@@ -2733,6 +2968,13 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                         item["error"] = pack["error"]
                     else:
                         item["error"] = pack["error"]
+                elif pack.get("char_refs_missing"):
+                    # 2026-10-18：缺角色参考图 → 不出图（借鉴「清单驱动·缺图不出图」）。
+                    item["success"] = False
+                    item["file"] = ""
+                    item.pop("url", None)
+                    item["char_refs_missing"] = pack["char_refs_missing"]
+                    item["error"] = pack["error"]
                 else:
                     refs = pack["refs"]
                     if pack["identity_grid"]:
@@ -2815,6 +3057,22 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                 logger.warning("[编辑式修复] 上一版图不存在（%s），回落全量重生成",
                                                os.path.basename(_fix_base))
                                 _fix_base = None
+                            # ⭐ 2026-10-18（借鉴同类项目「重roll 决策表」）：**身份/人数类
+                            #    缺陷不做定点修复** —— 低 denoise 的局部编辑改不动「画的是
+                            #    谁」，实测对「画错人 / 漏画 / 多画 / 克隆」不收敛，还可能
+                            #    把已正确的构图/光线改坏。这类缺陷直接全量重生成（提示词
+                            #    照常先做缺陷定向优化）。
+                            if _fix_base and attempts:
+                                _iss_txt = " ".join(
+                                    str(x) for x in (attempts[-1].get("issues") or []))
+                                _ID_DEFECTS = ("漏画", "多画", "出场角色", "角色不符",
+                                               "画错", "克隆", "重复", "分身",
+                                               "缺少角色", "人物缺失")
+                                if any(t in _iss_txt for t in _ID_DEFECTS):
+                                    logger.info(
+                                        "[编辑式修复] 上轮缺陷属身份/人数类 → 跳过定点修复，"
+                                        "全量重生成：%s", _iss_txt[:80])
+                                    _fix_base = None
                             # G10：基准改为 self_healed_prompt（自愈后提示词）。
                             # 旧 bug：基准是 orig_prompt（自愈前），重试会回落到未自愈提示词，
                             # 导致首次自愈对后续重试不再生效。
@@ -2871,10 +3129,29 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
                                         logger.info("镜头 %s 第 %d 次重试，按质检教训改写提示词：%s",
                                                         shot_id, attempt + 1, hints[:2])
                                     else:
-                                        prompt = _retry_base
-                                        item["prompt"] = prompt
-                                        logger.info("镜头 %s 第 %d 次重试，暂无可用教训，仅换种子",
-                                                        shot_id, attempt + 1)
+                                        # ⭐ 2026-10-17：LLM 即时改写 + 教训库都没给出改写时，把**上一轮
+                                        #    缺陷当「修正指令」确定性追加** —— 保证「重写提示词→重出图」
+                                        #    一定发生（用户口径），而不是只换种子白烧 GPU。
+                                        _rec_fb = attempts[-1] if attempts else {}
+                                        if not isinstance(_rec_fb, dict):
+                                            _rec_fb = {}
+                                        _iss_fb = "；".join(
+                                            str(x) for x in (
+                                                [_rec_fb.get("reason")]
+                                                + list(_rec_fb.get("critical_issues") or [])
+                                                + list(_rec_fb.get("issues") or [])
+                                            ) if str(x or "").strip())[:600]
+                                        if _iss_fb:
+                                            prompt = _retry_base + \
+                                                "\n\n【本轮质检缺陷·必须针对性修正，其余保持一致】" + _iss_fb
+                                            item["prompt"] = prompt
+                                            logger.info("镜头 %s 第 %d 次重试：LLM/教训库均无改写 → "
+                                                        "追加确定性修正指令后重出图", shot_id, attempt + 1)
+                                        else:
+                                            prompt = _retry_base
+                                            item["prompt"] = prompt
+                                            logger.info("镜头 %s 第 %d 次重试，暂无可用教训，仅换种子",
+                                                            shot_id, attempt + 1)
                                 except Exception as mem_err:
                                     logger.warning(f"读取记忆模块失败: {mem_err}")
 
@@ -3276,6 +3553,11 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         soft = _tally["soft_accepted_count"]
         blocked = _tally["qc_blocked_count"]
         delivered = _tally["delivered_count"]
+        # ⭐ Phase 0.4（2026-10-16）：分镜阶段耗时入库（fail-open，只观测不改行为）。
+        try:
+            _sb_record_stage_analytics(project_name, episode_no, manifest_shots)
+        except Exception as _an_err:  # noqa: BLE001
+            logger.debug("分镜阶段耗时入库失败（忽略）：%s", _an_err)
         manifest = {
             "project_name": project_name,
             # 从模板表取，避免模型换代后 manifest 里还写着旧工作流名（口径漂移）
@@ -3336,6 +3618,16 @@ def _storyboard_worker(task_id: str, project_name: str, shots: list,
         logger.error(f"分镜图任务失败: {e}")
         with lock:
             generation_state[task_id].update({"status": "failed", "error": str(e)})
+    # ⭐ 2026-10-19（L3 角色覆盖）：把「角色参考图缺失 / no_reference」记账落盘。
+    #    · 必须在这里做：本 worker 对 shots 做了浅拷贝，告警回不到 pipeline 的 ctx；
+    #    · 只合并**本轮真正生成过**的镜号（跳过的镜保留上一轮缺口），
+    #      否则补跑几镜会把其余镜的旧缺口一笔勾销 → 验收门误报通过。
+    try:
+        import quality_stage as _qs_ref
+        _qs_ref.save_ref_warnings(project_name, episode_no, shots,
+                                  processed_ids=_processed_ids)
+    except Exception as _ref_err:  # noqa: BLE001
+        logger.warning("角色参考图记账落盘失败（忽略）：%s", _ref_err)
     # ★ 用户决策 4：ComfyUI 侧分镜参考图上传残留（sb_ref_*）只在**本轮分镜批量生成全部
     # 结束后**按项目清理一次 —— 不在单镜循环里调（那会在重试中途删掉当前镜头正在用的参考图）。
     try:
@@ -3644,7 +3936,8 @@ def _optimize_prompt_from_qc(kind: str, prompt: str, rec: dict, style: str = "")
                 "碗碟、绸布等任何承托物，不得把物品放进或放在别的物体内部/上方，不得出现手或人物；"
                 "严禁把「某个容器」（例如黑色玉盒）写成画面核心或主体。\n"
                 "3. 角色参考图保持多视图横排、完整入画，不改变五官与服装。\n"
-                "4. 只修补质检列出的问题，**不得引入任何新物体、新容器、新场景元素**。"
+                "4. 只修补质检列出的问题、**其余描述逐字保留**（不要重写整篇、不要改变篇幅量级）；"
+                "不得引入任何新物体、新容器、新场景元素。"
             )
         user = (
             f"原提示词：\n{prompt.strip()}\n\n"

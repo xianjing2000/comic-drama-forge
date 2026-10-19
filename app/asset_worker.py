@@ -109,11 +109,8 @@ import random
 #:    真正需要立绘的角色。所以拆成两档，只有**强群像词**才无条件走合影。
 
 #: 强群像词：命中即**必然是一群人**（集合名词）→ 直接判 crowd，优先于镜头/台词判定。
-_CROWD_NAME_MARKERS = (
-    "群演", "群像", "围观", "路人", "群众", "众人", "人群", "人群们",
-    "甲乙丙丁", "围观者", "群众演员", "龙套", "学生们", "士兵们", "弟子们",
-    "们）", "们)", "众弟子", "众弟子们",
-)
+#: ⭐ 2026-10-16：常量下沉到叶子模块 character_tier（供音色链路等复用，单一事实源）。
+from character_tier import CROWD_NAME_MARKERS as _CROWD_NAME_MARKERS  # noqa: E402
 
 #: 弱群像词：可能指一群人也可能指单个（店员 / 侍卫 / 士兵…）→
 #: 只在**没有独立戏份**时（镜头少且无台词）才按 crowd 处理。
@@ -216,6 +213,19 @@ def _character_tier(project_name: str, char: dict, episode_no=None) -> str:
     except Exception as e:  # noqa: BLE001 - 判定失败按旧行为（生成），不拦资产
         logger.debug("角色级别判定失败（按正常生成处理）：%s", e)
         return "unknown"
+
+
+def _qc_issues_text(verdict: dict) -> str:
+    """把质检 verdict 的缺陷摘要拼成一句「修正指令」（供**编辑式修复**用，2026-10-16）。"""
+    v = verdict or {}
+    parts = []
+    for k in ("issues", "critical_issues", "kinds", "reason"):
+        x = v.get(k)
+        if isinstance(x, (list, tuple)):
+            parts += [str(i).strip() for i in x if str(i).strip()]
+        elif x and str(x).strip():
+            parts.append(str(x).strip())
+    return "；".join(dict.fromkeys(parts))[:600]
 
 
 def _all_project_shots(project_name: str):
@@ -695,7 +705,6 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     logger.info('[资产提示词预热] 增强层未启用，跳过')
                     return
                 import prompt_memory as _pm
-                import comfyui_client as _cc_mod
                 from concurrent.futures import ThreadPoolExecutor
                 _done = {'n': 0, 'skip': 0}
 
@@ -794,6 +803,17 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                         continue
             
                 prompt_zh = asset.get('reference_prompt_zh', asset.get('prompt_zh', asset.get('appearance', '')))
+                # ⭐ 2026-10-20（用户实测：物品提示词里还有「补充要求：…反派赵天霸为内门弟子华服」）：
+                #    剧本 JSON 是**历史脏串**的源头 —— 生成阶段把完整风格串（含情绪基调/
+                #    分镜节奏/规避项/角色专属补充要求）整段写进了 reference_prompt_zh。
+                #    出图前按资产类型清一遍，否则物品图会照着「角色造型」那段把人画进来。
+                #    （UI 显示的是剧本原值，落库清理见 tools/scrub_asset_prompts.py）
+                try:
+                    import style_kit as _sk_strip
+                    prompt_zh = _sk_strip.strip_ref_sections_text(
+                        prompt_zh, kind=str(asset_type or ''))
+                except Exception as _e_strip:  # noqa: BLE001 - 清洗失败绝不影响出图
+                    logger.debug('[资产提示词] 段落清洗失败（用原文）：%s', _e_strip)
                 # ---- 物品「主人形象」+「确切文字」入参（T02，2026-10-06） ----
                 # owner_photo：物品表面是否承载某角色的肖像（证件照/头像/画像/告示人像/屏幕人像）；
                 # surface_text：物品表面**确切**要呈现的文字（写进提示词，治「带文字物品乱码」）。
@@ -908,8 +928,19 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                                     logger.info("资产 %s 第 %d 次重试，按历史质检教训改写提示词：%s",
                                                     name, attempt + 1, suggestions[:2])
                                 else:
-                                    logger.info("资产 %s 第 %d 次重试，暂无可用教训，仅换种子",
-                                                    name, attempt + 1)
+                                    # ⭐ 2026-10-17：LLM 即时改写 + 教训库 都拿不到改写时，把**上一轮
+                                    #    缺陷当「修正指令」确定性追加进提示词** —— 保证「重写提示词
+                                    #    → 重出图」一定发生（用户口径：修复不好后要重写提示词再出图，
+                                    #    而不是只换种子白烧 GPU）。
+                                    _iss_fb = _qc_issues_text(base_attempts[-1]) if base_attempts else ""
+                                    if _iss_fb:
+                                        prompt_zh = orig_asset_prompt + \
+                                            "\n\n【本轮质检缺陷·必须针对性修正，其余保持一致】" + _iss_fb
+                                        logger.info("资产 %s 第 %d 次重试：LLM/教训库均无改写 → "
+                                                    "追加确定性修正指令后重出图", name, attempt + 1)
+                                    else:
+                                        logger.info("资产 %s 第 %d 次重试，暂无可用教训，仅换种子",
+                                                        name, attempt + 1)
                             except Exception as mem_err:
                                 logger.warning(f"读取记忆模块失败: {mem_err}")
                     
@@ -1079,6 +1110,16 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                     #    但成图仍可能画成单人立绘。这里把档位对应的形态要求写进质检判据，
                     #    不满足就驳回重画（与上面物品/颜色两条专项判据同一挂载方式）。
                     _tier_qc = str((_base_kw or {}).get("tier") or "").strip().lower()
+                    if not _tier_qc and str(asset_type) == "character":
+                        # ⭐ 2026-10-18（用户报「角色的三视图呢」）：tier 只对 supporting/minor
+                        #    传进 _base_kw（primary/unknown 走默认四区版式、不传参），于是
+                        #    **主角的版式没有任何质检判据** —— 实测主角设定图被画成单张立绘
+                        #    也照样判通过（QC 原话「单张正面全身立绘…达标」），三视图就"没了"。
+                        #    这里按生成端同一判据重新判定一次档位（确定性、零 LLM 成本）。
+                        try:
+                            _tier_qc = str(_character_tier(project_name, asset)).strip().lower()
+                        except Exception:  # noqa: BLE001 - 判定失败按无判据（旧行为）
+                            _tier_qc = ""
                     _crowd_qc = list((_base_kw or {}).get("crowd_names") or [])
                     if _crowd_qc or _tier_qc == "crowd":
                         _qc_desc_base = (str(_qc_desc_base) +
@@ -1088,6 +1129,23 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                                          "若画面里**只有一个人物**，或把群体画成了**单人的三视图/**"
                                          "**四区设定表**（正/侧/背分格、或带面部特写+配色板+局部细节的版面），"
                                          "判为关键缺陷，kinds 记「群像人数不符」。")
+                    elif _tier_qc == "supporting":
+                        _qc_desc_base = (str(_qc_desc_base) +
+                                         "\n\n【双格设定图专项判据】本图是主要配角的**双格设定图**："
+                                         "同一画面内并列出现同一角色的**正面与侧面**两个视角（左正右侧，"
+                                         "发型/服装/配色一致）。同一角色在不同分格中出现属于设定图版式，"
+                                         "**不得**据此判「人物重复/克隆」。"
+                                         "若只出现一个视角、或画成四区设定集/多人合影，"
+                                         "判为关键缺陷，kinds 记「版式不符」。")
+                    elif _tier_qc == "primary":
+                        _qc_desc_base = (str(_qc_desc_base) +
+                                         "\n\n【主角设定表专项判据】本图是主角的**角色设定表"
+                                         "（character sheet）**：必须包含正面/侧面/背面**三个视角的"
+                                         "人物分格**（同框横排；可另含面部特写/配色板/局部细节/身高比例区），"
+                                         "各分格是同一角色的不同朝向，人物形象与配色一致 —— "
+                                         "**不得**因为同一角色出现在多个分格就判「人物重复/克隆」。"
+                                         "若只画了单张立绘、或只有一两个视角、或构图是单人半身/胸像，"
+                                         "判为关键缺陷，kinds 记「版式不符」。")
                     elif _tier_qc == "minor":
                         _qc_desc_base = (str(_qc_desc_base) +
                                          "\n\n【单人立绘专项判据】本图是**次要角色的单张正面全身立绘**："
@@ -1110,6 +1168,51 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                         break
                     if not verdict.get("ok"):
                         break     # 质检接口异常，重生成无意义
+                    # ★ 2026-10-16（F 编辑式修复）：质检不达标时**先在失败原图上用图片编辑定点修**
+                    #   （把质检缺陷当编辑指令，不从头重画），修好且复检通过就用修复版；否则**落回**
+                    #   原有「换 seed 从头重生成」。全程 fail-open —— 修复失败绝不影响原流程。
+                    try:
+                        _iss = _qc_issues_text(verdict)
+                        if _iss and attempt == 0 and scratch_base and os.path.isfile(scratch_base):
+                            # ⚠️ 2026-10-16：物品的修复提示词**同样要去手** —— `orig_asset_prompt`
+                            #    是**未清洗**的剧本原文（可能含「掌心大小/握座」），且本处走
+                            #    `generate_storyboard` 而非物品生成接口（不经 _ensure_item_white_bg），
+                            #    把原文喂进去会**再次诱导画出手**（实测 监控灵石 修复 3 次全带手）。
+                            #    故物品在此复用同一套清洗，避免「基础图已修好、修复路径又画回手」。
+                            _repair_ctx = str(orig_asset_prompt)
+                            if asset_type == "item":
+                                try:
+                                    _repair_ctx = comfyui_client.ComfyUIClient._dehand_item_prompt(
+                                        comfyui_client.ComfyUIClient._strip_item_placement(_repair_ctx))
+                                except Exception:  # noqa: BLE001 - 清洗失败按原文，绝不阻断修复
+                                    _repair_ctx = str(orig_asset_prompt)
+                            _repair_prompt = (
+                                _repair_ctx
+                                + "\n\n【定点修正·在 <image1> 参考图上**直接修改**，不要从头重画】"
+                                + "请只修正以下问题，其余画面（人物身份/构图/风格）保持不变：" + _iss)
+                            _rf = comfyui_client.generate_storyboard(
+                                _repair_prompt, [scratch_base],
+                                filename_prefix=_gen_prefix + "_repair", seed=seed)
+                            _rfiles = (_rf or {}).get("files") or []
+                            if _rfiles and os.path.isfile(_rfiles[0]):
+                                _rverdict = qc_client.check_image(
+                                    _rfiles[0], _qc_desc_base, qc_cfg, style=gen_style)
+                                base_attempts.append(_qc_record_verdict(
+                                    project_name, "asset_image", f"{name}_base_repair",
+                                    "资产基础图编辑式修复", 1, seed, _rfiles[0], _rverdict, style=gen_style))
+                                if _qc_gate(_rverdict)["accept"]:
+                                    try:
+                                        import shutil as _shf
+                                        _shf.copy2(_rfiles[0], scratch_base)
+                                    except OSError:
+                                        scratch_base = _rfiles[0]
+                                    base_ok = True
+                                    logger.info("资产基础图【编辑式修复】通过：%s/%s（未从头重生成）",
+                                                asset_type, name)
+                                    break
+                    except Exception as _rpe:  # noqa: BLE001 - 编辑式修复失败回落原流程
+                        logger.warning("资产基础图编辑式修复失败（回落换 seed 重生成）：%s: %s",
+                                       type(_rpe).__name__, _rpe)
                     # ★ 立刻沉淀：让同一次循环的下一次重试就能召回这条缺陷
                     _record_qc_lesson(project_name, "asset", orig_asset_prompt, base_attempts[-1])
                     # ★ G1 止损：连续两次基础图缺陷完全相同 → 继续重试只是重复烧 GPU，提前停
@@ -1270,8 +1373,19 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                             "左右侧视/俯视鸟瞰，同一空间结构、陈设与光影一致）；"
                             f"资产设定：{str(prompt_zh)[:400]}")
                         _set_phase(f"{name} 场景九宫格整图质检中（第 {_oa + 1} 次）", "checking")
+                        # ⭐ 2026-10-18（场景机位图）：宫格是**参考素材**不是交付成品 ——
+                        #    用场景宫格专属判据（同一空间 9 机位），并把合格线降到 55：
+                        #    实测沿用单幅成品标准会因「拼贴感/单格笔触」连判 40~43 分，
+                        #    把机位图整批丢弃（机位图从未落盘的主因）。关键缺陷词表照常硬拦。
+                        _grid_cfg = dict(qc_cfg or {})
+                        try:
+                            _grid_cfg["pass_score"] = min(
+                                int((qc_cfg or {}).get("pass_score") or 70), 55)
+                        except Exception:  # noqa: BLE001
+                            _grid_cfg["pass_score"] = 55
                         _oneshot_verdict = qc_client.check_image(
-                            _oneshot_scratch, _oneshot_desc, qc_cfg, style=gen_style)
+                            _oneshot_scratch, _oneshot_desc, _grid_cfg, style=gen_style,
+                            is_grid="scene")   # 场景九宫格：按「多机位设定图」判（2026-10-18）
                         logger.info(
                             "[资产质检] grid scene/%s 第%d次 → ok=%s passed=%s score=%s",
                             name, _oa + 1, _oneshot_verdict.get("ok"),
@@ -1700,10 +1814,19 @@ def _generate_asset_task(task_id: str, assets: list, asset_type: str, project_na
                 if ENABLE_ASSET_HD and asset_type in ("character", "scene") and not sub_dir:
                     try:
                         import asset_enhance as _ae
+                        # ⭐ 2026-10-16：角色 HD 需**按实际版式** —— 把 tier 传下去（supporting=双格切 2、
+                        #    primary/minor/crowd=整图不切）。见 asset_enhance.enhance_character_sheet。
+                        _hd_tier = ""
+                        if asset_type == "character":
+                            try:
+                                _hd_tier = _character_tier(project_name, asset)
+                            except Exception:  # noqa: BLE001
+                                _hd_tier = ""
                         _enh = _ae.enhance_asset_dir(
                             asset_dir,
                             "character" if asset_type == "character" else "scene",
-                            megapixels=ASSET_HD_MEGAPIXELS, client=comfyui_client)
+                            megapixels=ASSET_HD_MEGAPIXELS, client=comfyui_client,
+                            **({"tier": _hd_tier} if asset_type == "character" else {}))
                         _asset_result["hd_enhance"] = {
                             "ok": _enh.get("ok"),
                             "produced": _enh.get("produced") or [],
@@ -1810,6 +1933,53 @@ ITEM_REF_META_NAMES = ("base.meta.json", "base.png.meta.json")
 def item_asset_dir(project_name: str, item_name: str) -> str:
     """道具资产目录绝对路径：<ITEMS_DIR>/<项目>/<道具>（不做存在性判断）。"""
     return os.path.join(ITEMS_DIR, str(project_name or "").strip(), str(item_name or "").strip())
+
+
+def generate_item_state_variant(project_name: str, item_name: str, state: str,
+                                *, client=None, seed=None) -> dict:
+    """为道具生成**状态变体**（2026-10-16，E）：以该道具 base 图为参考，按状态描述**编辑**出变体图，
+    落 ``items/<项目>/<道具>/states/<state_slug>.png``。供剧情里道具状态变化（剑断了 / 门半开）时取用
+    （取图侧见 asset_refs.item_state_image）。fail-open：base 缺失或出图失败返回 {"ok": False,...}。"""
+    import asset_refs
+    _slug = asset_refs.state_slug(state)
+    if not _slug:
+        return {"ok": False, "error": "状态为空"}
+    base_dir = item_asset_dir(project_name, item_name)
+    base = _first_existing_asset_image(base_dir)
+    if not base:
+        return {"ok": False, "error": "该道具无 base 图（请先出道具资产）", "dir": base_dir}
+    if client is None:
+        client = comfyui_client.ComfyUIClient()
+    out_dir = os.path.join(base_dir, "states")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:  # noqa: BLE001
+        return {"ok": False, "error": "目录创建失败：%s" % e}
+    out = os.path.join(out_dir, _slug + ".png")
+    prompt = ("参考图1（<image1>）是道具「%s」的设定图。请在这张图的基础上**直接修改**，"
+              "把它改为以下状态：%s。严格保持该道具的形状、材质、配色与风格不变，"
+              "只改变与状态相关的部分；输出单张完整画面。") % (item_name, str(state).strip())
+    try:
+        r = client.generate_storyboard(
+            prompt, [base], filename_prefix="asset_item_state/" + _slug, seed=seed)
+        files = (r or {}).get("files") or []
+        if files and os.path.isfile(files[0]):
+            import shutil as _sh
+            _sh.copy2(files[0], out)
+            # 状态 sidecar（供 /api/assets/item/state-variants 回显状态文案；写失败不影响出图）
+            try:
+                import json as _json
+                with open(os.path.join(out_dir, _slug + ".json"), "w", encoding="utf-8") as _f:
+                    _json.dump({"state": str(state).strip(), "item": item_name,
+                                "project": project_name, "slug": _slug}, _f, ensure_ascii=False)
+            except OSError as _e:  # noqa: BLE001
+                logger.warning("[道具状态变体] 状态 sidecar 写入失败（不影响出图）：%s", _e)
+            logger.info("[道具状态变体] %s/%s → %s（状态「%s」）", project_name, item_name, out, state)
+            return {"ok": True, "file": out, "state": state, "slug": _slug}
+        return {"ok": False, "error": "出图无产物"}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[道具状态变体] 生成失败：%s: %s", type(e).__name__, e)
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
 
 def item_ref_identity(path, project_name: str = "") -> str:

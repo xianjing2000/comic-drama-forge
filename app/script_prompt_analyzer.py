@@ -306,7 +306,8 @@ def analyze_asset_prompts(client, script: dict, kinds=("characters", "items", "s
                     updated += 1
                     touched.append(row)
             # 确定性补风格（中英双语）：模型被要求不写风格，这里统一收尾，不再有重复
-            style_kit.apply_asset_style_all(touched, style)
+            _asset_kind = {"characters": "character", "items": "item", "scenes": "scene"}.get(kind, "")
+            style_kit.apply_asset_style_all(touched, style, kind=_asset_kind)
         except LLMError as e:
             errors.append(f"{spec['label']}参考图提示词失败：{e}")
             logger.warning(f"{spec['label']}参考图提示词失败：{e}")

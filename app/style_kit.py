@@ -334,8 +334,13 @@ _ASPECT_TOKENS = ("竖屏", "横屏", "竖向", "横向", "竖版", "横版", "�
                   "超宽", "宽银幕", "9:16", "16:9", "1:1", "2:3", "3:2", "3:4", "4:3", "21:9",
                   "portrait", "landscape", "square", "ultrawide")
 
-#: 风格后缀的固定收尾（保画质、压畸形，与既有工作流负向词配合）
-_QUALITY_TAIL = "画面精致，光影细腻，构图稳定，无畸形"
+#: 风格后缀的固定收尾（只保留**可判定**的约束）。
+#: ⚠️ 2026-10-18（Seedance 技能「slop traps」口径）：原串「画面精致，光影细腻，构图稳定」
+#:    是**空泛形容词**（没有可执行信息，模型无法据此做取舍），且本项目自己的
+#:    `prompt_qc._QUALITY_FLUFF` 本来就在剥离这类词 —— 说明系统内部也认为它是噪声。
+#:    故只留「无畸形」这条**可判定**的结构约束；要提升画质请写**具体的可视要求**（哪里清晰、
+#:    什么材质、什么笔触），不要堆「精致/细腻」。
+_QUALITY_TAIL = "无畸形"
 
 #: 「色调 / 影调 / 光照」类 token —— 只作用于**画面氛围**，不进**资产参考图**。
 #: 根因（2026-10-07 用户反馈「生成的角色皮肤是蓝色的」）：
@@ -425,14 +430,117 @@ def _drop_tone_tokens(toks) -> List[str]:
     return [t for t in toks if not any(a in t for a in _TONE_TOKENS)]
 
 
-def reference_style(style) -> str:
-    """参考图专用风格串：剥离「色调/影调/光照」token
+#: 风格串里**对一张静态资产图无意义、甚至有害**的段落标签（按「标签：」识别）：
+#:   · 情绪基调 / 分镜节奏 —— 这是成片叙事与剪辑规则，
+#:     写进「巴掌长白玉简」的物品提示词只会稀释主体描述，模型还要分神去理解镜头语言；
+#:   · 规避项 —— 是一条**负面清单**（「现代都市元素、霓虹与电子产品」）。
+#:     否定词进正向提示词是扩散模型的经典反效果：越写它越容易画出它。
+#:     真正该用的负面约束是工作流里的 negative prompt，不是拼在正文里。
+#:   · 色彩倾向 —— 参考图是**固有色基准**，而成片调色倾向只该作用于成片。
+#:     这类整段（「冷金与青灰为主调，逆境时压暗低饱和」）不会被 _TONE_TOKENS 命中
+#:     （表里只收「色调/色温/高光」这类明确子串，收「冷/暗」会误伤画风），
+#:     但整段塞进物品图确实会把丹丸、白玉简一起染成青灰 —— 正是 2026-10-07 蓝皮肤事故的同一通道，
+#:     故在参考图口径下整段剔除；成片链路仍完整保留。
+_REF_STYLE_DROP_SECTIONS = ("情绪基调", "分镜节奏", "规避项", "色彩倾向")
+
+#: 风格串里可能出现的全部段落标签（用于把「标签：内容，标签：内容」切成段）
+_STYLE_SECTION_LABELS = ("创作设定—题材", "题材", "画风", "世界观",
+                         "情绪基调", "分镜节奏", "色彩倾向", "规避项", "补充要求")
+
+_STYLE_SECTION_RE = re.compile(
+    "(" + "|".join(re.escape(_x) for _x in _STYLE_SECTION_LABELS) + ")：")
+
+
+def _strip_ref_sections(norm: str, kind: str = "") -> str:
+    """按段落标签切分风格串，剔除参考图不适用的段落。
+
+    背景（2026-10-20 用户实测「你这提示词不对吧」）：``style_guide.json`` 的 ``style``
+    把 8 个语义维度挤在一个字符串里 ——
+    ``题材：…，画风：…，世界观：…，情绪基调：…，分镜节奏：…，色彩倾向：…，
+    规避项：…，补充要求：…``
+    旧实现只剥「色调」token，其余照单全收，于是每个资产提示词末尾都挂着一长串
+    与「这张图该画什么」无关的成片规则，物品图里还会冒出「反派赵天霸为内门弟子华服」
+    这种角色专属要求 —— 物品图因此可能被画出一个人来。
+    """
+    if not norm:
+        return norm
+    parts = _STYLE_SECTION_RE.split(norm)
+    # re.split 带捕获组 → [前言, 标签, 内容, 标签, 内容, ...]
+    if len(parts) < 3:
+        return norm          # 没有可识别的段落标签 → 原样返回（自由风格文本）
+    out: List[str] = []
+    # ⭐「补充要求」是**角色专属**段落（道袍/发冠束发/反派赵天霸为内门弟子华服）。
+    #   物品与场景图照抄这段，轻则稀释主体、重则真把人物画进物品图里
+    #   —— 所以只有角色资产保留，其余类型一律剔除。
+    drop = set(_REF_STYLE_DROP_SECTIONS)
+    if str(kind or "").strip().lower() not in ("character", "char", "角色"):
+        drop.add("补充要求")
+    head = parts[0].strip("， 。；")
+    if head:
+        out.append(head)
+    for i in range(1, len(parts) - 1, 2):
+        label = parts[i]
+        body = parts[i + 1].strip("， 。；")
+        if label in drop:
+            continue
+        if body:
+            out.append("%s：%s" % (label, body))
+    return "，".join(out)
+
+
+def strip_ref_sections_text(text: str, kind: str = "") -> str:
+    """从**已存在的提示词文本**里删掉参考图不适用的风格段落。
+
+    为什么必须单独有这一步（2026-10-20 用户第二次实测「为什么你物品的提示词里面还有
+    角色的描述」）：
+      :func:`_strip_ref_sections` 只作用于「**注入时**」的风格串构建。但资产提示词
+      在**剧本生成阶段**就已经把当时的完整风格串（含情绪基调/分镜节奏/规避项/补充要求）
+      写进了 ``script.json``。等到出图时，:func:`with_reference_style` 的第⓪步
+      短路判定（「颜色保真条款在」+「风格 token 都在」）直接 ``return _raw``，
+      脏串于是**永远清不掉** —— 修了注入侧，历史数据照旧带着「反派赵天霸为内门弟子华服」。
+
+    与 :func:`strip_tone_tokens_text` 同类（那边处理的是色调词），这里处理的是段落。
+    """
+    t = str(text or "")
+    if not t:
+        return t
+    # 先把「参考图颜色须准确…」之后的条款保护起来：它本身不是风格段，
+    # 且紧跟在「补充要求」后面，不切开会被一起吞掉。
+    tail = ""
+    _pos = t.find(REFERENCE_COLOR_FIDELITY_MARK_ZH)
+    if _pos >= 0:
+        tail = t[_pos:]
+        t = t[:_pos]
+    parts = _STYLE_SECTION_RE.split(t)
+    if len(parts) >= 3:
+        drop = set(_REF_STYLE_DROP_SECTIONS)
+        if str(kind or "").strip().lower() not in ("character", "char", "角色"):
+            drop.add("补充要求")
+        buf = [parts[0]]
+        for i in range(1, len(parts) - 1, 2):
+            label, body = parts[i], parts[i + 1]
+            if label in drop:
+                continue
+            buf.append(label + "：" + body)
+        t = "".join(buf)
+    # 收拾删段后残留的「。，」「，，」「。。」之类
+    t = re.sub(r"([，。；])(?:\1)+", r"\1", t)
+    t = t.replace("。，", "。").replace("，。", "。")
+    return (t + tail).strip()
+def reference_style(style, *, kind: str = "") -> str:
+    """参考图专用风格串：剥离「色调/影调/光照」token，并剔除成片规则段落
 
     参考图（角色三视图 / 物品 / 场景原画）是**身份与固有色的基准**，
     色调/光影类词只该作用于成片氛围，不该写进基准图 —— 否则整图被调色，
     肤色与固有色一起染偏（2026-10-07 蓝皮肤事故）。
+
+    2026-10-20 追加：还要剔掉「情绪基调 / 分镜节奏 / 规避项」三类段落
+    （见 :func:`_strip_ref_sections`）。
     """
     norm = normalize_style(style)
+    if not norm:
+        return ""
+    norm = _strip_ref_sections(norm, kind=kind)
     if not norm:
         return ""
     return "，".join(_drop_tone_tokens(style_tokens(norm)))
@@ -484,8 +592,13 @@ def strip_tone_tokens_text(text: str, style) -> str:
     return out.strip()
 
 
-def with_reference_style(prompt: str, style, *, with_tail: bool = True) -> str:
+def with_reference_style(prompt: str, style, *, with_tail: bool = True,
+                           kind: str = "") -> str:
     """资产参考图（角色三视图 / 物品 / 场景原画）专用风格注入。
+
+    ``kind``：资产类型（``character`` / ``item`` / ``scene``）。决定是否保留「补充要求」
+    段落 —— 那段写的是角色造型（道袍/发冠束发/反派赵天霸为内门弟子华服），
+    只有角色图该吃；物品与场景图照抄会稀释主体，甚至真把人物画进来。
 
     与 with_style 的两点差别：
       1) 用 reference_style 过滤后的风格串 —— 剥离色调/影调/光照 token；
@@ -502,14 +615,18 @@ def with_reference_style(prompt: str, style, *, with_tail: bool = True) -> str:
     #    原因是第①步 strip_tone_tokens_text 改动文本后，with_style 认为风格未落地 → 再拼一次。
     #    注意：用**库内已注册**的风格串（如 '国漫3D渲染'）时不会暴露，只有自由风格文本会。
     #    这里做入口短路：风格与条款都已落地 → 原样返回。
-    _raw = str(prompt or "").strip()
+    # ⭐ 2026-10-20（用户第二次实测：物品提示词里还有角色描述）：
+    #   进入短路判定**之前**，先把已存在文本里的脏段落清掉。
+    #   否则「风格与条款都已落地」→ return _raw 会把上游剧本写进去的
+    #   「补充要求：…反派赵天霸为内门弟子华服」原样放行，注入侧再怎么过滤都没用。
+    _raw = strip_ref_sections_text(str(prompt or "").strip(), kind=kind)
     if (_raw and REFERENCE_COLOR_FIDELITY_MARK_ZH in _raw
-            and _style_already_present(_raw, reference_style(style) or style)):
+            and _style_already_present(_raw, reference_style(style, kind=kind) or style)):
         return _raw
     # ① 先删掉文本里**已存在**的色调词（上游剧本阶段就写进来的，注入时的过滤清不掉）
     text = strip_tone_tokens_text(_raw, style) if _raw else _raw
     # ② 再按「参考图口径」补写过滤后的风格后缀（幂等）
-    ref = reference_style(style)
+    ref = reference_style(style, kind=kind)
     merged = with_style(text, ref, with_tail=with_tail) if ref else text
     # ③ 追加颜色保真条款
     return _append_clause(merged, REFERENCE_COLOR_FIDELITY_ZH,
@@ -895,8 +1012,10 @@ _EN_STYLE_LEXICON = {
     "60": "1960s",
 }
 
-#: 英文风格后缀固定收尾（与中文 _QUALITY_TAIL 语义对齐）
-_QUALITY_TAIL_EN = "highly detailed, delicate lighting, stable composition, no distortion"
+#: 英文风格后缀固定收尾（与中文 _QUALITY_TAIL 语义对齐）。
+#: 2026-10-18：去掉 "highly detailed, delicate lighting, stable composition" 这类空泛质量词
+#: （Seedance slop traps），只留可判定的 "no distortion"。
+_QUALITY_TAIL_EN = "no distortion"
 
 #: 中文风格名的**构词后缀**，翻译时直接剥离（英文里不需要「风格/风/画风」这类词）。
 #: 注意顺序：长后缀在前，避免「画风」被「风」先吃掉。
@@ -1090,7 +1209,8 @@ def resolve(style, *, default_ratio: Optional[Tuple[int, int]] = None,
 
 
 def apply_asset_style(assets: Optional[List[dict]], style,
-                      *, key: str = "reference_prompt_zh") -> int:
+                      *, key: str = "reference_prompt_zh",
+                      kind: str = "") -> int:
     """把风格后缀确定性地补进资产卡参考提示词，返回被改写的条目数。
 
     风格补写不再依赖模型自觉：bible 提示词已明确要求模型**不要**写风格词
@@ -1110,7 +1230,7 @@ def apply_asset_style(assets: Optional[List[dict]], style,
         base = a.get(key) or ""
         if is_en:
             # 参考图口径：英文同样剥离色调/影调 token 并补颜色保真条款
-            ref_en = reference_style(norm)
+            ref_en = reference_style(norm, kind=kind)
             merged = with_style_en(base, ref_en) if ref_en else str(base or "").strip()
             merged = _append_clause(merged, REFERENCE_COLOR_FIDELITY_EN,
                                     REFERENCE_COLOR_FIDELITY_MARK_EN)
@@ -1119,14 +1239,18 @@ def apply_asset_style(assets: Optional[List[dict]], style,
             # ⚠️ 资产参考图必须走 with_reference_style（见其 docstring）：
             #    旧实现用 with_style 把「色调灰蓝压抑」整串拼进角色三视图 →
             #    皮肤被染蓝（2026-10-07 用户反馈）。
-            merged = with_reference_style(base, norm)
+            merged = with_reference_style(base, norm, kind=kind)
         if merged and merged != str(base or "").strip():
             a[key] = merged
             changed += 1
     return changed
 
 
-def apply_asset_style_all(assets: Optional[List[dict]], style) -> int:
-    """中英双语一起补写风格（资产参考提示词的统一收尾入口）"""
-    return (apply_asset_style(assets, style, key="reference_prompt_zh")
-            + apply_asset_style(assets, style, key="reference_prompt_en"))
+def apply_asset_style_all(assets: Optional[List[dict]], style,
+                          *, kind: str = "") -> int:
+    """中英双语一起补写风格（资产参考提示词的统一收尾入口）
+
+    ``kind`` 见 :func:`with_reference_style`：物品/场景要剔除「补充要求」段落。
+    """
+    return (apply_asset_style(assets, style, key="reference_prompt_zh", kind=kind)
+            + apply_asset_style(assets, style, key="reference_prompt_en", kind=kind))

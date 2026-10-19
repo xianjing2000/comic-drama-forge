@@ -62,7 +62,7 @@ from config import (
     SHOT_DURATION_ACTION_SEC_MAX,
     # 分镜粒度（2026-10-06 用户指定：每集 20~30 镜、每镜 5~6 秒）——见 config 里
     # SHOT_GRANULARITY_* 与本文件 CHARS_PER_SHOT / REF_INSERT_RATIO / SPLIT_ACTION_BEATS 的注释。
-    SHOT_CAP_GROWTH, SHOT_GRANULARITY_TARGET_SHOTS, SHOT_GRANULARITY_MAX_SHOTS,
+    SHOT_CAP_GROWTH, SHOT_GRANULARITY_MAX_SHOTS,
 )
 from common_util import as_dict as _as_dict
 
@@ -211,6 +211,9 @@ SHOT_FIELDS_DEFAULT = {
     "prompt_h3": "",
     "characters_in_shot": [],
     "items_in_shot": [],
+    # ⭐ 2026-10-16（E 道具状态）：本镜各道具的**状态**（{道具名: 状态描述}），如 {"玄铁剑": "已断"}。
+    #    取图时若非空且存在状态变体 → 优先取变体（见 qc_helpers._allocate_storyboard_refs）。
+    "items_state": {},
     # P0-1：分镜「首帧/末帧/运动」三段结构（借鉴 ViMax decompose_visual_description）。
     # 模型逐镜把单段画面描述拆成「运动起点→终点→运动类型」，下游 build_storyboard_prompt
     # 据此给模型显式锚点，减少动作画崩。旧剧本无此字段 → 空串，下游回落单段 description。
@@ -507,8 +510,10 @@ _DEFAULT_REWRITE_RULES = (
     "一段需要连续完成 2 个以上动作时，**按动作先后拆成相邻两镜**，每镜只推进一个动作——"
     "参考片 92 镜几乎每镜只有一个动作节拍，靠相邻镜切换推进，而不是靠一镜内堆叠多个动作；"
     "一条信息用一个画面能讲清的，绝不拆成两镜；**纯环境空镜**（无人、无动作、无信息推进）禁止生成；\n"
-    "4) 【描述/对白比】剧情主要由人物台词与动作推进，画面描述只做必要补充："
-    "全块所有镜头 description+visual_detail 的合计字数不得超过 dialogue 合计字数的 3 倍；"
+    "4) 【画面描述与对白比】剧情主要由人物台词与动作推进：description 只写动作、构图"
+    "与必要的光线/环境锚点，**不得**堆砌不推动剧情的背景铺陈（大段世界观、环境修辞、衣着罗列）；"
+    "全块所有镜头 description+visual_detail 的合计字数，不得超过「0.6×各镜时长×该镜台词字数」的"
+    "合计预算（10s 镜=6 倍、8s 镜=4.8 倍、5s 镜=3 倍，全片按台词加权聚合）；"
     "无台词的镜头必须有明确的人物动作或情绪变化，禁止写成静态环境铺陈；\n"
     "5) 原文对话尽量原样写进对应角色的 dialogue.text，禁止改写成概括式引述；\n"
     "6) 镜头按原文时间顺序排列，块首镜头自然衔接上一块结尾，不得跳段、不得重复；\n"
@@ -1401,8 +1406,8 @@ def _fallback_bible(outlines: list, novel_title: str, style: str) -> dict:
     # 兜底路径同样要带风格：否则一旦 bible 汇总失败，资产提示词又回到「零风格词」老样子
     eff = style_kit.normalize_style(style)
     if eff:
-        for group in (out_chars, out_items, out_scenes):
-            style_kit.apply_asset_style_all(group, eff)
+        for group, _k in ((out_chars, "character"), (out_items, "item"), (out_scenes, "scene")):
+            style_kit.apply_asset_style_all(group, eff, kind=_k)
     return {
         "title": (novel_title or "")[:20],
         "theme": "",
@@ -1560,15 +1565,20 @@ def build_shots_for_chunk(client, bible: dict, outline: dict, chunk: dict, shots
     #    **不写进提示词**，模型看不到。
     if shots_target > 0:
         shots_cap = max(shots_target, min(120, int(math.ceil(shots_target * SHOT_CAP_GROWTH))))
-        # ⚠️ 2026-10-13：此前这里写「至少 {shots_target} 个（不设上限）」—— 那是**下限**，
-        #    且 shots_target 是**按字数**估出来的（estimate_shots_for_chars = 字数/240），
-        #    等于变相按字数定镜数。现改为：shots_target 只用于技术预算（shots_cap，
-        #    防单次响应体过大），**不写进提示词**；提示词口径与「无下限」分支完全一致。
-        _shots_min_text = "数量由你按「每镜时长 10 秒」判定（**不设上下限**）"
-        _shots_range_text = ("shots 数组元素个数**不设上下限**"
-                             "（既无「至少 N 镜」，也无「不得超过 N 镜」）")
-        _shots_targeting_text = (f"本块镜数**下限 {shots_target} 个、不设上限**"
-                                 f"（原文信息量更大时可远多于它）。")
+        # target_shots 必须进提示词且是硬目标：只给「每镜 10 秒」→ 按内容自由膨胀
+        # （实测 2478 字切出 35 镜）；只给镜数 → 摊薄灌水。两者同时给才收敛。
+        _total_sec = shots_target * 10
+        _shots_min_text = (f"**恰好 {shots_target} 个镜头**"
+                           f"（每镜 10 秒，成片合计约 {_total_sec} 秒）")
+        _shots_range_text = (f"shots 数组**必须恰好 {shots_target} 个元素**（不得多、不得少）")
+        _shots_targeting_text = (
+            f"**本集镜头数配额：恰好 {shots_target} 个**（每镜 10 秒 → 成片约 {_total_sec} 秒）。\n"
+            f"切镜时必须**同时**满足两条：\n"
+            f"  · 粒度：一个镜头 = 能在成片 10 秒里演完的一个完整内容单元；\n"
+            f"  · 配额：总数**恰好 {shots_target} 个**。\n"
+            f"原文的完整单元**多于** {shots_target} 时，把相邻的同类单元合并成一镜"
+            f"（**全部情节必须保留**，只是每镜承载更多内容，不许删戏）；"
+            f"**少于** {shots_target} 时，在不灌水的前提下补足。")
     else:
         # 无下限：cap 仅作技术护栏（防单次响应体过大），不写进提示词。
         shots_cap = max(12, min(120, int(math.ceil(SHOT_GRANULARITY_MAX_SHOTS * SHOT_CAP_GROWTH))))
@@ -2435,6 +2445,15 @@ def apply_episode_schema(script: dict, duration_per_shot: float = None) -> dict:
     meta["episode_stats"] = stats
     meta["shot_count"] = stats["shot_count"]
     meta["episode_duration_sec"] = stats["duration_sec"]
+
+    # ⭐ 2026-10-19 v3 技能口径增强（doubao-creative-drama）：场次归属 / 三层台词 /
+    #    单集创作卡 / 场次攻防契约 / 证据链台账。幂等 + fail-open：模型已给的字段一律
+    #    保留；任何异常只记日志，绝不阻断剧本落盘（旧剧本/旧链路零回归）。
+    try:
+        from script_v3 import enrich_v3
+        enrich_v3(script, project_root=(script.get("metadata") or {}).get("project_name") or None)
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("v3 技能口径增强失败（剧本继续落盘）：%s", _e)
     return script
 
 
@@ -2521,6 +2540,39 @@ def _match_known_names(raw_names, known: list, field: str,
                 field, "、".join(missing)[:60], "、".join(resolved)[:60],
                 "、".join(x for x in (known or []) if x)[:120])
     return resolved
+
+
+def _match_item_state(raw_state, known_items: list) -> dict:
+    """把镜头声明的**道具状态** ``{道具名: 状态}`` 收敛到 bible 物品名（与 items_in_shot 同口径）。
+
+    2026-10-16（E 道具状态）：剧本阶段模型可声明某道具在本镜的**状态**（如「玄铁剑」→「剑身断成两截」），
+    生成期据此优先取该道具的**状态变体参考图**（见 :func:`asset_refs.item_state_image`，
+    变体由 ``asset_worker.generate_item_state_variant`` 产出）。本函数只做键收敛 + 值限长：
+    键须命中 bible 物品名（模糊命中口径同 :func:`_match_known_names`），值截 20 字；非 dict / 空
+    → 返回 ``{}``，下游按 base 图取图（对老剧本零行为变化）。
+
+    ⚠️ 刻意**不**校验物品是否在本镜 ``items_in_shot`` 里：状态本就服务于「本镜出现该道具」，
+    未出场时无人消费（``_allocate_storyboard_refs`` 只遍历 items_in_shot），无需制造丢弃告警。
+    """
+    if not isinstance(raw_state, dict) or not raw_state:
+        return {}
+    _raw = {}
+    for k, v in raw_state.items():
+        _k = str(k or "").strip()
+        _v = str(v or "").strip()
+        if _k and _v:
+            _raw[_k] = _v[:20]
+    if not _raw:
+        return {}
+    out = {}
+    for _k, _v in _raw.items():
+        _res, _miss, _fz = asset_name_match.resolve_names([_k], known_items or [], "item")
+        if _res:
+            out[_res[0]] = _v
+        else:
+            logger.warning("镜头 items_state 的道具「%s」未命中 bible（可用：%s）→ 该状态丢弃",
+                           _k, "、".join(x for x in (known_items or []) if x)[:100])
+    return out
 
 #: 画面文本字段（补全 characters_in_shot 时的扫描面）——这些字段都会被写进
 #: 生成端提示词，模型看得见里面的人名，就有概率把那个人画出来。
@@ -3438,15 +3490,6 @@ def collect_scene_flow(shots: list) -> list:
 _SCENE_HEADING_PREFIX_RE = re.compile(r"^\s*【\s*第\s*\d+\s*场\s*】\s*")
 
 
-def _scene_heading_body(shot: dict) -> str:
-    """剥掉「【第N场】」前缀后的场次正文（口径与 renumber_scenes 一致）。"""
-    try:
-        head = _SCENE_HEADING_PREFIX_RE.sub("", str((shot or {}).get("scene_heading") or ""))
-    except Exception:  # noqa: BLE001
-        head = ""
-    if not head:
-        head = str((shot or {}).get("location") or "")
-    return re.sub(r"\s+", "", head)
 
 
 def audit_scene_numbering(shots: list) -> dict:
@@ -3761,6 +3804,10 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
             # 模型写的物品名差一个标点就静默丢弃，该物品全程没有设定图且日志无痕）。
             "items_in_shot": _match_known_names(
                 s.get("items_in_shot"), items, "items_in_shot", kind="item"),
+            # ⭐ 2026-10-16（E 道具状态）：本镜各道具的**状态**（{道具名: 状态}，键收敛到 bible
+            #    物品名、值截 20 字）。下游 _allocate_storyboard_refs 据此优先取该道具的状态变体图；
+            #    无状态时恒为 {}（对老剧本零行为变化）。
+            "items_state": _match_item_state(s.get("items_state"), items),
             # P0-1：首帧/末帧/运动三段（借鉴 ViMax）。限长避免模型越界输出塞一长段；
             # 旧剧本/模型未输出 → 空串，下游 build_storyboard_prompt 回落单段 description，零变化。
             "first_frame": str(s.get("first_frame") or "").strip()[:40],
@@ -3865,6 +3912,52 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
     # 必须放在 align_shots_to_reference 之后 —— 对齐会改变镜数与 shot_id，
     # 场次号要看到最终镜头表；幂等，落盘前还会再收一次（含覆盖率补镜）。
     assign_scene_numbers(shots)
+    # ⭐ 2026-10-19（C1 兼容版开场）：首镜承担「时空落点」。
+    # 提示词 ③ 禁止「平铺直叙的场景介绍」开场（那是为了保住钩子），但成片也需要观众
+    # 立刻知道「这是哪儿、什么时候」。两者并存：首镜**仍是钩子**，只由这里**确定性补一条
+    # 时空字幕** —— 文本取自场景表已有的 location + time_of_day（不靠模型发挥、不可编造）。
+    # · 只在整集第一块（start_id==1）做；已有字幕的镜头不动；
+    # · 字幕是否真的烧进成片由项目开关 subtitle_enabled 决定（默认关）→ 对不烧字幕的项目零可见影响；
+    # · 关闭方式：环境变量 MJSCXT_OPENING_CAPTION=off。
+    if start_id == 1 and shots and \
+            str(os.environ.get("MJSCXT_OPENING_CAPTION") or "").strip().lower() not in ("0", "off", "false", "no"):
+        _first = shots[0]
+        if not (isinstance(_first.get("caption"), dict) and _first["caption"].get("text")):
+            _loc = str(_first.get("location") or "").strip()
+            _tod = str(_first.get("time_of_day") or "").strip()
+            _txt = ("%s·%s" % (_loc, _tod)) if (_loc and _tod) else (_loc or _tod)
+            if _txt:
+                _first["caption"] = {"text": _txt, "kind": "时间地点"}
+                _first["caption_text"] = _txt
+                logger.info("[开场时空字幕] 首镜无字幕 → 按场景表补「%s」（location=%r / time=%r）",
+                            _txt, _loc, _tod)
+        # 「局部」镜（只拍手部/道具）不能承担开场建立：观众拿不到空间定位。
+        if str(_first.get("shot_type") or "") == "局部":
+            logger.warning("[开场建立] 首镜被写成「局部」景别（只拍手部/道具），观众拿不到空间信息："
+                           "建议重生成首镜或人工改为中景/全景（不阻断出片）")
+    # ⭐ 2026-10-19（用户 QA：全片唯一一条画内字幕「黄昏·青云宗后山」风格突兀）：
+    #    让「时空落点」成为**系统性**装置 —— 每次场景切换的第一镜都补一条时空字幕
+    #    （首镜已由上方开场块处理）。只有一两处时才显得突兀，场景切换处统一出现才成体系。
+    #    · 文本取自镜头的 location + time_of_day（场景表事实，模型不可编造）；
+    #    · 已有字幕（悬念/回溯等）不动；同一场景内不重复补；
+    #    · 关闭方式：环境变量 MJSCXT_SCENE_CAPTION=off（与开场字幕同一套语义）。
+    if shots and str(os.environ.get("MJSCXT_SCENE_CAPTION") or "").strip().lower() not in (
+            "0", "off", "false", "no"):
+        _prev_loc = str(shots[0].get("location") or "").strip()
+        for _sh in shots[1:]:
+            _loc = str(_sh.get("location") or "").strip()
+            if _loc and _loc != _prev_loc:
+                _has = isinstance(_sh.get("caption"), dict) and _sh["caption"].get("text")
+                if not _has:
+                    _tod = str(_sh.get("time_of_day") or "").strip()
+                    _txt = ("%s·%s" % (_loc, _tod)) if (_loc and _tod) else _loc
+                    if _txt:
+                        _sh["caption"] = {"text": _txt, "kind": "时间地点"}
+                        _sh["caption_text"] = _txt
+                        logger.info("[场景时空字幕] 镜%s 场景切换 %s → %s，补「%s」",
+                                    _sh.get("shot_id"), _prev_loc or "?", _loc, _txt)
+            if _loc:
+                _prev_loc = _loc
     # 分配集数
     n = len(shots)
     if n:
@@ -3874,60 +3967,6 @@ def _norm_shots(raw_shots: list, bible: dict, episodes: int, start_id: int = 1) 
     return shots
 
 
-def _run_full_coverage_check(client, novel_text: str, script: dict, reports=None,
-                             warnings: list = None, continuity_dir: str = None,
-                             project_key: str = None, max_rounds: int = COVERAGE_MAX_ROUNDS,
-                             total_steps: int = 0) -> dict:
-    """整本剧本的原文覆盖率校验：逐句核对原文是否被镜头承载 → 遗漏补生成 → 复检。
-
-    只增不删：补生成只向 shots 追加镜头，不改写、不替换既有镜头。
-    校验失败时降级（记 warning 并沿用原覆盖率摘要），不阻断剧本落盘。
-    """
-    warnings = warnings if warnings is not None else []
-    try:
-        import coverage as coverage_mod
-        if reports:
-            reports("coverage", total_steps, total_steps,
-                    f"原文覆盖率校验（逐句核对 {len(novel_text or '')} 字是否被镜头承载）…", 98)
-        rep = coverage_mod.run_coverage_check(
-            client, novel_text, script, episode_no=1, threshold=None,
-            max_rounds=max_rounds, events=None,
-            continuity_dir=continuity_dir, project_key=project_key, save=True)
-        if rep.get("supplement_shots"):
-            apply_episode_schema(script)   # 补生成镜头后刷新镜头数 / 时长
-        if reports:
-            reports("coverage", total_steps, total_steps,
-                    f"原文覆盖率：情节级 {rep.get('plot_coverage_percent')}%、"
-                    f"细节级 {rep.get('detail_coverage_percent')}%，遗漏 "
-                    f"{rep.get('missing_count')} 条、补生成 {rep.get('supplement_shots')} 镜", 99)
-        # ---- P0-3 剧本↔原著一致性：整本单集路径（1 集 = 整本小说）无单章比较基准，
-        #      锚定与要素覆盖显式跳过，只做元信息泄漏扫描 + 命中镜头定向重写。
-        try:
-            import script_consistency as sc_mod
-            sc_rep = sc_mod.run_script_consistency_check(
-                client, script, novel_meta=None, chapter_text="", chapter=None,
-                episode_no=1, auto_fix=True, events=None,
-                continuity_dir=continuity_dir, project_key=project_key, save=True,
-                skip_anchor=True, skip_elements=True)
-            if reports:
-                reports("consistency", total_steps, total_steps,
-                        f"剧本一致性：元信息泄漏 "
-                        f"{(sc_rep.get('leak') or {}).get('hit_count')} 处，"
-                        f"定向修复 {sc_rep.get('fix_rounds')} 轮"
-                        f"（{'已修复' if sc_rep.get('fixed') else '留告警'}）", 99.5)
-        except Exception as e:  # noqa: BLE001
-            note = (f"剧本一致性校验失败（已跳过，剧本仍按原结果落盘）："
-                    f"{type(e).__name__}: {str(e)[:200]}")
-            warnings.append(note)
-            logger.warning(note)
-        return coverage_mod.summary_for_meta(rep, rep.get("report_path")) \
-            or (script.get("metadata") or {}).get("coverage") or {}
-    except Exception as e:  # noqa: BLE001
-        note = (f"原文覆盖率校验失败（已跳过，剧本仍按全量分块生成）："
-                f"{type(e).__name__}: {str(e)[:200]}")
-        warnings.append(note)
-        logger.warning(note)
-        return (script.get("metadata") or {}).get("coverage") or {}
 
 
 # 整本转剧本路径已随「一章一集」拍板移除（2026-10-05）；集级入口见 convert_chapter_with_continuity
@@ -4620,9 +4659,9 @@ def convert_chapter_to_script(client, novel_meta: dict, novel_text: str, chapter
     # 风格：以调用方传入的 style 为准（模型的返回值可能是自我发挥，用户意图优先）
     eff_style = style_kit.normalize_style(style) or style_kit.normalize_style(bible.get("style"))
     # 确定性补写：模型不得自写风格词（写了会重复），统一在这里收尾，中英双语都补
-    style_filled = style_kit.apply_asset_style_all(characters, eff_style) \
-        + style_kit.apply_asset_style_all(items, eff_style) \
-        + style_kit.apply_asset_style_all(scenes, eff_style)
+    style_filled = style_kit.apply_asset_style_all(characters, eff_style, kind="character") \
+        + style_kit.apply_asset_style_all(items, eff_style, kind="item") \
+        + style_kit.apply_asset_style_all(scenes, eff_style, kind="scene")
     if eff_style and style_filled:
         logger.info("第%s集：已为 %d 条资产参考提示词补写风格「%s」", episode_no, style_filled, eff_style)
     bible = {"title": str(bible.get("title") or novel_title)[:40],
