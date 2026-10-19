@@ -103,8 +103,16 @@ async function request<T>(
   // FormData 必须让浏览器自行生成 multipart boundary —— 一旦手工带上
   // Content-Type: application/json，boundary 就没了，后端 request.files 收到空列表。
   const isForm = typeof FormData !== 'undefined' && options.body instanceof FormData;
+  // ⭐ 2026-10-19 修复「点按钮没反应」：POST/PUT/PATCH **没有 body** 时补 `{}`。
+  //    此前只带 `Content-Type: application/json` 而 body 为空 → Flask 3 的
+  //    `request.json` 直接 400（空 body 解析失败）；若连 content-type 都不带则 415。
+  //    前端 catch 又多半是静默的，于是「暂停托管」等按钮看起来完全没反应。
+  const _method = String(options.method || 'GET').toUpperCase();
+  const _needsJsonBody = !isForm && options.body == null
+    && (_method === 'POST' || _method === 'PUT' || _method === 'PATCH');
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
+    body: _needsJsonBody ? '{}' : options.body,
     headers: isForm
       ? { ...options.headers }
       : { 'Content-Type': 'application/json', ...options.headers },
@@ -535,33 +543,8 @@ export const memoryApi = {
     if (Array.isArray(d)) return d;
     return d?.memories || [];
   },
-  record: (data: Partial<Memory>) =>
-    request<Memory>('/memory/record', { method: 'POST', body: JSON.stringify(data) }),
-  // 字段名对齐后端契约（app.py api_memory_record_lesson）：
-  // 后端读 project/prompt/issues/category，不再读 lesson/tags。
-  // 旧签名 (lesson, tags) 已废弃，改为传结构化对象。
-  recordLesson: (data: {
-    project: string;
-    prompt?: string;
-    issues: string[];
-    episode?: number;
-    category?: string;
-  }) =>
-    request<Memory>('/memory/record-lesson', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
-  recordSuccess: (data: {
-    project: string;
-    prompt?: string;
-    highlights: string[];
-    episode?: number;
-    category?: string;
-  }) =>
-    request<Memory>('/memory/record-success', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    }),
+  // 2026-10-16 收敛：后端 /memory/record* 三个「手动登记」端点已随 ai_memory 死壳移除
+  // （记忆唯一来源 = prompt_memory 质检教训库，自动沉淀）。前端从此不再提供手动登记。
   clearOld: (days: number = 90) =>
     request<void>('/memory/clear-old', {
       method: 'POST',
@@ -642,20 +625,8 @@ export const storyboardApi = {
     `${API_BASE}/storyboards/file/${encodeURIComponent(project)}/${filename}`,
   // generateNineGrid / selectNineGridShot（POST /storyboard/nine-grid 与 /select）
   // 已随后端九宫格草案路由下线移除；九宫格候选构图改走 gridCandidates / gridApply。
-  // ---- 分镜九宫格候选构图（2026-10-01，对标 BigBanana：一图 9 候选→选格裁切） ----
-  // 返回类型对齐后端实际契约（app.py api_storyboard_grid_candidates / grid_apply）：
-  // gridApply 实际回 {success, project, shot_id, cell, applied, url, cleared, hint}，
-  // 此前只声明了 {success, applied, url}，调用方读 cell 会编译报错。
-  gridCandidates: (projectName: string, episodeNo: number, shotId: string) =>
-    request<ShotGridStartResponse>('/storyboard/grid-candidates', {
-      method: 'POST',
-      body: JSON.stringify({ project_name: projectName, episode_no: episodeNo, shot_id: shotId }),
-    }),
-  gridApply: (projectName: string, episodeNo: number, shotId: string, cell: number) =>
-    request<ShotGridApplyResponse>('/storyboard/grid-apply', {
-      method: 'POST',
-      body: JSON.stringify({ project_name: projectName, episode_no: episodeNo, shot_id: shotId, cell }),
-    }),
+  // ⚠️ 2026-10-19：分镜九宫格候选构图后端已于 7701cd7 随「一镜 3x3」整体下线，
+  //    这里的方法一并删除；UI 入口也已从 ShotCard 移除，避免点了 404。
 };
 
 /** 视频生成方式（**项目级**设定，与后端 config.VIDEO_MODES 一致）

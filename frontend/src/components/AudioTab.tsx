@@ -651,11 +651,12 @@ function VoiceBankPanel({ projectKey }: { projectKey: string }) {
             const pv: PreviewState = previews[name] || {};
             const busy = busyChar === name || !!pv.loading;
             /** 禁用原因：即使当前 cloneOk=true 也一定给 tooltip，绝不出现「点了没反应」的静默禁用 */
-            const disabledTip = !cloneOk
-              ? tf('audio.voiceCloneUnavailable', '克隆不可用：请确认 ComfyUI 提供了参考音频克隆节点')
-              : pv.loading
-                ? tf('audio.voicePreviewCookingShort', '正在合成试听音频…')
-                : t('audio.voicePreview');
+            // ⭐ 2026-10-16：试听**不再**因「克隆节点不可用」整行禁用 —— 只有用户**上传音色**（clone
+            //   模式）才需要克隆节点；design/preset 模式的试听不需要。若某行确属 clone 模式且节点缺失，
+            //   后端会返回可读错误（前端 toast 展示），好过对所有行静默禁用。
+            const disabledTip = pv.loading
+              ? tf('audio.voicePreviewCookingShort', '正在合成试听音频…')
+              : t('audio.voicePreview');
             return (
               <div key={name} className="rounded border border-line bg-surface px-3 py-2">
                 <div className="flex items-center justify-between gap-2">
@@ -685,7 +686,7 @@ function VoiceBankPanel({ projectKey }: { projectKey: string }) {
                           <Button
                             variant="ghost"
                             onClick={() => doPreview(name)}
-                            disabled={busy || !cloneOk}
+                            disabled={busy}
                             loading={!!pv.loading}
                             title={disabledTip}
                           >
