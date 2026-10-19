@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""部署门禁（t15，2026-10-12）：把「桌面版启动 / 资源镜像播种 / 副本同步」三件事一键检查。
+"""部署门禁（t15，2026-10-12）：把「桌面版启动 / 资源镜像播种 / 副本同步 / 静态检查」一键检查。
 
 为什么需要
 ----------
@@ -20,6 +20,9 @@
   3. app-sync         python tools/check_app_sync.py
                       app/*.py 是否已同步到 electron-app/_backend/app、安装区 backend、
                       运行时镜像 app（三处「必须同步」副本）。
+  4. static-lint      python tools/lint_gate.py（Phase 0.2，2026-10-16）
+                      语法错误 + 未定义名（pyflakes/ruff）。把「等裸名触发才炸」的
+                      NameError 类缺陷挡在发布之前。无 pyflakes/ruff 时记 env_error。
 
 用法
 ----
@@ -49,6 +52,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MAIN_JS = ROOT / "electron-app" / "main.js"
 CHECK_SYNC = ROOT / "tools" / "check_app_sync.py"
+LINT_GATE = ROOT / "tools" / "lint_gate.py"
 
 
 def _run(argv: list, timeout: int = 600) -> dict:
@@ -102,10 +106,12 @@ def gate_app_sync(opts: dict) -> dict:
 #: 而「改了 main.js 但安装区那份没同步」会让桌面版继续跑旧启动逻辑（t15 修的就是
 #: 这一类「改了不生效」）。打包产物（dist / 便携版）允许陈旧，只提示不判失败。
 def _installed_root() -> str:
-    """安装区根目录探测（t43，2026-10-12）：原先硬编码 C:/mjscxt_p139，换机即失效。
+    """安装区根目录探测（t43，2026-10-12；2026-10-16 增嵌套布局）。
 
-    优先级：环境变量 MJSCXT_INSTALLED_ROOT → 自动探测常见盘符根下的 mjscxt* 目录
+    优先级：环境变量 MJSCXT_INSTALLED_ROOT → 自动探测常见盘符下的 mjscxt* 目录
     （含 resources/）→ 找不到返回空串（对应目标跳过，不误报）。
+    ⭐ 2026-10-16：安装区从 ``C:\\mjscxt_p139`` 迁到 ``D:\\mjscxt-migrated\\mjscxt_p139``
+    （即 ``<盘>:\\mjscxt*\\mjscxt*\\resources``，多一层嵌套），故同时探测「一层」与「两层」。
     """
     env = (os.environ.get("MJSCXT_INSTALLED_ROOT") or "").strip()
     if env:
@@ -118,9 +124,21 @@ def _installed_root() -> str:
             continue
         for name in names:
             full = os.path.join(base, name)
-            if name.lower().startswith("mjscxt") and os.path.isdir(full) \
-                    and os.path.isdir(os.path.join(full, "resources")):
+            if not (name.lower().startswith("mjscxt") and os.path.isdir(full)):
+                continue
+            # 一层：<drive>\mjscxtX\resources
+            if os.path.isdir(os.path.join(full, "resources")):
                 return full
+            # 两层（迁移布局）：<drive>\mjscxtX\mjscxtY\resources
+            try:
+                subs = os.listdir(full)
+            except OSError:
+                continue
+            for sub in subs:
+                subfull = os.path.join(full, sub)
+                if sub.lower().startswith("mjscxt") and os.path.isdir(subfull) \
+                        and os.path.isdir(os.path.join(subfull, "resources")):
+                    return subfull
     return ""
 
 
@@ -168,11 +186,27 @@ def gate_main_js_copies(_opts: dict) -> dict:
             "detail": "\n".join(lines)}
 
 
+def gate_static_lint(_opts: dict) -> dict:
+    """静态检查门禁（2026-10-16，Phase 0.2）：语法错误 + 未定义名。
+
+    把「能被静态检出、却要等裸名首次触达才炸」的缺陷挡在提交/发布之前（本例：
+    一处 `continuity.py` 的 NameError 在杀生产）。退出码 2 = 无 pyflakes/ruff，
+    仅做了语法检查 → 记为 env_error（提醒安装 pyflakes 启用完整检查）。
+    """
+    r = _run([sys.executable, str(LINT_GATE)])
+    if r["code"] == 2:
+        return {"ok": False, "env_error": True, "exit": 2, "seconds": r["seconds"],
+                "detail": (r["out"] or r["err"])[-1200:]}
+    return {"ok": r["code"] == 0, "exit": r["code"], "seconds": r["seconds"],
+            "detail": (r["out"] or r["err"])[-4000:]}
+
+
 GATES = [
     ("main-js-syntax", "node --check electron-app/main.js（桌面版启动脚本语法）", gate_main_js_syntax),
     ("main-js-copies", "electron-app/main.js 与安装区启动入口是否一致（避免改了不生效）", gate_main_js_copies),
     ("mirror-policy", "node electron-app/main.js --mirror-selftest（镜像指纹/播种策略自检）", gate_mirror_policy),
     ("app-sync", "python tools/check_app_sync.py（app/*.py 三处副本是否同步）", gate_app_sync),
+    ("static-lint", "python tools/lint_gate.py（语法错误 + 未定义名）", gate_static_lint),
 ]
 
 

@@ -62,7 +62,11 @@ class TestHealOverSplit(unittest.TestCase):
     ARGS = (None, {}, {}, CHUNK)
 
     def test_does_not_retry_when_density_ok(self):
-        shots = _shots(20)
+        # 用**当前** CHARS_PER_SHOT 推「恰好达标」的镜数 —— 不写死数字，免得该常量调整后
+        # 本用例随代码变红（原写死 20，是 CHARS_PER_SHOT=240 时代的引导值；2026-10-15
+        # 该值改为 480 → 对 3600 字而言 20 镜已属过碎）。
+        ideal = max(1, int(round(3600 / float(N.CHARS_PER_SHOT))))
+        shots = _shots(ideal)
         with mock.patch.object(N, 'build_shots_for_chunk') as m:
             out = N._heal_over_split(*self.ARGS, shots, 'T')
         m.assert_not_called()

@@ -1,0 +1,40 @@
+#!/usr/bin/env sh
+# 漫剧生成系统 · 本地提交门禁（opt-in，只读，可绕过）
+#
+# 启用（每个 clone 一次）：git config core.hooksPath .githooks
+# 停用：git config --unset core.hooksPath
+# 临时绕过：git commit --no-verify
+#
+# 为什么需要本地钩子（而不是只靠 CI）：
+#   `_backend/` 与 `%APPDATA%\mjscxt-desktop\resource-mirror\` 都在 .gitignore 里，
+#   CI 根本看不到它们 —— 而「改了 app/ 却忘了同步副本」正是**本地**才会发生的漂移，
+#   也是「改了没生效」的头号成因。desktop-release.yml 只在**发布**时兜底，本地钩子
+#   才是第一道闸（2026-10-16，对应优化规划 Phase 0.5）。
+#
+# 跑两条只读门禁：
+#   1) tools/check_app_sync.py  副本同步（改了 app/ 没同步 → 拦下；副本不存在则跳过）
+#   2) tools/lint_gate.py       语法错误 / 未定义名（pyflakes/ruff；未装则只查语法）
+set -e
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+PY="${PYTHON:-python}"
+
+# 1) 副本同步
+if [ -f "$ROOT/tools/check_app_sync.py" ]; then
+  echo "[pre-commit] 副本同步检查…"
+  if ! "$PY" "$ROOT/tools/check_app_sync.py" --quiet-ok; then
+    echo "[pre-commit] ✗ 副本漂移：请先跑  python tools/sync_copies.py --apply  再提交。"
+    exit 1
+  fi
+fi
+
+# 2) 静态检查（语法 + 未定义名）
+if [ -f "$ROOT/tools/lint_gate.py" ]; then
+  echo "[pre-commit] 静态检查…"
+  if ! "$PY" "$ROOT/tools/lint_gate.py"; then
+    echo "[pre-commit] ✗ 静态检查未过（语法错误 / 未定义名）。"
+    exit 1
+  fi
+fi
+
+echo "[pre-commit] ✓ 通过"
+exit 0

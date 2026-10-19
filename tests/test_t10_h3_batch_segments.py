@@ -323,7 +323,7 @@ class BatchLoopRuntimeTests(unittest.TestCase):
                 'x.mp4', float(expected), {'video_max_drift': 0.30}, fr)
         return [it['code'] for it in items if it.get('fatal')]
 
-    def _run(self, durs, batch_size):
+    def _run(self, durs, batch_size, tail_png=None):
         loop = _find_batch_loop()
         self.assertIsNotNone(loop)
         segs = [{'name': 'shot_%02d' % (i + 1), 'duration': float(d), 'prompt': 'p%d' % i}
@@ -399,6 +399,15 @@ class BatchLoopRuntimeTests(unittest.TestCase):
             '_sn': 1,
             '_ssegs': segs,
             'videos_dir': tmp,
+            # 2026-10-19 批间末帧锚定：批循环新调用的模块级助手必须进命名空间。
+            # 默认用真实的抽取函数（假 mp4 内容 → fail-open 返回 ""，不影响既有断言）；
+            # 传入 tail_png 时替换为假抽取器，用于验证「第 2 批起首段挂末帧」。
+            '_BATCH_TAIL_DIRNAME': video_helpers._BATCH_TAIL_DIRNAME,
+            '_extract_batch_tail_frame': (
+                (lambda *a, **k: tail_png) if tail_png
+                else video_helpers._extract_batch_tail_frame),
+            '_anchor_batch_head_to_prev_tail':
+                video_helpers._anchor_batch_head_to_prev_tail,
             # for 语句**之前**的初始化（原本在 if 分支体内，本仿真直接提供）
             '_bfiles': [],
             '_berr': '',
@@ -446,6 +455,33 @@ class BatchLoopRuntimeTests(unittest.TestCase):
         self.assertEqual(len(r['calls']), 1)
         self.assertEqual(r['seen'], [(3, 90.0, ['shot_01', 'shot_02', 'shot_03'])],
                          '单批场景的 QC 作用域应等于整场（3 段 / 90s）')
+
+    def test_tail_anchor_applied_from_second_batch_only(self):
+        """2026-10-19：第 2 批起，首段必须挂上一批末帧；第 1 批不受影响。
+
+        插件「段间引导」只在同一次提交内传递尾帧 → 批间必须由这里补锚点，
+        否则第 5 段与第 6 段之间就是无引导硬切（用户实测卡顿）。
+        """
+        tmp = tempfile.mkdtemp(prefix='t10tail_')
+        tail = os.path.join(tmp, 'tail.png')
+        with open(tail, 'wb') as fh:
+            fh.write(b'\x89PNG\r\n\x1a\n')
+        with mock.patch.dict(os.environ, {'MJSCXT_H3_BATCH_TAIL_ANCHOR': '1'}):
+            r = self._run([10.0, 10.0, 10.0, 10.0, 10.0], 2, tail_png=tail)
+        self.assertEqual(len(r['calls']), 3)
+        self.assertNotIn('batch_tail_anchor', r['calls'][0]['segments'][0],
+                         '第 1 批不该有上一批末帧（不存在「上一批」）')
+        for i, c in enumerate(r['calls'][1:], start=2):
+            head = c['segments'][0]
+            self.assertEqual(head.get('batch_tail_anchor'), tail,
+                             '第 %d 批首段没有挂上一批末帧' % i)
+            self.assertEqual(head['reference_images'][-1], tail,
+                             '第 %d 批首段 reference_images 末尾不是末帧图' % i)
+            self.assertIn('<Picture 1>', head['prompt'],
+                          '第 %d 批首段提示词没有声明末帧图（会被构建器静默丢弃）' % i)
+        # 共享段 dict（_ssegs / _batches 同一对象）不得被污染
+        self.assertNotIn('batch_tail_anchor', r['segs'][2])
+        self.assertNotIn('reference_images', r['segs'][2])
 
 
 if __name__ == '__main__':

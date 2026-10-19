@@ -16,6 +16,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'app'))
 
 import common_util as U  # noqa: E402
+import fs_atomic  # noqa: E402
 
 
 class TestNow(unittest.TestCase):
@@ -79,14 +80,17 @@ class TestJsonIO(unittest.TestCase):
         shutil.rmtree(self.d, ignore_errors=True)
 
     def test_roundtrip(self):
+        # 写走规范实现 fs_atomic（2026-10-16：common_util.write_json 已作为生产死代码移除，
+        # 原子写统一到 fs_atomic.atomic_write_json）；读走 common_util.read_json。
         p = os.path.join(self.d, 'sub', 'x.json')
-        self.assertTrue(U.write_json(p, {'k': 'v'}))
+        fs_atomic.atomic_write_json(p, {'k': 'v'})
         self.assertEqual(U.read_json(p), {'k': 'v'})
 
     def test_atomic_no_tmp_left(self):
         p = os.path.join(self.d, 'y.json')
-        U.write_json(p, {'a': 1})
-        self.assertEqual(sorted(os.listdir(self.d)), ['y.json'])
+        fs_atomic.atomic_write_json(p, {'a': 1})
+        left = sorted(os.listdir(self.d))
+        self.assertEqual(left, ['y.json'], '原子写不得残留临时文件：%s' % left)
 
     def test_missing_returns_default(self):
         self.assertEqual(U.read_json(os.path.join(self.d, 'no.json'), {'d': 1}), {'d': 1})
@@ -99,7 +103,7 @@ class TestJsonIO(unittest.TestCase):
 
     def test_unicode_preserved(self):
         p = os.path.join(self.d, 'cn.json')
-        U.write_json(p, {'名': '中文'})
+        fs_atomic.atomic_write_json(p, {'名': '中文'})
         self.assertEqual(U.read_json(p), {'名': '中文'})
 
 

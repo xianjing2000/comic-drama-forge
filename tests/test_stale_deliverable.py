@@ -27,10 +27,14 @@ if _APP not in sys.path:
 
 
 def _load_pipeline():
-    """导入宿主 app + pipeline（pipeline._A() 需要 sys.modules['app'] 存在）。"""
-    import app  # noqa: F401  仅为满足 pipeline._A() 的宿主解析
+    """导入 config + pipeline。
+
+    D-1（2026-10-16）：pipeline 各函数内 `from config import PROJECT_OUTPUT_DIR`
+    （原经 app 服务定位器 `_A()`），重定向数据根需 patch `config.PROJECT_OUTPUT_DIR`。
+    """
+    import config
     import pipeline
-    return app, pipeline
+    return config, pipeline
 
 
 class TestStaleDeliverableNotAcceptable(unittest.TestCase):
@@ -40,12 +44,12 @@ class TestStaleDeliverableNotAcceptable(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.app, cls.pipeline = _load_pipeline()
+        cls.config, cls.pipeline = _load_pipeline()
 
     def setUp(self):
         self.td = tempfile.mkdtemp(prefix="t22_stale_")
-        self._orig_out = getattr(self.app, "PROJECT_OUTPUT_DIR", None)
-        self.app.PROJECT_OUTPUT_DIR = self.td
+        self._orig_out = getattr(self.config, "PROJECT_OUTPUT_DIR", None)
+        self.config.PROJECT_OUTPUT_DIR = self.td
         self.idx = os.path.join(self.td, "autopilot", self.PROJECT, "deliverables.json")
         os.makedirs(os.path.dirname(self.idx), exist_ok=True)
         # 假的成片文件（登记时需要能取 size）
@@ -56,11 +60,11 @@ class TestStaleDeliverableNotAcceptable(unittest.TestCase):
     def tearDown(self):
         if self._orig_out is None:
             try:
-                del self.app.PROJECT_OUTPUT_DIR
+                del self.config.PROJECT_OUTPUT_DIR
             except AttributeError:
                 pass
         else:
-            self.app.PROJECT_OUTPUT_DIR = self._orig_out
+            self.config.PROJECT_OUTPUT_DIR = self._orig_out
         shutil.rmtree(self.td, ignore_errors=True)
 
     # ---------------- 工具 ----------------

@@ -22,11 +22,12 @@ r"""代码副本漂移检查器（只读，T7 建议①的最小实现；t9 补�
     · 单点使用：python tools/check_app_sync.py   → 退出码非 0 即判失败
     · 一键门禁：python tools/deploy_gates.py     → 连同 electron-app/main.js 语法、
       镜像播种策略自检一起跑（退出码语义见该脚本 docstring）
-    · 本工具**只读**：不复制、不删除任何文件；同步动作由人工/发布流程完成。
+    · 本工具**只读**：不复制、不删除任何文件；同步动作用 tools/sync_copies.py。
 
 默认副本集合（不存在则跳过，不报错）：
     electron-app\_backend\app                        （Electron 打包源，【必须同步】）
-    C:\mjscxt_p139\resources\backend                  （生产/开发部署镜像，【必须同步】）
+    D:\mjscxt-migrated\mjscxt_p139\resources\backend     （生产/开发部署镜像，【必须同步】；2026-10-16 起）
+    资源镜像 %APPDATA%\mjscxt-desktop\resource-mirror\app（Electron 运行时镜像，后端实际读这里，【必须同步】）
     %APPDATA%\mjscxt-desktop\resource-mirror\app       （Electron 运行时镜像，后端实际读这里，【必须同步】）
     electron-app\dist\win-unpacked\resources\backend   （打包产物，【允许陈旧】）
     packaging\_dist\漫剧工坊_便携版\app                  （便携包，【允许陈旧】）
@@ -46,7 +47,8 @@ r"""代码副本漂移检查器（只读，T7 建议①的最小实现；t9 补�
     失败**（退出码仍 0），只在输出里标注 [允许陈旧·落后 N 处]。
     需要把它们当硬门禁时用 --strict-stale。
 
-⚠️ 只读：本工具不复制、不删除任何文件。同步动作请用 tools/sync_copies.py（未实现时仍走人工）。
+⚠️ 只读：本工具不复制、不删除任何文件。同步动作请用 tools/sync_copies.py
+（2026-10-16 起已实现：默认 dry-run，`--apply` 执行；覆盖前自动备份）。
 """
 from __future__ import annotations
 
@@ -124,10 +126,12 @@ def scan(d: Path) -> dict:
 
 
 def _installed_root() -> str:
-    """安装区根目录探测（t43，2026-10-12）：原先硬编码 C:/mjscxt_p139，换机即失效。
+    """安装区根目录探测（t43，2026-10-12；2026-10-16 增嵌套布局）。
 
-    优先级：环境变量 MJSCXT_INSTALLED_ROOT → 自动探测常见盘符根下的 mjscxt* 目录
+    优先级：环境变量 MJSCXT_INSTALLED_ROOT → 自动探测常见盘符下的 mjscxt* 目录
     （含 resources/）→ 找不到返回空串（对应目标跳过，不误报）。
+    ⭐ 2026-10-16：安装区从 ``C:\\mjscxt_p139`` 迁到 ``D:\\mjscxt-migrated\\mjscxt_p139``
+    （即 ``<盘>:\\mjscxt*\\mjscxt*\\resources``，多一层嵌套），故同时探测「一层」与「两层」。
     """
     env = (os.environ.get("MJSCXT_INSTALLED_ROOT") or "").strip()
     if env:
@@ -140,9 +144,21 @@ def _installed_root() -> str:
             continue
         for name in names:
             full = os.path.join(base, name)
-            if name.lower().startswith("mjscxt") and os.path.isdir(full) \
-                    and os.path.isdir(os.path.join(full, "resources")):
+            if not (name.lower().startswith("mjscxt") and os.path.isdir(full)):
+                continue
+            # 一层：<drive>\mjscxtX\resources
+            if os.path.isdir(os.path.join(full, "resources")):
                 return full
+            # 两层（迁移布局）：<drive>\mjscxtX\mjscxtY\resources
+            try:
+                subs = os.listdir(full)
+            except OSError:
+                continue
+            for sub in subs:
+                subfull = os.path.join(full, sub)
+                if sub.lower().startswith("mjscxt") and os.path.isdir(subfull) \
+                        and os.path.isdir(os.path.join(subfull, "resources")):
+                    return subfull
     return ""
 
 

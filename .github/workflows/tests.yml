@@ -29,7 +29,23 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies
-        run: pip install -r app/requirements.txt
+        run: |
+          pip install -r app/requirements.txt
+          pip install pyflakes
+
+      # ⭐ Phase 0（2026-10-16）静态门禁：语法错误 + 未定义名（F821）。
+      # 把「等裸名首次触达才炸」的 NameError 类缺陷挡在 PR 之前（实测曾有一例在杀
+      # 生产）。范围 app/（含 routes/workers/providers 等子目录）。
+      # ⚠️ 首次启用前请在本地跑一次 `python tools/lint_gate.py` 确认无历史遗留问题。
+      - name: Static lint (undefined name / syntax)
+        run: python tools/lint_gate.py
+
+      # ⭐ D-4（2026-10-16）依赖图门禁：只对**基线之外的新循环依赖**报错。当前库有
+      # 5 组已知环（多为函数内惰性 import 的逃逸态），直接「有环即红」会让 CI 恒红 ——
+      # 故用基线登记，只防「生长」。基线 tools/dep_cycles_baseline.json，更新需人审后
+      # 跑 `python tools/audit_depgraph.py --write-baseline`。
+      - name: Dependency graph gate (no new cycles)
+        run: python tools/audit_depgraph.py --strict
 
       - name: Run tests
         run: python tools/run_all_tests.py

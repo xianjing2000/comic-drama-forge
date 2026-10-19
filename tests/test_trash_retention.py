@@ -64,8 +64,14 @@ class TestTrashPlan(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             trash = root / '_trash'
-            _mkentry(trash, '20261010_120000_alpha', age_days=1)
-            _mkentry(trash, '20261009_120000_alpha', age_days=2)
+            # ⚠️ trash_plan 对「项目快照」按**条目名里的日期**算年龄（不是文件 mtime，
+            #    见 output_reclaim._parse_entry）—— 故名字必须用**相对今天**的日期。
+            #    原写死 2026101x 只在 2026-10-10 前后成立，过了 10-16 后 20261009 就 >7 天
+            #    → 被误判超期 → 本测试随日历变红（2026-10-16 修复）。
+            today = time.strftime('%Y%m%d')
+            yday = time.strftime('%Y%m%d', time.localtime(time.time() - 86400))
+            _mkentry(trash, '%s_120000_alpha' % today, age_days=1)
+            _mkentry(trash, '%s_120000_alpha' % yday, age_days=2)
             plan = OR.trash_plan(str(root), keep_days=7, keep_per_project=1)
             self.assertEqual(len(plan['drop']), 0, '7 天内的都应保留')
 

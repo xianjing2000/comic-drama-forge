@@ -27,6 +27,30 @@ import sys
 
 SELF_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_APP = os.path.join(os.path.dirname(SELF_DIR), "app")
+#: D-4（2026-10-16）：循环依赖基线文件。当前代码库有若干「已知/故意」（多为函数内
+#: 惰性 import 的逃逸态）环，直接「有环即红」会让 CI 恒红；基线把这些**登记**下来，
+#: `--strict` 只在出现**基线之外的新环**时失败 —— 即「不再生长」而不是「一次清零」。
+DEFAULT_BASELINE = os.path.join(SELF_DIR, "dep_cycles_baseline.json")
+
+
+def _load_baseline(path: str) -> list:
+    """读循环依赖基线（{"cycles": [[模块名...], ...]}）；缺失/损坏 → []（空基线）。"""
+    try:
+        with io.open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        cs = d.get("cycles") if isinstance(d, dict) else d
+        return [[str(x) for x in c] for c in (cs or []) if isinstance(c, list)]
+    except (OSError, ValueError):
+        return []
+
+
+def _write_baseline(path: str, cycles: list) -> None:
+    """把当前环集写为基线（人审后执行）。"""
+    with io.open(path, "w", encoding="utf-8") as f:
+        json.dump({"cycles": cycles,
+                   "note": "D-4：已接受的循环依赖基线。--strict 仅在出现新环时失败；"
+                           "确认新环可接受后跑 --write-baseline 更新。"},
+                  f, ensure_ascii=False, indent=2)
 
 
 def _mod_name(path: str, root: str) -> str:
@@ -128,6 +152,14 @@ def main(argv=None) -> int:
     ap.add_argument("--inversion", action="store_true")
     ap.add_argument("--god", action="store_true")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--gate", action="store_true",
+                    help="发现循环依赖即非 0 退出（供 CI 门禁；默认只报告、恒 0）")
+    ap.add_argument("--strict", action="store_true",
+                    help="出现「基线之外的新循环依赖」即退出码 1。比 --gate 更适合"
+                         "当前仍有已知环的仓库：只防新增，不要求一次清零")
+    ap.add_argument("--baseline", default=DEFAULT_BASELINE, help="循环依赖基线文件路径")
+    ap.add_argument("--write-baseline", action="store_true",
+                    help="把当前环集写为基线后退出（人审后执行）")
     args = ap.parse_args(argv)
     want_all = not (args.cycles or args.inversion or args.god)
 
@@ -141,6 +173,22 @@ def main(argv=None) -> int:
     inv = sorted((m, t, ln.get((m, t), [])[:5]) for m in edges if not m.startswith(("routes.", "workers."))
                  for t in edges[m] if t.startswith("routes."))
 
+    # ---- D-4（2026-10-16）：循环依赖基线门禁 ----
+    if args.write_baseline:
+        _write_baseline(args.baseline, cycles)
+        print("已写入循环依赖基线：%s（%d 组）" % (args.baseline, len(cycles)))
+        return 0
+    if args.strict:
+        _base = {frozenset(c) for c in _load_baseline(args.baseline)}
+        _new = [c for c in cycles if frozenset(c) not in _base]
+        if _new:
+            sys.stderr.write("✗ 新增循环依赖 %d 组（不在基线 %s 内）：\n"
+                             % (len(_new), args.baseline))
+            for c in _new:
+                sys.stderr.write("   [%d] %s\n" % (len(c), ", ".join(c)))
+            sys.stderr.write("  若确认可接受，跑 `python tools/audit_depgraph.py --write-baseline` 更新基线。\n")
+            return 1
+
     if args.json:
         print(json.dumps({
             "modules": len(mods), "edges": sum(len(v) for v in edges.values()),
@@ -149,7 +197,7 @@ def main(argv=None) -> int:
             "fan_in": indeg.most_common(30),
             "fan_out": sorted(outdeg.items(), key=lambda kv: -kv[1])[:30],
         }, ensure_ascii=False, indent=2))
-        return 0
+        return 1 if (args.gate and cycles) else 0
 
     if want_all or args.cycles:
         print("=== 循环依赖（强连通分量 >1）：%d 组 ===" % len(cycles))
@@ -176,7 +224,7 @@ def main(argv=None) -> int:
         for m, c in sorted(outdeg.items(), key=lambda kv: -kv[1])[:15]:
             print("  %4d  %s" % (c, m))
         print()
-    return 0
+    return 1 if (args.gate and cycles) else 0
 
 
 if __name__ == "__main__":

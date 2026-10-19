@@ -52,8 +52,8 @@ class TestCrossEpisodePrewarmMultiGuard(unittest.TestCase):
     def test_pipeline_prefetch_single_episode_noop(self):
         """另一触发点 pipeline._prefetch_next_scripts：单集不派发预取线程。"""
         import pipeline
-        with mock.patch.object(pipeline, "_A", return_value=mock.MagicMock()) as m_A, \
-             mock.patch.object(pipeline.threading, "Thread") as m_thread:
+        # D-1（2026-10-16）：`pipeline._A()` 服务定位器已删除，无需再桩它。
+        with mock.patch.object(pipeline.threading, "Thread") as m_thread:
             pipeline._prefetch_next_scripts({"config": {"episodes": [1]}, "episode_no": 1})
         m_thread.assert_not_called()
 

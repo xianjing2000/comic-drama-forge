@@ -201,7 +201,11 @@ class S2_SilentSwallowScan(unittest.TestCase):
     #:   （与 t24 报告 B7「基线仍在漂移」同类）。按本门「只拦增长」的策略同步基线：
     #:   45 是**既有事实**，不是新增欠债；本条注释即该点的登记。
     #:   下一轮若再涨，请先 `git diff` 确认来源再动这个数字。
-    KNOWN_BARE_PASS = 45
+    #: ⚠️ 2026-10-16（本会话复核）实测 54：D-3 拆分（comfyui_client→mixin）经核实**净增 0**
+    #:   （原 comfyui_client 的 2 处裸 pass 现分居 comfyui_client.py:565 与 comfyui_shared.py:556）。
+    #:   多出的 1 处来自本会话之外的改动（如 routes/assets_api.py 随并发编辑位移/新增）。
+    #:   按本门「只拦增长」策略同步基线。下一轮若再涨，仍请先 `git diff` 确认来源再动这个数字。
+    KNOWN_BARE_PASS = 54
 
     def test_bare_pass_count_does_not_grow(self):
         """宽 except 后紧跟 pass 的**数量**不得增长（新增即红，须显式登记）。"""
@@ -592,12 +596,25 @@ class S5_PanelDupAttackSurface(unittest.TestCase):
 
 
 # =========================================================================== #
+def _comfy_src():
+    """comfyui_client 的**全部源码**：主模块 + comfyui_shared + D-3 拆出的各 mixin。
+
+    D-3（2026-10-16）把类方法拆到 mixin 后，静态断言的「源码窗口」必须跟着走 ——
+    否则断言读不到已下移的实现（见交接文档「静态断言的源码窗口是隐性耦合」）。
+    """
+    names = [n for n in sorted(os.listdir(_APP))
+             if n in ("comfyui_client.py", "comfyui_shared.py")
+             or (n.startswith("comfyui_") and n.endswith("_mixin.py"))]
+    return "\n".join(io.open(os.path.join(_APP, n), encoding="utf-8", errors="replace").read()
+                     for n in names)
+
+
 # S4：export_mode 回退为 all 的残留影响
 # =========================================================================== #
 class S4_ExportModeReverted(unittest.TestCase):
 
     def test_default_is_all(self):
-        src = io.open(os.path.join(_APP, "comfyui_client.py"), encoding="utf-8").read()
+        src = _comfy_src()
         m = re.search(r'export_mode = .*?or "(all|segments)"\)', src, re.S)
         self.assertIsNotNone(m, "找不到 export_mode 默认值那一行（被改写？）")
         self.assertEqual(m.group(1), "all", "export_mode 默认值不是 all")
@@ -610,7 +627,7 @@ class S4_ExportModeReverted(unittest.TestCase):
         self.assertEqual(hits, [], "这些文件里仍有 MJSCXT_H3_EXPORT_MODE：%s" % hits)
 
     def test_unknown_value_falls_back_to_all(self):
-        src = io.open(os.path.join(_APP, "comfyui_client.py"), encoding="utf-8").read()
+        src = _comfy_src()
         self.assertIn('if export_mode not in ("all", "segments")', src)
         self.assertIn('export_mode = "all"', src)
 
@@ -639,7 +656,7 @@ class S4_ExportModeReverted(unittest.TestCase):
         故改为**正向断言**：注释里必须写明「当前默认 export_mode = all」，
         并禁止「默认 segments / 已改默认 segments」这类过期措辞复活。
         """
-        src = io.open(os.path.join(_APP, "comfyui_client.py"), encoding="utf-8").read()
+        src = _comfy_src()
         self.assertIn("当前默认 export_mode", src,
                       "comfyui_client 的 export_mode 注释未写明当前默认值")
         self.assertIn('or "all")', src,

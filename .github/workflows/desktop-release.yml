@@ -48,6 +48,12 @@ jobs:
 
       - uses: actions/checkout@v5
 
+      # 门禁用 Python（与 tests.yml 同版本；仅跑 stdlib 门禁，不装后端依赖）
+      - name: Setup Python (gates)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
       # 把发布版本写进 electron-app/package.json（updater 的 currentVersion 读它）
       - name: Write version to package.json
         working-directory: electron-app
@@ -73,6 +79,15 @@ jobs:
       - name: Pack backend resources
         working-directory: electron-app
         run: node pack_backend.js
+
+      # ⭐ Phase 0（2026-10-16）：打包后端必须与源码一致（副本漂移门禁）。
+      # 背景：_backend/ 与运行镜像都在 .gitignore 里，CI 无法逐副本比对；但
+      # pack_backend.js 是从源码 app/ 现场生成的打包后端 —— 此刻比对「app/ 源码 vs
+      # 打包后端」能在发布前拦下「收集器漏文件 / 版本错位」。显式 --target 使该副本
+      # 按「必须同步」处理；纯 stdlib，无第三方依赖。
+      - name: Gate — 打包后端与源码一致（app-sync）
+        run: python tools/check_app_sync.py --source app --target electron-app/_backend/app
+        shell: pwsh
 
       # 烘焙嵌入式 Python（embeddable）到 _backend/python，并装后端依赖
       - name: Bake embedded Python

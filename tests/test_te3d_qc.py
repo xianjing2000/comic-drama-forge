@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _APP = os.path.join(os.path.dirname(_HERE), "app")
@@ -75,10 +76,13 @@ class TestBlockingQc(unittest.TestCase):
         right = _mk(self._p("right.png"), [(500, 100, 600, 300, CHAR_BLUE)])
         shot_left = {"characters_in_shot": ["羡进"], "blocking": [{"name": "羡进", "x": "left"}]}
         shot_right = {"characters_in_shot": ["羡进"], "blocking": [{"name": "羡进", "x": "right"}]}
-        self.assertTrue(Q.qc_blocking_image(shot_left, left)["ok"])
-        self.assertFalse(Q.qc_blocking_image(shot_left, right)["ok"])
-        self.assertTrue(Q.qc_blocking_image(shot_right, right)["ok"])
-        self.assertFalse(Q.qc_blocking_image(shot_right, left)["ok"])
+        # 2026-10-13 起 _SLOT_ENFORCE 默认 False（渲染侧「世界坐标→屏幕水平」映射未标定，
+        # 站位判定暂不作为否决判据）—— 判定逻辑仍在，这里显式开启以钉住站位判据本身。
+        with mock.patch.object(Q, "_SLOT_ENFORCE", True):
+            self.assertTrue(Q.qc_blocking_image(shot_left, left)["ok"])
+            self.assertFalse(Q.qc_blocking_image(shot_left, right)["ok"])
+            self.assertTrue(Q.qc_blocking_image(shot_right, right)["ok"])
+            self.assertFalse(Q.qc_blocking_image(shot_right, left)["ok"])
 
     def test_framing_band(self):
         small = _mk(self._p("small.png"), [(280, 150, 340, 210, CHAR_BLUE)])
@@ -109,7 +113,7 @@ class TestBlockingQc(unittest.TestCase):
         return {
             "camera": {"position": [0.0, 1.0, 4.0], "target": [0.0, 1.0, 0.0]},
             "scene": {"entities": [
-                {"id": "char_1", "type": "character",
+                {"id": "char_1", "name": "羡进", "type": "character",
                  "transform": {"position": [0.0, 0.0, 0.0], "rotation": [0, 0, 0],
                                "scale": [1, 1, 1]},
                  "poseValues": {}, "currentPreset": ""},

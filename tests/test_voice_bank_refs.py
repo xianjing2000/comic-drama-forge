@@ -281,7 +281,15 @@ class TestStepTtsPre(_VBTmpBase):
                             'shots': [{'shot_id': 'shot_01'}]})}
 
     def _run(self, stub, ctx):
-        with mock.patch.object(pipeline, '_A', lambda: stub):
+        # D-1（2026-10-16）：`pipeline._A()` 服务定位器已删除，step_tts_pre 改为函数内
+        # 显式 import → 直接 patch 各**来源模块**的名字（原 _StubApp 是 _A() 的替身）。
+        with mock.patch.object(asset_refs, '_build_asset_index', stub._build_asset_index), \
+             mock.patch.object(video_helpers, '_ensure_voice_bank_refs',
+                               stub._ensure_voice_bank_refs), \
+             mock.patch('routes.tts._dub_project_dir', stub._dub_project_dir), \
+             mock.patch.object(tts_client, 'check_environment', stub.tts_env_check), \
+             mock.patch.object(tts_client, 'list_voice_bank',
+                               stub.tts_client.list_voice_bank):
             return pipeline.step_tts_pre(ctx)
 
     def test_off_by_enable_tts_pre(self):
