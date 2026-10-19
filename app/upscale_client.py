@@ -28,6 +28,11 @@ from typing import Dict, List, Optional
 import requests
 import cancellation  # S9：远端任务取消（中止信号贯穿超分轮询，与 pipeline/llm_client 同一套）
 
+# ⭐ D-2（2026-10-16）：probe_video 单一实现 —— 原为 video_probe.probe_video 的
+#   逐字重复（两处源码逐字相同，已 AST 核实）。收敛后本模块直接再导出，
+#   `from upscale_client import probe_video` 的调用方零改动。
+from video_probe import probe_video  # noqa: F401
+
 from config import (
     COMFYUI_URL, COMFYUI_OUTPUT_DIR, PROJECT_OUTPUT_DIR, UPSCALE_DIR,
     FLASHVSR_MODEL_DIR, FLASHVSR_REQUIRED_FILES, UPSCALE_DEFAULT_PARAMS,
@@ -86,61 +91,6 @@ class UpscaleError(RuntimeError):
 def _which(name: str) -> Optional[str]:
     return shutil.which(name)
 
-
-def probe_video(path: str, timeout: int = 60) -> Dict:
-    """用 ffprobe 读取视频真实参数（分辨率 / 帧率 / 帧数 / 时长 / 体积 / 是否有音轨）
-
-    失败时返回 {'ok': False, 'error': ...}，绝不猜测。
-    """
-    if not path or not os.path.exists(path):
-        return {"ok": False, "error": f"文件不存在: {path}"}
-    ffprobe = _which("ffprobe") or "ffprobe"
-    cmd = [ffprobe, "-v", "error", "-print_format", "json",
-           "-show_format", "-show_streams", path]
-    try:
-        # 显式指定 utf-8：避免 Windows GBK 默认解码把 ffprobe 输出（含中文路径）解坏
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout)
-    except FileNotFoundError:
-        return {"ok": False, "error": "未找到 ffprobe，可执行文件不在 PATH 中"}
-    except Exception as e:
-        return {"ok": False, "error": f"ffprobe 执行异常: {e}"}
-    if r.returncode != 0:
-        return {"ok": False, "error": f"ffprobe 返回 {r.returncode}: {(r.stderr or '').strip()[:300]}"}
-    try:
-        data = json.loads(r.stdout or "{}")
-    except Exception as e:
-        return {"ok": False, "error": f"ffprobe 输出解析失败: {e}"}
-
-    v = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
-    a = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
-    if not v:
-        return {"ok": False, "error": "未找到视频流"}
-    fps = 0.0
-    try:
-        num, den = (v.get("avg_frame_rate") or v.get("r_frame_rate") or "0/1").split("/")
-        fps = float(num) / float(den) if float(den) else 0.0
-    except Exception:
-        fps = 0.0
-    size = 0
-    try:
-        size = int((data.get("format") or {}).get("size") or os.path.getsize(path))
-    except Exception:
-        size = os.path.getsize(path)
-    return {
-        "ok": True,
-        "path": os.path.abspath(path),
-        "width": int(v.get("width") or 0),
-        "height": int(v.get("height") or 0),
-        "fps": round(fps, 3),
-        "frames": int(v.get("nb_frames") or 0),
-        "duration": round(float((data.get("format") or {}).get("duration") or 0), 3),
-        "size_bytes": size,
-        "size_mb": round(size / 1048576, 2),
-        "video_codec": v.get("codec_name"),
-        "has_audio": bool(a is not None),
-        "audio_codec": (a or {}).get("codec_name"),
-    }
 
 
 def read_te_template(path: str = UPSCALE_TE_TEMPLATE_PATH) -> Dict:

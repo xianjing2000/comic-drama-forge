@@ -1370,8 +1370,6 @@ class FailoverLLMClient:
             raise LLMError("尚未配置任何可用的 LLM 客户端（主 + 备用均未配置）")
 
 
-def client_from_config(config_path: str, timeout: int = DEFAULT_TIMEOUT) -> LLMClient:
-    return LLMClient(config_path=config_path, timeout=timeout)
 
 
 def build_failover_chain(primary: LLMClient, model_fallbacks: list = None,

@@ -302,6 +302,21 @@ STORYBOARD_GRID_ANALYSIS_NOTE = (
     "实测畸变全部出现在手部特写格（shot_05 格5 / shot_07 格4 / shot_08 格6）。"
 )
 
+#: 场景资产九宫格判定（2026-10-18「场景机位图」落地）：与分镜九宫格是**两种图**。
+#: 实测事故：场景宫格沿用分镜逐格判据，被连续两轮判「风格不达标 score 40~43」整批丢弃，
+#: 机位图从未落盘。本判据只按「同一空间的 9 个机位」评估，明确不按单幅成品图打分。
+SCENE_GRID_ANALYSIS_NOTE = (
+    "\n【场景九宫格判定·重要】本图是**场景资产的多机位设定图**：3×3 共 9 格 = 同一场地的 "
+    "9 个机位/景别（正面全景/远景/中景/近景/细节/左右斜侧/俯视鸟瞰），**不是时间序列分镜，"
+    "不是漫画页**。判定只按以下四条：\n"
+    "  ① 九格是否为**同一空间**：建筑/陈设/地形结构一致、光照方向一致；\n"
+    "  ② 各格是否有明显差异：仅当 ≥7/9 格几乎完全相同才判「机位雷同」；\n"
+    "  ③ **不得出现人物**：场景资产应无人（出现人物 = 缺陷「场景含人物」，记关键缺陷）；\n"
+    "  ④ 整体画风/配色与目标风格一致即可 —— **单格笔触差异、清晰度不足、分格线、拼贴感"
+    "本身一律不计缺陷**，不得因「一张图被分割成多格」扣分或判 style_match=false。\n"
+    "  评语只针对以上四条，不要按「单幅成品图」的标准评它。\n"
+)
+
 # 风格一致性硬规则：追加到所有图片/视频质检提示词末尾，保证用户自定义的旧配置
 # 也同样具备风格检测能力（与 WATERMARK_EXEMPT_NOTE / CRITICAL_RULE_NOTE 同一机制）。
 # {style} 由 check_image / check_video 在运行时替换为目标风格串；无风格时整段不追加。
@@ -502,8 +517,19 @@ def _has_negative_context(text: str, idx: int, window: int = 6) -> bool:
 
 #: 弱化词：判官自陈「轻微」时，该条**不算关键缺陷**（见 find_critical_issues 的说明）。
 #: 只用于图片/视频词表；音频走 AUDIO_CRITICAL_KEYWORDS，语义不同、不套用。
-_MILD_HINTS = ("轻微", "略显", "略微", "稍显", "稍有", "稍钝", "仅记", "不构成",
-               "可忽略", "属轻微", "基本正常", "不影响")
+_MILD_HINTS = ("轻微", "略显", "略微", "略粗", "略钝", "略有", "稍显", "稍有", "稍钝",
+               "仅记", "不构成", "可忽略", "属轻微", "基本正常", "不影响")
+
+#: 判官**自陈「未达关键缺陷程度」**的紧贴句式（2026-10-16 补）。
+#: 与 _MILD_HINTS 同义：这是判官**显式认定「够不上关键缺陷」**的表述，但句中仍可能
+#: 出现词表短词而被误判硬阻断。实测：「手部…部分粘连感…（未达畸形级别）」因命中
+#: 「粘连」被当关键缺陷 → 本镜重画（换种子也救不回）。此处把这种「未达X级别/程度」
+#: 句型按弱化处理。
+#: ⚠️ 用**紧贴式**正则（未达 + 缺陷类别 + 级别/程度，且不跨子句），只在判官写明
+#:    「够不上某类关键缺陷」时生效；不会误吞真缺陷（如「未达到要求，面部畸变明显」
+#:    里的「畸变」离「未达」跨了子句/超窗，照常命中）。
+_MILD_UNREACHED_RE = re.compile(
+    r"未达[^，。；！？\n]{0,6}?(畸形|崩坏|变形|关键缺陷|硬伤)[^，。；！？\n]{0,3}?(级别|程度|阈值|标准)")
 
 
 def find_critical_issues(issues, keywords=None) -> list:
@@ -527,7 +553,8 @@ def find_critical_issues(issues, keywords=None) -> list:
         #    否定词过滤抓不到它：句中「畸变」前面隔着「未见多指/粘连等明显」共 9 字，
         #    而 _has_negative_context 只看紧邻上下文。
         #    这里只对**图片/视频**词表生效（音频词表语义不同，保持原样）。
-        if keywords is None and any(h in s for h in _MILD_HINTS):
+        if keywords is None and (any(h in s for h in _MILD_HINTS)
+                                 or _MILD_UNREACHED_RE.search(s)):
             continue
         # ⚠️ 2026-10-14 新增【软告警豁免】（治荒诞误伤，详见 _script_language_soft_warnings）：
         #    五层软告警是**建议性**的镜头语言分布提示，本身不构成缺陷；但文本里会提到
@@ -725,6 +752,11 @@ DEFAULT_IMAGE_PROMPT = (
     "1) 人物：脸型/发型/服装/配饰与设定一致，无五官畸变、多手多脚、肢体错位；\n"
     "2) 画面：无严重糊化、噪点、色块、扭曲；\n"
     "3) 构图：主体完整清晰，场景与镜头描述相符；\n"
+    "3b) 人物身份与数量：若「镜头信息」列出了出场角色，画面中出现的**人物身份与数量**"
+    "必须与之一致 —— 画成别人、明显多画或漏画（例如只画了其中一人）都判关键缺陷，"
+    "并必须在 issues 中以「出场角色不符：…」开头写明具体差异；"
+    "「众人/群像」类角色出现多名不同人物**不算**重复；局部插入镜只拍身体局部/"
+    "道具时，不要求出现完整人脸。\n"
     "4) 景别：取景范围是否落在「镜头信息」给出的判定标准内（判定口径见下方容差说明，"
     "差一档不算缺陷）；\n"
     "5) 风格：画面整体画风/渲染方式/笔触/配色必须与目标风格一致，不得偏离；\n"
@@ -859,10 +891,10 @@ _DEFAULT_SCRIPT_PROMPT = (
     "dialogue 只允许两种内容：① 原文的对话；② 原文明确心理活动/独白改写的**第一人称**自语"
     "（角色以第一人称自然说出）。注意区分：角色之间正常的对话、第一人称回忆与自语是**合格**的，"
     "不要误伤。\n"
-    "24. **描述臃肿度**（2026-09-27 新增）：统计全片 description+visual_detail 合计字数与 "
-    "dialogue 合计字数之比。若画面描述总字数超过台词总字数的 3 倍，说明剧情被背景描写拖累、"
-    "成片会一直「说背景描述」，判为缺陷并写明「描述/对白比 ≈X 倍」。描述应只写动作与构图，"
-    "纯环境铺陈、背景补叙应删除，而不是堆进 description。\n"
+    "24. **画面描述的聚焦度**（2026-10-19 修订：**不再按字数比判定**）：只检查 "
+    "description / visual_detail 是否在写**不推动剧情的纯背景铺陈**（大段世界观、环境修辞、"
+    "衣着罗列）。若确属此类，写明「描写偏离动作与构图」；**不得**因描述字数多、或描述与台词的"
+    "字数比大而判缺陷 —— 画面描述是生图的依据，写足是正常的。\n"
     "25. **对白驱动率**（2026-09-27 新增）：有台词的镜头占比应 ≥40%。若超过一半镜头既无台词"
     "又无明确人物动作（静态空镜/环境铺陈），说明叙事靠画面流水账而非人物互动推进，"
     "判为缺陷并写明有台词镜数/总镜数。\n"
@@ -2360,7 +2392,8 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
                 override: dict = None, style: str = "",
                 ref_images: list = None,
                 prev_shot_desc: str = "", prev_shot_ref: str = "",
-                blocking_ref: str = "", blocking_spec: str = "") -> dict:
+                blocking_ref: str = "", blocking_spec: str = "",
+                is_grid: bool = False) -> dict:
     """单张图片质检。永不抛异常：失败时返回 ok=False 并带 error。
     override 仅用于「测试连通性」临时传参，不落盘。
     style：目标风格串（用户与总控敲定），用于「风格达标」判定；为空则不做风格检测。
@@ -2402,7 +2435,18 @@ def check_image(image_path: str, shot_desc: str = "", cfg: dict = None,
         "{shot_desc}", shot_desc or "（无）").replace(
         "{pass_score}", str(cfg.get("pass_score", 70))).replace(
         "{style}", style_norm or "（未指定）")
-    prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE + FRAMING_TOLERANCE_NOTE + MANNEQUIN_DISTINCTION_NOTE + STORYBOARD_GRID_ANALYSIS_NOTE
+    prompt = prompt + WATERMARK_EXEMPT_NOTE + CRITICAL_RULE_NOTE + FRAMING_TOLERANCE_NOTE + MANNEQUIN_DISTINCTION_NOTE
+    # ⭐ 2026-10-16（缺陷核验）：分镜已改**单帧**（九宫格 2026-10-15 整体移除，见 config.py:720-728），
+    #    但**场景资产仍是 3×3 九宫格**（asset_worker 出图 desc 明说）。故「九宫格逐格分析」提示
+    #    只在 **is_grid=True**（场景 grid 质检等）时追加；否则会把单帧分镜谎报为 3×3，
+    #    诱导质检模型臆造「面板雷同 / 只看 1-2 格」之类缺陷（本行原为无条件拼接 —— 已修）。
+    if is_grid:
+        # ⭐ 2026-10-18：场景九宫格（is_grid="scene"）与分镜九宫格是**两种图**，判据不同 ——
+        #    场景宫格是「同一场地的 9 个机位」，不是时间序列关键帧。旧口径把分镜的逐格
+        #    判据套到场景宫格上，实测连续两轮判「风格不达标 score 40~43」把机位图整批丢掉。
+        prompt = prompt + (SCENE_GRID_ANALYSIS_NOTE
+                           if str(is_grid).strip().lower() == "scene"
+                           else STORYBOARD_GRID_ANALYSIS_NOTE)
     if style_norm:
         prompt = prompt + STYLE_CHECK_NOTE.replace("{style}", style_norm)
     # ---- 角色资产的人物性别一致性（2026-09-28）：拿不到性别时整段不追加 ----
@@ -3632,6 +3676,22 @@ def _validate_script_structure(script: dict) -> list:
                 if field not in shot:
                     issues.append(f"镜头 {shot.get('shot_id', f'[{i}]')} 缺少字段: {field}")
 
+    # ⭐ 2026-10-19（消除双轨）：结构判据的单一事实来源是 `script_structure.check()`。
+    #    本函数原先只查「字段在不在」，而 pipeline 的 step_script 已用新校验器拦 P0
+    #    （空镜开场 / dialogue 字符串 / 台词缺 speaker / 道具脱节 / 动作链断裂…）——
+    #    同一份剧本在界面上显示「结构 OK」、在流水线里却被拦。
+    #    这里把新校验器的 **P0** 并入返回值（issues 在 check_script 里属于 critical），
+    #    两处结论从此一致。只并入 P0：P1（如「道具定义了未入镜」）是建议项，
+    #    不应把整本判失败。
+    try:
+        import script_structure as _ss
+        for _it in (_ss.check(script).get("p0") or []):
+            _msg = "[%s] %s" % (_it.get("code"), _it.get("message"))
+            if _msg not in issues:
+                issues.append(_msg)
+    except Exception as _e:  # noqa: BLE001  校验器异常不能让质检挂掉
+        logger.warning("结构校验器合并失败（忽略，沿用字段级检查）：%s", _e)
+
     return issues
 
 
@@ -3782,9 +3842,22 @@ def _validate_script_prompts(script: dict) -> list:
     return issues
 
 
-#: 描述/对白字数比上限（压缩提炼口径：剧情主要由台词+动作推进，画面描述只做必要补充）。
-#: 与 novel_to_script.REWRITE_RULES 的「description+visual_detail ≤ dialogue×3」同源，此处做客观复检。
+#: 描述/对白比上限的**基准比值**（以 5 秒镜为基准；默认 3.0）。
+#:
+#: ⭐ 2026-10-19（用户拍板 A 方案）：阈值**按时长折算** ——
+#:    单镜允许比值 = DESC_TO_DIALOGUE_RATIO_MAX / 5.0 × duration
+#:    （等价于用户口径 ratio_max = 0.6 × duration：10s→6 倍，8s→4.8 倍，5s→3 倍）。
+#:    旧口径「全片 ≤3 倍」与「description 100~120 字 / 台词 ≤30 字」的写法
+#:    （理论 5~9 倍）自相矛盾，v2 实测 5.3 倍被误判「臃肿」；但完全取消判据又会
+#:    失去对「背景铺陈压过人物冲突」的量化兜底。折中为按秒折算：
+#:    画面描述是生图依据，时长越长可承载的信息越多；5s 短镜仍是 3 倍不放松。
+#:    聚合口径：全片允许描述字数 = Σ(每镜 0.6×duration×该镜台词字数)；
+#:    无台词镜不产生预算（其描述仍计入总描述，由台词镜的预算整体兜底）。
 DESC_TO_DIALOGUE_RATIO_MAX = 3.0
+#: 折算基准秒数（10s 镜 → 3.0/5×10 = 6 倍）。私有常量：不参与配置中心登记。
+_DESC_TO_DIALOGUE_BASE_SEC = 5.0
+#: 剧本缺 duration 时的兜底秒数（与 novel_to_script 的默认镜长一致）。
+_DESC_DURATION_FALLBACK_SEC = 10.0
 #: 对白驱动率下限：有台词的镜头占比低于该值，说明剧情靠画面铺陈推进、易退化成「背景描述流水账」。
 DIALOGUE_SHOT_RATIO_MIN = 0.40
 
@@ -3805,43 +3878,74 @@ def _shot_dialogue_chars(shot: dict) -> int:
 
 
 def _validate_script_bloat(script: dict) -> list:
-    """描述臃肿度 + 对白驱动率 客观校验（2026-09-27 新增，补「剧本一开始就偏」的漏检）
+    """描述/对白比（**按时长折算**）+ 对白驱动率 + 「全片无台词」客观校验。
 
-    两条判据直击「视频一直说背景描述」的病根：
-    ① 描述臃肿度：全片 description+visual_detail 合计字数 vs dialogue 合计字数，
-       超过 DESC_TO_DIALOGUE_RATIO_MAX 倍说明画面描述压过台词、成片大概率变成背景复述；
-    ② 对白驱动率：有台词的镜头占比低于 DIALOGUE_SHOT_RATIO_MIN，
-       说明大量静态空镜、叙事靠画面铺陈而非人物互动。
+    ⭐ 2026-10-19（用户拍板 A 方案）：描述/对白比**恢复判据，但阈值按时长折算**。
+    历史两版口径都不对：
+      · 「全片 ≤3 倍」与生成侧「description 100~120 字 / 台词 ≤30 字」（理论 5~9 倍）
+        自相矛盾 —— v2 实测 5.3 倍被误判「臃肿」，且重写时模型会去压缩
+        `description`（生图依据），反而伤画面；
+      · 完全取消判据又失去「背景铺陈压过人物冲突」的量化兜底。
+    现行公式（用户口径 `ratio_max = 0.6 × duration`）：
+        单镜允许比值 = DESC_TO_DIALOGUE_RATIO_MAX / 5.0 × 本镜 duration
+        （10s→6 倍，8s→4.8 倍，5s→3 倍；5s 短镜不放松）。
+        聚合口径：全片允许描述字数 = Σ(每镜 0.6×duration×该镜台词字数)，
+        再拿「全片 description+visual_detail 合计」去比 —— 单个短台词镜不会
+        连累整片（其描述由其它台词镜的时长预算整体兜底），与旧实现同为全片口径。
+    另两条兜底保持不变：① 对白驱动率 ≥ DIALOGUE_SHOT_RATIO_MIN；
+    ② 有描述但全片零台词（必然退化成空镜流水账）。
     """
     issues = []
     shots = [s for s in (script.get("shots") or []) if isinstance(s, dict)]
     if not shots:
         return issues
 
+    _per_sec = DESC_TO_DIALOGUE_RATIO_MAX / _DESC_TO_DIALOGUE_BASE_SEC
     desc_chars = 0
     dialogue_chars = 0
     dialogue_shots = 0
+    desc_budget = 0.0
+    over_budget = []   # (超出字数, 镜号, 本镜倍数, 本镜上限, 时长) —— 仅用于诊断信息
     for s in shots:
-        desc_chars += len(str(s.get("description") or ""))
-        desc_chars += len(str(s.get("visual_detail") or ""))
+        own_desc = len(str(s.get("description") or "")) + len(str(s.get("visual_detail") or ""))
+        desc_chars += own_desc
         d = _shot_dialogue_chars(s)
         dialogue_chars += d
         if d > 0:
             dialogue_shots += 1
+            try:
+                dur = float(s.get("duration") or _DESC_DURATION_FALLBACK_SEC)
+            except (TypeError, ValueError):
+                dur = _DESC_DURATION_FALLBACK_SEC
+            if dur <= 0:
+                dur = _DESC_DURATION_FALLBACK_SEC
+            own_budget = _per_sec * dur * d
+            desc_budget += own_budget
+            if own_desc > own_budget:
+                over_budget.append((own_desc - own_budget, s.get("shot_id"),
+                                    own_desc / float(d), own_budget / float(d), dur))
 
-    # ① 描述臃肿度
-    if dialogue_chars > 0:
+    # ① 描述臃肿（按时长折算口径）
+    if dialogue_chars > 0 and desc_chars > desc_budget:
         ratio = desc_chars / float(dialogue_chars)
-        if ratio > DESC_TO_DIALOGUE_RATIO_MAX:
-            issues.append(
-                f"描述臃肿：全片画面描述+细节 {desc_chars} 字 / 台词 {dialogue_chars} 字 "
-                f"= {ratio:.1f} 倍（> {DESC_TO_DIALOGUE_RATIO_MAX:g} 倍），"
-                f"剧情应由台词+动作驱动，请压缩画面描述、删纯背景铺陈")
-    elif desc_chars > 0:
+        eff_max = desc_budget / float(dialogue_chars)
+        msg = (f"描述臃肿：全片画面描述+细节 {desc_chars} 字 / 台词 {dialogue_chars} 字 "
+               f"= {ratio:.1f} 倍（> 按时长折算上限 {eff_max:.1f} 倍；"
+               f"基准 {DESC_TO_DIALOGUE_RATIO_MAX:g} 倍@5s，即 0.6×时长）")
+        top = sorted(over_budget, key=lambda x: x[0], reverse=True)[:3]
+        if top:
+            msg += "；超出本镜预算：" + "、".join(
+                f"shot_{sid}({r:.1f}倍>{m:.1f}倍/{dur:g}s)"
+                for _over, sid, r, m, dur in top)
+        issues.append(msg + "。请先补台词，再删纯背景铺陈（环境光线/衣着/背景陈设）；"
+                            "**不要**为压比率删掉生图必需的画面信息")
+
+    # ② 全片无台词（保留）：有描述却一句台词都没有 → 成片必然是无解说空镜流水
+    if dialogue_chars <= 0 and desc_chars > 0:
         issues.append("全片无台词：画面描述 {0} 字但没有任何 dialogue，"
                       "成片会退化成纯背景解说/空镜流水账".format(desc_chars))
 
-    # ② 对白驱动率
+    # ③ 对白驱动率
     ratio_shots = dialogue_shots / float(len(shots))
     if ratio_shots < DIALOGUE_SHOT_RATIO_MIN:
         issues.append(

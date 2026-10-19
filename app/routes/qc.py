@@ -217,7 +217,7 @@ def api_qc_config_get():
                     "ai_settings_path": os.path.abspath(AI_CONFIG_PATH)})
 @qc_bp.route('/api/qc/config', methods=['POST'])
 def api_qc_config_save():
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     data.pop("reuse_llm", None)   # 旧字段：质检不再复用文本分析 LLM，直接忽略
     cfg = qc_client.save_config(QC_CONFIG_PATH, data)
     view = qc_client.public_view(cfg)
@@ -261,7 +261,7 @@ def api_qc_test():
     """测试质检接口：可用页面暂存参数直接测试，不落盘。
     传 image_path 时用真实图片走一次图片质检；传 video_path 走视频抽帧质检；
     否则做连通性测试（vision=true 时用极小图片探测视觉能力）。"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     data.pop("reuse_llm", None)
     cfg = _qc_load_cfg()
     for k in ("image_prompt", "video_prompt", "pass_score",

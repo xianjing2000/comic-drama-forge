@@ -32,7 +32,7 @@ def api_watermark_config_get():
                     "message": "视频水印默认关闭；开启并保存后，成片会自动追加一份带水印版本"})
 @watermark_bp.route('/api/watermark/config', methods=['POST'])
 def api_watermark_config_save():
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     cfg = video_watermark.save_config(WATERMARK_CONFIG_PATH, data)
     view = _wm_view(cfg)
     warning = ""
@@ -51,7 +51,7 @@ def api_watermark_config_save():
 @watermark_bp.route('/api/watermark/apply', methods=['POST'])
 def api_watermark_apply():
     """对指定视频烧写水印（手动单段验证用）。body: video_path / project_name / config(临时覆盖)"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     src = str(data.get("video_path") or "").strip()
     project_name = _safe_project(data.get("project_name") or "watermark")
     cfg = video_watermark.load_config(WATERMARK_CONFIG_PATH)

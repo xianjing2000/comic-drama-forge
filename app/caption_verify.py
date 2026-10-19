@@ -366,6 +366,63 @@ def collect_burn_text(script: dict, project: str):
 
 # ===================== 规范化与比对 =====================
 
+def transcribe_media(path: str, *, timeout: int = None, progress_cb=None) -> dict:
+    """把音视频的**音轨**转写成文本（ffmpeg 抽 16kHz 单声道 → whisper ``-l zh -otxt``）。
+
+    供「自动验收门」（quality_stage.speech_garble_verdict）复用同一套 whisper 环境，
+    避免两处各写一份 ffmpeg/whisper 调用（口径漂移）。
+
+    Returns:
+        ``{ok, text, error}``：环境不全 / 抽轨失败 / 转写失败一律 ``ok=False`` 并给中文
+        ``error``；**不抛异常**（调用方按 fail-open 处理）。
+    """
+    env = available()
+    if not env.get("available"):
+        return {"ok": False, "text": "", "error": "转写环境不可用：" + "；".join(env.get("reasons") or [])}
+    wtimeout = int(timeout or _WHISPER_TIMEOUT_SEC)
+    tmpdir = tempfile.mkdtemp(prefix="transcribe_media_")
+    wav = os.path.join(tmpdir, "audio.wav")
+    try:
+        if progress_cb:
+            progress_cb("ffmpeg 抽取音轨…")
+        cmd = [env["ffmpeg"], "-y", "-v", "error", "-i", path, "-vn",
+               "-ar", str(_AUDIO_SAMPLE_RATE), "-ac", "1", wav]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=_FFMPEG_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "text": "", "error": "音轨抽取超时"}
+        if r.returncode != 0 or not os.path.isfile(wav) or os.path.getsize(wav) <= 0:
+            return {"ok": False, "text": "",
+                    "error": "音轨抽取失败：" + ((r.stderr or "").strip()[-300:]
+                                             or "ffmpeg 返回码 %d" % r.returncode)}
+        if progress_cb:
+            progress_cb("whisper 转写中…")
+        base = os.path.join(tmpdir, "transcript")
+        wcmd = [env["exe"], "-m", env["model"], "-f", wav, "-l", "zh",
+                "-otxt", "-of", base]
+        try:
+            wr = subprocess.run(wcmd, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=wtimeout)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "text": "", "error": "whisper 转写超时（>%ss）" % wtimeout}
+        txt_path = base + ".txt"
+        text = ""
+        if os.path.isfile(txt_path):
+            try:
+                with open(txt_path, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            except OSError as e:
+                logger.warning("读取转写 txt 失败（%s）：%s", txt_path, e)
+        if not text.strip():
+            return {"ok": False, "text": "",
+                    "error": "whisper 未产出转写文本（返回码 %s）：%s"
+                             % (wr.returncode, (wr.stderr or "").strip()[-300:] or "无输出")}
+        return {"ok": True, "text": text, "error": ""}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def normalize_text(text: str) -> str:
     """规范化：剥 ASR 训练残留套话 → 小写 → 去全部空白/标点/引号（只留文字与数字）。
 

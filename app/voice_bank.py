@@ -302,7 +302,12 @@ def _fallback_speaker(name: str, gender: str) -> str:
 
 def persona_ref_text(name: str, entry: dict) -> str:
     """参考音色的样句：把身份/年龄/性格写进句子（TTS 有语境，音色更贴人设）。"""
+    from character_tier import is_crowd_name
     entry = entry or {}
+    # ⭐ 2026-10-16（配音核验）：群像是**一群人**，绝不能拼出「我是<群像名>…。这是我的声音样本。」
+    #    这种病句（VoiceDesign 只好用一个怪腔调的人去念它 → 用户实测「音频有问题」）。
+    if is_crowd_name(name):
+        return "众人嘈杂议论，七嘴八舌，人声鼎沸。"
     bits = []
     for k in ("identity", "age", "personality"):
         v = str(entry.get(k) or "").strip()
@@ -349,6 +354,19 @@ def build_voice_spec(project_name: str, name: str, *, voice_map=None, entry=None
     else:
         reason = ("角色 %s 全项目剧本都没有可用的 voice_style/人设 → 回落预置嗓子 %s（%s）"
                   % (name, speaker, source))
+    # ⭐ 2026-10-16（配音核验）：**群像**（集合名词，如「青云宗外门弟子群像」）不是一个人，
+    #    不该合成「单人参考音色」。这里改为**群体音色**：多人嘈杂的 instruct + 不带第一人称
+    #    自指的样句；仍 design、仍可试听（前端「试听」照常可用）。每个群像也是**独立**音色。
+    from character_tier import is_crowd_name
+    if is_crowd_name(name):
+        _base = str(instruct or "").strip()
+        instruct = (("%s；" % _base) if _base else "") + \
+            "多人嘈杂、七嘴八舌、群体说话、人声鼎沸（一群人齐声，不是单个人）"
+        mode = "design"
+        ref_text = "众人嘈杂议论，七嘴八舌，人声鼎沸。"
+        source = "群像（群体音色）"
+        ep_no = None
+        reason = ("角色 %s 是群像（集合名词）→ 用**群体音色**（多人嘈杂），不做单人参考音色" % name)
     return {
         "character": name,
         "mode": mode,

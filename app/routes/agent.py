@@ -40,7 +40,7 @@ def api_agent_kill():
     """急停开关：一键中止所有正在跑的总控动作（无人值守时的刹车）"""
     if request.method == 'GET':
         return jsonify({"success": True, "kill": agent_core.kill_state()})
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     on = bool(data.get("on", True))
     reason = str(data.get("reason") or "").strip() or ("手动急停" if on else "")
     return jsonify({"success": True, "kill": agent_core.set_kill(on, reason)})
@@ -51,7 +51,7 @@ def api_agent_chat():
     _gate = _ai_gate_or_400("chat")
     if _gate is not None:
         return _gate
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     message = str(data.get("message") or "").strip()
     if not message:
         return jsonify({"success": False, "error": "message 不能为空"}), 400

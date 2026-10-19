@@ -152,8 +152,11 @@ def _episodes_worker(task_id: str, novel_meta: dict, chapters: list, style: str,
                         chapter_preflight.save_preflight(CONTINUITY_DIR, key, _pf_res)
                         try:
                             chapter_preflight.merge_to_bible(CONTINUITY_DIR, key, _pf_res)
-                        except Exception:  # noqa: BLE001
-                            pass
+                        except Exception as _mbe:  # noqa: BLE001
+                            # 跨集连贯合并失败不能静默 —— 否则 bible 缺数据下游无感知。
+                            # 与上方同款 fail-open：只记 warning，不阻塞本集生成。
+                            logger.warning("第%s集连贯合并到 bible 失败（跳过注入，不阻塞）：%s",
+                                           ep, _mbe)
                 except Exception as _pfe:  # noqa: BLE001
                     logger.warning("第%s集前置解析失败（跳过注入，不阻塞）：%s", ep, _pfe)
                 # 2026-10-13：**文学剧本层已整体移除** —— 原文一律取「章节正文」。

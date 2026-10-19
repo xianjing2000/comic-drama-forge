@@ -27,7 +27,7 @@ def api_plugins():
 @plugin_bp.route('/api/plugins/run', methods=['POST'])
 def api_plugins_run():
     """执行指定插件（把剧本等上下文传入插件，返回插件产出）"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     pid = str(data.get('plugin_id') or '').strip()
     if not pid:
         return jsonify({"success": False, "error": "缺少 plugin_id"}), 400

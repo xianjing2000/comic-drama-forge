@@ -64,27 +64,6 @@ def read_json(path: str, default: Any = None) -> Any:
         return default
 
 
-def write_json(path: str, data: Any, indent: int = 2) -> bool:
-    """原子写 JSON（先写临时文件再替换，避免中途崩溃留下半个文件）。
-
-    收敛自 autopilot._write_json / project_store._write_json。
-    返回是否成功；失败不抛。
-    """
-    try:
-        if not path:
-            return False
-        d = os.path.dirname(os.path.abspath(path))
-        if d:
-            os.makedirs(d, exist_ok=True)
-        tmp = path + '.tmp'
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=indent)
-        os.replace(tmp, path)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def as_dict(value: Any) -> dict:
     """把模型返回值规整成 dict（容错优先）。
 

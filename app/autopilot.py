@@ -284,13 +284,9 @@ def split_plan_patch(patch: dict) -> dict:
     return {"accepted": accepted, "rejected": rejected, "reasons": reasons}
 
 
-def _A():
-    """延迟取宿主模块 app（避开循环导入：app 在加载期就会 import 本模块）"""
-    import sys as _sys
-    mod = _sys.modules.get("app")
-    if mod is None:
-        raise RuntimeError("宿主模块 app 尚未加载")
-    return mod
+# D-1（2026-10-16）：原 `_A()` 服务定位器（`sys.modules['app']`）已删除 —— 各调用点
+# 改为**函数内显式 import**（来源由 app.py 的实际导入锚定）。见
+# docs/D-1_B-6_落地说明_20261016.md。
 
 
 def _write_json(path: str, data) -> None:
@@ -443,28 +439,84 @@ def set_plan_report(project_name: str, patch: dict, novel_id: str = "",
             "rejected": rejected, "reasons": reasons}
 
 
+_OUTPUT_KEYS_CACHE = {"ts": 0.0, "keys": set()}
+
+
+def _output_project_keys() -> set:
+    """产物目录下「仍有痕迹」的项目名集合（**一次性 listdir**，10 秒缓存）。
+
+    为什么不是逐个项目做 `isdir`：`output/autopilot/` 可能积累数百个历史计划目录，
+    对每个目录做 7 次存在性检查 = 数千次系统调用（实测 9 秒）。一次列 7 个父目录
+    即可得到同样的集合，与项目数无关。
+    """
+    now = time.time()
+    if now - float(_OUTPUT_KEYS_CACHE.get("ts") or 0) < 10.0:
+        return _OUTPUT_KEYS_CACHE["keys"]
+    keys = set()
+    try:
+        from config import PROJECT_OUTPUT_DIR
+        for rel in ("scripts", "final", "videos", "upscale",
+                    "assets/characters", "assets/items", "assets/scenes"):
+            try:
+                keys.update(os.listdir(os.path.join(PROJECT_OUTPUT_DIR, rel)))
+            except OSError:
+                pass
+    except Exception:  # noqa: BLE001
+        return set()
+    _OUTPUT_KEYS_CACHE.update({"ts": now, "keys": keys})
+    return keys
+
+
+def _project_output_exists(name: str) -> bool:
+    """该名字在产物目录下是否还有痕迹（走缓存集合，O(1)）。"""
+    return str(name or "") in _output_project_keys()
+
+
 def list_plans() -> list:
-    """列出所有项目的托管计划（含未启用的，供前端展示全貌）"""
-    A = _A()
+    """列出所有**仍然存在**的项目的托管计划（含未启用的，供前端展示全貌）。
+
+    ⚠️ 2026-10-19（性能事故）：原实现遍历 `output/autopilot/` 下**所有**子目录，
+    每个都 `get_plan()` 读一次文件。历史/测试计划累积到 703 条时单次 6.9 秒，
+    `/api/autopilot/status` 被拖到 14.5 秒；前端 3 秒轮询 → 线程池占满 → 全站按钮无响应。
+    现在只保留：① 项目注册表里存在的；② 产物目录里仍有痕迹的。其余视为历史遗留跳过。
+    """
+    import project_store
     out = []
     seen = set()
+    try:
+        recs = project_store.list_projects(with_stats=False)
+    except Exception as e:  # noqa: BLE001
+        recs = []
+        logger.warning("项目注册表读取失败（仅按产物目录判断）：%s", e)
+    known = {(r.get("dir_key") or r.get("name")) for r in recs
+             if (r.get("dir_key") or r.get("name"))}
     root = _autopilot_dir()
     if os.path.isdir(root):
-        for name in sorted(os.listdir(root)):
-            if not os.path.isdir(os.path.join(root, name)):
+        # ⚠️ 用 scandir + DirEntry.is_dir()（缓存 stat），不要 listdir + isdir：
+        #    700+ 个历史目录时前者 ~30ms，后者 ~1.5s。
+        try:
+            with os.scandir(root) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError:
+            entries = []
+        for e in entries:
+            try:
+                if not e.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            name = e.name
+            if name not in known and not _project_output_exists(name):
                 continue
             seen.add(name)
             out.append({"project": name, **get_plan(name)})
     # 项目注册表里存在但还没有托管计划的，也一并列出（默认为未启用）
-    try:
-        for rec in A.project_store.list_projects(with_stats=False):
-            key = rec.get("dir_key") or rec.get("name")
-            if key and key not in seen:
-                out.append({"project": key, "name": rec.get("name"),
-                            **get_plan(key)})
-                seen.add(key)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("项目注册表读取失败（仅展示已有托管计划）：%s", e)
+    for rec in recs:
+        key = rec.get("dir_key") or rec.get("name")
+        if key and key not in seen:
+            out.append({"project": key, "name": rec.get("name"),
+                        **get_plan(key)})
+            seen.add(key)
     out.sort(key=lambda x: (-int(x.get("priority") or 0), x.get("project") or ""))
     return out
 
@@ -488,18 +540,20 @@ def enabled_projects() -> list:
 
 def _novel_meta(project_name: str, plan: dict) -> dict:
     """取该项目关联的小说元信息（优先计划里记录的 novel_id）"""
-    A = _A()
+    from config import NOVELS_DIR
+    from novel_parser import get_novel
+    import project_store
     novel_id = (plan.get("novel_id") or "").strip()
     if not novel_id:
         try:
-            rec = A.project_store.get_project(project_name) or {}
+            rec = project_store.get_project(project_name) or {}
             novel_id = (rec.get("novel_id") or "").strip()
         except Exception:  # noqa: BLE001
             novel_id = ""
     if not novel_id:
         return {}
     try:
-        return A.get_novel(A.NOVELS_DIR, novel_id) or {}
+        return get_novel(NOVELS_DIR, novel_id) or {}
     except Exception as e:  # noqa: BLE001
         logger.warning("小说元信息读取失败（%s）：%s", novel_id, e)
         return {}
@@ -511,18 +565,20 @@ def chapters_and_text(novel_meta: dict) -> tuple:
     拆章（一章拆多集）需要在**正文**上找语义切点，正文此前已在这里读过一次，
     所以直接把全文一并带出，避免调用方二次读盘。
     """
-    A = _A()
+    from config import NOVELS_DIR
+    from novel_parser import read_novel_text
+    from novel_parser import split_chapters
     if not novel_meta:
         return [], ""
     text = ""
     try:
-        text = A.read_novel_text(A.NOVELS_DIR, novel_meta.get("novel_id")) or ""
+        text = read_novel_text(NOVELS_DIR, novel_meta.get("novel_id")) or ""
     except Exception as e:  # noqa: BLE001
         logger.warning("小说正文读取失败：%s", e)
     if not text:
         return [], ""
     items = []
-    for c in A.split_chapters(text):
+    for c in split_chapters(text):
         items.append({
             "index": int(c.get("index") or len(items) + 1),
             "title": c.get("title") or f"第{c.get('index')}章",
@@ -573,8 +629,8 @@ def episode_units(chapters: list, plan: dict = None, text: str = "",
     """
     if not chapters:
         return []
-    A = _A()
-    nts = getattr(A, "novel_to_script", None)
+    import novel_to_script
+    nts = novel_to_script
     if nts is None:  # 理论上不会发生（app 必然导入它）；降级为「一章一集」
         selected = set(target_episodes(chapters, plan or {}))
         return [{"episode_no": int(c.get("index") or 0),
@@ -677,7 +733,6 @@ def deliverables_map(project_name: str) -> dict:
 
 def _episode_state(project_name: str, episode_no: int, plan: dict, chapters: list) -> dict:
     """判断某集当前状态：done / rejected / pending_human / todo"""
-    A = _A()
     try:
         import pipeline
     except ImportError:
@@ -770,10 +825,21 @@ def append_history(project_name: str, episode_no: int, result: dict) -> None:
 
 
 def read_history(project_name: str = "", hours: int = 24) -> list:
-    A = _A()
     root = _autopilot_dir()
-    projects = [project_name] if project_name else (
-        sorted(os.listdir(root)) if os.path.isdir(root) else [])
+    if project_name:
+        projects = [project_name]
+    else:
+        projects = sorted(os.listdir(root)) if os.path.isdir(root) else []
+        # ⭐ 2026-10-19：历史目录同样会被历史/测试计划污染（实测 703 个）。
+        #    只读仍有产物痕迹的项目，避免每次轮询扫几百个 jsonl。
+        try:
+            import project_store
+            known = {(r.get("dir_key") or r.get("name"))
+                     for r in project_store.list_projects(with_stats=False)}
+        except Exception:  # noqa: BLE001
+            known = set()
+        projects = [p for p in projects
+                    if p in known or _project_output_exists(p)]
     cutoff = time.time() - hours * 3600
     rows = []
     for pj in projects:
@@ -1413,7 +1479,6 @@ def _produce(project: str, plan: dict, pick: dict) -> None:
     episode_no = pick["episode_no"]
     chapter = pick["chapter"]
     meta = _novel_meta(project, plan)
-    A = _A()
     t0 = time.time()
 
     # P0-5 门禁（无人值守分支）：托管最怕「静默失败」—— AI 配置不全时若照跑，整晚生产
@@ -1600,7 +1665,7 @@ def purge_project(project_name: str) -> dict:
     #    于是重建同名项目时 autopilot 读旧台账（current 指向第2集、attempts 记第1集
     #    已完成）→ 自动从第2集续跑。改成安全调用：方法不存在则跳过（不影响后续清理）。
     try:
-        _sched_cancel = getattr(_A(), "schedule_cancel", None)
+        _sched_cancel = None  # D-1：app 从未定义 schedule_cancel，安全调用恒为 no-op
         if callable(_sched_cancel):
             _sched_cancel(project_name)
     except Exception:  # noqa: BLE001
@@ -1780,19 +1845,23 @@ def pipeline_list_dead(project: str) -> list:
 
 def ready(plan: dict = None) -> dict:
     """托管可行性自检（告诉用户还差什么才能真正无人值守）"""
-    A = _A()
+    from routes._shared import _current_llm_client
+    from routes._shared import _qc_load_cfg
+    from routes._shared import comfyui_client
+    from dub_mix import ffmpeg_available as mix_ffmpeg_check
+    import qc_client
     checks = []
     try:
-        client = A._current_llm_client()
+        client = _current_llm_client()
         ok = bool(client and getattr(client, "configured", False))
     except Exception:  # noqa: BLE001
         ok = False
     checks.append({"key": "text_model", "label": "文本模型（剧本生成）", "ok": ok,
                    "hint": "" if ok else "请到「AI 设置 → 文本分析」配置接口"})
     try:
-        cfg = A._qc_load_cfg()
-        qc_img = A.qc_client.image_qc_ready(cfg)
-        qc_vid = A.qc_client.video_qc_ready(cfg)
+        cfg = _qc_load_cfg()
+        qc_img = qc_client.image_qc_ready(cfg)
+        qc_vid = qc_client.video_qc_ready(cfg)
     except Exception:  # noqa: BLE001
         qc_img = qc_vid = False
     # P1-1：接口「配置就绪」≠「能真正调用」。key 存在但鉴权 401 / 模型不可用时，
@@ -1801,7 +1870,7 @@ def ready(plan: dict = None) -> dict:
     qc_probe_hint = ""
     if qc_img or qc_vid:
         try:
-            probe = A.qc_client.test_vision(A.qc_client.resolve_endpoint(cfg), timeout=20)
+            probe = qc_client.test_vision(qc_client.resolve_endpoint(cfg), timeout=20)
             if not probe.get("success"):
                 err = str(probe.get("error") or "")
                 if "401" in err or "无效" in err or "令牌" in err or "unauthorized" in err.lower():
@@ -1822,14 +1891,14 @@ def ready(plan: dict = None) -> dict:
     checks.append({"key": "qc", "label": "AI 质检（图片/视频）", "ok": qc_ok,
                    "hint": qc_hint, "qc_probe": "fail" if qc_probe_hint else "ok"})
     try:
-        env = A.mix_ffmpeg_check()
+        env = mix_ffmpeg_check()
         ff = bool(env.get("available"))
         ff_hint = "" if ff else "；".join(env.get("reasons") or [])
     except Exception as e:  # noqa: BLE001
         ff, ff_hint = False, str(e)
     checks.append({"key": "ffmpeg", "label": "FFmpeg（成片合成/探测）", "ok": ff, "hint": ff_hint})
     try:
-        st = A.comfyui_client.get_status()
+        st = comfyui_client.get_status()
         cok = st.get("status") == "online"
     except Exception:  # noqa: BLE001
         cok = False

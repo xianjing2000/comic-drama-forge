@@ -11,9 +11,8 @@ import time
 from flask import Blueprint, jsonify, request, send_file
 
 import nle_export
-from config import PROJECT_OUTPUT_DIR
 from flask import abort
-from routes._shared import _app_logger, _autopilot_guard, _load_script_for, _project_or_400, _safe_project
+from routes._shared import _app_logger, _load_script_for, _project_or_400, _safe_project
 
 export_bp = Blueprint('export', __name__)
 
@@ -37,7 +36,7 @@ def api_export_run():
 
     body: {project_name, episode_no?, formats?: ["jianying","fcpxml","srt","frames"]}
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project_name') or '')
     if err is not None:
@@ -88,34 +87,75 @@ def api_export_list():
 def api_export_download(filename):
     """导出产物下载（限导出根目录内）"""
     return _serve_attachment(nle_export.EXPORT_DIR, filename)
-@export_bp.route('/api/export/current', methods=['POST'])
-@_autopilot_guard
-def api_export_current():
-    """导出当前项目的所有格式"""
-    data = request.get_json(silent=True) or {}
-    project_name = data.get('project_name', '')
-    formats = data.get('formats', ['fcpml', 'edl', 'json'])
+@export_bp.route('/api/export/batch', methods=['POST'])
+def api_export_batch():
+    """跨集批量导出（E-3，2026-10-16）：对多个集各跑一次 ``nle_export.export_all``，
+    再把本批产物打包成一个 zip 供下载。
 
-    # A-01（F-01）：项目名统一走 _project_or_400（越界/缺失 → 400，不写盘）
-    project_name, err = _project_or_400(project_name, field_name="project_name")
+    body: ``{project_name, episodes: [int, ...], formats?: [...], zip_name?}``
+    - ``episodes`` **必填**（非空数组）——不猜、不扫全量，避免把无关产物一起打包。
+    - 取代此前的死端点 ``POST /api/export/current``（只查文件是否存在、从不生成；全仓无调用方）。
+
+    返回：``{success, project, episodes, per_episode, zip, filename, url}``
+    """
+    import zipfile
+    from datetime import datetime as _dt
+
+    data = (request.get_json(silent=True) or {})
+    project, err = _project_or_400(data.get('project_name') or '')
     if err is not None:
         return err
+    eps_raw = data.get('episodes')
+    if not isinstance(eps_raw, list) or not eps_raw:
+        return jsonify({"success": False, "error": "episodes 必须是非空数组"}), 400
+    try:
+        eps = sorted({int(e) for e in eps_raw if str(e).strip() != ""})
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "error": "episodes 含非法集号"}), 400
+    if not eps:
+        return jsonify({"success": False, "error": "episodes 解析后为空"}), 400
 
-    export_dir = os.path.join(PROJECT_OUTPUT_DIR, "exports", project_name)
-    os.makedirs(export_dir, exist_ok=True)
+    formats = data.get('formats')
+    fmt = formats if isinstance(formats, list) and formats else None
 
-    result = {}
-    for fmt in formats:
-        if fmt == 'fcpml':
-            filename = f"{project_name}_fcpml.xml"
-        elif fmt == 'edl':
-            filename = f"{project_name}_edl.edl"
-        elif fmt == 'json':
-            filename = f"{project_name}_timeline.json"
-        else:
+    per_ep = {}
+    for ep in eps:
+        script = _load_script_for(project, ep)
+        if not script:
+            per_ep[ep] = {"ok": False, "error": "剧本不存在"}
             continue
-        filepath = os.path.join(export_dir, filename)
-        if os.path.exists(filepath):
-            result[fmt] = filepath
+        try:
+            per_ep[ep] = nle_export.export_all(project, script, formats=fmt, episode=ep)
+        except Exception as e:  # noqa: BLE001
+            _app_logger().exception("NLE 批量导出失败 ep=%s", ep)
+            per_ep[ep] = {"ok": False, "error": str(e)}
 
-    return jsonify({"success": True, "files": result})
+    out_dir = os.path.join(nle_export.EXPORT_DIR, project)
+    os.makedirs(out_dir, exist_ok=True)
+    ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+    zip_name = str(data.get('zip_name') or f"{project}_{len(eps)}集_{ts}.zip")
+    if not zip_name.lower().endswith('.zip'):
+        zip_name += '.zip'
+    zip_path = os.path.join(out_dir, zip_name)
+    try:
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            for _ep, _res in per_ep.items():
+                for _v in ((_res.get("results") or {}).values()):
+                    if not isinstance(_v, dict) or not _v.get("ok"):
+                        continue
+                    _p = _v.get("path")
+                    if _p and os.path.isfile(str(_p)):
+                        zf.write(str(_p), arcname=f"ep{_ep:02d}/{os.path.basename(str(_p))}")
+                    elif _v.get("draft_dir") and os.path.isdir(str(_v["draft_dir"])):
+                        _dd = str(_v["draft_dir"])
+                        for _root, _dirs, _files in os.walk(_dd):
+                            for _f in _files:
+                                _fp = os.path.join(_root, _f)
+                                zf.write(_fp, arcname=f"ep{_ep:02d}/{os.path.relpath(_fp, _dd)}")
+    except Exception as e:  # noqa: BLE001
+        _app_logger().exception("批量导出打包失败")
+        return jsonify({"success": False, "error": f"打包失败：{e}"}), 500
+
+    return jsonify({"success": True, "project": project, "episodes": eps,
+                    "per_episode": per_ep, "zip": zip_path, "filename": zip_name,
+                    "url": f"/api/export/download/{project}/{zip_name}"})

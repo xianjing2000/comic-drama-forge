@@ -9,6 +9,8 @@ import os
 import shutil
 import time
 
+import fs_atomic
+
 from flask import Blueprint, jsonify, request, send_file
 
 from character_manager import CharacterManager
@@ -52,17 +54,23 @@ def _load_script(project_name: str, episode_no: int = 1):
 
 
 def _save_script(script: dict, sp: str) -> bool:
-    """覆盖写剧本（**先备份**）。返回是否成功。"""
+    """覆盖写剧本（**先备份**）。返回是否成功。
+
+    2026-10-16（v2 A-4）：写盘改走 `fs_atomic.atomic_write_json`（唯一临时名 + fsync +
+    os.replace 重试 + .bak 快照），替代旧「固定 `sp + '.tmp'` + os.replace」——后者在多写者
+    并发时会发布交错的半份 JSON（同 t23/A-3 事故形态）。时间戳备份名沿用 .bak_charupdate_<ts>。
+    """
     try:
         bak = f"{sp}.bak_charupdate_{time.strftime('%Y%m%d_%H%M%S')}"
-        shutil.copy2(sp, bak)
-        tmp = sp + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(script, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, sp)
+        try:
+            if os.path.isfile(sp):
+                shutil.copy2(sp, bak)
+        except OSError as _be:  # noqa: BLE001 备份失败不阻断写入（fs_atomic 另有 .bak 快照）
+            _app_logger().warning("[characters] 剧本备份失败（继续写入）：%s", _be)
+        fs_atomic.atomic_write_json(sp, script)
         _app_logger().info("[characters] 剧本已更新（备份 %s）", os.path.basename(bak))
         return True
-    except (OSError, ValueError) as e:
+    except Exception as e:  # noqa: BLE001
         _app_logger().error("[characters] 剧本写回失败：%s", e)
         return False
 

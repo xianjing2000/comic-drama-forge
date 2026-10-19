@@ -63,6 +63,10 @@ __all__ = [
     "probe_audio_metrics", "audio_level_check", "silence_intervals",
     "audio_quality_verdict", "final_audio_qc_path", "save_final_audio_qc",
     "load_final_audio_qc",
+    # 自动验收门（L3）：台词乱码率 + 角色参考图覆盖
+    "GARBLE_MAX_DEFAULT", "speech_garble_verdict", "cast_coverage_verdict",
+    "acceptance_path", "save_acceptance", "load_acceptance", "acceptance_verdict",
+    "ref_warnings_path", "save_ref_warnings", "load_ref_warnings",
 ]
 
 #: 四层，顺序即晋级顺序。
@@ -444,6 +448,242 @@ def load_final_audio_qc(project: str, episode: Any, *,
     except (ValueError, OSError) as e:
         logger.warning("成片音频结论读取失败（按无结论处理）：%s", e)
         return {}
+
+
+# =====================================================================
+# 自动验收门（L3，2026-10-19）：台词乱码率 + 角色参考图覆盖
+# =====================================================================
+
+#: 乱码率上限：超出即「建议重配」。env 覆盖：MJSCXT_GARBLE_MAX
+GARBLE_MAX_DEFAULT = 0.20
+
+
+def _garble_threshold() -> float:
+    raw = (os.environ.get("MJSCXT_GARBLE_MAX") or "").strip()
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return GARBLE_MAX_DEFAULT
+    return min(1.0, max(0.0, v))
+
+
+def _episode_dialogue_text(script: dict) -> str:
+    """该集**全部台词**（TTS 的唯一输入口径）拼成一段，供与转写比对。"""
+    parts = []
+    for sh in (script or {}).get("shots") or []:
+        if not isinstance(sh, dict):
+            continue
+        _d = sh.get("dialogue") or []
+        if _d:
+            for d in _d:
+                if isinstance(d, dict) and str(d.get("text") or "").strip():
+                    parts.append(str(d["text"]).strip())
+        elif str(sh.get("dialogue_text") or "").strip():
+            parts.append(str(sh["dialogue_text"]).strip())
+    return "\n".join(parts)
+
+
+def speech_garble_verdict(video_path: str, *, project: str, episode: Any,
+                          timeout: Optional[int] = None) -> Dict[str, Any]:
+    """**台词乱码率** = 1 − 相似度(成片音轨转写, 剧本台词)。
+
+    为什么用「转写 vs 剧本」而不是「转写里有多少非中文」：TTS 念错的典型形态是**念错字**
+    （多音字 / 生僻字 / 专名），文本本身仍是合法中文——只有和剧本原文比对才抓得到。
+    判据与 caption_verify 的烧字幕校对同源（ffmpeg 抽轨 + whisper 转写 + 去标点比对）。
+
+    Returns: ``{available, garble_rate, similarity, threshold, ok, error, ...}``
+    ``available=False`` 表示**未判定**（环境缺失/无台词/成片不存在）→ 调用方按 fail-open 处理，
+    不得据此判缺陷。
+    """
+    out: Dict[str, Any] = {"available": False, "garble_rate": None, "similarity": None,
+                           "threshold": _garble_threshold(), "ok": None,
+                           "error": "", "video": video_path}
+    if not video_path or not os.path.isfile(video_path):
+        out["error"] = "成片不存在，无法转写"
+        return out
+    try:
+        import caption_verify as cv                     # 延迟导入：复用同一套 whisper 环境
+        script, _sp = cv.load_episode_script(project, episode)
+        if not isinstance(script, dict):
+            out["error"] = "未找到该集剧本，无法比对台词"
+            return out
+        norm_e = cv.normalize_text(_episode_dialogue_text(script))
+        if not norm_e:
+            out["error"] = "该集没有台词（纯画面集），乱码率不适用"
+            return out
+        tr = cv.transcribe_media(video_path, timeout=timeout)
+        if not tr.get("ok"):
+            out["error"] = tr.get("error") or "转写失败"
+            return out
+        norm_t = cv.normalize_text(tr.get("text") or "")
+        import difflib
+        sim = difflib.SequenceMatcher(None, norm_t, norm_e, autojunk=False).ratio()
+        out.update({"available": True, "similarity": round(sim, 4),
+                    "garble_rate": round(1.0 - sim, 4),
+                    "expected_chars": len(norm_e), "transcript_chars": len(norm_t),
+                    "ok": (1.0 - sim) <= out["threshold"]})
+        return out
+    except Exception as e:                              # noqa: BLE001
+        out["error"] = "%s: %s" % (type(e).__name__, e)
+        return out
+
+
+def cast_coverage_verdict(script: dict, *, project: Optional[str] = None,
+                          episode: Any = None,
+                          root: Optional[str] = None) -> Dict[str, Any]:
+    """角色出镜 vs 参考图覆盖的**确定性**核对（不调模型、零成本）。
+
+    数据源是生成侧已记账的 ``_ref_warnings`` / ``_no_reference``（见
+    ``asset_refs._note_ref_warning``）。这两者**只活在内存**：续跑或单独重跑成片时
+    ``ctx`` 会从磁盘重新加载剧本，告警全丢 —— 直接读内存会把「生成期就没拿到角色图」
+    误报成「通过」。所以这里在给了 ``project/episode`` 时**并集**读取生成时落盘的
+    ``ref_warnings.json``（见 :func:`save_ref_warnings`）。
+    """
+    shots = [s for s in ((script or {}).get("shots") or []) if isinstance(s, dict)]
+    side: Dict[str, Any] = {}
+    if project:
+        side = load_ref_warnings(project, episode, root=root)
+    need = [s for s in shots if s.get("characters_in_shot")]
+    missing, no_ref = [], []
+    for s in need:
+        sid = s.get("shot_id")
+        _side = side.get(str(sid)) or {}
+        warns = list(s.get("_ref_warnings") or []) + list(_side.get("warnings") or [])
+        is_nr = bool(s.get("_no_reference")) or bool(_side.get("no_reference"))
+        if is_nr:
+            no_ref.append(sid)
+        if any("角色参考图缺失" in str(w) for w in warns):
+            missing.append(sid)
+    return {"shots_total": len(shots), "shots_with_cast": len(need),
+            "shots_missing_cast_ref": len(missing), "missing_cast_ref_shots": missing[:30],
+            "shots_no_reference": len(no_ref), "no_reference_shots": no_ref[:30],
+            "ok": not missing and not no_ref}
+
+
+def ref_warnings_path(project: str, episode: Any, *, root: Optional[str] = None) -> str:
+    """角色参考图记账落点：<output>/qc/<项目>/<集>/ref_warnings.json"""
+    if root is None:
+        from config import PROJECT_OUTPUT_DIR as root
+    return os.path.join(root, "qc", str(project or ""), _norm_ep(episode), "ref_warnings.json")
+
+
+def save_ref_warnings(project: str, episode: Any, shots: list, *,
+                      processed_ids: Optional[list] = None,
+                      root: Optional[str] = None) -> str:
+    """把镜头的 ``_ref_warnings`` / ``_no_reference`` 落盘。
+
+    ``processed_ids`` 是**本轮真正重新生成过**的镜号：
+    · 给了 → **增量合并**：只替换这些镜的记账，其余镜的旧缺口原样保留
+      （断点续跑只补 3 镜时，不能把另外 80 镜的旧缺口一笔勾销 → 误报通过）；
+    · 没给 → 整表覆盖（全量重跑 / 单测用）。
+    本轮处理过且干净的镜会被**移除**条目，所以修好后缺口能真正消失。
+    失败只 warning 并返回空串。"""
+    def _entry(s):
+        w = [str(x) for x in (s.get("_ref_warnings") or []) if str(x).strip()]
+        nr = bool(s.get("_no_reference"))
+        return {"warnings": w, "no_reference": nr} if (w or nr) else None
+
+    payload: Dict[str, Any] = {}
+    if processed_ids is not None:
+        payload = dict(load_ref_warnings(project, episode, root=root))
+        _proc = {str(x) for x in processed_ids}
+        for _k in _proc:
+            payload.pop(_k, None)
+        for s in shots or []:
+            if isinstance(s, dict) and str(s.get("shot_id")) in _proc:
+                e = _entry(s)
+                if e:
+                    payload[str(s.get("shot_id"))] = e
+    else:
+        for s in shots or []:
+            if isinstance(s, dict):
+                e = _entry(s)
+                if e:
+                    payload[str(s.get("shot_id"))] = e
+    try:
+        p = ref_warnings_path(project, episode, root=root)
+        atomic_write_json(p, payload)
+        return p
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("角色参考图记账落盘失败（忽略）：%s", e)
+        return ""
+
+
+def load_ref_warnings(project: str, episode: Any, *,
+                      root: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        data = read_json_strict(ref_warnings_path(project, episode, root=root), {}) or {}
+        return data if isinstance(data, dict) else {}
+    except (ValueError, OSError) as e:
+        logger.warning("角色参考图记账读取失败（按无缺口处理）：%s", e)
+        return {}
+
+
+def acceptance_path(project: str, episode: Any, *, root: Optional[str] = None) -> str:
+    """验收门结论落点：<output>/qc/<项目>/<集>/acceptance.json"""
+    if root is None:
+        from config import PROJECT_OUTPUT_DIR as root
+    return os.path.join(root, "qc", str(project or ""), _norm_ep(episode), "acceptance.json")
+
+
+def save_acceptance(project: str, episode: Any, payload: Dict[str, Any],
+                    *, root: Optional[str] = None) -> str:
+    try:
+        p = acceptance_path(project, episode, root=root)
+        atomic_write_json(p, dict(payload or {}))
+        return p
+    except Exception as e:                              # noqa: BLE001
+        logger.warning("验收门结论落盘失败（不影响成片）：%s", e)
+        return ""
+
+
+def load_acceptance(project: str, episode: Any, *,
+                    root: Optional[str] = None) -> Dict[str, Any]:
+    try:
+        data = read_json_strict(acceptance_path(project, episode, root=root), {}) or {}
+        return data if isinstance(data, dict) else {}
+    except (ValueError, OSError) as e:
+        logger.warning("验收门结论读取失败（按无结论处理）：%s", e)
+        return {}
+
+
+def acceptance_verdict(video_path: Optional[str], *, project: str, episode: Any,
+                       script: Optional[dict] = None,
+                       timeout: Optional[int] = None) -> Dict[str, Any]:
+    """一次跑齐两项，返回可直接落盘的汇总（乱码率未判定不算失败）。"""
+    if script is None:
+        try:
+            import caption_verify as cv
+            script, _ = cv.load_episode_script(project, episode)
+        except Exception:                               # noqa: BLE001
+            script = {}
+    report: Dict[str, Any] = {
+        "project": project, "episode": _norm_ep(episode), "when": _now(),
+        "speech": (speech_garble_verdict(video_path, project=project, episode=episode,
+                                         timeout=timeout) if video_path else
+                   {"available": False, "ok": None, "error": "未提供成片"}),
+        "cast": cast_coverage_verdict(script or {}, project=project, episode=episode),
+    }
+    # 让「文本规则是否真的生效」写进报告：空表 = A2/L2 本轮是空跑（用户看报告即可发现，
+    # 不必去猜 project_rules 有没有配）。fail-open。
+    try:
+        import text_rules as _tr
+        _r = _tr.describe(project)
+        report["text_rules"] = {"path": _r.get("path"),
+                                "aliases": _r.get("alias_count", 0),
+                                "pronounce": _r.get("pronounce_count", 0)}
+    except Exception as _e:                             # noqa: BLE001
+        report["text_rules"] = {"error": "%s: %s" % (type(_e).__name__, _e)}
+    # 剧本 ↔ bible 一致性（未入镜的道具 / 镜头里没人设的特征）。零成本、不调模型。
+    try:
+        import script_structure as _ss
+        report["script_bible"] = _ss.bible_coverage_verdict(script or {})
+    except Exception as _e:                             # noqa: BLE001
+        report["script_bible"] = {"error": "%s: %s" % (type(_e).__name__, _e)}
+    _sp, _ca = report["speech"], report["cast"]
+    report["ok"] = bool(_sp.get("ok") in (True, None) and _ca.get("ok"))
+    return report
+
 
 # =====================================================================
 # B 层：内容质检（复用既有 qc_client 结论，不重复造判据）

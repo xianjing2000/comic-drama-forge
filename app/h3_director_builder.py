@@ -78,6 +78,20 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from h3_segment_loras import MAX_SEGMENT_LORAS  # 单一来源：段级 LoRA 条数上限（=8）
 
+
+def _h3_steps_override() -> int:
+    """H3 采样步数覆盖（B-2，2026-10-16）：env ``MJSCXT_H3_STEPS`` > 0 时覆写 Director
+    的 ``steps`` widget；否则返回 0 = 不改（用工作流模板值，**零行为变更**）。
+
+    与 ``config.H3_SAMPLER_STEPS`` 同源（此处直接读 env，避免构建器 import config 的
+    导入期副作用）。合法值仅在 >0 时生效，非法/空一律按「不改」处理。
+    """
+    try:
+        v = int(float(str(os.environ.get("MJSCXT_H3_STEPS") or "0").strip() or 0))
+        return v if v > 0 else 0
+    except (TypeError, ValueError):
+        return 0
+
 logger = logging.getLogger(__name__)
 
 #: 视频帧率（H3 按 24 训练；插件默认亦为 24）
@@ -949,6 +963,11 @@ class H3DirectorBuilder:
         self._set_widget(director, _DIRECTOR_POS, "total_frames", total)
         self._set_widget(director, _DIRECTOR_POS, "timeline_data",
                          json.dumps(timeline, ensure_ascii=False))
+        # B-2（2026-10-16）：采样步数覆盖 —— 仅当 MJSCXT_H3_STEPS>0 时写，否则完全不写
+        # （用模板值，零行为变更）。配合模板 node 80 的少步蒸馏 LoRA 做提速 A/B。
+        _steps_ov = _h3_steps_override()
+        if _steps_ov > 0:
+            self._set_widget(director, _DIRECTOR_POS, "steps", int(_steps_ov))
         stripped = self._strip_pseudo_widgets(director)
         if seed is not None:
             self._set_widget(director, _DIRECTOR_POS, "seed", int(seed))

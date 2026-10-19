@@ -39,7 +39,7 @@ from config import (
     PROJECT_DEFAULT_CONFIG, AI_CHAT_DIR, AI_SETTINGS_PATH, AI_CHAT_HISTORY_PATH,
     NOVELS_DIR, TASKS_DB_PATH,
     # 视频生成方式（项目级，新建项目时用户选择）：常量与归一同源，避免两处口径漂移
-    VIDEO_MODES, norm_video_mode,
+    norm_video_mode,
 )
 
 INDEX_VERSION = 1

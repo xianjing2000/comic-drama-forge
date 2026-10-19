@@ -206,7 +206,7 @@ def api_upscale_list():
 @upscale_bp.route('/api/upscale/video', methods=['POST'])
 def api_upscale_video():
     """发起视频超分（异步任务）：body 支持 project_name / video_path|video_url / scale / mode 等"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # P2-T2：写盘路由统一走 _project_or_400（前端契约必填 project_name，
     # 缺省只会静默写进共享 'project' 命名空间造成串项目）
     project_name, err = _project_or_400((data.get('project_name') or '').strip())

@@ -475,9 +475,20 @@ def _assign_pool_speakers(needs_pool: Dict[str, str]) -> Dict[str, str]:
     male_names = sorted(n for n, g in needs_pool.items() if g == "male")
     female_names = sorted(n for n, g in needs_pool.items() if g == "female")
     out: Dict[str, str] = {}
+    # ⭐ 2026-10-16（音色唯一性）：池只有 5 男 / 4 女预置嗓子；超过即**取模复用 → 必然撞音色**。
+    #    旧实现静默取模（用户「每个角色音色必须不一样」会被违背却不自知）。这里显式告警：
+    #    撞池的角色应补 voice_style（走 design 音色）或改用 design 兜底，而不是静默同音。
     for k, nm in enumerate(male_names):
+        if k >= len(MALE_POOL):
+            logger.warning("男性角色 %d 个 > 预置池 %d：『%s』将与更早的角色**同音色**（%s）"
+                           "—— 请给『%s』补 voice_style（走 design），否则音色重复",
+                           len(male_names), len(MALE_POOL), nm, MALE_POOL[k % len(MALE_POOL)], nm)
         out[nm] = MALE_POOL[k % len(MALE_POOL)]
     for k, nm in enumerate(female_names):
+        if k >= len(FEMALE_POOL):
+            logger.warning("女性角色 %d 个 > 预置池 %d：『%s』将与更早的角色**同音色**（%s）"
+                           "—— 请给『%s』补 voice_style（走 design），否则音色重复",
+                           len(female_names), len(FEMALE_POOL), nm, FEMALE_POOL[k % len(FEMALE_POOL)], nm)
         out[nm] = FEMALE_POOL[k % len(FEMALE_POOL)]
     return out
 
@@ -651,6 +662,42 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
     vmap.setdefault("characters", {})
     vmap.setdefault("lines", {})
 
+    # ---- ⭐ 2026-10-19（A2 角色名词表 / L2 发音替换表）----
+    # A2：同一角色的不同写法（「赵天监」/「赵安」）在下游会被当成不同人 → 音色/参考图各绑一半。
+    #     这里把**说话人**与音色映射的键统一到标准名，台词里的别名也一并替换。
+    # L2：Qwen3-TTS 不支持 SSML/发音词典 → 只能把**送去朗读的文本**改写成同音写法。
+    # 两者都是 fail-open：规则缺失/损坏 → 空表，行为与改动前逐字一致。
+    try:
+        import text_rules as _tr
+        _rules = _tr.load(project)
+    except Exception as _e:  # noqa: BLE001
+        _tr = None
+        _rules = {"aliases": {}, "pronounce": {}}
+        logger.warning("项目文本规则加载失败（按空表处理）：%s", _e)
+    _aliases = _rules.get("aliases") or {}
+    _pronounce = _rules.get("pronounce") or {}
+    if _aliases:
+        # 音色映射的键也归一（用户可能按别名配过音色）
+        _vmap_chars = {}
+        for _k, _v in vmap["characters"].items():
+            try:
+                _vmap_chars[_tr.canon_name(_k, _aliases)] = _v
+            except Exception:  # noqa: BLE001
+                _vmap_chars[_k] = _v
+        vmap["characters"] = _vmap_chars
+
+    def _canon_name(name: str) -> str:
+        try:
+            return _tr.canon_name(name, _aliases) if (_tr and _aliases) else name
+        except Exception:  # noqa: BLE001
+            return name
+
+    def _speak(t: str) -> str:
+        try:
+            return _tr.speak(t, _pronounce, _aliases) if (_tr and (_pronounce or _aliases)) else t
+        except Exception:  # noqa: BLE001
+            return t
+
     # ---- 参考音频克隆（voice_bank）----
     # 某角色在 voice_bank 里登记过参考音频 → 其音色自动切 clone 模式（除非 voice_map
     # 里**显式**指定了其它模式，显式优先）。dub_dir 由 out_dir_wav 反推（parent），
@@ -719,11 +766,15 @@ def build_dub_plan(script: Dict, voice_map: Optional[Dict] = None,
             text = clean_line_text(row.get("text"))
             if not text:
                 continue
+            # L2：朗读文本按发音表改写（只影响 TTS，不改字幕/剧本）
+            text = _speak(text)
             dlg_speaker = row.get("speaker") or ""
             char_name = _first_present(
                 override.get("character"), dlg_speaker,
                 shot.get("dialogue_speaker"), shot.get("speaker"), shot.get("character"),
                 cast[0] if cast else "", NARRATION_SPEAKER)
+            # A2：说话人收敛到标准名（否则同一角色会按别名分到两套音色）
+            char_name = _canon_name(char_name)
             base_voice = vmap["characters"].get(char_name) or default_voice_map(
                 [{"name": char_name}], project, episode)["characters"].get(char_name)
             voice = normalize_voice(override, base_voice)
@@ -910,7 +961,10 @@ def list_voice_bank(dub_dir: str) -> List[Dict]:
         except Exception:  # noqa: BLE001
             meta = {}
         out.append({
-            "character": name,
+            # ⭐ 2026-10-16（配音核验）：用 ref.json 里保存的**原始角色名**，而不是 safe_name 后的
+            #    目录名 —— 否则名字带括注/·/标点的角色（如「外门围观弟子（群像）」）在前端
+            #    boundOf(原name) 落空 → 该行不渲染「试听/解绑」，且试听请求把目录名回传后端致 persona 查不到。
+            "character": str(meta.get("character") or name),
             "file": ref,
             "exists": True,
             "ref_text": ref_text,

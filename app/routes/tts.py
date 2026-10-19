@@ -31,7 +31,7 @@ def api_tts_env():
 @tts_bp.route('/api/tts/voice-map', methods=['POST'])
 def api_tts_voice_map_save():
     """保存角色音色配置（所有角色固定 speaker/seed，保证全剧音色一致）"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
     # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
     project_name, err = _project_or_400((data.get('project_name') or '').strip())
@@ -176,6 +176,14 @@ def api_tts_voice_bank_preview():
         return jsonify({"success": False, "error": "缺少 character"}), 400
     text = clean_line_text(data.get('text') or '', character) or \
         f"我是{character}，今日便让你见识见识。"
+    # ⭐ 2026-10-19（L2 发音替换表）：试听必须与成片同一条朗读文本 —— 否则「试听所见
+    #    即成片所听」的承诺失效（用户按试听验收，成片却念错）。fail-open。
+    try:
+        import text_rules as _tr
+        _rules = _tr.load(project_name)
+        text = _tr.speak(text, _rules.get("pronounce") or {}, _rules.get("aliases") or {})
+    except Exception as _e:  # noqa: BLE001
+        _app_logger().debug("发音替换表应用失败（按原文合成）：%s", _e)
     dub_dir = _dub_project_dir(project_name)
     # ⭐ t8：试听音色方案 = 人设（VoiceDesign）/ 用户上传（clone）/ 兜底（preset）
     try:
@@ -251,7 +259,7 @@ def api_tts_voice_bank_preview():
 @tts_bp.route('/api/tts/preview', methods=['POST'])
 def api_tts_preview():
     """单句试听合成：指定 text + 音色（或角色），返回可播放音频与时长"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
     # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
     project_name, err = _project_or_400((data.get('project_name') or '').strip())
@@ -260,6 +268,13 @@ def api_tts_preview():
     text = clean_line_text(data.get('text') or '', str(data.get('character') or ''))
     if not text:
         return jsonify({"success": False, "error": "缺少待合成文本 text"}), 400
+    # ⭐ 2026-10-19（L2 发音替换表）：与 build_dub_plan 同一套「朗读文本」口径。fail-open。
+    try:
+        import text_rules as _tr
+        _rules = _tr.load(project_name)
+        text = _tr.speak(text, _rules.get("pronounce") or {}, _rules.get("aliases") or {})
+    except Exception as _e:  # noqa: BLE001
+        _app_logger().debug("发音替换表应用失败（按原文合成）：%s", _e)
 
     # 试听前先跑一遍台词预检：用户在这里就能看到「这句会被念成什么样」以及为什么，
     # 不必等到整集配完才发现结构残留被念了出来。

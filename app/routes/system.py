@@ -282,7 +282,7 @@ def api_ai_models():
     返回（失败，HTTP 400）：{success, error, code, models_url, base_url, api_key_masked,
                             hint(友好提示)}
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     if not isinstance(data, dict):
         return jsonify({"success": False, "error": "body 必须是 JSON 对象"}), 400
     base_url = str(data.get("base_url") or "").strip()
@@ -363,8 +363,13 @@ def api_i18n(lang):
     if os.path.isdir(locale_dir):
         available = sorted(os.path.splitext(f)[0] for f in os.listdir(locale_dir)
                            if f.lower().endswith(".json"))
-    return jsonify({"success": True, "lang": safe, "messages": pack,
-                    "available": available})
+    _resp = jsonify({"success": True, "lang": safe, "messages": pack,
+                     "available": available})
+    # ⭐ 2026-10-17：语言包必须**每次重新校验** —— 否则改了 locales/ 里的词条，前端刷新也
+    #    可能命中浏览器缓存、看不到更新（症状：卡片上直接显示 `sb.quality.blockedLine`
+    #    这种原始 key）。前端在启动时调本接口、无本地缓存，故加 no-store 即可保证刷新即生效。
+    _resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return _resp
 
 
 @system_bp.route('/api/logs', methods=['GET'])
@@ -422,7 +427,7 @@ def api_providers():
 @system_bp.route('/api/providers/select', methods=['POST'])
 def api_providers_select():
     """切换某环节引擎（写入运行时环境变量；持久化请改 .env 的 MJSCXT_PROVIDER_*）"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     kind = str(data.get('kind') or '').strip().lower()
     name = str(data.get('name') or '').strip()
     if kind not in ('image', 'video', 'tts') or not name:
@@ -454,7 +459,7 @@ def api_comfyui_models_select():
     body: {"unet_main": "<模型名>", ...}
     显式传 null 或 "" 表示**清空**该槽位，回落到工作流模板自身的取值。
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     if not isinstance(data, dict):
         return jsonify({"success": False, "error": "body 必须是 JSON 对象"}), 400
     # 只允许已知槽位，脏 key 直接忽略（不报错，避免前后端版本差导致整体失败）

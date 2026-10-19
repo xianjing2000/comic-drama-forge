@@ -40,7 +40,7 @@ def api_llm_config_save():
     完全无效 —— 结果是旧接口永远存不进 text 模块（调用方不传 module 时直接报
     "unknown module：(空)"）。这里改为把改写后的 data 显式传进共用的实现。
     """
-    data = dict(request.json or {})
+    data = dict((request.get_json(silent=True) or {}))
     data["module"] = "text"
     return _save_ai_module(data)
 @llm_bp.route('/api/llm/config/clear', methods=['POST'])
@@ -56,12 +56,12 @@ def api_llm_test():
 
     ⚠️ 与 api_llm_config_save 同类修法（t14 发现的 P1，本接口漏修）：不能「改本地
     dict 后调用 api_ai_test()」—— api_ai_test 内部重新从 request.json 取值，本地
-    dict 的修改不保证生效（body 为空 dict 时 request.json or {} 会新建一份空 dict，
+    dict 的修改不保证生效（body 为空 dict 时 (request.get_json(silent=True) or {}) 会新建一份空 dict，
     注入丢失 → 400 unknown module）。routes/ai.py 的测试逻辑没有抽出「接受 data 的
     实现函数」，本文件在只改自身的前提下，通过覆盖 Flask 的 JSON 缓存让 api_ai_test
     读到注入后的 module/probe（对齐 config_save「复制 + 显式注入」的稳健口径）。
     """
-    data = dict(request.json or {})
+    data = dict((request.get_json(silent=True) or {}))
     data["module"] = "text"
     data.setdefault("probe", "text")
     # 覆盖 Flask 的 JSON 缓存：_cached_json 是 (normal, silent) 二元组（Flask 2.x/3.x

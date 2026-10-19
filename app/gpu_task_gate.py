@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from contextlib import contextmanager
 from typing import Optional, Set
@@ -36,6 +37,100 @@ from typing import Optional, Set
 logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
+
+
+# ===================== 资源护栏：可用内存/显存只读探测（B-5，2026-10-16） =====================
+# 本机 8G 显存 + 32G 内存跑 19.5G 模型时，内存耗尽会出现「86 分钟/镜」的全线停摆
+#（docs/性能画像_内存并发GPU_20261012.md）。在每次 GPU 任务开始前探测余量、低于阈值告警，
+# 并把数字并进 /api/status。**只读、fail-open**：探测失败绝不阻断任务。
+_MEM_CACHE = {"t": 0.0, "data": {}}
+_MEM_TTL_SEC = 5.0
+
+
+def _probe_mem() -> dict:
+    """探测可用内存/显存（只读）。任何失败返回已探到的部分（可能为空 dict）。"""
+    info: dict = {}
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MEMSTATUSEX(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            _st = _MEMSTATUSEX()
+            _st.dwLength = ctypes.sizeof(_MEMSTATUSEX)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(_st)):
+                info["ram_total_gb"] = round(_st.ullTotalPhys / (1024 ** 3), 1)
+                info["ram_free_gb"] = round(_st.ullAvailPhys / (1024 ** 3), 1)
+        else:
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                _m = {}
+                for _line in f:
+                    _k, _, _v = _line.partition(":")
+                    _m[_k.strip()] = int((_v.strip().split() or ["0"])[0] or 0)
+            info["ram_total_gb"] = round(_m.get("MemTotal", 0) / (1024 ** 2), 1)
+            info["ram_free_gb"] = round(
+                _m.get("MemAvailable", _m.get("MemFree", 0)) / (1024 ** 2), 1)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import subprocess
+        _p = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5)
+        if _p.returncode == 0 and (_p.stdout or "").strip():
+            _parts = [x.strip() for x in _p.stdout.strip().splitlines()[0].split(",")]
+            if len(_parts) >= 2 and _parts[0].isdigit() and _parts[1].isdigit():
+                info["vram_free_mb"] = int(_parts[0])
+                info["vram_total_mb"] = int(_parts[1])
+    except Exception:  # noqa: BLE001
+        pass
+    return info
+
+
+def _probe_mem_cached() -> dict:
+    """带 5s 缓存的探测（/api/status 会被前端轮询，避免每次都起 nvidia-smi）。"""
+    import time as _t
+    _now = _t.time()
+    if _now - _MEM_CACHE["t"] > _MEM_TTL_SEC:
+        _MEM_CACHE["t"] = _now
+        _MEM_CACHE["data"] = _probe_mem()
+    return _MEM_CACHE["data"]
+
+
+def _mem_guard(task_id: str, label: str) -> dict:
+    """任务开始前只读探测 + 阈值告警（fail-open）。返回探测快照。"""
+    try:
+        from config import (GPU_GUARD_ENABLED, GPU_GUARD_RAM_WARN_GB,
+                            GPU_GUARD_VRAM_WARN_MB)
+    except Exception:  # noqa: BLE001
+        return {}
+    if not GPU_GUARD_ENABLED:
+        return {}
+    _m = _probe_mem_cached()
+    if not _m:
+        return {}
+    _warns = []
+    _rf = _m.get("ram_free_gb")
+    if isinstance(_rf, (int, float)) and _rf < GPU_GUARD_RAM_WARN_GB:
+        _warns.append("可用内存 %.1fGB < %sGB" % (_rf, GPU_GUARD_RAM_WARN_GB))
+    _vf = _m.get("vram_free_mb")
+    if isinstance(_vf, (int, float)) and _vf < GPU_GUARD_VRAM_WARN_MB:
+        _warns.append("可用显存 %dMB < %sMB" % (_vf, GPU_GUARD_VRAM_WARN_MB))
+    if _warns:
+        logger.warning(
+            "⚠ GPU 任务 %s（%s）开始前资源偏紧：%s —— 可能触发内存换页/变慢，"
+            "建议暂停非必要前置段或稍后再跑", task_id, label or "-", "；".join(_warns))
+    return _m
 
 _concurrency_loaded = False
 _concurrency = 1
@@ -122,6 +217,7 @@ def run_gpu_task(task_id: str, label: str = ""):
         _cur = _module_state._running_count
     logger.info("GPU 任务 %s 开始执行（%s；当前 running=%d/%d）",
                 task_id, label, _cur, _concurrency)
+    _mem_guard(task_id, label)   # B-5：开始前只读探测余量，偏紧则告警（fail-open）
 
     try:
         yield
@@ -150,11 +246,29 @@ def has_other_running_gpu_tasks(exclude_task_id: str = "") -> bool:
 
 
 def status() -> dict:
-    """当前闸门状态（供 /api/system/status 暴露，修复失真可观测性）"""
+    """当前闸门状态（供 /api/system/status 暴露，修复失真可观测性）。
+
+    B-5（2026-10-16）：附上可用内存/显存只读探测与阈值告警位，给运维处置窗口。
+    """
     _ensure_state()
     with _LOCK:
-        return {
+        out = {
             "running": _module_state._running_count,
             "concurrency": _concurrency,
             "running_tasks": list(_module_state._running_tasks),
         }
+    try:
+        from config import (GPU_GUARD_ENABLED, GPU_GUARD_RAM_WARN_GB,
+                            GPU_GUARD_VRAM_WARN_MB)
+        _m = _probe_mem_cached()
+        if _m:
+            out["memory"] = _m
+            _rf = _m.get("ram_free_gb")
+            _vf = _m.get("vram_free_mb")
+            out["memory_warn"] = bool(
+                (isinstance(_rf, (int, float)) and _rf < GPU_GUARD_RAM_WARN_GB) or
+                (isinstance(_vf, (int, float)) and _vf < GPU_GUARD_VRAM_WARN_MB))
+            out["guard_enabled"] = bool(GPU_GUARD_ENABLED)
+    except Exception:  # noqa: BLE001
+        pass
+    return out

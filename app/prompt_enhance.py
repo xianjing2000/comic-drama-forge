@@ -49,13 +49,18 @@ from prompt_protocol import (  # 协议标记下沉（2026-10-08 解耦）：不
 from config import (AI_CONFIG_PATH, LLM_CONFIG_PATH,
                     PROMPT_ENHANCE_ENABLED, PROMPT_MODEL_REVIEW_ENABLED,
                     PROMPT_ENHANCE_TIMEOUT_SEC, PROMPT_ENHANCE_CACHE_SIZE,
-                    PROMPT_ENHANCE_BUDGET_SEC, PROMPT_ENHANCE_COOLDOWN_SEC)
+                    PROMPT_ENHANCE_BUDGET_SEC, PROMPT_ENHANCE_COOLDOWN_SEC,
+                    PROMPT_ENHANCE_SKIP_KINDS)
 from llm_client import LLMClient
 
 logger = logging.getLogger(__name__)
 
 #: 参与增强/复审的提示词类型（audio=台词，会被 TTS 逐字念出，绝不改写）
 _ENHANCEABLE_KINDS: Tuple[str, ...] = ("storyboard", "asset", "keyframe", "h3")
+
+#: per-kind 跳过名单（来自 config.PROMPT_ENHANCE_SKIP_KINDS；默认空 = 不跳过任何类型）。
+#   设成 "storyboard" 可**只关分镜**的增强/复审（省前置段 ~56s/镜）。B-4，2026-10-16。
+_SKIP_KINDS = frozenset(str(k).strip().lower() for k in PROMPT_ENHANCE_SKIP_KINDS)
 
 #: 运维兜底开关：设为 0/false/off 可在不改代码的情况下临时关闭（排障用）
 _ENV_ENHANCE = "MJSCXT_PROMPT_ENHANCE"
@@ -431,19 +436,20 @@ def _cache_key(kind: str, style: str, prompt: str, salt: str = "", model: str = 
 _ENHANCE_INSTRUCTIONS: Dict[str, str] = {
     "storyboard": (
         "你是资深漫剧分镜提示词工程师。用户给出一条即将提交给图像生成模型"
-        "（Qwen-Image，英文 <imageN> 参考图协议）的分镜提示词，以及该镜头的中文上下文。"
-        "请增强这条提示词的画面表现力，规则：\n"
-        "1. 只允许改写与扩充「SCENE AND ACTION:」与「LIGHTING:」两段：把动作写得更有"
-        "镜头感（身体的先后动作、空间关系、视线方向），把光影写得更具体（光源方向、"
-        "色温、氛围）；\n"
-        "2. 其余段落（TASK / FRAMING / PRIMARY CANVAS / COMPOSITION BASELINE / IDENTITY / "
-        "REFERENCE ROLES / STYLE / PRESERVE）必须逐字保留，一个字都不要改；\n"
-        "3. 所有 <imageN> 编号引用原样保留，不得增删或改编号；\n"
-        "4. 不得出现任何「文字/字幕/水印」相关描述；不得加入画面中不存在的新人物或新道具；"
-        "增强内容必须与中文上下文一致；景别与运镜遵守参考片语法——特写/局部/近景一律固定"
-        "机位，运镜只写在中景上（轻推/跟随/轻摇），不得出现大特写/远景/大远景；\n"
-        "5. 语言与原文保持一致（英文协议保持英文），直接输出完整提示词，"
-        "不要解释、不要 Markdown 代码块。"
+        "（Qwen-Image，英文 <imageN> 参考图协议）的**结构化**分镜提示词，以及该镜头的中文上下文。"
+        "请按 **Qwen-Image 官方规范**把它改写为**一段流畅、自然的英文描述性语言**，规则：\n"
+        "1. **必须输出单个连贯段落**；**禁止保留任何分段标题、编号、列表或 Markdown 结构**"
+        "（正文里不得出现 TASK: / FRAMING: / IDENTITY: / SCENE AND ACTION: 这类字样）；\n"
+        "2. 必须完整保留这些**硬约束**（用自然语言融进句子）：景别与机位；每个角色的朝向与姿态"
+        "（如「背影、背对镜头、面部不可见」）；「同一角色/道具在画面中只出现一次、不得分身或"
+        "复制、多角色各保身份不串味」；参考图是身份来源（按 <imageN> 逐一对应，不得张冠李戴）；"
+        "场景与动作；整体画风；\n"
+        "3. 所有 <imageN> 编号引用**原样保留**；不得增删角色/道具；不得出现任何「文字/字幕/水印」"
+        "相关描述；景别与运镜遵守参考片语法（特写/局部/近景固定机位，运镜只写在中景上）；\n"
+        "4. 写成**对这一帧画面本身的描述**（谁在哪、在做什么、什么景别/机位/光影/画风），"
+        "而不是对模型的命令句；\n"
+        "5. 末尾加：Ultra HD, 4K, cinematic composition。直接输出改写后的那一段，不要解释、"
+        "不要 Markdown 代码块。"
     ),
     "asset": (
         "你是漫剧资产设定图提示词工程师。用户给出一条资产（角色/物品/场景）参考图的"
@@ -480,6 +486,9 @@ def enhance_prompt(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
     out = {"prompt": prompt, "applied": False, "note": ""}
     kind = str(kind or "").strip().lower()
     if kind not in _ENHANCEABLE_KINDS or not str(prompt or "").strip():
+        return out
+    if kind in _SKIP_KINDS:
+        out["note"] = "该类型已按配置跳过增强（MJSCXT_PROMPT_ENHANCE_SKIP_KINDS）"
         return out
     if not enhance_enabled():
         out["note"] = "增强未启用"
@@ -605,6 +614,9 @@ def model_review(kind: str, prompt: str, ctx=None, style: str = "") -> dict:
     kind = str(kind or "").strip().lower()
     if kind not in _ENHANCEABLE_KINDS or not str(prompt or "").strip():
         out["note"] = "该类型不参与模型复审"
+        return out
+    if kind in _SKIP_KINDS:
+        out["note"] = "该类型已按配置跳过复审（MJSCXT_PROMPT_ENHANCE_SKIP_KINDS）"
         return out
     if not review_enabled():
         out["note"] = "复审未启用"

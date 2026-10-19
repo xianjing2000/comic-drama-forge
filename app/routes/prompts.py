@@ -29,7 +29,7 @@ def api_prompt_enhance_config():
     """
     import prompt_enhance
     if request.method == "POST":
-        data = request.json or {}
+        data = (request.get_json(silent=True) or {})
         if not any(k in data for k in ("enhance_enabled", "review_enabled")):
             return jsonify({"success": False, "error": "缺少 enhance_enabled / review_enabled"}), 400
         cfg = save_prompt_enhance_config(data)

@@ -68,7 +68,7 @@ def api_novel_episodes_generate(novel_id):
         return jsonify({"success": False,
                         "error": "该小说未识别到章节标记，无法按章分集；请改用「AI 转成剧本」整本处理"}), 400
 
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     style = (data.get('style') or '3D动漫渲染').strip() or '3D动漫渲染'
     # ⭐ 2026-10-10：0 = 不预设镜数（由原文信息密度决定）；显式传值仍 clamp 到 4~40。
     try:

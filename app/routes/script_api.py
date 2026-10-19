@@ -109,7 +109,7 @@ def api_fallback_script():
         script = script_gen.load_fallback_script()
         if not script:
             return jsonify({"error": "未找到本地兜底剧本（output/scripts/剑心初醒_兼容版.json）"}), 404
-        data = request.json or {}
+        data = (request.get_json(silent=True) or {})
         project_name = _safe_project(data.get('project_name') or script.get("title", "fallback"))
         script_path = script_gen.save_script(script, project_name)
         script.setdefault("metadata", {})["script_path"] = script_path

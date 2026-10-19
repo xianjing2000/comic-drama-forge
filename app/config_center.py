@@ -111,14 +111,9 @@ def ensure_table(path: str = None) -> bool:
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with _db(p) as conn:
-            conn.execute(
-                'CREATE TABLE IF NOT EXISTS app_settings ('
-                '  key TEXT PRIMARY KEY,'
-                '  value TEXT,'
-                '  value_type TEXT,'
-                '  updated_at TEXT,'
-                '  note TEXT'
-                ')')
+            # t33/F-5（2026-10-16）：DDL 收敛到 schema.TABLES（单一来源）。
+            import schema as _schema
+            conn.execute(_schema.TABLES['app_settings'])
         return True
     except Exception as e:  # noqa: BLE001
         logger.warning('配置库建表失败（忽略，将退回代码默认值）：%s', e)
@@ -212,11 +207,61 @@ def resolve_all() -> Dict[str, Dict[str, Any]]:
     return out
 
 
+#: 产品决策变更 → 数据库里若仍是**旧默认值**（说明用户从未改过），自动升级到新默认。
+#: 只对「精确等于旧默认值」的行生效；用户自定义过的任何其它值一律不动。
+#: 背景（2026-10-19 实测）：REGISTRY.default 会在启动时回写 config 常量 ——
+#: `shot_duration_min/max` 的登记默认长期停在 5.0/8.0（2026-10-14 已定稿「每镜 10 秒」），
+#: 于是 config.py 写着 10.0、运行进程里却被回写成 5.0/8.0，产品决策从未真正生效。
+_KNOWN_DEFAULT_MIGRATIONS = {
+    'shot_duration_min': (5.0, 10.0),
+    'shot_duration_max': (8.0, 10.0),
+    'shot_granularity_target_sec': (5.5, 10.0),
+}
+
+
+def _migrate_known_defaults() -> int:
+    """把「仍是旧默认值」的 DB 行升级到新默认（幂等、fail-open）。返回迁移条数。"""
+    p = db_path()
+    if not p or not ensure_table(p):
+        return 0
+    try:
+        import config_doctor as CD
+        reg = getattr(CD, 'REGISTRY', {}) or {}
+        n = 0
+        with _db(p) as conn:
+            for key, (old, new) in _KNOWN_DEFAULT_MIGRATIONS.items():
+                row = conn.execute('SELECT value FROM app_settings WHERE key=?',
+                                   (key,)).fetchone()
+                if not row:
+                    continue
+                t = (reg.get(key) or {}).get('type') or 'float'
+                ok, v = _coerce(row[0], t)
+                if not ok:
+                    continue
+                try:
+                    is_old = abs(float(v) - float(old)) < 1e-9
+                except (TypeError, ValueError):
+                    is_old = False
+                if is_old:
+                    conn.execute(
+                        'UPDATE app_settings SET value=?, updated_at=?, note=? WHERE key=?',
+                        (str(new), time.strftime('%Y-%m-%d %H:%M:%S'),
+                         '自动迁移：产品决策「每镜 10 秒」（旧默认 %s→%s）' % (old, new), key))
+                    n += 1
+        if n:
+            logger.info('配置库迁移：%d 项旧默认值已升级为「每镜 10 秒」口径', n)
+        return n
+    except Exception as e:  # noqa: BLE001
+        logger.warning('配置库旧默认值迁移失败（忽略）：%s', e)
+        return 0
+
+
 def apply_to_runtime() -> int:
     """把最终生效值回写到各模块属性（启动时调用一次）。
 
     返回成功回写的项数。fail-open：任何一项失败只记日志。
     """
+    _migrate_known_defaults()
     resolved = resolve_all()
     n = 0
     for key, info in resolved.items():

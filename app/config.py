@@ -470,16 +470,28 @@ def tail_shot_indexes(shots) -> set:
             storyboard_helpers 逐镜九宫格降级。
     """
     out = set()
-    n = len(shots or [])
+    # ⭐ 2026-10-19 修复：原实现按 `scene_no` 的**数值**分组（`nxt != no`），
+    #    与 docstring 自己写的「必须按连续 run 分组」相反 —— 后果：
+    #      ① 手写/旧剧本没有 scene_no（全为 0）→ 只把**整集最后一镜**当收尾镜，
+    #         每场戏的收尾镜全部享受不到短时长例外（实测：镜10 是第 1 场末镜、8 秒，
+    #         被 QC 判「时长过短」）；
+    #      ② docstring 里记录的重写尾镜「scene_no 退回 1」场景也判不对。
+    #    现改为按**连续 run** 分组：key = (location, scene_no)。location 变了就断场
+    #    （覆盖 scene_no 缺失/陈旧）；location 相同但 scene_no 变了也断场（同地换场）。
+    def _group_key(s: dict):
+        return (str(s.get("location") or "").strip(), int(s.get("scene_no") or 0))
+
+    last_key = None
+    last_idx = None
     for i, s in enumerate(shots or []):
         if not isinstance(s, dict):
             continue
-        no = int(s.get("scene_no") or 0)
-        nxt = None
-        if i + 1 < n and isinstance(shots[i + 1], dict):
-            nxt = int(shots[i + 1].get("scene_no") or 0)
-        if nxt != no:
-            out.add(i)
+        key = _group_key(s)
+        if last_key is not None and key != last_key:
+            out.add(last_idx)          # 上一镜 = 上一场的最后一镜
+        last_key, last_idx = key, i
+    if last_idx is not None:
+        out.add(last_idx)              # 整集最后一镜
     return out
 #: 单块镜头数上限相对目标值的**放大倍数**（2026-10-06 由「2 倍 + 3」收紧而来）。
 #: 原口径（`shots_target * 2 + 3`，上限 120）让模型「被允许」写到目标的 2 倍以上 ——
@@ -672,6 +684,18 @@ def _env_bool(key: str, default: bool) -> bool:
 #
 # 仍想保留旧行为（例如 8G 显存 + 大内存压力）：MJSCXT_KEEP_MODEL_LOADED=0
 KEEP_MODEL_LOADED = _env_bool("MJSCXT_KEEP_MODEL_LOADED", True)
+
+
+# ===================== GPU 任务前的资源护栏（B-5，2026-10-16） =====================
+# 本机 8G 显存 + 32G 内存跑 19.5G 模型时，内存耗尽会出现「86 分钟/镜」的全线停摆
+# （docs/性能画像_内存并发GPU_20261012.md）。这里在每次 GPU 任务开始前**只读探测**可用
+# 内存/显存，低于阈值就告警（不硬拦），并把这些数字并进 /api/status，给运维处置窗口。
+# 探测失败一律静默（fail-open），绝不影响任务本身。
+GPU_GUARD_ENABLED = _env_bool("MJSCXT_GPU_GUARD", True)
+#: 可用 RAM 低于此值（GB）告警
+GPU_GUARD_RAM_WARN_GB = _env_int("MJSCXT_GPU_GUARD_RAM_WARN_GB", 6)
+#: 可用 VRAM 低于此值（MB）告警
+GPU_GUARD_VRAM_WARN_MB = _env_int("MJSCXT_GPU_GUARD_VRAM_WARN_MB", 800)
 
 
 # ===================== ComfyUI 任务历史自动清理 =====================
@@ -932,6 +956,14 @@ H3_COMMON_REFS_MAX = max(0, _env_int("H3_COMMON_REFS_MAX", 6))
 # env MJSCXT_H3_BATCH_SEGMENTS 可覆盖本默认值；**设 0 = 关闭分批**，
 # 此时渲染路径与改动前逐位一致（只剩「分批」这一条分支不进）。
 H3_BATCH_SEGMENTS = max(0, _env_int("MJSCXT_H3_BATCH_SEGMENTS", 5))
+
+# ⭐ 2026-10-16（B-2 代码侧）：H3 采样步数**覆盖**（0 = 不改，用工作流模板值）。
+#   动机：单镜 343.6s 的最大来源是采样步数；若工作流已挂少步蒸馏 LoRA（模板 node 80 =
+#   fl2v_lightx2v_turbo），配合它把步数压到 4–8 可望大幅提速。本开关让 A/B 无需手改
+#   工作流 JSON：设 MJSCXT_H3_STEPS=8 → 构建器覆写 Director 的 steps widget。
+#   ⚠️ 改步数会改**内容寻址缓存键**（红线 #2）→ 先单镜 A/B（同 seed 同 prompt 比对
+#   耗时与质检分）通过再全量。真正提速收益需在有 GPU 的机器上实测。
+H3_SAMPLER_STEPS = max(0, _env_int("MJSCXT_H3_STEPS", 0))
 
 # AI 对话（创作总控）：多轮对话历史 + 已生效的项目创作设定
 AI_CHAT_DIR = os.path.join(PROJECT_OUTPUT_DIR, "ai_chat")
@@ -1458,6 +1490,14 @@ CONFLICT_NEGATIVE_TOKENS = ("3D渲染", "二次元动漫", "3D动漫", "3D渲染
 PROMPT_ENHANCE_ENABLED = _env_bool("MJSCXT_PROMPT_ENHANCE", True)
 #: 增强后用「质检模型」对提示词做语义复审；复审不通过且给出改进版、改进版复检不降分才采纳
 PROMPT_MODEL_REVIEW_ENABLED = _env_bool("MJSCXT_PROMPT_MODEL_REVIEW", True)
+#: per-kind 跳过名单（逗号分隔，如 "storyboard"）：让增强/复审**只对指定类型关闭**。
+#   默认空 = 全部类型照常（零行为变更）。实测「只关 storyboard」可省前置段 56.1s/镜
+#   （一集约 43 分钟，见 docs/减时分析_一集生产时间_20261013.md）。B-4，2026-10-16。
+#   例：MJSCXT_PROMPT_ENHANCE_SKIP_KINDS=storyboard
+PROMPT_ENHANCE_SKIP_KINDS = tuple(
+    _k.strip().lower()
+    for _k in (os.getenv("MJSCXT_PROMPT_ENHANCE_SKIP_KINDS") or "").split(",")
+    if _k.strip())
 #: 单次增强/复审调用的超时（秒）。预检在生成链路里同步执行，失败即回落原文。
 #
 # ⭐ 2026-10-12 **P0 修正**（本值一度从 90 被改成 25，前提是错的，已回退并抬高）：

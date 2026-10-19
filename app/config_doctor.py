@@ -146,14 +146,13 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     # ---- 镜头时长 ----
     'shot_duration_min': {
-        'default': 5.0, 'type': 'float', 'range': (0.5, 60.0), 'group': '镜头',
-        'desc': '单镜最短秒数（用户口径：每镜 5~6 秒）',
+        'default': 10.0, 'type': 'float', 'range': (0.5, 60.0), 'group': '镜头',
+        'desc': '单镜最短秒数（用户口径 2026-10-14 定稿：每镜固定 10 秒；收尾镜可更短）',
         'owner': 'config.SHOT_DURATION_MIN',
     },
     'shot_duration_max': {
-        'default': 8.0, 'type': 'float', 'range': (0.5, 120.0), 'group': '镜头',
-        'desc': '单镜最长秒数。⚠️ 用户口径是「每镜 5~6 秒」，但代码刻意留到 8.0 —— '
-                '注释写明「留余量给长台词；>6 秒的镜属长尾」。两者不是冲突，是留了余量。',
+        'default': 10.0, 'type': 'float', 'range': (0.5, 120.0), 'group': '镜头',
+        'desc': '单镜最长秒数（与 MIN 同锁 10.0；弹性 5~12 秒试行后镜数 26→47 已回退）',
         'owner': 'config.SHOT_DURATION_MAX',
     },
 
@@ -340,7 +339,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     'h3_segment_max_sec': {
         # ⭐⭐ 2026-10-11 用户口径「取消长镜切段」：4.0 → 12.0。
         #   segment_durations 保证 duration <= max_sec 时恒返回单段，而单镜上限
-        #   SHOT_DURATION_MAX=8，故 12.0 等效「永不切段」。
+        #   SHOT_DURATION_MAX=10（2026-10-14 定稿），故 12.0 等效「永不切段」。
         #   ⚠️ 这里必须与 h3_prompt_kit.H3_SEGMENT_MAX_SEC 同值 —— REGISTRY.default
         #   会反向覆盖代码常量（与覆盖率门槛那次同因），只改代码会被回写成本表 default。
         'default': 12.0, 'type': 'float', 'range': (0.0, 60.0), 'group': 'H3 提示词',
@@ -492,7 +491,8 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     'desc_to_dialogue_ratio_max': {
         'default': 3.0, 'type': 'float', 'range': (0.0, 100.0), 'group': '质检',
-        'desc': '描述/对白字数比上限（压缩提炼口径：画面描述只做必要补充）',
+        'desc': '描述/对白比的**基准**比值（5 秒镜 = 3 倍）；实际阈值按时长折算：'
+                '0.6×duration（10s=6 倍、8s=4.8 倍、5s=3 倍），见 qc_client._validate_script_bloat。',
         'owner': 'qc_client.DESC_TO_DIALOGUE_RATIO_MAX',
     },
     'dialogue_shot_ratio_min': {
@@ -629,8 +629,8 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         'owner': 'config.BEAT_CLIMAX_BONUS_SEC',
     },
     'shot_granularity_target_sec': {
-        'default': 5.5, 'type': 'float', 'range': (0.5, 120.0), 'group': '镜头',
-        'desc': '每镜目标秒数（用户口径 5~6 秒）',
+        'default': 10.0, 'type': 'float', 'range': (0.5, 120.0), 'group': '镜头',
+        'desc': '每镜目标秒数（用户口径 2026-10-14 定稿：10 秒）',
         'owner': 'config.SHOT_GRANULARITY_TARGET_SEC',
     },
     'chapter_dev_tolerance': {

@@ -534,11 +534,10 @@ def _boot_qc_migration() -> None:
     通过 `sys.modules["app"]`（由 _load_flask_app 注册的 app.py 模块）取函数，避免
     `import app` 的命名歧义；取不到就静默跳过（如旧版模块）。失败只告警、不得阻断启动。
     """
+    # D-1（2026-10-16）：直接 import 下沉后的实现，去掉 `sys.modules["app"]` 服务定位。
     try:
-        _mod = sys.modules.get("app")
-        _fn = getattr(_mod, "boot_qc_migration", None)
-        if callable(_fn):
-            _fn()
+        from qc_helpers import boot_qc_migration
+        boot_qc_migration()
     except Exception as e:  # noqa: BLE001  迁移失败不得阻断启动
         logger.warning(f"质检存量迁移调用失败（不影响启动）：{e}")
 

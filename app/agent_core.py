@@ -307,8 +307,11 @@ TOOLS = [
         # P2-2：端点读的是 `query` 参数（见 api_memory_search 的 request.args.get('query')），
         # 此前误发 `q` → 端点永远拿到空 query → 400「缺少 query 参数」→ 工具恒 ok=False。
         # 入参对用户仍叫 q（schema 不变），但请求要落到 `query` 上。
+        # 2026-10-16 收敛：原映射 /api/memory/search（随 ai_memory 死壳一起删除）→ 改指
+        #   **唯一来源**：质检教训库 /api/memory/lessons（支持 q 关键词过滤）。
+        #   教训库=生成链路自动沉淀的学习成果（不达标→改提示词），不再是两套数据。
         "call": lambda a, c: ("GET",
-                              "/api/memory/search?query=" + quote(_p(a.get("q")), safe=""), {}),
+                              "/api/memory/lessons?limit=20&q=" + quote(_p(a.get("q")), safe=""), {}),
     },
 
     # ---------- 配置写入 ----------
@@ -612,6 +615,90 @@ TOOLS = [
                                   "episode_no": a.get("episode") or c.get("episode"),
                                   "formats": a.get("formats"),
                               }.items() if v is not None}),
+    },
+
+    # ===== 2026-10-16 补充：常用但此前缺失的操作（对齐 HTTP 端点，覆盖从 35 扩上去）=====
+    {
+        "name": "list_lessons",
+        "description": "读取**质检教训库**（生成链路自动沉淀的学习成果）。决定怎么调参 / 改提示词"
+                       "前可先看历史教训。kind 可逗号分隔（storyboard/asset/video/audio/script…），"
+                       "q 为关键词，project 缺省当前项目。",
+        "parameters": _schema({"kind": _STR, "q": _STR, "project": _proj_prop(), "limit": _INT}),
+        "risk": "safe", "expensive": False,
+        "call": lambda a, c: ("GET", "/api/memory/lessons?limit=%d%s%s%s" % (
+            int(a.get("limit") or 30),
+            ("&q=" + quote(_p(a.get("q")), safe="")) if a.get("q") else "",
+            ("&kind=" + quote(_p(a.get("kind")), safe="")) if a.get("kind") else "",
+            ("&project=" + quote(_p(a.get("project") or c.get("project")), safe=""))
+            if (a.get("project") or c.get("project")) else ""), {}),
+    },
+    {
+        "name": "create_project",
+        "description": "新建一个生产项目（一部小说 = 一个项目）。name 必填（用户给的项目名）；"
+                       "novel_id 指向已上传的小说（可选，上传小说后拿到）。",
+        "parameters": _schema({"name": _STR, "novel_id": _STR}, ["name"]),
+        "risk": "write", "expensive": False,
+        "call": lambda a, c: ("POST", "/api/projects", {k: v for k, v in {
+            "name": _p(a.get("name")), "novel_id": _p(a.get("novel_id"))}.items() if v}),
+    },
+    {
+        "name": "delete_project",
+        "description": "删除一个项目（工作区 + 全部产物整体移入回收站，**可还原，非物理删除**）。"
+                       "⚠️ 危险操作：调用前**必须先向用户确认项目名**。project 从 list_projects 拿。",
+        "parameters": _schema({"project": _proj_prop("要删除的项目名/ID")}, ["project"]),
+        "risk": "write", "expensive": False,
+        "call": lambda a, c: ("POST",
+                              "/api/projects/" + _qp(a.get("project") or c.get("project")) + "/delete",
+                              {"confirm": True}),
+    },
+    {
+        "name": "set_ai_config",
+        "description": "配置某个 AI 模块的接口（改模型 / 网关 / 密钥）。module ∈ text|qc|chat："
+                       "text=剧本·文本模型，qc=质检视觉模型，chat=总控对话模型。只传要改的字段。",
+        "parameters": _schema({"module": {"type": "string", "description": "text|qc|chat"},
+                               "base_url": _STR, "model": _STR, "api_key": _STR}, ["module"]),
+        "risk": "write", "expensive": False,
+        "call": lambda a, c: ("POST", "/api/ai/config", {k: v for k, v in {
+            "module": _p(a.get("module")), "base_url": a.get("base_url"),
+            "model": a.get("model"), "api_key": a.get("api_key")}.items() if v}),
+    },
+    {
+        "name": "reorder_shots",
+        "description": "调整某集分镜顺序（拖拽排序写回剧本）。order 必须是**当前全部镜头 shot_id 的"
+                       "一个完整排列**（shot_id 从 get_shots 拿）；shot_id 本身不变，只调顺序。",
+        "parameters": _schema({"project": _proj_prop(), "episode": _INT, "order": _ARR_STR}, ["order"]),
+        "risk": "write", "expensive": False,
+        "call": lambda a, c: ("POST", "/api/storyboard/shot/reorder", {
+            "project_name": _p(a.get("project") or c.get("project")),
+            "episode_no": a.get("episode"), "order": a.get("order") or []}),
+    },
+    {
+        "name": "clear_lessons",
+        "description": "清空质检教训库（按环节 kind；不传=全清）。教训库是生成链路的学习成果，"
+                       "清空前建议先向用户确认。",
+        "parameters": _schema({"kind": _STR}),
+        "risk": "write", "expensive": False,
+        "call": lambda a, c: ("POST", "/api/memory/lessons/clear", {"kind": _p(a.get("kind"))}),
+    },
+    {
+        "name": "run_consistency",
+        "description": "对某项目/某集跑**跨镜角色一致性校验**（人脸/外观一致性），返回报告。耗时较长。",
+        "parameters": _schema({"project": _proj_prop(), "episode": _INT,
+                               "include_assets": _BOOL, "include_shots": _BOOL}),
+        "risk": "expensive", "expensive": True,
+        "call": lambda a, c: ("POST", "/api/consistency/run", {k: v for k, v in {
+            "project_name": _p(a.get("project") or c.get("project")),
+            "episode_no": a.get("episode"),
+            "include_assets": a.get("include_assets"),
+            "include_shots": a.get("include_shots")}.items() if v is not None}),
+    },
+    {
+        "name": "run_caption_verify",
+        "description": "跑字幕/画面文字校对（核对画面里的文字是否与预期一致）。",
+        "parameters": _schema({"project": _proj_prop(), "episode": _INT}),
+        "risk": "expensive", "expensive": True,
+        "call": lambda a, c: ("POST", "/api/caption_verify/run", {
+            "project": _p(a.get("project") or c.get("project")), "episode_no": a.get("episode")}),
     },
 ]
 

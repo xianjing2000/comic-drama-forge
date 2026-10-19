@@ -277,7 +277,7 @@ def api_autopilot_plan_get(project_name):
 def api_autopilot_plan_set(project_name):
     """设置某项目的自动生产计划（目标集数、镜头数、风格、质量阈值、重试上限…）"""
     project = _safe_project(project_name)
-    data = dict(request.json or {})
+    data = dict((request.get_json(silent=True) or {}))
     novel_id = str(data.pop('novel_id', '') or '').strip()
     # GET 会把计划整份返回（含 updated_at 等只读回显键）；客户端「读回来再写回去」
     # 不该被判成非法写入 —— 这几个键按只读回显忽略（有注释也有测试）。
@@ -310,7 +310,7 @@ def api_autopilot_enable():
     _gate = _ai_gate_or_400("episode")
     if _gate is not None:
         return _gate
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project') or data.get('project_name') or '',
                                     field_name="project")
@@ -359,7 +359,7 @@ def api_autopilot_enable():
 @autopilot_bp.route('/api/autopilot/disable', methods=['POST'])
 @_autopilot_guard
 def api_autopilot_disable():
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project') or data.get('project_name') or '',
                                    field_name="project")
@@ -377,7 +377,7 @@ def api_autopilot_pause():
     很容易以为「只暂停了某个项目」，实际把所有项目都停了 —— 静默越权。
     这里保留 reason 语义，并在收到 project 时**显式告知**它被忽略、给出替代做法。
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     result = autopilot.pause(str(data.get('reason') or '手动暂停'))
     ignored_project = str(data.get('project') or data.get('project_name') or '').strip()
     payload = {"success": True, **result}
@@ -416,7 +416,7 @@ def api_autopilot_deliverables():
 @_autopilot_guard
 def api_autopilot_review():
     """验收 / 打回成片（打回 = 该集在下次轮转时自动重做）"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # 口径统一（F-01 收口）：与 run-once 一致，改走 _project_or_400 拒绝越界/空/控制字符。
     project, err = _project_or_400(
         data.get('project') or data.get('project_name') or '', field_name="project")
@@ -475,7 +475,7 @@ def api_autopilot_exceptions():
 @_autopilot_guard
 def api_autopilot_exception_resolve():
     """处理异常：标记已解决 / 忽略（之后托管会重新尝试该集）"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     project = _safe_project(data.get('project') or data.get('project_name') or '')
     try:
         ep = int(data.get('episode_no') or 0)
@@ -549,7 +549,7 @@ def api_autopilot_run_once():
     _gate = _ai_gate_or_400("episode")
     if _gate is not None:
         return _gate
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # 口径统一（F-01 收口）：run-once / review 此前用 _safe_project，会把越界/空/控制字符
     # 项目名静默收敛成合法键，与全仓 46 处 _project_or_400 不一致；现改走同一入口。
     project, err = _project_or_400(
@@ -763,13 +763,11 @@ def _hhmmss(ts) -> str:
 def _live_snapshot(project: str) -> dict:
     """挑出与 project 相关、且正在跑的生成任务快照（取有 live 的那条）。
 
-    generation_state 是 app.py 的模块级全局；用 sys.modules 取而不 import app，
-    避免与「app 导入 routes → routes 再 import app」形成循环导入。
+    D-1（2026-10-16）：`generation_state` 的**唯一来源**是 `job_state`（app 只是再导出），
+    故直接 `from job_state import generation_state`，不再经 `sys.modules.get("app")`。
     取不到（单测 / 未启动）时返回空 dict —— 端点仍可只靠日志工作，不报错。
     """
-    import sys as _sys
-    _app = _sys.modules.get("app")
-    _state = getattr(_app, "generation_state", None) if _app else None
+    from job_state import generation_state as _state
     if not isinstance(_state, dict):
         return {}
     _best = {}

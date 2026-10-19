@@ -8,7 +8,7 @@ import os    # noqa: F401
 import json  # noqa: F401
 import time  # noqa: F401
 import uuid  # noqa: F401
-from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
+from flask import Flask, request, jsonify, send_file, abort, redirect, send_from_directory
 from routes._shared import (  # noqa: F401  再导出：既有装饰器/调用零改动
     _autopilot_guard, _friendly_error, _prompt_memory_dead_count,
     _prompt_memory_used_total, _prompt_memory_view)
@@ -24,7 +24,7 @@ autonomous_bp = Blueprint('autonomous', __name__)
 @_autopilot_guard
 def api_autonomous_start():
     """一键启动全自动生产：上传小说后，AI对话定风格，然后一键启动24h自动生产"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # A-01（F-01）：统一走 _project_or_400（缺失/越界 → 400，不落共享 'project' 命名空间）
     project_name, err = _project_or_400(data.get('project_name') or '')
     if err is not None:
@@ -78,7 +78,7 @@ def api_autonomous_start():
 @_autopilot_guard
 def api_autonomous_stop():
     """停止全自动生产"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     project, err = _project_or_400(data.get('project_name') or '')
     if err is not None:
         return err
@@ -90,7 +90,7 @@ def api_autonomous_stop():
 @_autopilot_guard
 def api_autonomous_resume():
     """恢复全自动生产"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     project, err = _project_or_400(data.get('project_name') or '')
     if err is not None:
         return err
@@ -113,7 +113,7 @@ def api_autonomous_status():
 @_autopilot_guard
 def api_autonomous_chat():
     """AI 对话指令解析：将用户的自然语言指令转化为生产动作"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     message = str(data.get('message') or '').strip()
     project, err = _project_or_400(data.get('project_name') or '')
     if err is not None:

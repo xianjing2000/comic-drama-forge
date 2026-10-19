@@ -221,7 +221,7 @@ def api_update_episode(novel_id, episode_no):
             script = json.load(f)
     except Exception as e:  # noqa: BLE001
         return jsonify({"success": False, "error": f"剧本读取失败：{e}"}), 500
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     updates = data.get("shots") or []
     if not updates:
         return jsonify({"success": False, "error": "没有要修改的镜头"}), 400

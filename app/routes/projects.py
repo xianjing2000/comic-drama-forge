@@ -31,7 +31,7 @@ import json
 import prompt_memory
 import qc_client
 import style_kit
-from config import CHARACTERS_DIR, CONTINUITY_DIR, DUB_DIR, FINAL_DIR, ITEMS_DIR, NOVELS_DIR, NOVEL_BRIEF_CHARS, QC_DIR, SCENES_DIR, STORYBOARDS_DIR, UPSCALE_DIR, VIDEOS_DIR
+from config import CHARACTERS_DIR, CONTINUITY_DIR, DUB_DIR, FINAL_DIR, ITEMS_DIR, NOVELS_DIR, NOVEL_BRIEF_CHARS, QC_DIR, SCENES_DIR, SCRIPT_DIR, STORYBOARDS_DIR, UPSCALE_DIR, VIDEOS_DIR
 from flask import abort
 from novel_parser import get_novel, preview_novel
 import novel_parser
@@ -45,7 +45,7 @@ def api_projects_list():
                     "index_path": project_store.PROJECT_INDEX_PATH})
 @projects_bp.route('/api/projects', methods=['POST'])
 def api_projects_create():
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     name = (data.get('name') or '').strip()
     if not name:
         return jsonify({"error": "项目名称不能为空"}), 400
@@ -86,7 +86,7 @@ def api_projects_ensure_for_novel():
     自动生产控制台的第 1 步：用户上传小说后，前端立刻调用本接口把项目建好并选中，
     避免「小说传上来了但托管没项目可生产」的断档。名称取小说标题（清洗后）。
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     novel_id = str(data.get('novel_id') or '').strip()
     if not novel_id:
         return jsonify({"success": False, "error": "缺少 novel_id"}), 400
@@ -187,7 +187,7 @@ def api_project_novel_brief(pid):
     return jsonify({"success": True, **out})
 @projects_bp.route('/api/projects/<path:pid>/rename', methods=['POST'])
 def api_project_rename(pid):
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     name = (data.get('name') or '').strip()
     if not name:
         return jsonify({"error": "新项目名不能为空"}), 400
@@ -205,9 +205,39 @@ def api_project_config(pid):
         return jsonify({"success": True, "project": rec["dir_key"],
                         "config": project_store.read_config(rec["dir_key"]),
                         "config_path": project_store.paths(rec["dir_key"])["config"]})
-    cfg = project_store.update_config(rec["dir_key"], request.json or {})
+    cfg = project_store.update_config(rec["dir_key"], (request.get_json(silent=True) or {}))
     return jsonify({"success": True, "project": rec["dir_key"], "config": cfg,
                     "project_record": project_store.get_project(rec["id"])})
+
+
+@projects_bp.route('/api/projects/<path:pid>/text-rules', methods=['GET', 'POST'])
+def api_project_text_rules(pid):
+    """项目文本规则（A2 角色名词表 + L2 发音替换表）。
+
+    GET  → {aliases, pronounce, path, alias_count, pronounce_count}
+    POST body ``{"aliases": {"别名": "标准名"}, "pronounce": {"原词": "同音写法"}}``
+         → 整表覆盖保存（空对象 = 关闭，默认即空）。
+
+    生效范围（刻意收窄）：
+    · aliases   → **读剧本后**把镜头里的角色/物品/说话人名收敛到标准名（磁盘剧本不动）；
+                  台词文本里的别名同样替换（避免配音念错名字）。
+    · pronounce → **只改送去 TTS 的朗读文本**（Qwen3-TTS 不支持 SSML/发音词典）。
+    两者都不进字幕、不进画面提示词。
+    """
+    rec = project_store.get_project(pid)
+    if not rec:
+        return jsonify({"error": "项目不存在", "ref": pid}), 404
+    import text_rules
+    if request.method == 'GET':
+        return jsonify({"success": True, **text_rules.describe(rec["dir_key"])})
+    data = (request.get_json(silent=True) or {})
+    try:
+        path = text_rules.save(rec["dir_key"], data)
+    except Exception as e:  # noqa: BLE001
+        _app_logger().error("项目文本规则保存失败 %s：%s", rec["dir_key"], e)
+        return jsonify({"success": False, "error": f"保存失败：{e}"}), 500
+    return jsonify({"success": True, "saved": path,
+                    **text_rules.describe(rec["dir_key"])})
 @projects_bp.route('/api/projects/<path:pid>/cover')
 def api_project_cover(pid):
     """项目封面图（无封面 404，前端回落占位图标）"""
@@ -229,7 +259,7 @@ def api_project_cover_generate(pid):
     rec = project_store.get_project(pid)
     if not rec:
         return jsonify({"error": "项目不存在", "ref": pid}), 404
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     try:
         cover = _generate_project_cover(rec, seed=data.get('seed'))
     except Exception as e:  # noqa: BLE001
@@ -239,7 +269,7 @@ def api_project_cover_generate(pid):
                     "cover_url": f"/api/projects/{rec['dir_key']}/cover?t={int(time.time())}"})
 @projects_bp.route('/api/projects/<path:pid>/delete', methods=['POST'])
 def api_project_delete(pid):
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     confirm = bool(data.get('confirm'))
     rec = project_store.get_project(pid)
     if not rec:
@@ -482,6 +512,19 @@ def api_project_asset_detail(pid):
             meta = dict(hit)
             meta["script_path"] = sp["path"]
             break
+    # ⭐ 2026-10-17：把该资产的**落盘质检结论**（base.meta.json 的 qc）一并发给前端 ——
+    #    此前端点只回剧本字段，资产弹窗看不到「这张图质检过没过、问题在哪」。
+    asset_qc = {}
+    try:
+        for _cand in ("base.meta.json", "base.png.meta.json"):
+            _mp = os.path.join(target, _cand)
+            if os.path.isfile(_mp):
+                with open(_mp, "r", encoding="utf-8") as _f:
+                    asset_qc = (json.load(_f) or {}).get("qc") or {}
+                break
+    except Exception as _qe:  # noqa: BLE001 - 质检信息是增强，绝不影响详情接口
+        _app_logger().debug(f"资产质检结论读取失败（忽略）：{_qe}")
+        asset_qc = {}
     shot_refs = []
     for sp in detail_scripts:
         for sh in (sp["data"].get("shots") or []):
@@ -498,6 +541,7 @@ def api_project_asset_detail(pid):
         "thumb_url": (base or (views[0] if views else {})).get("url") if views else "",
         "meta": {
             "name": name,
+            "qc": asset_qc,
             "prompt_zh": meta.get("reference_prompt_zh") or "",
             "prompt_en": meta.get("reference_prompt_en") or "",
             "appearance": meta.get("appearance") or "",
@@ -816,8 +860,12 @@ def _cover_prompt_from_outline(rec: dict, outline: dict, hero_imgs: list, villai
         base = f"漫剧主视觉封面插画，《{name}》：{summary}"
     else:
         base = f"漫剧主视觉封面插画，《{name}》主题氛围场景"
-    # 加入风格 + 光影 + 构图（与旧版一致，避免画质下降）
-    base += "，戏剧性光影，电影感构图，景深层次丰富，高细节，画面中不出现任何文字"
+    # 爆款封面口径（2026-10-18）：人脸视觉中心 + 正反对峙冲突感 + 顶部留标题版位。
+    # 标题文字不交给模型画（扩散模型写中文必乱），由 cover_art 在出图后确定性叠加。
+    base += ("，主角面部为画面视觉中心（半身近景），表情强烈有戏，反派从侧后方逼近形成对峙压迫感，"
+             "冲突张力强，强对比戏剧光与轮廓光，景深层次丰富，高细节，"
+             "画面上方约三分之一保留较暗且干净的背景区域（后续叠加标题用），"
+             "画面中不出现任何文字、字幕或水印")
     # 如有角色参考图，追加“主角团/反派”人数（不点名，避免把群演误画成反派）
     extras = []
     if hero_imgs:
@@ -834,6 +882,8 @@ def _generate_project_cover(rec: dict, seed=None) -> str:
 
     新版：优先读 book_outline.json 作为主题输入，并用主角/反派角色资产图作为参考（最多 3 张），
     走故事板/参考图生成链路，若资产缺失则回落到旧的场景 t2i 链路（保持无角色时也能出图）。
+    ⭐ 2026-10-18：出图后由 cover_art 叠加「大字剧名 + 卖点短句」（爆款封面口径）；
+    原始出图保留为 cover_raw.png，排版失败回退原图，封面生成不因排版失败而失败。
     """
     dir_key = rec["dir_key"]
     cfg = project_store.read_config(dir_key)
@@ -852,8 +902,10 @@ def _generate_project_cover(rec: dict, seed=None) -> str:
         )
     else:
         # 无参考图时回落到场景 t2i（旧逻辑，保证封面始终能生成）
-        prompt = (f"漫剧主视觉封面插画，《{name}》主题氛围场景，戏剧性光影，电影感构图，"
-                  f"景深层次丰富，高细节，画面中不出现任何文字")
+        prompt = (f"漫剧主视觉封面插画，《{name}》主题氛围场景，冲突对峙的戏剧性瞬间，"
+                  f"强对比戏剧光与轮廓光，电影感构图，景深层次丰富，高细节，"
+                  f"画面上方约三分之一保留较暗且干净的背景区域（后续叠加标题用），"
+                  f"画面中不出现任何文字、字幕或水印")
         outs = comfyui_client.generate_scene_base(
             prompt, seed=seed, style=style, size=size,
             filename_prefix=f"comic_drama/{dir_key}_cover")
@@ -861,7 +913,19 @@ def _generate_project_cover(rec: dict, seed=None) -> str:
         raise RuntimeError("ComfyUI 未返回任何图片")
     cover = _project_cover_path(dir_key)
     os.makedirs(os.path.dirname(cover), exist_ok=True)
-    _move_with_retry(outs[0], cover)   # G8② 同款：move 而非 copy，ComfyUI output 不留副本
+    # 原始出图留一份（cover_raw.png）：换标题/排错时不必重出图
+    raw = os.path.join(os.path.dirname(cover), "cover_raw.png")
+    _move_with_retry(outs[0], raw)   # G8② 同款：move 而非 copy，ComfyUI output 不留副本
+    # ⭐ 2026-10-18 爆款封面排版：大字剧名 + 卖点短句（选字/分行/渲染见 cover_art）。
+    # 排版失败由 cover_art 内部回退原图，这里再兜一层 —— 封面生成绝不因排版失败而失败。
+    try:
+        import cover_art
+        title, tagline = cover_art.load_cover_texts(dir_key, name, CONTINUITY_DIR, SCRIPT_DIR)
+        if not cover_art.burn_title(raw, cover, title, tagline=tagline):
+            shutil.copy2(raw, cover)
+    except Exception as e:  # noqa: BLE001
+        _app_logger().warning("封面排版失败（保留原图）：%s", e)
+        shutil.copy2(raw, cover)
     return cover
 def _precip_meta_of(asset_dir: str, filename: str) -> dict:
     """读某个产物的旁路元数据（<产物>.meta.json），失败返回 {}。"""

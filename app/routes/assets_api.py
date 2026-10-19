@@ -24,6 +24,9 @@ import time  # noqa: F401
 import uuid  # noqa: F401
 from agent_core import logger
 from asset_worker import _generate_asset_task
+from asset_worker import item_asset_dir
+from asset_worker import generate_item_state_variant
+from asset_worker import _first_existing_asset_image
 from character_helpers import _character_base_prompt
 from character_helpers import _character_outfit_dir
 from character_helpers import _find_script_character
@@ -46,7 +49,6 @@ from routes._shared import _project_style
 from routes._shared import _safe_project
 from routes._shared import _safe_upload_name
 from routes._shared import _serve_safe
-from shared_project import _ep_dir as _ep_dir_for
 from storyboard_helpers import _write_artifact_meta
 from style_helpers import _style_aspect_guard
 import sheet_split
@@ -673,6 +675,131 @@ def api_character_outfits_list():
         logger.warning("服装变体列表读取失败（返回空数组）：%s", e)
         out = []
     return jsonify({"success": True, "outfits": out})
+
+
+def _item_state_desc_of(state_json: str) -> str:
+    """状态变体的状态文案：states/<slug>.json 里 state 字段；任何失败返回 ''（列表不因此报错）。"""
+    try:
+        if os.path.isfile(state_json):
+            with open(state_json, "r", encoding="utf-8") as f:
+                return str((json.load(f) or {}).get("state") or "").strip()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("道具状态 sidecar 读取失败（回落 slug）：%s", e)
+    return ""
+
+
+@assets_api_bp.route('/api/assets/item/state-variant', methods=['POST'])
+def api_item_state_variant_generate():
+    """生成道具**状态变体**（E，2026-10-16）：同一道具的不同状态图（如「剑完好」vs「剑已断」）。
+
+    body = {project_name, item(道具名), state(状态描述), overwrite?}
+    以该道具 base 图为参考做**图片编辑**，落 items/<项目>/<道具>/states/<slug>.png；
+    分镜按 state 取图（见 asset_refs.item_state_image）。返回 {task_id, status:"started"}，
+    进度轮询 /api/generation/status/<task_id>。已存在同 slug 且非空 → 默认跳过（overwrite=true 重画）。
+    """
+    data = _body()
+    project_name, err = _project_or_400((data.get('project_name') or '').strip())
+    if err is not None:
+        return err
+    item = (data.get('item') or '').strip()
+    state = str(data.get('state') or '').strip()
+    overwrite = bool(data.get('overwrite'))
+    # 道具名是路径段，与角色同守卫口径
+    if not item or '/' in item or '\\' in item or item in ('.', '..'):
+        return jsonify({"success": False,
+                        "error": "item（道具名）不能为空且不得含路径分隔符"}), 400
+    if not state:
+        return jsonify({"success": False, "error": "state（状态描述）不能为空"}), 400
+
+    import asset_refs as _asset_refs
+    slug = _asset_refs.state_slug(state)
+    if not slug:
+        return jsonify({"success": False, "error": "state 无法转成合法文件名（slug 为空）"}), 400
+
+    item_dir = item_asset_dir(project_name, item)
+    base = _first_existing_asset_image(item_dir)
+    if not base:
+        return jsonify({"success": False, "item": item,
+                        "error": "该道具还没有基础图，请先出道具资产再生成状态变体"}), 400
+    out = os.path.join(item_dir, "states", slug + ".png")
+    if not overwrite and os.path.isfile(out) and os.path.getsize(out) > 0:
+        return jsonify({"success": True, "skipped": True, "task_id": "",
+                        "item": item, "state": state, "slug": slug,
+                        "message": "该状态变体已存在；如需重画请带 overwrite=true"})
+
+    task_id = f"itemstate_{project_name}_{uuid.uuid4().hex[:12]}"
+    with lock:
+        generation_state[task_id] = {
+            "status": "running", "asset_type": "item_state",
+            "progress": 0, "total": 1, "current": 0,
+            "phase": "道具状态变体", "results": [],
+            "project_name": project_name, "step": "asset_item_state",
+            "item": item, "state": state, "slug": slug,
+        }
+
+    def _run():
+        try:
+            r = generate_item_state_variant(project_name, item, state)
+        except Exception as e:  # noqa: BLE001
+            logger.error("道具状态变体任务异常：项目=%s 道具=%s 状态=%s：%s",
+                         project_name, item, state, e, exc_info=True)
+            r = {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+        with lock:
+            _st = generation_state.get(task_id)
+            if isinstance(_st, dict):
+                _st["progress"] = 1
+                _st["current"] = 1
+                _st["results"] = [r]
+                _st["status"] = "completed" if r.get("ok") else "failed"
+                if not r.get("ok"):
+                    _st["error"] = r.get("error") or "生成失败"
+
+    thread = threading.Thread(target=_run)
+    thread.daemon = True
+    thread.start()
+    logger.info("[道具状态变体] 项目=%s 道具=%s 状态=%s（overwrite=%s）任务=%s 已启动",
+                project_name, item, state, overwrite, task_id)
+    return jsonify({"task_id": task_id, "status": "started",
+                    "item": item, "state": state, "slug": slug})
+
+
+@assets_api_bp.route('/api/assets/item/state-variants', methods=['GET'])
+def api_item_state_variants_list():
+    """列出某道具已生成的状态变体：query = project_name, item。
+
+    返回 [{slug, state(从 sidecar 读，缺失回落 slug), url, ready}]。
+    目录不存在 / 任何读取异常 → 空数组（fail-open，绝不抛错）。
+    """
+    project_name = _safe_project((request.args.get('project_name') or '').strip())
+    item = (request.args.get('item') or '').strip()
+    if not project_name or not item or '/' in item or '\\' in item or item in ('.', '..'):
+        return jsonify({"success": False, "error": "project_name 与 item 必填",
+                        "states": []}), 400
+    states_dir = os.path.join(item_asset_dir(project_name, item), "states")
+    out = []
+    if not os.path.isdir(states_dir):
+        return jsonify({"success": True, "states": out})
+    try:
+        # 纵深防御：显式校验 realpath 未越出 states_dir（阻断符号链接等目录逃逸）
+        _root_real = os.path.realpath(states_dir)
+        for _fn in sorted(os.listdir(states_dir)):
+            if not _fn.lower().endswith(".png"):
+                continue
+            _fp = os.path.join(states_dir, _fn)
+            if not os.path.isfile(_fp) or not os.path.realpath(_fp).startswith(_root_real + os.sep):
+                logger.warning("[道具状态变体] 异常文件已跳过（越界防护）：%s", _fn)
+                continue
+            _slug = os.path.splitext(_fn)[0]
+            out.append({
+                "slug": _slug,
+                "state": _item_state_desc_of(os.path.join(states_dir, _slug + ".json")) or _slug,
+                "url": "/api/assets/items/%s/%s/states/%s" % (project_name, item, _fn),
+                "ready": os.path.getsize(_fp) > 0,
+            })
+    except Exception as e:  # noqa: BLE001  目录枚举失败按空数组处理（fail-open）
+        logger.warning("道具状态变体列表读取失败（返回空数组）：%s", e)
+        out = []
+    return jsonify({"success": True, "states": out})
 
 
 @assets_api_bp.route('/api/assets/<path:filename>')

@@ -73,7 +73,7 @@ def api_analyze_prompts():
     body: {script, script_path, mode: shots|assets|all, shot_ids: [...], project_name, extra_instruction}
     单镜头重写：mode=shots 且 shot_ids=[该镜头号]
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     script = data.get('script')
     if not isinstance(script, dict) or not script.get('shots'):
         return jsonify({"success": False, "error": "缺少剧本数据（或剧本中没有镜头）"}), 400

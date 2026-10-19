@@ -66,17 +66,10 @@ _DB_PATH = os.getenv("MJSCXT_CRED_DB") or os.path.join(_PROJECT_ROOT, "output", 
 # 改一处即可，不再有「改了这本、漏了那本」。
 from config import AI_MODULES as MODULES
 
-_CREDS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS ai_credentials (
-    module           TEXT PRIMARY KEY,
-    base_url         TEXT NOT NULL DEFAULT '',
-    model            TEXT NOT NULL DEFAULT '',
-    api_key_cipher   TEXT NOT NULL DEFAULT '',
-    reasoning_effort TEXT NOT NULL DEFAULT '',
-    source           TEXT NOT NULL DEFAULT '',
-    updated_at       TEXT NOT NULL
-);
-"""
+# t33/F-5（2026-10-16）：DDL 收敛到 schema.TABLES（单一来源）——不再本地重复定义，
+# 杜绝「schema.py 的副本丢 NOT NULL DEFAULT」这类漂移（T23 实测过）。
+import schema as _schema
+_CREDS_SCHEMA = _schema.TABLES['ai_credentials']
 
 _LOCK = threading.RLock()
 _SCHEMA_READY = False

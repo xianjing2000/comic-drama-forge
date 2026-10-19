@@ -345,7 +345,7 @@ def api_novel_chapters_analyze(novel_id):
             "success": False,
             "error": "尚未配置「文本分析模型」，无法做章节目录体检；"
                      "系统已用规则兜底折叠（标题行外无正文即视为卷/分部标题）。"}), 400
-    force = bool((request.json or {}).get("force"))
+    force = bool(((request.get_json(silent=True) or {})).get("force"))
     try:
         meta = ensure_chapter_structure(NOVELS_DIR, novel_id, client, force=force)
     except NovelParseError as e:
@@ -387,7 +387,7 @@ def api_novel_chapter_preflight(novel_id, chapter_index):
         return jsonify({"success": False,
                         "error": f"章节 {chapter_index} 不存在（共 {len(all_chapters)} 章）"}), 404
 
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     proj = _resolve_novel_project(data, meta)
     key = _novel_key(meta, proj["dir_key"])
     # 接线 force（t55）：force=false（默认）且已有前置解析结果 → 直接复用，不重复 LLM 解析；

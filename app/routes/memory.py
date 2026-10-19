@@ -91,7 +91,7 @@ def api_memory_lessons_clear():
 
     → {success, cleared, kind}。
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     kind = str(data.get("kind") or "").strip()
     try:
         cleared = prompt_memory.get_memory(PROJECT_OUTPUT_DIR).clear(kind)
@@ -165,129 +165,6 @@ def api_memory_list():
         "total": len(entries),
     })
 
-@memory_bp.route('/api/memory/search', methods=['GET'])
-@_autopilot_guard
-def api_memory_search():
-    """搜索记忆"""
-    query = request.args.get('query', '')
-    mem_type = request.args.get('type')
-    limit = int(request.args.get('limit', 10))
-    if not query:
-        return jsonify({"success": False, "error": "缺少 query 参数"}), 400
-    mem = get_memory_system()
-    results = mem.search_by_pattern(query, mem_type=mem_type, limit=limit)
-    return jsonify({
-        "success": True,
-        "memories": [e.to_dict() for e in results],
-        "total": len(results),
-    })
-
-@memory_bp.route('/api/memory/record', methods=['POST'])
-@_autopilot_guard
-def api_memory_record():
-    """记录记忆"""
-    data = request.get_json(silent=True) or {}
-    if not data:
-        return jsonify({"success": False, "error": "缺少请求体"}), 400
-
-    mem_type = data.get('type', 'insight')
-    content = data.get('content', '')
-    context = data.get('context', {})
-    confidence = data.get('confidence', 1.0)
-    tags = data.get('tags', [])
-    source = data.get('source', 'manual')
-
-    if not content:
-        return jsonify({"success": False, "error": "缺少 content"}), 400
-
-    mem = get_memory_system()
-    entry = mem.add_memory(
-        mem_type=mem_type,
-        content=content,
-        context=context,
-        confidence=confidence,
-        tags=tags,
-        source=source,
-    )
-    return jsonify({"success": True, "memory": entry.to_dict()})
-
-@memory_bp.route('/api/memory/record-lesson', methods=['POST'])
-@_autopilot_guard
-def api_memory_record_lesson():
-    """记录质检教训"""
-    data = request.get_json(silent=True) or {}
-    if not data:
-        return jsonify({"success": False, "error": "缺少请求体"}), 400
-
-    project = data.get('project', '')
-    episode = data.get('episode', 0)
-    prompt = data.get('prompt', '')
-    issues = data.get('issues', [])
-    category = data.get('category', 'quality')
-
-    if not project or not issues:
-        return jsonify({"success": False, "error": "缺少必要参数"}), 400
-
-    mem = get_memory_system()
-    entry = mem.record_lesson(
-        project=project,
-        episode=episode,
-        prompt=prompt,
-        issues=issues,
-        category=category,
-    )
-    return jsonify({"success": True, "memory": entry.to_dict()})
-
-@memory_bp.route('/api/memory/record-success', methods=['POST'])
-@_autopilot_guard
-def api_memory_record_success():
-    """记录成功经验"""
-    data = request.get_json(silent=True) or {}
-    if not data:
-        return jsonify({"success": False, "error": "缺少请求体"}), 400
-
-    project = data.get('project', '')
-    episode = data.get('episode', 0)
-    prompt = data.get('prompt', '')
-    highlights = data.get('highlights', [])
-    category = data.get('category', 'quality')
-
-    if not project or not highlights:
-        return jsonify({"success": False, "error": "缺少必要参数"}), 400
-
-    mem = get_memory_system()
-    entry = mem.record_success(
-        project=project,
-        episode=episode,
-        prompt=prompt,
-        highlights=highlights,
-        category=category,
-    )
-    return jsonify({"success": True, "memory": entry.to_dict()})
-
-@memory_bp.route('/api/memory/optimize-prompt', methods=['POST'])
-@_autopilot_guard
-def api_memory_optimize_prompt():
-    """基于记忆优化提示词"""
-    data = request.get_json(silent=True) or {}
-    if not data:
-        return jsonify({"success": False, "error": "缺少请求体"}), 400
-
-    base_prompt = data.get('prompt', '')
-    issues = data.get('issues', [])
-
-    if not base_prompt:
-        return jsonify({"success": False, "error": "缺少 prompt"}), 400
-
-    mem = get_memory_system()
-    optimized = mem.evolution.auto_optimize_prompt(base_prompt, issues)
-    return jsonify({
-        "success": True,
-        "original": base_prompt,
-        "optimized": optimized,
-        "improvements": len(issues),
-    })
-
 @memory_bp.route('/api/memory/insights', methods=['GET'])
 @_autopilot_guard
 def api_memory_insights():
@@ -315,27 +192,3 @@ def api_memory_clear_old():
         "days": days,
     })
 
-@memory_bp.route('/api/memory/export', methods=['GET'])
-@_autopilot_guard
-def api_memory_export():
-    """导出记忆数据"""
-    mem_type = request.args.get('type')
-    mem = get_memory_system()
-    entries = mem.list_all(mem_type=mem_type) if mem_type else mem.list_all()
-    return jsonify({
-        "success": True,
-        "memories": [e.to_dict() for e in entries],
-        "total": len(entries),
-        "exported_at": datetime.now().isoformat(),
-    })
-
-@memory_bp.route('/api/memory/trends', methods=['GET'])
-@_autopilot_guard
-def api_memory_trends():
-    """获取趋势分析"""
-    mem = get_memory_system()
-    trends = mem.evolution.analyze_trends()
-    return jsonify({
-        "success": True,
-        "trends": trends,
-    })

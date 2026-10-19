@@ -12,7 +12,6 @@
 """
 import json
 import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from pathlib import Path
 from datetime import datetime, timedelta
 from typing import List, Dict, Any

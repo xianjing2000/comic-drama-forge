@@ -761,6 +761,16 @@ class PromptMemory:
         "It defines the framing and the spatial layout of the frame",
         "3D导演台构图基准",
         "SCENE AND ACTION:", "Location:", "Action and content:",
+        # 2026-10-18 紧凑自然语言版分镜提示词（build_storyboard_prompt_compact）的固定句式
+        "Generate ONE storyboard frame", "opening instant of this shot",
+        "Opening instant (draw exactly this static moment",
+        "Stylized hand-drawn / CG render of the given art style",
+        "is a GROUP of", "No other people appear.",
+        # 2026-10-18 首帧口径：分镜图只画开头瞬间，画面段主体改为 OPENING FRAME 句式；
+        # 两条片段登记进指纹剥离表，保证「有首帧/无首帧」提示词的教训召回口径一致。
+        "OPENING FRAME (this still must be EXACTLY this instant",
+        "the static moment at the very start of the shot",
+        "draw this and nothing later):",
         "Speaking state:", "is quietly saying one short line",
         "shown only as natural lip movement and subtle expression changes",
         "Emotion and mood:", "LIGHTING:", "STYLE:", "PRESERVE:",

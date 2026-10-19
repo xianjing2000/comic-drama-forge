@@ -1918,10 +1918,12 @@ STATE_SCHEMA_HINT = """{
     "location": "本集开场地点",
     "transition": "从上集结尾地点/时间到本集开场的衔接方式（一句话，说明移动或转场过程；首集填『开篇』）",
     "character_states": [{"name": "角色名", "status": "处境/情绪", "outfit": "服装状态", "goal": "当前目标"}],
+    "item_states": [{"name": "物品/道具名", "state": "该道具此刻的状态（如『剑完好』『门半开』『信封未拆』『玉佩已碎』）；无变化可省略"}],
     "open_foreshadows": [{"id": "F1", "desc": "伏笔描述", "from_episode": 1}]},
   "state_out": {"time": "本集结尾时间", "location": "本集结尾地点",
     "transition": "本集结尾到下一集开场的建议承接方式（一句话）",
     "character_states": [{"name": "角色名", "status": "结尾处境/情绪", "outfit": "结尾服装状态", "goal": "下一步目标"}],
+    "item_states": [{"name": "物品/道具名", "state": "该道具结尾时的状态（供下一集承接；无变化可省略）"}],
     "open_foreshadows": [{"id": "F1", "desc": "尚未回收的伏笔", "from_episode": 1}]},
   "key_events": ["本集实际发生的关键事件（3-6 条，供下一集禁止重演）"],
   "plot_points": ["本集剧情要点（4-6 条）"],
@@ -2799,6 +2801,25 @@ def convert_chapter_with_continuity(client, novel_meta: dict, novel_text: str, c
         script["scene_flow"] = novel_to_script.collect_scene_flow(script.get("shots") or [])
         _pn = script.setdefault("production_notes", {})
         _pn["scene_count"] = len(script["scene_flow"])
+        # ⭐ 2026-10-19 根修：落盘前补一次 v3 增强 —— 覆盖率补镜 / 局部重写 / 资产对齐都发生在
+        #   apply_episode_schema（及其末尾的 enrich_v3）之后，后置改写的新镜头/新台词会绕过 v3
+        #   schema（生产实证：9 句台词缺 spoken_text/source_text、场次契约 shot_ids 陈旧）。
+        #   这里在 normalize_scene_numbering 之后、collect_scene_flow 之前重跑 enrich_v3：
+        #   三层台词补全、创作卡空壳兜底、场次契约按当前镜头流刷新。幂等 + fail-open。
+        try:
+            import script_v3  # noqa: PLC0415
+            script_v3.enrich_v3(script, project_root=project_key)
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("落盘前 v3 增强失败（已跳过，不阻断落盘）：%s", _e)
+        # ⭐ 2026-10-19：LLM 二次补全创作卡与证据链实内容 —— enrich_v3 只能给骨架（从既有
+        #   字段推导），episode_card 的目标/阻力/代价/紧迫感/信息差/金句、evidence_ledger 的
+        #   source/evidence/consequence 需要模型按已定稿镜头表补实。独立小请求（约 4K token）
+        #   放在最后，不受 shots 长 JSON 截断影响。fail-open：失败保留 enrich 结果。
+        try:
+            import script_v3  # noqa: PLC0415
+            script_v3.llm_card_ledger(client, script, project_root=project_key)
+        except Exception as _e:  # noqa: BLE001
+            logger.warning("落盘前 v3 创作字段二次补全失败（已跳过，不阻断落盘）：%s", _e)
         if not _sn_norm.get("ok"):
             _w = script.setdefault("metadata", {}).setdefault("warnings", [])
             if isinstance(_w, list):

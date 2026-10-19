@@ -99,7 +99,7 @@ def _consistency_collect(project_name: str, episode_no: int = None) -> dict:
 @consistency_bp.route('/api/consistency/run', methods=['POST'])
 def api_consistency_run():
     """执行一致性校验（可指定 project_name / episode_no / 是否含资产多视图）"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     project_name = _safe_project(data.get('project_name') or '')
     if not project_name:
         return jsonify({"success": False, "error": "缺少 project_name"}), 400

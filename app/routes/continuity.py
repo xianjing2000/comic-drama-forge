@@ -71,7 +71,7 @@ def api_continuity_revalidate(novel_id, episode_no):
     validation["quotes"] = continuity.check_quotes_in_script(CONTINUITY_DIR, key, script, episode_no)
 
     rewrite = {"triggered": False, "rounds": 0, "rewritten_shot_ids": [], "notes": []}
-    body = request.json or {}
+    body = (request.get_json(silent=True) or {})
     if body.get("rewrite") and validation.get("rewrite_needed") and int(episode_no) > 1:
         issues = [i for i in (validation.get("issues") or [])
                   if i.get("severity") in ("high", "medium")]

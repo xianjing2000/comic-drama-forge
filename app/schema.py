@@ -74,10 +74,14 @@ TABLES: Dict[str, str] = {
         ' updated_at TEXT NOT NULL,'
         ' PRIMARY KEY (task_id, unit_key),'
         ' FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE)'),
+    # t33/F-5（2026-10-16）：权威 DDL 与 ai_credentials_db._CREDS_SCHEMA 对齐 —— 此前的
+    # 副本**丢了每列 NOT NULL DEFAULT ''**（T23 实测的漂移，同一份代码两处定义不同）。
     'ai_credentials': (
         'CREATE TABLE IF NOT EXISTS ai_credentials ('
-        ' module TEXT PRIMARY KEY, base_url TEXT, model TEXT, api_key_cipher TEXT,'
-        ' reasoning_effort TEXT, source TEXT, updated_at TEXT)'),
+        " module TEXT PRIMARY KEY, base_url TEXT NOT NULL DEFAULT '',"
+        " model TEXT NOT NULL DEFAULT '', api_key_cipher TEXT NOT NULL DEFAULT '',"
+        " reasoning_effort TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '',"
+        ' updated_at TEXT NOT NULL)'),
     'app_settings': (
         'CREATE TABLE IF NOT EXISTS app_settings ('
         ' key TEXT PRIMARY KEY, value TEXT, value_type TEXT, updated_at TEXT, note TEXT)'),
@@ -247,6 +251,15 @@ def ensure_schema(db_path: str) -> Dict[str, Any]:
                          'ensure_schema 自动应用'))
                     ver = SCHEMA_VERSION
                 out['version'] = ver
+            # F-3（2026-10-16）：跑一次版本化迁移（migrations.py）—— 幂等、无迁移零开销。
+            #   接线在 ensure_schema 内（而非各启动点）→ 唯一启动点（serve.py 调本函数）
+            #   自动覆盖。失败绝不阻断 schema 初始化（DB 引导的既有 fail-open 纪律）。
+            try:
+                import migrations as _mig
+                out['migrations'] = _mig.migrate(db_path)
+            except Exception as _me:  # noqa: BLE001
+                out['migrations'] = {'ok': False,
+                                     'error': '%s: %s' % (type(_me).__name__, _me)}
             out['ok'] = True
         finally:
             conn.close()

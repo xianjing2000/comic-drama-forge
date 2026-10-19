@@ -40,6 +40,8 @@ SCENE_HD_PREFIX = "cell"
 
 #: 角色三视图增强文件名（正面/侧面/背面，与 ASSET_VIEW_STEMS 口径对齐）
 CHARACTER_HD_VIEWS = ("front", "side", "back")
+#: supporting（双格：正面+侧面）的切分视图名（2026-10-16 按实际版式重写切分）。
+CHARACTER_HD_VIEWS_2 = ("front", "side")
 
 
 def hd_dir(asset_dir: str) -> str:
@@ -74,6 +76,14 @@ CHAR_HD_PROMPT_TMPL = (
     "输出必须是**单张完整画面**，不得出现分格线、不得拼图、不得出现多个视角。")
 
 VIEW_ZH = {"front": "正面", "side": "侧面", "back": "背面"}
+
+#: 整图 HD 重绘提示词（四区/单图/合影等**不可切分**的版式）：保持版式与分区，不合并成单张立绘。
+CHAR_HD_SHEET_PROMPT = (
+    "参考图1（<image1>）是一张角色设定表（可能含多个分区/多视角/中文文字标注）。"
+    "请把它整体重绘为一张**更清晰**的设定表：严格保持画面中的所有分区布局与相对位置、"
+    "每个人物形象（五官/发型/服装款式与配色/体型比例）、以及文字标注的位置与内容完全一致；"
+    "仅提升清晰度与细节，不得增删分区、不得改变版式、不得把多个分区合并成单张立绘、"
+    "不得改变身份特征或换装。输出是**一张完整设定表**，不是单张立绘。")
 
 
 def _cut_grid(image_path: str, cols: int, rows: int) -> List:
@@ -157,43 +167,69 @@ def enhance_scene_grid(asset_dir: str, *, grid_name: str = "grid.png",
 
 def enhance_character_sheet(asset_dir: str, *, sheet_name: str = "base.png",
                             megapixels: float = 1.5, seed: Optional[int] = None,
-                            client=None) -> dict:
-    """角色三视图整图 → 切 3 栏 → 逐栏放大重绘 → <asset_dir>/hd/{front,side,back}.png
+                            client=None, tier: str = "") -> dict:
+    """角色基础图 → HD 增强（**按实际版式**，2026-10-16 重写）。
 
-    三视图是「正/侧/背三张全身视图横排」，故按 1×3 等分切。
+    ⚠️ 版式随 tier 变（`_character_tier`）：
+      · **supporting** = 双格（正面+侧面）→ 切 **2 栏** → hd/front.png、hd/side.png；
+      · **primary**(四区不对称) / **minor**(单图) / **crowd**(合影) / unknown → **不切**，
+        整图重绘 → hd/base.png（用 CHAR_HD_SHEET_PROMPT，保持版式与分区）。
+    旧实现对所有档位一律按「三视图 1×3」硬切（`_cut_grid(src,3,1)`）—— 四区不对称版面/双格/单图/
+    合影都会被切错，产物还是分镜**首选**身份锚点。四区版式代码**自陈无法行列切分**
+    （`comfyui_client.py:1545`「四区不对称布局，无法做行列投影切分」）。
     """
     import style_kit
+    from PIL import Image
     src = os.path.join(asset_dir, sheet_name)
     if not os.path.exists(src):
-        return {"ok": False, "reason": "无三视图整图", "produced": [], "failed": [], "seconds": 0.0}
+        return {"ok": False, "reason": "无基础图", "produced": [], "failed": [], "seconds": 0.0}
     if client is None:
         import comfyui_client
         client = comfyui_client.ComfyUIClient()
     t0 = time.time()
-    views = _cut_grid(src, 3, 1)
-    target = style_kit.aspect_size(views[0].size, megapixels)
     d = hd_dir(asset_dir)
-    produced, failed = [], []
-    logger.info("[资产增强] 角色三视图 → %d 视图，单视图 → %dx%d（%.1fMP）",
-                len(views), target[0], target[1], megapixels)
-    for view, im in zip(CHARACTER_HD_VIEWS, views):
-        name = "%s.png" % view
-        out = os.path.join(d, name)
-        tmp = os.path.join(d, "_tmp_%s" % name)
-        _upscale_to(im, target).save(tmp)
-        prompt = CHAR_HD_PROMPT_TMPL.format(view_zh=VIEW_ZH.get(view, view))
-        if _redraw(client, tmp, prompt, out, seed=seed):
-            produced.append(name)
-        else:
-            failed.append(name)
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    _tier = str(tier or "").strip().lower()
+
+    if _tier == "supporting":
+        # —— 双格（正面+侧面）：切 2 栏，逐栏 HD ——
+        cells = _cut_grid(src, 2, 1)
+        target = style_kit.aspect_size(cells[0].size, megapixels)
+        produced, failed = [], []
+        logger.info("[资产增强] 角色双格 → %d 格，单格 → %dx%d（%.1fMP）",
+                    len(cells), target[0], target[1], megapixels)
+        for view, im in zip(CHARACTER_HD_VIEWS_2, cells):
+            name = "%s.png" % view
+            out = os.path.join(d, name)
+            tmp = os.path.join(d, "_tmp_%s" % name)
+            _upscale_to(im, target).save(tmp)
+            prompt = CHAR_HD_PROMPT_TMPL.format(view_zh=VIEW_ZH.get(view, view))
+            (produced if _redraw(client, tmp, prompt, out, seed=seed) else failed).append(name)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        sec = time.time() - t0
+        logger.info("[资产增强] 角色（双格）完成：成功 %d / 失败 %d，耗时 %.1f 秒",
+                    len(produced), len(failed), sec)
+        return {"ok": bool(produced), "produced": produced, "failed": failed, "seconds": round(sec, 1)}
+
+    # —— primary / minor / crowd / unknown：整图 HD（不切，保持版式）——
+    with Image.open(src) as _im:
+        _im = _im.convert("RGB")
+        target = style_kit.aspect_size(_im.size, megapixels)
+        out = os.path.join(d, "base.png")
+        tmp = os.path.join(d, "_tmp_base.png")
+        _upscale_to(_im, target).save(tmp)
+    ok = _redraw(client, tmp, CHAR_HD_SHEET_PROMPT, out, seed=seed)
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
     sec = time.time() - t0
-    logger.info("[资产增强] 角色完成：成功 %d / 失败 %d，耗时 %.1f 秒（%s）",
-                len(produced), len(failed), sec, os.path.basename(asset_dir))
-    return {"ok": bool(produced), "produced": produced, "failed": failed, "seconds": round(sec, 1)}
+    logger.info("[资产增强] 角色（整图·%s）→ hd/base.png：%s，耗时 %.1f 秒",
+                _tier or "unknown", "成功" if ok else "失败", sec)
+    return {"ok": bool(ok), "produced": ["base.png"] if ok else [],
+            "failed": [] if ok else ["base.png"], "seconds": round(sec, 1)}
 
 
 def enhance_asset_dir(asset_dir: str, kind: str, **kw) -> dict:

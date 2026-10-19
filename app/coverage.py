@@ -228,13 +228,15 @@ def _shot_lines(shots, desc_limit: int = 40) -> list:
 
 def _judge_units(client, shots, units, ids, events=None, label: str = "coverage",
                  batch_size: int = JUDGE_BATCH_UNITS, retry_missing: bool = True) -> tuple:
-    """批量 LLM 判定；返回 ({unit_id: bool}, {unit_id: bool}, failed_batches)
+    """批量 LLM 判定；返回 (judged, covered, failed, critical)
 
-    第一个返回值是「被判定过」的单元（含判 false 的），第二个仅判 true 的。
+    第一个返回值是「被判定过」的单元（含判 false 的），第二个仅判 true 的；
+    第四个 critical 为 {unit_id: bool}：该单元是否「核心剧情关键点」——
+    丢失后观众无法理解核心因果的单元（证据/身份/能力证明、剧情转折、任务下达、关键金句）。
     """
-    judged, covered, failed = {}, {}, []
+    judged, covered, failed, critical = {}, {}, [], {}
     if not ids or client is None:
-        return judged, covered, failed
+        return judged, covered, failed, critical
     shot_lines = _shot_lines(shots, desc_limit=40 if len(shots or []) <= 200 else 24)
     shot_block = "\n".join(shot_lines) if shot_lines else "（本集暂无镜头）"
 
@@ -256,7 +258,11 @@ def _judge_units(client, shots, units, ids, events=None, label: str = "coverage"
             "【本集剧本镜头】（格式：#镜头号 画面描述｜画面细节｜台词｜音效）\n" + shot_block + "\n\n"
             "【原文片段】（格式：编号｜片段）\n" + unit_block + "\n\n"
             "【输出要求】严格只输出一个 JSON 对象，不要解释文字：\n"
-            '{"results": [{"id": 1, "covered": true, "shot_id": 3, "reason": "≤15字"}]}\n'
+            '{"results": [{"id": 1, "covered": true, "shot_id": 3, "reason": "≤15字", "critical": false}]}\n'
+            "【critical 判定口径】对每个片段额外标注 critical（布尔值）：该片段是否承载"
+            "「核心剧情关键点」——证据/身份/能力证明、剧情转折、任务下达、关键金句。"
+            "丢失后观众将无法理解核心因果的片段判 critical=true；背景补叙、环境描写、"
+            "常规过渡与次要细节判 critical=false。只输出布尔值，不要解释。\n"
             "【硬性约束】results 必须逐条覆盖上面全部 " + str(len(batch)) +
             " 条编号（原样使用给出的编号，一条不漏）；covered 为布尔值；"
             "shot_id 填最能承载该片段的镜头号，找不到填 null。"
@@ -285,21 +291,23 @@ def _judge_units(client, shots, units, ids, events=None, label: str = "coverage"
             got.add(uid)
             ok = bool(r.get("covered"))
             judged[uid] = ok
+            critical[uid] = bool(r.get("critical"))
             if ok:
                 covered[uid] = True
         missed = [u for u in batch if u not in got]
         if missed and retry_missing:
             # 降半批重试一次，尽量少留「未判定」
-            sub_judged, sub_covered, sub_failed = _judge_units(
+            sub_judged, sub_covered, sub_failed, sub_critical = _judge_units(
                 client, shots, units, missed, events=events, label=label + "r",
                 batch_size=max(4, int(batch_size) // 3), retry_missing=False)
             judged.update(sub_judged)
             covered.update(sub_covered)
             failed.extend(sub_failed)
+            critical.update(sub_critical)
             missed = [u for u in missed if u not in sub_judged]
         if missed:
             failed.append({"batch": missed[:20], "error": "模型未返回这些单元的判定"})
-    return judged, covered, failed
+    return judged, covered, failed, critical
 
 
 # ===================== 覆盖率校验 =====================
@@ -331,13 +339,17 @@ def check_coverage(client, chapter_text, script, threshold=None, use_llm: bool =
         elif uid in body_ids:
             pending.append(uid)
 
-    judged, llm_covered, failed = {}, {}, []
+    judged, llm_covered, failed, critical = {}, {}, [], {}
     if pending and use_llm and client is not None:
-        judged, llm_covered, failed = _judge_units(client, shots, units, pending, events=events)
+        judged, llm_covered, failed, critical = _judge_units(client, shots, units, pending, events=events)
         covered_ids.update(llm_covered.keys())
 
     body_covered = [uid for uid in body_ids if uid in covered_ids]
     missing_ids = [uid for uid in body_ids if uid not in covered_ids]
+    # ⭐ P0 剧情点硬校验：遗漏单元中「核心剧情关键点」（critical=true）的数量。
+    #   它们丢失后观众无法理解核心因果，必须强制补生成，不受情节级阈值「达标即停」影响。
+    critical_missing = [uid for uid in missing_ids if critical.get(uid)]
+    critical_covered = [uid for uid in body_ids if uid in covered_ids and critical.get(uid)]
     body_chars = sum(len(units[uid - 1]) for uid in body_ids)
     covered_chars = sum(len(units[uid - 1]) for uid in body_covered)
     literal_sum = sum(len(units[uid - 1]) * literal_ratio(units[uid - 1], corpus_grams)
@@ -396,6 +408,15 @@ def check_coverage(client, chapter_text, script, threshold=None, use_llm: bool =
         "threshold_percent": _pct(thr),
         "passed": bool(coverage >= thr),
         "zero_omission": bool(not missing_ids),
+        # —— P0 剧情点硬校验：核心关键点覆盖情况（critical 单元）
+        "critical_unit_count": len([uid for uid in body_ids if critical.get(uid)]),
+        "critical_covered_count": len(critical_covered),
+        "critical_missing_count": len(critical_missing),
+        "critical_missing_ids": critical_missing,
+        "critical_missing_rows": [
+            {"id": uid, "text": units[uid - 1][:300], "chars": len(units[uid - 1]),
+             "reason": "unjudged" if (uid in pending and uid not in judged) else "not_covered"}
+            for uid in critical_missing[:MAX_MISSING_LISTED]],
         "rule_hits": rule_hits,
         "llm_judged": len(judged),
         "llm_covered": len(llm_covered),
@@ -597,8 +618,12 @@ def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=
             from degradation import note as _dg_note
             _dg_note('coverage.py:593', 'noqa: BLE001')
 
+    # ⭐ P0 剧情点硬校验：补生成触发条件 = 情节级低于阈值 **或** 仍有核心关键点遗漏（critical_missing）。
+    #   次要单元/环境描写随情节级阈值放行（避免 0.98 式跑满 3 轮的过度补生成）；但关键因果点
+    #   必须补到清零或轮数跑满，杜绝「监控灵石自证」这类关键剧情被达标即停漏掉。
     while (report.get("missing_ids")
-           and report.get("plot_coverage", 0) < thr
+           and (report.get("plot_coverage", 0) < thr
+                or report.get("critical_missing_count", 0) > 0)
            and supplement_rounds < rounds_cap):
         supplement_rounds += 1
         prev_missing = len(report.get("missing_ids") or [])
@@ -647,7 +672,14 @@ def run_coverage_check(client, chapter_text, script, episode_no=None, threshold=
     report["supplement_triggered"] = bool(supplement_rounds)
     report["detail_passed"] = bool(report.get("detail_coverage", 0) >= dthr)
     report["zero_omission"] = bool(not report.get("missing_ids"))
-    report["passed"] = bool(report.get("plot_coverage", 0) >= thr and report["detail_passed"])
+    report["p0_passed"] = bool(report.get("critical_missing_count", 0) == 0)
+    report["passed"] = bool(report.get("plot_coverage", 0) >= thr and report["detail_passed"]
+                            and report.get("critical_missing_count", 0) == 0)
+    if report.get("critical_missing_count", 0) > 0:
+        logger.warning(
+            f"第{ep}集 P0 剧情点校验：仍有 {report['critical_missing_count']} 个核心关键点未承载"
+            f"（补生成 {supplement_rounds} 轮后仍遗漏：{report.get('critical_missing_ids')[:8]}）"
+            "——已尽量补追，不阻断落盘；前端可据此人工确认。")
     report["episode_no"] = ep
     report["elapsed_sec_total"] = report.get("elapsed_sec")
 
@@ -705,6 +737,13 @@ def summary_for_meta(report: dict, path: str = None) -> dict:
         "threshold_percent": r.get("threshold_percent", _pct(DEFAULT_THRESHOLD)),
         "passed": bool(r.get("passed")),
         "zero_omission": bool(r.get("zero_omission")),
+        # —— P0 剧情点硬校验（前端可展示：核心关键点是否全承载）
+        "p0_passed": bool(r.get("p0_passed")),
+        "critical_unit_count": r.get("critical_unit_count", 0),
+        "critical_covered_count": r.get("critical_covered_count", 0),
+        "critical_missing_count": r.get("critical_missing_count", 0),
+        "critical_missing_ids": r.get("critical_missing_ids") or [],
+        "critical_missing_preview": [m.get("text") for m in (r.get("critical_missing_rows") or [])[:8]],
         # 遗漏与排除
         "missing_count": r.get("missing_count"),
         "missing_ids": r.get("missing_ids"),
@@ -739,6 +778,3 @@ def attach_to_script(script: dict, report: dict, path: str = None) -> dict:
     return script
 
 
-def script_coverage(script: dict) -> dict:
-    """从剧本里取覆盖率摘要（前端用；缺失时返回空）"""
-    return ((script or {}).get("metadata") or {}).get("coverage") or {}

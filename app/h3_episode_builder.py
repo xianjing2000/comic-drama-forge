@@ -39,6 +39,7 @@ import copy
 import json
 import logging
 import math
+import os
 import uuid
 from typing import Dict, List, Optional, Tuple
 
@@ -324,6 +325,19 @@ class H3EpisodeBuilder:
         # 用户若敲定了竖屏 9:16，必须在这里覆写，否则提示词里写着「竖屏」而画布是横屏。
         resolution = (tuple(resolution_override) if resolution_override
                       else self._template_resolution())
+        # ⚠️ 2026-10-18（8G 显存应急，凌晨自动修复）：模板 960×544 + 243 帧的 VAE 解码
+        #   在 8G 卡上必然死锁（GPU 100%/32W/30+ 分钟无输出）。环境变量按比例降分辨率，
+        #   例如 MJSCXT_H3_RES_SCALE=0.66 → 640×352，VAE 显存需求砍半。默认 1.0 不生效。
+        try:
+            _res_scale = float(os.getenv("MJSCXT_H3_RES_SCALE", "1.0") or 1.0)
+        except ValueError:
+            _res_scale = 1.0
+        if resolution and 0.2 <= _res_scale < 1.0:
+            _w = max(64, int(int(resolution[0]) * _res_scale) // 32 * 32)
+            _h = max(64, int(int(resolution[1]) * _res_scale) // 32 * 32)
+            logger.info("H3 段分辨率按 MJSCXT_H3_RES_SCALE=%.2f 降为 %d×%d（原 %d×%d）",
+                        _res_scale, _w, _h, resolution[0], resolution[1])
+            resolution = (_w, _h)
         if resolution_override:
             logger.info(f"H3 段分辨率已按用户设定覆写：{resolution[0]}×{resolution[1]}")
         elif resolution is None:

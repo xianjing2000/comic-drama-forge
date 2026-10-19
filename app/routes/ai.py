@@ -51,11 +51,11 @@ def api_ai_config_reveal():
 @ai_bp.route('/api/ai/config', methods=['POST'])
 def api_ai_config_save():
     """保存单个模块：{module: text|qc|chat, base_url, model, api_key?}"""
-    return _save_ai_module(request.json or {})
+    return _save_ai_module((request.get_json(silent=True) or {}))
 @ai_bp.route('/api/ai/config/clear', methods=['POST'])
 def api_ai_config_clear():
     """清空单个模块；不传 module 则整体重置三个模块"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     module = (data.get("module") or "").strip() or None
     if module and module not in AI_MODULES:
         return jsonify({"success": False, "error": f"unknown module：{module}"}), 400
@@ -130,7 +130,7 @@ def api_ai_test():
     - qc：默认做「视觉能力」探测（发一张极小图片），确认模型支持图像输入；
           也可传 probe="text" 只测文本连通性。
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     module = (data.get("module") or "").strip()
     if module not in AI_MODULES:
         return jsonify({"success": False, "error": f"unknown module：{module or '(空)'}"}), 400
@@ -282,7 +282,7 @@ def api_ai_chat_archive_date(date):
 @ai_bp.route('/api/ai/chat/clear', methods=['POST'])
 def api_ai_chat_clear():
     """清空会话（默认保留创作设定草稿与已生效设定）"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
     project = _chat_project(data, history)
     history = ai_chat.clear_history(AI_CHAT_HISTORY_PATH,
@@ -293,7 +293,7 @@ def api_ai_chat_clear():
 @ai_bp.route('/api/ai/chat', methods=['POST'])
 def api_ai_chat():
     """一轮对话：调用「对话总控模型」，返回回复并同步更新创作设定草稿"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     message = str(data.get("message") or "").strip()
     if not message:
         return jsonify({"success": False, "error": "message 不能为空"}), 400
@@ -353,7 +353,7 @@ def api_ai_chat():
 @ai_bp.route('/api/ai/chat/apply', methods=['POST'])
 def api_ai_chat_apply():
     """应用设定：把当前草稿（可叠加 patch）落盘为项目创作设定配置"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
     project = _chat_project(data, history)
     draft = ai_chat.get_draft(history, project)
@@ -394,7 +394,7 @@ def api_ai_chat_apply():
 @ai_bp.route('/api/ai/chat/draft', methods=['POST'])
 def api_ai_chat_draft():
     """直接补充 / 修改创作设定草稿（不调用模型，供界面表单编辑）"""
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     history = ai_chat.load_history(AI_CHAT_HISTORY_PATH)
     project = _chat_project(data, history)
     patch = data.get("settings") if isinstance(data.get("settings"), dict) else {}
@@ -418,7 +418,7 @@ def api_ai_settings():
     project = (request.args.get("project") or "").strip()
 
     if request.method == 'POST':
-        data = request.json or {}
+        data = (request.get_json(silent=True) or {})
         message = "设置已保存"
 
         # 「LLM 引擎」= 「文本分析模型」——同一个模块、同一份配置。
