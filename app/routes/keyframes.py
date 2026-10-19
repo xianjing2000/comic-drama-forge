@@ -235,7 +235,7 @@ def api_keyframes_generate():
     """批量生成尾帧（Qwen Edit，以分镜图为首帧参考）——后台任务 + 断点续跑"""
     # ⚠️ 故意不设 AI 门禁：尾帧提示词在 shot/剧本数据里（上游产出），本步只做 Qwen Edit
     # 图生图 + 质检，不读 AI 凭证。门禁挂这里会误伤「有存量分镜、但 AI key 未配」的续跑。
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project_name') or '')
     if err is not None:

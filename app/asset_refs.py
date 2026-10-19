@@ -47,7 +47,7 @@ from config import (
     PROJECT_DEFAULT_CONFIG,
     PROMPT_ENHANCE_CONFIG_PATH, save_prompt_enhance_config, _prompt_enhance_file_flags,
 )
-from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
+from flask import Flask, request, jsonify, send_file, abort, redirect, send_from_directory
 from shared_project import _first_existing, _shot_num_key, comfyui_client  # noqa: F401  再导出
 from shared_ai import _ai_gate_or_400  # noqa: F401  再导出
 from shared_base import _trash_move  # noqa: F401  再导出
@@ -356,6 +356,30 @@ def _resolve_scene_entry(shot: dict, scene_idx: dict,
                         where or "scene-ref", loc, name, level)
         shot["_scene_match"] = {"queried": loc, "matched": name, "level": level}
     return name, (scene_idx.get(name) or {})
+
+
+def state_slug(state: str) -> str:
+    """状态描述 → 安全文件 slug（道具状态变体文件名，读写共用，避免漂移）。"""
+    import re as _re
+    return _re.sub(r"[^\w一-鿿]+", "_", str(state or "").strip()).strip("_")[:40]
+
+
+def item_state_image(item_dir: str, state: str, base_image: str) -> str:
+    """道具**状态变体**取图（2026-10-16，E）：若 ``<item_dir>/states/<state_slug>.png`` 存在则返回它，
+    否则回落 ``base_image``。变体由 ``asset_worker.generate_item_state_variant`` 产出
+    （同一道具、不同状态：如「剑完好」vs「剑已断」）。fail-open：缺文件/异常都回落 base。"""
+    if not str(state or "").strip() or not item_dir:
+        return base_image
+    try:
+        _slug = state_slug(state)
+        if not _slug:
+            return base_image
+        _p = os.path.join(item_dir, "states", _slug + ".png")
+        if os.path.isfile(_p) and os.path.getsize(_p) > 0:
+            return _p
+    except Exception:  # noqa: BLE001
+        pass
+    return base_image
 
 
 def _resolve_item_names(shot: dict, item_idx: dict, where: str = "") -> list:
@@ -1053,9 +1077,24 @@ def _h3_audio_defs_for(common: list, project_name: str, characters=None) -> list
     if not _pairs:
         return []
     _vs_map = {}
+    # ⭐ 2026-10-18：同时带出**角色 gender**（`asset_prompt_kit.infer_gender`：优先读剧本
+    #    `gender` 字段，其次 name/identity 全词线索；推不出返回空串）。供 H3 台词收口句
+    #    （"He/She closes ..."）用**角色性别**而不是按名字瞎猜。
+    _g_map = {}
+    try:
+        from asset_prompt_kit import infer_gender as _infer_gender  # 叶子模块，无环
+    except Exception:  # noqa: BLE001
+        _infer_gender = None
     for _c in (characters or []):
         if isinstance(_c, dict) and _c.get("name"):
-            _vs_map[str(_c["name"]).strip()] = str(_c.get("voice_style") or "").strip()
+            _nm0 = str(_c["name"]).strip()
+            _vs_map[_nm0] = str(_c.get("voice_style") or "").strip()
+            _g_map[_nm0] = ""
+            if _infer_gender is not None:
+                try:
+                    _g_map[_nm0] = _infer_gender(_c) or ""
+                except Exception:  # noqa: BLE001
+                    _g_map[_nm0] = ""
     _out = []
     for _i, _item in enumerate(_pairs, start=1):
         _nm = str((_item[0] if isinstance(_item, (list, tuple)) else _item) or "").strip()
@@ -1064,7 +1103,7 @@ def _h3_audio_defs_for(common: list, project_name: str, characters=None) -> list
         #    非 ASCII 时留空，由 h3_prompt_kit 的性别兜底短语接管。
         _voice = _vs if (_vs and _vs.isascii()) else ""
         _out.append({"name": _nm, "label": f"<Audio {_i}>", "speaker": f"S{_i}",
-                     "voice": _voice})
+                     "voice": _voice, "gender": _g_map.get(_nm, "")})
     logger.info("[H3音色声明] 生成 %d 条 <Audio N> 声明：%s", len(_out),
                     "、".join(d["name"] + d["label"] for d in _out))
     return _out

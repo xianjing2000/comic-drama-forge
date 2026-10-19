@@ -73,7 +73,7 @@ def api_video_retry_shots_batch():
     加锁 —— impl 本身无闸门，闸门在单镜路由壳上）。单镜失败不中断批次；
     上限 12 镜防误触全量重跑。同步返回逐镜结果（前端逐条展示）。
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     ids = data.get('shot_ids')
     if not isinstance(ids, list) or not [s for s in ids if str(s).strip()]:
         return jsonify({"success": False,
@@ -237,7 +237,7 @@ def api_video_preview_approve():
     批准会绑定该预演产物的哈希（见 preview_gate.approve）：预演被重出一版，
     旧批准自动失效，避免「批的是上一版预演」。
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     project, err = _project_or_400(
         data.get('project') or data.get('project_name') or '', field_name="project")
     if err is not None:

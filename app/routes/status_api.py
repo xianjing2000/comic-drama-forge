@@ -4,7 +4,7 @@
 # 由 tools/sink_routes.py 生成：URL 与响应体一字不改，只把 @app.route 换成蓝图路由；
 # 共享助手从 routes/_shared.py 取（沿用既有蓝图模式）。
 import logging
-from flask import Blueprint, jsonify, request, send_file, abort, current_app  # noqa: F401
+from flask import Blueprint, jsonify, request, send_file, abort, current_app, Response, stream_with_context  # noqa: F401
 import os    # noqa: F401
 import sys   # noqa: F401
 import re    # noqa: F401
@@ -88,3 +88,57 @@ def api_status():
         "gpu_gate": gpu_task_gate.status(),
         "interrupted_tasks": job_state.get_interrupted_tasks(),
     })
+
+
+@status_api_bp.route('/api/events/stream')
+def api_events_stream():
+    """SSE 进度推送（E-1，2026-10-16）：把 ``job_state.generation_state`` 里进行中任务的
+    快照按秒推送，替代前端 1~30s 轮询。只读、fail-open：快照有变化才推 ``data:``，否则
+    推一行 SSE 注释心跳（``: keep-alive``）；Waitress 长连接已就绪
+    （``serve.py`` channel_timeout=1800）。
+
+    前端配套：``frontend/src/hooks/useEventStream.ts``。断开由浏览器 EventSource 自动重连。
+    """
+    def _snapshot():
+        tasks = []
+        try:
+            with job_state.lock:
+                for tid, st in list(job_state.generation_state.items()):
+                    if not isinstance(st, dict):
+                        continue
+                    tasks.append({
+                        "task_id": tid,
+                        "status": st.get("status"),
+                        "progress": st.get("progress"),
+                        "total": st.get("total"),
+                        "phase": st.get("phase"),
+                        "project_name": st.get("project_name"),
+                        "step": st.get("step"),
+                        "episode_no": st.get("episode_no"),
+                        "error": st.get("error") or "",
+                        # live：分镜重试循环「当前正在用的提示词/镜头」快照（前端实时渲染用）
+                        "live": st.get("live"),
+                    })
+        except Exception as e:  # noqa: BLE001 - 快照失败不中断流
+            logger.debug("events/stream 快照失败：%s", e)
+        return {"tasks": tasks, "count": len(tasks), "ts": time.time()}
+
+    def _gen():
+        last = None
+        yield ": connected\n\n"
+        while True:
+            try:
+                payload = json.dumps(_snapshot(), ensure_ascii=False)
+            except Exception:  # noqa: BLE001
+                payload = '{"tasks": []}'
+            if payload != last:
+                yield "data: %s\n\n" % payload
+                last = payload
+            else:
+                yield ": keep-alive\n\n"
+            time.sleep(1.0)
+
+    return Response(stream_with_context(_gen()), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache",
+                             "Connection": "keep-alive",
+                             "X-Accel-Buffering": "no"})

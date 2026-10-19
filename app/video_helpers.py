@@ -188,6 +188,139 @@ def _batch_segs_by_shot(_segs_in, _max_segs):
         _out2.append(_cur2)
     return _out2
 
+
+#: 批间衔接锚点图的落盘子目录（相对本集 videos_dir；不进成片清单、不参与扫描）
+_BATCH_TAIL_DIRNAME = "_batch_tails"
+
+
+def _extract_batch_tail_frame(video_path, out_dir, scene_no, batch_idx, timeout=120):
+    """从上一批成片抽**最后一帧**，落盘为本批首段的衔接锚点图。
+
+    背景（2026-10-19 用户实测「第一个 5 段和第二个 5 段中间有卡顿」）：
+    场次内按 ``MJSCXT_H3_BATCH_SEGMENTS`` 分批后，批与批是**彼此独立的 ComfyUI
+    提交** —— 插件「段间引导」只在同一次提交内把上一段尾帧钉进下一段
+    conditioning，新批第 1 段 ``continuityFromPrev=False`` 拿不到上一批尾帧，
+    批间只是 ffmpeg 硬拼。这里把上一批实际成片的末帧抽出来，交给
+    :func:`_anchor_batch_head_to_prev_tail` 挂进下一批首段。
+
+    fail-open：ffmpeg 缺失 / 视频损坏 / 超时一律只记日志并返回 ""，
+    调用方按「无锚点硬切」继续，绝不影响出片主链路。
+    """
+    try:
+        import subprocess
+        if not (video_path and os.path.isfile(str(video_path))
+                and os.path.getsize(str(video_path)) > 0):
+            return ""
+        os.makedirs(out_dir, exist_ok=True)
+        out = os.path.join(out_dir, "scene_%02d_b%02d_tail.png"
+                           % (int(scene_no), int(batch_idx)))
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+               # -sseof 回退 0.5s 再取 1 帧：与 keyframe.export_episode_end_frame
+               # 的集末帧抽法同口径（同一套 ffmpeg 产物参数，便于对照）。
+               "-sseof", "-0.5", "-i", str(video_path),
+               "-frames:v", "1", "-q:v", "2", "-y", out]
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        if proc.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0:
+            return out
+        logger.warning("[分批衔接] 抽上一批末帧失败（rc=%s）：%s",
+                       proc.returncode, (proc.stderr or b"")[:200])
+    except Exception as _e:  # noqa: BLE001 - 增强特性，失败绝不阻断出片
+        logger.warning("[分批衔接] 抽上一批末帧异常（忽略）：%s", _e)
+    return ""
+
+
+def _prompt_section_append_line(prompt, section, line):
+    """在 H3 六段式提示词的指定 section **末尾**追加一行。
+
+    六段格式由 ``h3_prompt_kit.build_ref2va`` 产出（``name:\\nbody`` 以空行分隔）。
+    找不到该 section（历史/异常格式）→ 追加到文末，绝不丢内容。
+    失败一律原样返回（提示词手术绝不阻断出片）。
+    """
+    prompt = str(prompt or "")
+    line = str(line or "").strip()
+    if not line:
+        return prompt
+    try:
+        import re as _re_ps
+        m = _re_ps.search(r"(?m)^%s:[ \t]*\r?\n" % _re_ps.escape(section), prompt)
+        if not m:
+            return (prompt + "\n" + line) if prompt else line
+        body_start = m.end()
+        # 下一个 section 头（小写/下划线的 `name:` 独占一行）
+        m2 = _re_ps.search(r"(?m)^[a-z][a-z_]*:[ \t]*$", prompt[body_start:])
+        body_end = body_start + (m2.start() if m2 else len(prompt) - body_start)
+        body = prompt[body_start:body_end].rstrip("\r\n")
+        rest = prompt[body_end:]
+        return prompt[:body_start] + body + "\n" + line + (("\n\n" + rest) if rest else "")
+    except Exception:  # noqa: BLE001 - 保持原样
+        return prompt
+
+
+def _anchor_batch_head_to_prev_tail(batch_segs, tail_png, common_count=0):
+    """把上一批**末帧**作为 ``<Picture K>`` 挂到本批首段（批间硬切补丁）。
+
+    与「跨场首镜挂上一场末镜」（``_shot_segment`` 的 ``extra_ref``）同构，但
+    **必须比它多做一步**：在提示词里显式声明 ``<Picture K>`` 与开场承接句 ——
+    构建器按提示词声明的最大编号截断参考图（``h3_director_builder.picture_capacity``），
+    只挂图不写标签会被**静默丢弃**（``seg_ref_lists`` 的 ``names[:own_cap]``）。
+
+    K 按**实际槽位**算（公共图 + 本段已存在且不重复的参考图 + 1），而不是
+    简单取提示词最大编号 + 1：某张资产图缺失/未上传时两者会错位，槽位口径
+    才是插件真正看到的 ``<Picture N>`` 位置编号。
+
+    返回**新的**段列表（首段为浅拷贝）：``_batches`` 与 ``_ssegs`` 共享同一批
+    dict，原地改会把锚点图带进场景映射 / 返工重跑路径。
+    """
+    try:
+        if not batch_segs or not tail_png or not os.path.isfile(str(tail_png)):
+            return batch_segs
+        head = dict(batch_segs[0] or {})
+        refs = list(head.get("reference_images") or [])
+        _max_slots = int(getattr(h3_director_builder, "MAX_REFERENCE_IMAGES", 9) or 9)
+        # 按构建器的真实口径数「会占槽的图」：去空、去不存在、段内去重
+        _seen, _existing = set(), 0
+        for _p in refs:
+            _sp = str(_p or "").strip()
+            if not _sp or not os.path.isfile(_sp):
+                continue
+            _k = os.path.normcase(os.path.normpath(os.path.abspath(_sp)))
+            if _k in _seen:
+                continue
+            _seen.add(_k)
+            _existing += 1
+        _common_n = max(0, int(common_count or 0))
+        if _common_n + _existing >= _max_slots:
+            logger.warning(
+                "[分批衔接] 本批首段参考图 %d 张 + 公共 %d 张已占满 %d 槽 → "
+                "跳过上一批末帧锚定（本批衔接仍为硬切）",
+                _existing, _common_n, _max_slots)
+            return batch_segs
+        label = "<Picture %d>" % (_common_n + _existing + 1)
+        refs.append(str(tail_png))
+        head["reference_images"] = refs
+        _prompt = str(head.get("prompt") or "")
+        _prompt = _prompt_section_append_line(
+            _prompt, "subject_definitions",
+            "%s is the last frame of the immediately preceding video segment (the "
+            "previous generation batch); it is used only as the opening-continuity "
+            "anchor for this segment's first frame, not as a character or scene "
+            "reference." % label)
+        _prompt = _prompt_section_append_line(
+            _prompt, "detailed_description",
+            "Opening continuity: the first frame of this segment must continue "
+            "seamlessly from %s — same framing, subject placement, pose, lighting and "
+            "wardrobe — with no jump, re-framing or costume change at the cut; the "
+            "action then develops naturally from that exact starting image." % label)
+        head["prompt"] = _prompt
+        head["batch_tail_anchor"] = str(tail_png)
+        logger.info("[分批衔接] 本批首段已挂上一批末帧 %s（%s）：批边界不再是无锚点硬切",
+                    os.path.basename(str(tail_png)), label)
+        return [head] + list(batch_segs[1:])
+    except Exception as _e:  # noqa: BLE001 - 增强特性，失败绝不阻断出片
+        logger.warning("[分批衔接] 挂上一批末帧失败（忽略，按硬切继续）：%s", _e)
+        return batch_segs
+
+
 def _apply_video_lessons(_segs, project_name, style=""):
     """按「本场段提示词集合」召回 kind='video' 的历史质检修正建议（消费端补全，2026-10-13）。
 
@@ -584,6 +717,128 @@ def _recompose_episode_video(videos_dir: str, episode_tag: str) -> str:
         return ""
 
 
+def _rerun_episode_video_for_rework(project_name: str, episode_no, script: dict,
+                                    style: str = "", timeout=None,
+                                    gate_task_id: str = "") -> str:
+    """返工收尾：重跑本集视频以**整场重画**被登记的场次（其余场次复用），返回整集原片路径。
+
+    为什么不是「只重画那一场」：按场次生成在 only_scenes 过滤后，会把**仅所选场次**的
+    素材拼成整集（其余场次根本不进 _scene_files）—— 用它回灌会丢掉其它场次。正确口径是
+    跑**整集**生成、但让 seg_map.needs_scene_rerun 里的场次强制重画、其余场次复用磁盘上
+    已有成片（_force_scene 的既有消费逻辑），最终 concat 出完整整集。
+    自身进 GPU 闸门（后台调用，非在已持闸门的线程内）。
+    fail-open：任何异常返回 ""，旧成片原地保留。
+    """
+    import time  # 本模块顶层未导入 time（历史约定按需局部导入）
+    try:
+        script = script or {}
+        shots = script.get("shots") or []
+        if not shots:
+            logger.warning("[返工收尾] 剧本无镜头，跳过整场重画")
+            return ""
+        char_refs = script.get("characters") or []
+        scene_refs = script.get("scenes") or []
+        _ep = int(episode_no or 1)
+        ep_tag = f"ep{_ep:02d}"
+        tid = f"rework_ep_{project_name}_{int(time.time() * 1000)}"
+        with lock:
+            generation_state[tid] = {
+                "status": "running", "progress": 0, "total": len(shots),
+                "results": [], "phase": "返工：整场重画中",
+                "project_name": project_name, "step": "video",
+                "episode_no": _ep, "pipeline": False,
+            }
+        try:
+            import gpu_task_gate as _gtg
+            with _gtg.run_gpu_task(gate_task_id or tid, "返工·整场重画"):
+                # 直接调用 worker 体（它自身不进闸门；本次闸门由此处持有）。
+                _video_generate_worker(
+                    tid, project_name, shots, char_refs, scene_refs, {}, True, "episode",
+                    int(timeout or 900), ep_tag, _ep, "auto", style or "",
+                    overwrite=False, build_only=False, only_scenes=None)
+        finally:
+            with lock:
+                generation_state.pop(tid, None)
+        videos_dir = _ep_dir(os.path.join(VIDEOS_DIR, project_name), _ep)
+        full = os.path.join(videos_dir, f"{ep_tag}_full.mp4")
+        if os.path.isfile(full) and os.path.getsize(full) > 0:
+            logger.info("[返工收尾] 整场重画完成，整集原片已更新：%s", full)
+            return full
+        logger.warning("[返工收尾] 整场重画未产出整集原片：%s", full)
+        return ""
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[返工收尾] 整场重画失败（保留旧成片）：%s", e)
+        return ""
+
+
+def _compose_final_from_source(project_name: str, episode_no, script: dict) -> str:
+    """用整集原片合成**交付成片**（epNN_final.mp4），返回成片路径。
+
+    与 routes/final.py:_compose_via_pipeline 同口径：喂一个最小 ctx，让 pipeline.step_final
+    处理「超分产物失效判断 / 成片失效标记清除 / 字幕烧录 / 幂等短路」。返工已把成片标为失效
+    （mark_episode_outputs_stale），故这里会真正重做并清除标记。
+    fail-open：未就绪或异常返回 ""，旧成片原地保留。
+    """
+    try:
+        _ep = int(episode_no or 1)
+        ctx = {"project_name": project_name, "episode_no": _ep,
+               "episode_tag": f"ep{_ep:02d}", "script": script or {},
+               "config": {}, "progress": lambda *a, **k: None}
+        res = pipeline.step_final(ctx) or {}
+        return str(res.get("artifact") or "")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[返工收尾] 合成成片失败（保留旧成片）：%s", e)
+        return ""
+
+
+def _schedule_rework_finalize(project_name: str, episode_no, script: dict,
+                              style: str = "", timeout=None) -> str:
+    """异步返工收尾：整场重画（被登记的场次）→（worker 已 concat）→ 合成交付成片。
+
+    为什么异步：多镜场的正确收尾是「整集重跑、仅重画该场」，耗时可达数分钟到数十分钟；
+    若在单镜重跑请求里同步做会把 HTTP 请求拖到超时。故放到后台 daemon 线程，并挂一个
+    可见任务（generation_state[<tid>]）供前端展示进度；主请求立即返回该 tid。
+    全程 fail-open：任何失败只记日志，旧成片原地保留。
+    """
+    import time  # 本模块顶层未导入 time（历史约定按需局部导入）
+    _ep = int(episode_no or 1)
+    shots = (script or {}).get("shots") or []
+    tid = f"rework_finalize_{project_name}_{int(time.time() * 1000)}"
+    with lock:
+        generation_state[tid] = {
+            "status": "running", "progress": 0, "total": len(shots),
+            "results": [], "phase": "返工收尾：整场重画 + 合成成片",
+            "project_name": project_name, "step": "video", "episode_no": _ep,
+            "pipeline": False, "rework_finalize": True,
+        }
+
+    def _work():
+        try:
+            full = _rerun_episode_video_for_rework(
+                project_name, _ep, script, style=style, timeout=timeout,
+                gate_task_id=tid)
+            final = _compose_final_from_source(project_name, _ep, script) if full else ""
+            with lock:
+                cur = generation_state.get(tid)
+                if isinstance(cur, dict):
+                    cur.update({
+                        "status": "completed" if final else "failed",
+                        "progress": 100,
+                        "phase": ("返工成片已更新" if final
+                                  else "返工收尾未产出成片（保留旧成片）"),
+                        "final_path": final,
+                        "error": "" if final else "未产出交付成片"})
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[返工收尾] 后台任务失败（保留旧成片）：%s", e)
+            with lock:
+                cur = generation_state.get(tid)
+                if isinstance(cur, dict):
+                    cur.update({"status": "failed", "error": str(e)})
+
+    threading.Thread(target=_work, daemon=True).start()
+    return tid
+
+
 def _seg_sort_key(path: str):
     """分段 mp4 的排序键：按文件名里最后一段数字排序（seg_0007 / _00007_ 都能排对）。
 
@@ -624,7 +879,7 @@ import h3_common_refs
 import h3_director_builder
 import h3_prompt_kit
 import h3_segment_loras
-from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
+from flask import Flask, request, jsonify, send_file, abort, redirect, send_from_directory
 import model_capabilities
 import os
 import pipeline
@@ -644,7 +899,7 @@ _norm_shot_key = shot_key.norm_shot_key
 
 
 def _video_retry_shot_impl():
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project_name') or '')
     if err is not None:
@@ -828,6 +1083,27 @@ def _video_retry_shot_impl():
                                      + (f"；建议：{_pf_v.get('rebuild_hint')}" if _pf_v.get("rebuild_hint") else ""),
                             "prompt_qc": _pf_v.get("verdict")}), 200
 
+    # ⭐ 2026-10-19（P0 配音乱码修复）：单镜重跑同样走 TTS 驱动音轨（source），
+    #    与整集链路同口径 —— 重跑出来的这一镜音轨风格/音色与正片一致。
+    try:
+        import shot_dub as _sd_retry
+        if _sd_retry.dub_driven_enabled():
+            _rp_dub = _sd_retry.build_shot_track(
+                project, data.get('episode_no') or 1, script, shot)
+            if _rp_dub:
+                for _di, _rs in enumerate(_rs_segs):
+                    try:
+                        _ddur = float(_rs.get("duration") or dur)
+                    except (TypeError, ValueError):
+                        _ddur = float(dur or 10)
+                    _dp = (_sd_retry.fit_track(
+                        _rp_dub, _ddur,
+                        os.path.join(os.path.dirname(_rp_dub), "_fit"))
+                        if _di == 0 else _sd_retry.silence_for(round(_ddur, 2)))
+                    if _dp:
+                        _rs["dub_audios"] = [_dp]
+    except Exception as _sd_re:  # noqa: BLE001
+        logger.warning("[逐镜配音] 单镜驱动音轨准备失败（回退自生成音频）：%s", _sd_re)
     try:
         result = comfyui_client.generate_h3_sequence(
             segments=_rs_segs,
@@ -941,6 +1217,27 @@ def _video_retry_shot_impl():
             {"shot_id": shot_id, "seq": seq, "recomposed": bool(_recomposed)})
     except Exception as _iv_e:  # noqa: BLE001 - 打标失败不影响重做本身
         logger.warning(f"[单镜重跑] 标记成片/超分失效失败：{_iv_e}")
+    # ⭐ Phase 1（2026-10-16）：返工闭环最后一步 —— 刷新**交付成片**（epNN_final.mp4）。
+    #   此前返工只更新整集原片 + 打「失效」标记；交付成片要用户再点一次「生成成片」才更新，
+    #   且多镜场连整集原片都不会自动更新（只登记待重跑）—— 这正是 PRD FR-36 的缺口。现闭合：
+    #     · 单镜场（整集原片已就地重拼）→ 同步合成交付成片（廉价：一步 copy / 烧字幕）；
+    #     · 多镜场（需整场重画）→ 后台异步「整场重画 → 重拼 → 合成成片」，返回任务号供前端展示。
+    #   两条路径都 fail-open：失败只记日志，旧成片原地保留，绝不影响本次重跑本身。
+    _finalized = ""
+    _finalize_task = ""
+    if _recomposed and os.path.isfile(_recomposed):
+        _finalized = _compose_final_from_source(project, _rs_ep, script)
+    elif _scene_rerun:
+        try:
+            _style_rw = shot.get("style") or style_kit.normalize_style(
+                (autopilot.get_plan(project) or {}).get("style"))
+            _finalize_task = _schedule_rework_finalize(
+                project, _rs_ep, script,
+                style=_style_rw, timeout=int(data.get('timeout') or 900))
+            logger.info("[单镜重跑] 多镜场 %s：已排入后台「整场重画+成片」任务 %s",
+                        sorted(set(_scene_rerun)), _finalize_task)
+        except Exception as _ft_e:  # noqa: BLE001
+            logger.warning(f"[单镜重跑] 排入返工收尾任务失败（忽略）：{_ft_e}")
     return jsonify({"success": True, "project": project, "shot_id": shot_id, "seq": seq,
                     "mode": mode, "path": dst,
                     "url": f"/api/videos/{project}/{_rs_sub}{os.path.basename(dst)}",
@@ -948,6 +1245,10 @@ def _video_retry_shot_impl():
                     "deliverable_marked_stale": bool(stale),
                     "recomposed": bool(_recomposed),
                     "recomposed_file": os.path.basename(_recomposed) if _recomposed else "",
+                    # Phase 1：交付成片是否已就地刷新；多镜场则为后台收尾任务号（供前端展示）
+                    "finalized": bool(_finalized),
+                    "final_path": _finalized or "",
+                    "finalize_task": _finalize_task,
                     # t2：待重跑场次（多镜场无法单镜替换 → 生成时整场重画后重拼）
                     "scene_rerun_required": list(_scene_rerun or []),
                     # t17：本次被标记失效的产物（final / upscale）——前端/排障据此提示
@@ -1300,6 +1601,32 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
             _epn = int(episode_no) if str(episode_no or "").strip() else 1
         except (TypeError, ValueError):
             _epn = 1
+        # ⭐ 2026-10-19（用户 P0「配音语义破碎」）：逐镜 TTS 驱动音轨 ——
+        #    台词改由 TTS 逐字念出，H3 用 audioMode=source 以它驱动口型（音色=角色克隆音色）。
+        #    H3 generate 模式会把台词"演"成伪中文（人名漂移/念画面描述/群像单音色，实测）。
+        #    fail-open：TTS 不可用 / 任一句失败 → _shot_dub 返回 {}，整体回退 generate。
+        try:
+            import shot_dub as _shot_dub
+            if _shot_dub.dub_driven_enabled():
+                _sd_script = None
+                try:
+                    import shared_episode as _se
+                    _sd_script = _se._load_script_for(project_name, _epn)
+                except Exception:  # noqa: BLE001
+                    _sd_script = None
+                _sd_dubs = _shot_dub.build_episode_shot_dubs(
+                    project_name, _epn,
+                    _sd_script or {"characters": [], "shots": shots},
+                    shots_hint=shots)
+                if _sd_dubs:
+                    for _s in shots:
+                        _p = _sd_dubs.get(str(_s.get("shot_id")))
+                        if _p:
+                            _s["_dub_audio"] = _p
+                    logger.info("[逐镜配音] 已挂 TTS 驱动音轨 %d/%d 镜（H3 source 模式）",
+                                len(_sd_dubs), len(shots))
+        except Exception as _sd_e:  # noqa: BLE001 - 配音准备失败绝不阻断视频
+            logger.warning("[逐镜配音] 准备失败（回退 H3 自生成音频）：%s", _sd_e)
         # 视频 URL 前缀：第 2 集起带 epNN 段（与 _ep_dir 的落盘位置一致）
         _vurl = (f"/api/videos/{project_name}/ep{_epn:02d}" if _epn > 1
                  else f"/api/videos/{project_name}")
@@ -1466,6 +1793,14 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                 #    ⚠️ 必须在槽位截断**之前**插入，否则会被 _own_room 截掉而静默失效。
                 if extra_ref and len(_seg_comps) < _own_room:
                     _seg_comps.append(dict(extra_ref))
+                    # ⭐ 2026-10-19 修复（静默丢弃）：此前只把 extra_ref 加进 refs，
+                    #   没加进 _shot_scene_refs → 提示词不声明这张图 → 构建器按
+                    #   picture_capacity（提示词最大 <Picture N>）截断参考图时，
+                    #   多出来的这张被 names[:own_cap] **静默丢弃**（零报错）→
+                    #   「跨场视觉衔接」特性实际上从未生效。
+                    #   把它并入场景组末尾（与 _seg_comps 的追加位置同序），
+                    #   <Picture N> 编号才能与实际槽位一一对应。
+                    _shot_scene_refs = list(_shot_scene_refs) + [dict(extra_ref)]
                 if len(_seg_comps) > _own_room:
                     _dropped = len(_seg_comps) - _own_room
                     _seg_comps = _seg_comps[:_own_room]
@@ -1578,6 +1913,30 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                                           reason=f"视频提示词预检未通过（{_pgate_seg.get('label')}）")
                 except Exception as _pe:  # noqa: BLE001
                     logger.warning(f"不合格提示词清理失败（忽略）：{_pe}")
+            # ⭐ 2026-10-19（P0 配音乱码修复）：逐镜 TTS 驱动音轨（H3 audioMode=source）。
+            #    · 有台词镜 → 该镜台词音轨（按子段时长裁/补；长镜切段时台词落在第 1 子段，
+            #      后续子段用静音 —— 台词通常只占整镜前半段，先按此简化）；
+            #    · 无台词镜 → 与镜长相同的静音轨（source 模式下保持无人声、不被 H3 自编）。
+            #    fail-open：任何异常只告警，该镜退回 H3 自生成音频（旧行为）。
+            try:
+                _dub_src = str(shot.get("_dub_audio") or "")
+                if _dub_src:
+                    import shot_dub as _sd_dub
+                    for _di, _ds in enumerate(_segs):
+                        try:
+                            _ddur = float(_ds.get("duration") or dur)
+                        except (TypeError, ValueError):
+                            _ddur = float(dur or 10)
+                        if _di == 0:
+                            _dp = _sd_dub.fit_track(
+                                _dub_src, _ddur,
+                                os.path.join(os.path.dirname(_dub_src), "_fit"))
+                        else:
+                            _dp = _sd_dub.silence_for(round(_ddur, 2))
+                        if _dp:
+                            _ds["dub_audios"] = [_dp]
+            except Exception as _sd_e:  # noqa: BLE001
+                logger.warning("[逐镜配音] 段级音轨挂载失败（该镜回退自生成音频）：%s", _sd_e)
             # ⚠️ 必须返回**列表**：长镜切段后一个分镜可能产出 N 个子段（见上方 _segs）。
             #    两个调用方（episode / per_shot）都用 isinstance(seg, list) 兼容单段，
             #    故单段场景零行为变更。旧写法 `return _segs[0]` 会把切段结果砍成 1 段，
@@ -1698,6 +2057,13 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                                         "kind": "scene", "path": _pp,
                                         "name": "上一场末镜衔接",
                                         "appearance": "同一场景群内上一场的最后一个分镜图",
+                                        # 提示词里的用途声明（_h3_picture_defs 对带
+                                        # desc 的场景图直接采用，替换通用的「环境参考」
+                                        # 措辞）：换场要接续的是服装/道具/光位，不是把
+                                        # 上一场的空间结构搬过来。
+                                        "desc": "上一场的最后一个分镜图，仅作跨场衔接参考："
+                                                "服装、道具、光位与陈设应与它接续；场景结构与"
+                                                "空间以本场分镜图为准，不要沿用上一场的环境",
                                     }
                                     logger.info(
                                         "[视频跨场衔接] shot=%s 换场首镜 → 引入上一场末镜 %s",
@@ -2419,6 +2785,15 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                     if _batches:
                         _bfiles, _berr = [], ""
                         for _bi, _bseg in enumerate(_batches):
+                            # ⭐ 2026-10-19（用户实测「第 1 个 5 段与第 2 个 5 段之间有卡顿」）：
+                            #   批间末帧锚定开关。默认开；env 显式 0/false/off/no = 关闭
+                            #   （关闭后批间行为与改动前逐位一致 = 纯硬切）。
+                            #   放在循环体内（每次现读 env）：批间开关可临时切换，
+                            #   且不依赖 for 语句之前的初始化（t10 AST 仿真只抽 for 节点）。
+                            _anchor_tail_on = (
+                                str(os.environ.get("MJSCXT_H3_BATCH_TAIL_ANCHOR")
+                                    or "1").strip().lower()
+                                not in ("0", "false", "off", "no"))
                             # ⭐ t10（2026-10-13）P0 修复：**批级 QC 作用域**。
                             #   被检产物是本批的 mp4，而 _qc_scope["segs"] 此前只在
                             #   每个**场**开头设过一次（= 整场段）→ 第 1 批实测 ≈25s
@@ -2453,8 +2828,24 @@ def _video_generate_worker_body(task_id, project_name, shots, character_refs,
                                               f"{len(_scene_groups)} 场"
                                               f"（scene_{_sn:02d} 第 {_bi + 1}/"
                                               f"{len(_batches)} 批，{len(_bseg)} 段）")})
+                            # ⭐ 2026-10-19：批间末帧锚定（用户 P0「5 段与 5 段之间卡顿」）。
+                            #   插件「段间引导」只在同一次提交内传递上一段尾帧，
+                            #   新批第 1 段 i=0 拿不到上一批尾帧 → 这里把上一批成片
+                            #   末帧抽出来，作为 <Picture K> 挂到本批首段并补开场承接句。
+                            #   只在**本批这次调用**用 _bseg_run（copy），不改共享 dict。
+                            _bseg_run = _bseg
+                            if _anchor_tail_on and _bi > 0 and _bfiles:
+                                _tail_png = _extract_batch_tail_frame(
+                                    _bfiles[-1],
+                                    os.path.join(videos_dir, _BATCH_TAIL_DIRNAME),
+                                    _sn, _bi - 1)
+                                if _tail_png:
+                                    _bseg_run = _anchor_batch_head_to_prev_tail(
+                                        _bseg, _tail_png,
+                                        common_count=len([c for c in _common
+                                                          if c.get("path")]))
                             _bres = comfyui_client.generate_h3_sequence_sequential(
-                                segments=_bseg,
+                                segments=_bseg_run,
                                 filename_prefix=(f"comic_drama/{project_name}_"
                                                  f"{episode_tag or 'episode'}_s{_sn:02d}"
                                                  f"_b{_bi:02d}"),

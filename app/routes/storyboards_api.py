@@ -47,7 +47,7 @@ def api_generate_storyboards():
     """为剧本的每个 shot 生成一张分镜图（参考角色/物品/场景资产图）"""
     # ⚠️ 故意不设 AI 门禁：分镜图 = 消费剧本里已产出的 shot.prompt + ComfyUI 出图 + 质检，
     # 不读任何 AI 凭证。挂在 LLM 门禁上会把「没配 key 但有存量剧本」的用户一起拦死。
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # P2-T2：写盘路由统一走 _project_or_400（缺省/越界 project_name → 400，
     # 不再静默回落共享 'project' 命名空间造成串项目）。前端契约必填。
     project_name, err = _project_or_400((data.get('project_name') or '').strip())

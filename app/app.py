@@ -13,7 +13,7 @@ import copy
 import uuid
 import contextvars
 from datetime import datetime
-from flask import Flask, render_template, request, jsonify, send_file, abort, redirect, send_from_directory
+from flask import Flask, request, jsonify, send_file, abort, redirect, send_from_directory
 from werkzeug.exceptions import BadRequest, HTTPException
 
 from config import (
@@ -113,9 +113,7 @@ import h3_director_builder
 import h3_segment_loras
 import autonomous
 import cancellation
-import ai_memory
 import prompt_memory
-from ai_memory import get_memory_system
 from dub_mix import (
     DubMixError, ffmpeg_available as mix_ffmpeg_check, shot_timeline,
     build_entries, mix_video_with_entries, write_mix_report, mix_out_dir,
@@ -534,16 +532,14 @@ app.logger.info(
 def boot_qc_migration() -> bool:
     """质检存量迁移（服务真正启动时显式调用一次；幂等；失败绝不阻断启动）。
 
+    D-1（2026-10-16）：实现已下沉到 ``qc_helpers.boot_qc_migration``（供 serve.py 直接
+    import）；此处保留同名再导出以兼容既有调用点（本文件 __main__ 直跑分支）。
+
     Returns:
         True 表示本次确实迁移了；False 表示无需迁移 / 已迁移 / 失败。
     """
-    try:
-        if qc_client.migrate_enabled_default(QC_CONFIG_PATH):
-            app.logger.info("质检存量配置已迁移为「默认开启」")
-            return True
-    except Exception as _e:  # noqa: BLE001  迁移失败不得阻断启动
-        app.logger.warning(f"质检存量迁移失败（不影响启动）：{_e}")
-    return False
+    from qc_helpers import boot_qc_migration as _impl
+    return _impl()
 
 
 # 无人值守托管：若存在已启用的托管计划，服务启动后自动接着生产（断点续跑）
@@ -940,10 +936,9 @@ def _handle_bad_request(e):
 # 由 GET 接口的 stale 字段带回界面 —— 否则界面会显示「已批准」，实际批的是上一版。
 
 
-#: 质检教训库（prompt_memory）与 AI 记忆（ai_memory）是**两套数据**：
-#:   - ai_memory：手动登记的经验/模式，供记忆页展示（本轮之前只有 3 条 test，是死壳）
-#:   - prompt_memory：生成链路**自动沉淀**的质检教训（真正在驱动「不达标→改提示词」）
-#: 记忆页此前只读前者，因此「看不到任何自动化学习成果」。下面这组接口把两者都暴露出来。
+#: 记忆数据**唯一来源 = prompt_memory**（生成链路自动沉淀的质检教训：不达标→改提示词）。
+#: 2026-10-16 收敛：原 ai_memory（手动登记的「自进化」死壳，实测只有 3 条 test 数据）已改为
+#: prompt_memory 的**只读门面**，不再自建第二份存储 —— 记忆页的统计/列表/洞察从此同源。
 
 
 if __name__ == '__main__':

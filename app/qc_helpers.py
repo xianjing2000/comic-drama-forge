@@ -22,6 +22,7 @@ from comfyui_client import (ComfyUIClient, camera_spec as _camera_spec,
                             IDENTITY_GRID_REF_MARK as _IDENTITY_GRID_REF_MARK)
 from config import (
     ENABLE_STORYBOARD_SCENE_REF as _SB_SCENE_REF,
+    ENABLE_3D_BLOCKING_IMAGE as _3D_BLOCKING_IMAGE,
     COMFYUI_URL, PROJECT_ROOT_DIR, PROJECT_DATA_DIR, PROJECT_OUTPUT_DIR, SCRIPT_DIR,
     CHARACTERS_DIR, ITEMS_DIR, SCENES_DIR, STORYBOARDS_DIR, KEYFRAMES_DIR, VIDEOS_DIR, FINAL_DIR,
     PROJECT_TRASH_DIR,
@@ -270,22 +271,241 @@ def _pick_hd_file(asset_dir: str, *names) -> str:
     return ""
 
 
-def prefer_hd_char_ref(original: str, payload: dict) -> str:
-    """分镜专用：角色参考图优先取 hd/ 下的高清单视角图。
+def _crop_sheet_view(sheet_path: str, view: str) -> str:
+    """从**原始三视图设定稿**里纯裁出指定视角（front/side/back），写缓存，返回路径（失败空串）。
 
-    三视图整图 → 增强为 hd/front.png（正面单张高清）。
-    取图优先级：hd/front.png → hd/side.png → hd/back.png → 原图。
-    角色身份锚点要的是「一张清晰的身份参考」，故优先正面高清图；
-    不再按景别选 half/front —— hd 产物本身已是满幅单视角、信息量远高于三视图整图。
+    为什么要纯裁：资产增强产出的 `hd/side|back.png` 是**切栏后再 img2img 重绘**的，实测模型把
+    每栏都重画成了**正面**（角度丢失）→ 按朝向取视图拿不到真侧/背。原始 `base.png` 的三视图
+    里**本身就有**正/侧/背，直接**纯裁**即可保真。
+
+    分栏做法：列方向"墨迹占比"投影（阈值 0.30）→ 连续段 → 宽度 ≥10% 的段视为人物栏（右端
+    面部特写栏通常 <10%，自动排除）→ 左起第 1/2/3 段 = 正面/侧面/背面。纵向再按该栏墨迹收紧。
+    **只写 `<资产目录>/_sb_view/<view>.png` 缓存，绝不回写 base.png。** 异常/分栏不足 3 段 → 返回 ""。
+    """
+    try:
+        _v = str(view or "").strip().lower()
+        if _v not in ("front", "side", "back") or not sheet_path or not os.path.isfile(sheet_path):
+            return ""
+        _d = os.path.dirname(sheet_path)
+        _out_dir = os.path.join(_d, "_sb_view")
+        _out = os.path.join(_out_dir, f"{_v}.png")
+        try:
+            if os.path.isfile(_out) and os.path.getmtime(_out) >= os.path.getmtime(sheet_path):
+                return _out
+        except OSError:
+            pass
+        from PIL import Image
+        import numpy as np
+        im = Image.open(sheet_path).convert("RGB")
+        W, H = im.size
+        ink = np.asarray(im.convert("L")) < 230
+        col = ink.sum(0) / float(H)
+        runs, s = [], None
+        for x in range(W):
+            if col[x] > 0.30:
+                if s is None:
+                    s = x
+            else:
+                if s is not None:
+                    runs.append((s, x)); s = None
+        if s is not None:
+            runs.append((s, W))
+        merged = []
+        for a, b in runs:
+            if merged and a - merged[-1][1] < 0.015 * W:
+                merged[-1] = (merged[-1][0], b)
+            else:
+                merged.append((a, b))
+        figures = [(a, b) for a, b in merged if (b - a) >= 0.10 * W]
+        if len(figures) < 3:
+            logger.info("[分镜参考图] 设定稿分栏不足 3 段（%d）→ 不纯裁：%s",
+                        len(figures), os.path.basename(sheet_path))
+            return ""
+        a, b = figures[{"front": 0, "side": 1, "back": 2}[_v]]
+        # 纵向：取**最长连续人物段**（排除顶部"正面/侧面/背面"文字标题与底部细节小图）
+        rows = ink[:, a:b].sum(axis=1)
+        thr = (b - a) * 0.05
+        rr, s2 = [], None
+        for y in range(H):
+            if rows[y] > thr:
+                if s2 is None:
+                    s2 = y
+            else:
+                if s2 is not None:
+                    rr.append((s2, y)); s2 = None
+        if s2 is not None:
+            rr.append((s2, H))
+        gap = max(2, int(0.02 * H))
+        mg = []
+        for _y0, _y1 in rr:
+            if mg and _y0 - mg[-1][1] < gap:
+                mg[-1] = (mg[-1][0], _y1)
+            else:
+                mg.append((_y0, _y1))
+        pad = max(1, int(0.01 * W))
+        if mg:
+            _y0, _y1 = max(mg, key=lambda t: t[1] - t[0])
+            y0, y1 = max(0, _y0 - pad), min(H, _y1 + pad)
+        else:
+            y0, y1 = 0, H
+        os.makedirs(_out_dir, exist_ok=True)
+        im.crop((max(0, a - pad), y0, min(W, b + pad), y1)).save(_out)
+        logger.info("[分镜参考图] 设定稿纯裁 %s → %s（栏 %d-%d px）",
+                    _v, os.path.relpath(_out, _d), a, b)
+        return _out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[分镜参考图] 设定稿纯裁失败（忽略）：%s", e)
+        return ""
+
+
+#: 景别 → 人物参考图保留的纵向比例（从头顶往下）。只对「比全身更近」的景别裁。
+#: 背景（2026-10-18 用户实测：中近景镜反复被画成全身、还画重人）：参考图全是全身，
+#: 模型会跟着参考图的取景铺开；把参考图裁到与目标景别一致的头肩/头腰，输出才收得回来。
+_CHAR_FRAME_KEEP = {"近景": 0.46, "中近景": 0.62}
+
+
+def _crop_char_framing(img_path: str, framing: str) -> str:
+    """按本镜景别把**单张人物立绘**裁到上半身（近景=头肩胸，中近景=头到腰）。
+
+    只写 ``<资产目录>/_sb_view/<stem>_f<NN>.png`` 缓存，绝不回写原图；任何失败返回原路径。
+    特写由 ``_apply_closeup_ref_strategy`` 单独处理（头部方裁），这里不重复。
+    ⚠️ 只接受**已经是单人图**的路径（视角纯裁 / hd 单视图）；三视图整图不要传进来 ——
+       按比例裁整图会把一排人全裁成「一排头」。
+    """
+    keep = _CHAR_FRAME_KEEP.get(str(framing or "").strip())
+    if not keep or not img_path or not os.path.isfile(img_path):
+        return img_path
+    try:
+        _parent = os.path.dirname(os.path.abspath(img_path))
+        _stem = os.path.splitext(os.path.basename(img_path))[0]
+        # 输入若已是 `_sb_view/front.png`（视角纯裁缓存），缓存放它旁边，避免套两层目录
+        _out_dir = _parent if os.path.basename(_parent) == "_sb_view" \
+            else os.path.join(_parent, "_sb_view")
+        _out = os.path.join(_out_dir, "%s_f%d.png" % (_stem, int(keep * 100)))
+        try:
+            if os.path.isfile(_out) and os.path.getmtime(_out) >= os.path.getmtime(img_path):
+                return _out
+        except OSError:
+            pass
+        import numpy as np
+        from PIL import Image
+        im = Image.open(img_path).convert("RGB")
+        W, H = im.size
+        # 先按墨迹收纵向边界（去白边），再取「头顶往下 keep」——hd 单视图常带留白
+        ink = np.asarray(im.convert("L")) < 235
+        rows = ink.sum(axis=1) > max(1, int(W * 0.02))
+        ys = np.where(rows)[0]
+        if len(ys):
+            y0, y1 = int(ys[0]), int(ys[-1]) + 1
+        else:
+            y0, y1 = 0, H
+        span = max(1, y1 - y0)
+        y_end = min(H, y0 + int(span * keep))
+        crop = im.crop((0, y0, W, max(y0 + 8, y_end)))
+        os.makedirs(_out_dir, exist_ok=True)
+        crop.save(_out)
+        logger.info("[分镜参考图] 按景别裁人物参考（%s → 保留 %d%%）：%s",
+                    framing, int(keep * 100), os.path.relpath(_out, _parent))
+        return _out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[分镜参考图] 按景别裁人物参考失败（忽略）：%s", e)
+        return img_path
+
+
+def prefer_hd_char_ref(original: str, payload: dict, view: str = "front",
+                       framing: str = "") -> str:
+    """分镜专用：角色参考图按**本镜朝向**取对应视角，优先从**原始三视图纯裁**。
+
+    优先序（2026-10-17）：
+      ① `_crop_sheet_view(original, view)` —— 从原始 `base.png` 三视图**纯裁**对应视角
+         （front/side/back），不重绘、不回写原图；
+      ② `hd/front.png`（单视角高清，**仅正面可靠**；hd/side|back 是重绘产物、实为正面，不用）；
+      ③ `hd/base.png`（整图高清）；④ 原图。
+    view 由剧本 `shot.blocking[].facing` 映射（`_view_from_facing`）：camera→front、
+    left/right→side、back→back。纯裁失败（版式非三视图）→ 自动回落 hd/原图。
+    framing（2026-10-18）：本镜景别；近景/中近景时把参考图裁到上半身
+    （`_crop_char_framing`），避免模型按全身参考铺开成全身构图。三视图整图（回退④）
+    不做景别裁（会把一排人裁成「一排头」）。
+    ⚠️ 群体角色（群像/弟子群…）同样走纯裁：多裁一列 = 单个弟子身份锚点。
+       2026-10-18 实测教训：曾改为「整张合影当参考」→ 模型把合影的**一字正面站位**当构图
+       照抄，所有群像镜（含近景！）都变成「5 人正面排排站」，站位/动作全丢。
     """
     if not original:
         return original
     _d = (payload or {}).get("_dir") or os.path.dirname(original or "")
-    hd = _pick_hd_file(_d, "front.png", "side.png", "back.png")
+    _v = str(view or "").strip().lower()
+    if _v in ("front", "side", "back"):
+        _crop = _crop_sheet_view(original, _v)
+        if _crop:
+            return _crop_char_framing(_crop, framing)
+    hd = _pick_hd_file(_d, "front.png") or _pick_hd_file(_d, "base.png")
     if hd:
-        logger.debug("[分镜参考图] 角色改用高清增强图：%s", hd)
-        return hd
+        logger.debug("[分镜参考图] 角色改用高清参考（视角=%s，纯裁不可用回落）：%s", _v or "front", hd)
+        return _crop_char_framing(hd, framing)
     return original
+
+
+def _char_facing_for_shot(shot, name: str) -> str:
+    """从剧本 `shot.blocking` 里取某角色本镜的朝向（camera/left/right/back；缺省空串）。
+
+    剧本阶段（LLM）已经按分镜判好了每个角色的朝向，这里只做**确定性读取**，不再额外调模型。
+    fail-open：任何异常 → 空串（调用方按「front」处理）。
+    """
+    try:
+        for it in (shot.get("blocking") or []):
+            if isinstance(it, dict) and str(it.get("name") or "").strip() == str(name or "").strip():
+                return str(it.get("facing") or "").strip().lower()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[分镜参考图] 读取角色朝向失败（按 front 处理）：%s", e)
+    return ""
+
+
+def _view_from_facing(facing: str) -> str:
+    """朝向 → 参考图视角：back→back；left/right→side；其余（camera/空）→front。"""
+    f = str(facing or "").strip().lower()
+    if f == "back":
+        return "back"
+    if f in ("left", "right"):
+        return "side"
+    return "front"
+
+
+def _crop_scene_grid_cell(grid_path: str, idx: int) -> str:
+    """从场景九宫格整图**纯裁**第 idx 格（1-based，行优先），写
+    ``<场景目录>/_sb_cell/cellNN.png`` 缓存并返回路径（失败返回空串）。
+
+    背景（2026-10-18「场景机位图」落地）：hd 增强缺失时，旧实现把**整张 9 宫格**当场景
+    参考图喂给分镜模型 —— 拼贴版式极易被画进分镜（「参考图里的九格」直接复刻）。
+    改为确定性裁出本镜机位那一格（同类项目「机位#N → 裁出单格作参考」同一做法）。
+    只写缓存目录，绝不回写 grid.png。
+    """
+    try:
+        if not grid_path or not os.path.isfile(grid_path):
+            return ""
+        _d = os.path.dirname(os.path.abspath(grid_path))
+        _out_dir = os.path.join(_d, "_sb_cell")
+        _out = os.path.join(_out_dir, "cell%02d.png" % int(idx))
+        try:
+            if os.path.isfile(_out) and os.path.getmtime(_out) >= os.path.getmtime(grid_path):
+                return _out
+        except OSError:
+            pass
+        from PIL import Image
+        im = Image.open(grid_path).convert("RGB")
+        W, H = im.size
+        cw, ch = W // 3, H // 3
+        i = int(idx) - 1
+        if i < 0 or i >= 9 or cw < 32 or ch < 32:
+            return ""
+        x, y = (i % 3) * cw, (i // 3) * ch
+        os.makedirs(_out_dir, exist_ok=True)
+        im.crop((x, y, x + cw, y + ch)).save(_out)
+        logger.info("[分镜参考图] 场景宫格纯裁 cell%02d → %s（%dx%d）",
+                    int(idx), os.path.relpath(_out, _d), cw, ch)
+        return _out
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[分镜参考图] 场景宫格纯裁失败（忽略）：%s", e)
+        return ""
 
 
 def prefer_hd_scene_ref(original: str, payload: dict, shot) -> str:
@@ -294,13 +514,13 @@ def prefer_hd_scene_ref(original: str, payload: dict, shot) -> str:
     格序与 config.SCENE_GRID_VIEW_KEYS 一一对应（行优先）：
       cell01=front 全景点 / cell02=wide 远景 / cell03=mid 中景 / cell04=near 近景
       cell05=detail_a / cell06=detail_b / cell07=left45 / cell08=right45 / cell09=top 俯视鸟瞰
-    hd/ 不存在或该格缺失时原样返回。
+    ⭐ 2026-10-18：hd 增强缺失时不再原样返回（那可能是整张 9 宫格）——
+       先从 grid.png **纯裁**本机位那一格（`_crop_scene_grid_cell`，零 GPU）；
+       grid 也没有（老项目/未生成机位图）才原样返回。
     """
     if not original:
         return original
     _d = (payload or {}).get("_dir") or os.path.dirname(original or "")
-    if not os.path.isdir(_hd_dir_of(_d)):
-        return original
     try:
         _key = _scene_view_for_shot(shot)
     except Exception:  # noqa: BLE001
@@ -309,11 +529,32 @@ def prefer_hd_scene_ref(original: str, payload: dict, shot) -> str:
         _idx = list(SCENE_GRID_VIEW_KEYS).index(_key) + 1
     except ValueError:
         _idx = 1
-    hd = _pick_hd_file(_d, "cell%02d.png" % _idx, "cell01.png")
-    if hd:
-        logger.debug("[分镜参考图] 场景改用高清机位图(%s)：%s", _key, hd)
-        return hd
+    if os.path.isdir(_hd_dir_of(_d)):
+        hd = _pick_hd_file(_d, "cell%02d.png" % _idx, "cell01.png")
+        if hd:
+            logger.debug("[分镜参考图] 场景改用高清机位图(%s)：%s", _key, hd)
+            return hd
+    _grid = os.path.join(_d, SCENE_GRID_FILENAME) if _d else ""
+    if _grid and os.path.isfile(_grid):
+        _crop = _crop_scene_grid_cell(_grid, _idx)
+        if _crop:
+            return _crop
     return original
+
+
+def _is_detail_shot(shot) -> bool:
+    """本镜是否为「局部」（detail / insert）插入镜 —— 2026-10-16 新增。
+
+    用途：「局部」镜**不注入角色脸部锚点**（见 :func:`_allocate_storyboard_refs`）。
+    判定用**权威景别**（``shot_camera.shot_framing``：优先读 ``shot_type``，回退解析
+    ``camera``），与生成端 / 质检端同源，避免口径漂移。
+    fail-open：任何异常 → False（按常规镜处理，绝不影响参考图分配）。
+    """
+    try:
+        import shot_camera  # 叶子模块（只依赖 config），无环
+        return shot_camera.shot_framing(shot) == "局部"
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
@@ -392,7 +633,14 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
     _hero_item = _text_item_closeup(shot, item_idx, items_in)
     _hero_path = ""
     if _hero_item:
-        _hero_path = str((item_idx.get(_hero_item) or {}).get("image") or "")
+        _hero_entry = item_idx.get(_hero_item) or {}
+        _hero_path = str(_hero_entry.get("image") or "")
+        # ⭐ 2026-10-16（E 道具状态）：文字道具主体同样支持状态变体（如「告示已被撕」）。fail-open。
+        _hero_state = (shot.get("items_state") or {}).get(_hero_item) \
+            if isinstance(shot.get("items_state"), dict) else None
+        if _hero_state and _hero_path:
+            from asset_refs import item_state_image as _item_state_image
+            _hero_path = _item_state_image(_hero_entry.get("_dir") or "", _hero_state, _hero_path)
         if _hero_path and _hero_path not in used_paths:
             used_paths.add(_hero_path)
             refs.append(("文字道具主体",
@@ -407,7 +655,24 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
     # ---- <image1>…<image3>：角色身份锚点（逐个独立，禁止特征串味）----
     # 官方要点：多角色时每人一张图 + 明确「independently / Do not merge facial features」，
     # 否则最常见的失败就是 A 的脸跑到 B、B 的衣服跑到 C。
+    # ⭐ 2026-10-16：「局部」（detail/insert）插入镜**不注入角色脸部锚点**。
+    #    真实死循环（shot_13 / shot_16）：局部镜要「只拍手部/道具、**不出现完整人脸**」，
+    #    而角色脸部锚点（半身近景）本身就是**一张脸** —— 模型会照它把特写画成带脸的中近景
+    #    → 质检判「景别不符」→ 重画还是脸 → 永不通过（换种子救不回）。
+    #    局部镜的叙事重心是**道具**，脸部锚点对「本体外观」无用反而有害，故整体跳过
+    #    （角色/造型改由描述文字锁定；道具 / 场景锚点照常保留）。
+    _detail = _is_detail_shot(shot)
+    if _detail and chars_in:
+        logger.info("[分镜参考图] shot=%s 是「局部」插入镜 → 不注入角色脸部锚点"
+                    "（避免照脸图把特写画成带脸中近景）；角色靠文字描述锁定",
+                    shot.get("shot_id"))
+        # 一致性：本镜**实际没有**注入角色身份锚点 → 同步清空 `_char_ref_names`，
+        # 否则 `_shot_has_char_ref` 会误判「有角色锚点」，在开启 3D 基准图 / 身份网格时
+        # 又去渲染一张带人偶/脸的参考图，把刚去掉的脸从另一条路带回来。
+        shot["_char_ref_names"] = []
     for i, name in enumerate(chars_in):
+        if _detail:
+            break
         if i >= 3:
             # 3 个角色身份槽位；第 4 人起并入构图说明。
             # ⭐ t16 P0-③ 该降级**刻意不升级为告警**（否则三人群像镜会天天刷屏）：
@@ -427,7 +692,16 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
         img = _pick_char_view(payload, _want_half,
                               _shot_outfit_dir(shot, name, payload.get("_dir") or ""))
         # 2026-10-16：优先取资产高清增强产物（<asset_dir>/hd/front.png），缺失则原样回落
-        img = prefer_hd_char_ref(img, payload)
+        # 2026-10-18：带上本镜景别 —— 近景/中近景把参考裁到上半身（治「参考全身→画全身」）
+        _framing = ""
+        try:
+            import shot_camera  # 叶子模块（只依赖 config），与 _is_detail_shot 同口径
+            _framing = shot_camera.shot_framing(shot)
+        except Exception as _fr_e:  # noqa: BLE001 - 景别读不到就按全身（旧行为）
+            logger.debug("[分镜参考图] 读取景别失败（按全身参考）：%s", _fr_e)
+        img = prefer_hd_char_ref(
+            img, payload, _view_from_facing(_char_facing_for_shot(shot, name)),
+            framing=_framing)
         if not img or img in used_paths:
             # ⭐ 2026-10-13（t16 P0-③，用户口径「静默降级容忍度极低」）：这里原先直接
             #    continue —— 角色**整条身份链**（身份锚点 / 服装锚点 / 身份基准网格）
@@ -436,6 +710,23 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
             #    的集都会命中（例：第3集新登场的 王虎/李天风/王二牛/莫问天，资产尚未产出）。
             #    现在把两种原因分开报，并把「缺哪一档 / 影响哪一镜」写进 shot
             #    （_ref_warnings 累加式 + _ref_warning 首条），随任务结果一起可查。
+            if not img:
+                # ⭐ 2026-10-16 方案A（用户口径「没做方案A你跑什么测试」）：
+                #    角色资产缺失 → **按需生成**一张立绘并落盘（缓存复用），
+                #    成功则本镜照常注入身份锚点，不再降级。
+                #    提示词取索引里的 appearance（外貌锁定）；生成后自动做高清增强。
+                #    fail-open：生成失败 / 并发争抢 → 保持原有降级行为，绝不阻断出图。
+                try:
+                    import asset_ondemand as _aod
+                    img = _aod.ensure_character_asset(payload, project_name or "")
+                    if img:
+                        logger.info(
+                            "[分镜参考图] shot=%s 角色「%s」资产缺失 → 按需生成成功：%s",
+                            shot.get("shot_id"), name, img)
+                except Exception as _ode:  # noqa: BLE001
+                    logger.warning("[按需角色] 调用失败（按无锚点继续）：%s: %s",
+                                   type(_ode).__name__, _ode)
+                    img = ""
             if not img:
                 _cd = str(payload.get("_dir") or "")
                 _missing_view = []
@@ -454,6 +745,11 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
                        "取不到可用图（base.png / front.png 均不存在或为空）")
                     + "；本镜将**不带该角色的身份参考图**（身份锚点 / 服装锚点 / 身份基准"
                       "网格一并失效，只能靠文字描述锁人）")
+                # ⭐ 2026-10-18（借鉴同类项目「清单驱动·缺图不出图」）：把缺失角色记到
+                #    shot 上，由分镜 worker 决定停不停 —— 无身份锚点硬画必出"画错人/错服"，
+                #    白白烧 GPU 还会被质检拦下反复重试。开关：MJSCXT_SB_REQUIRE_CHAR_REFS。
+                shot["_sb_missing_char_refs"] = list(
+                    shot.get("_sb_missing_char_refs") or []) + [name]
                 logger.warning(
                     "[分镜参考图] shot=%s 角色「%s」命中资产索引但取不到参考图"
                     "（目录=%s，缺档=%s）→ 本镜无该角色身份锚点",
@@ -498,13 +794,20 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
     # 2026-10-16：优先取高清机位图（<asset_dir>/hd/cellNN.png，按本镜机位选格）
     if scene_img:
         scene_img = prefer_hd_scene_ref(scene_img, _sc_entry, shot)
-    # ⭐ 2026-10-15（用户口径）：默认不再单独注入场景图 —— 3D 构图基准图（<image1>）
-    #    本身已含完整场景（建筑/石阶/石灯笼/材质/光影），再补一张属冗余信号，
-    #    且会与基准图的场景互相拉扯。见 config.ENABLE_STORYBOARD_SCENE_REF（默认 False）。
-    if scene_img and not _SB_SCENE_REF:
+    # ⭐ 2026-10-15（用户口径）：3D 构图基准图（<image1>）本身已含完整场景，再补一张场景图
+    #    属冗余信号、且会与基准图的场景互相拉扯 → 故默认不再单独注入场景图
+    #    （见 config.ENABLE_STORYBOARD_SCENE_REF，默认 False）。
+    # ⚠️ 2026-10-17 修正（实测「动作镜大量『场景与设定不符』」）：上面这条**前提是 3D 基准图
+    #    真的会渲染**。但 ENABLE_3D_BLOCKING_IMAGE 默认 False —— 此时若还把场景图丢掉，分镜就
+    #    **完全没有场景锚点**，背景全靠模型自由发挥（实测 4/4 失败镜都是「背景不是设定广场」）。
+    #    改为：仅在 **3D 基准图确实启用** 时才把场景图当冗余省略；否则**保留**当空间/光照锚点。
+    if scene_img and not _SB_SCENE_REF and _3D_BLOCKING_IMAGE:
         logger.info("[分镜参考图] shot=%s 场景参考图已按开关关闭（3D 基准图已含场景）：%s",
                     shot.get("shot_id"), scene_name)
         scene_img = None
+    elif scene_img and not _SB_SCENE_REF:
+        logger.info("[分镜参考图] shot=%s 3D 基准图未启用 → 保留场景参考图作空间/光照锚点：%s",
+                    shot.get("shot_id"), scene_name)
     if scene_img and scene_img in used_paths:
         # ⭐ t16 P0-③：场景锚点被「角色参考图占位」挤掉时原先静默置 None
         #    （实测从未发生 —— 场景图与角色图不会是同一文件，但一旦发生就是无声降级）。
@@ -525,8 +828,24 @@ def _allocate_storyboard_refs(shot: dict, char_idx: dict, item_idx: dict, scene_
         if cand == _hero_item:      # 已提为 image1 的 edit target，不重复占槽
             continue
         if len(item_refs) >= 2:
+            # ⭐ 2026-10-19（B3）：超槽位的道具此前**静默丢弃** —— 出图时该道具没有任何
+            #    外观锚点，成片里它长什么样全靠模型自由发挥，且日志/界面完全看不出来。
+            #    这里显式记账（不改变出图行为，只让缺口可见）。
+            _note_ref_warning(
+                shot, "物品参考图超出槽位上限：本镜还有物品「%s」未带参考图"
+                      "（每镜最多 2 张道具槽，避免挤占角色身份槽位）→ 该道具外观不可控" % cand)
+            logger.warning("[分镜参考图] shot=%s 物品「%s」超出 2 张道具槽位 → 本镜不带它的参考图",
+                           shot.get("shot_id"), cand)
             break
-        img = item_idx.get(cand, {}).get("image")
+        _ientry = item_idx.get(cand, {}) or {}
+        img = _ientry.get("image")
+        # ⭐ 2026-10-16（E 道具状态）：本镜若给了「该道具的状态」(shot.items_state) 且存在状态变体
+        #    items/<name>/states/<slug>.png → 优先取变体（如「剑已断」而非「剑完好」）。fail-open。
+        _istate = (shot.get("items_state") or {}).get(cand) \
+            if isinstance(shot.get("items_state"), dict) else None
+        if _istate and img:
+            from asset_refs import item_state_image as _item_state_image
+            img = _item_state_image(_ientry.get("_dir") or "", _istate, img)
         if not img or img in used_paths or img == scene_img:
             # ⭐ t16 P0-③（2026-10-13）：道具参考图静默丢弃的三种成因必须可区分 ——
             #    「物品资产无图」（资产没出/被回收）、「与已用图重复」、「与场景图重复」。
@@ -822,9 +1141,40 @@ def _qc_shot_desc(shot: dict) -> str:
         ang = _camera_angle(cam)
         if ang:
             parts.append(f"机位：{ang}（须与画面一致）")
+    # ⭐ 2026-10-18：把**出场角色名单**发给质检 —— 此前质检看不到"这镜该有谁"，
+    #    实测把「只画了羡进、漏掉赵天霸」的分镜判成通过（用户只能自己发现）。
+    _cast = [str(x).strip() for x in (shot.get("characters_in_shot") or [])
+             if str(x).strip()]
+    if _cast:
+        try:
+            import character_tier
+            _groups = [c for c in _cast if character_tier.is_crowd_name(c)]
+        except Exception:  # noqa: BLE001
+            _groups = [c for c in _cast if any(t in c for t in ("群像", "众", "人群", "弟子群"))]
+        _grp = ("（「%s」是群体，画面可以是其中一名或多名弟子）" % "、".join(_groups)) \
+            if _groups else ""
+        # 开场画面提到"两侧弟子/众人"但名单里没有群体角色 → 背景里可以出现这些背景人物，
+        # 不得按"名单外人物"判缺陷（与生成侧 compact 提示词的背景人物口径一致）。
+        _ffm = str(shot.get("first_frame") or "") + str(shot.get("description") or "")
+        _extras_ok = (not _groups) and any(
+            t in _ffm for t in ("两侧", "弟子", "众人", "围观", "群人", "人群"))
+        _ban = ("（画面中的人物身份应与之一致；开场画面提到的两侧弟子等背景人物可出现在"
+                "背景里，不算名单外人物）") if _extras_ok else \
+               "（画面中的人物身份应与之一致；不得出现名单外的人物）"
+        parts.append(f"出场角色：{'、'.join(_cast)}{_grp}{_ban}")
     if shot.get("location"):
         parts.append(f"场景：{shot['location']}")
-    if shot.get("description"):
+    # ⭐ 2026-10-18：分镜图 = 该镜「开头瞬间」（与生成侧 build_storyboard_prompt 同口径）。
+    #    质检必须按**开场画面**判定；否则会拿全片动作（含结果）去要求一张静态图 ——
+    #    实测死循环：图是对的（开头没抬手），却被判「动作没演完」→ 反复重生成。
+    _ff = str(shot.get("first_frame") or "").strip()
+    if _ff:
+        parts.append(f"开场画面（本图应为这一瞬间的静止画面）：{_ff}")
+        if shot.get("description"):
+            parts.append(
+                "本镜动作过程（视频阶段演绎；本图**不得**因动作尚未发生/未完成而判缺陷）："
+                f"{str(shot['description']).strip()}")
+    elif shot.get("description"):
         parts.append(str(shot["description"]).strip())
     if shot.get("emotion"):
         parts.append(f"情绪：{shot['emotion']}")
@@ -924,7 +1274,16 @@ def _qc_ref_images(shot: dict, char_idx: dict, item_idx: dict, scene_idx: dict,
     for n in _match_shot_chars(shot, char_idx):
         _add(f"角色「{n}」的外貌、服装与发型", (char_idx.get(n) or {}).get("image"))
     for n in _resolve_item_names(shot, item_idx, "图片质检"):
-        _add(f"物品「{n}」的形状、材质与配色", (item_idx.get(n) or {}).get("image"))
+        _e = item_idx.get(n) or {}
+        _img = _e.get("image")
+        # ⭐ 2026-10-16（E 道具状态）：判官也必须拿**同状态**的锚点 —— 否则会把「剑已断」
+        #    误判成「与设定图不符」。与生成侧取图同源（asset_refs.item_state_image）。
+        _ist = (shot.get("items_state") or {}).get(n) \
+            if isinstance(shot.get("items_state"), dict) else None
+        if _ist and _img:
+            from asset_refs import item_state_image as _item_state_image
+            _img = _item_state_image(_e.get("_dir") or "", _ist, _img)
+        _add(f"物品「{n}」的形状、材质与配色", _img)
     loc, _scene_e = _resolve_scene_entry(shot, scene_idx, "图片质检")
     if _scene_e:
         # 质检口径与生成侧话术同步（2026-09-29）：场景锚点核对的是**空间结构与
@@ -1080,3 +1439,21 @@ def _qc_canon_prompt_block(novel) -> str:
     except Exception as e:  # noqa: BLE001
         logger.warning("canon 提示词片段生成失败（忽略）：%s", e)
         return ""
+
+
+def boot_qc_migration() -> bool:
+    """质检存量迁移（服务真正启动时显式调用一次；幂等；失败绝不阻断启动）。
+
+    D-1（2026-10-16）：从 app.py 下沉到此，供 serve.py 直接 import，去掉
+    `sys.modules.get("app")` 的服务定位。
+    Returns:
+        True 表示本次确实迁移了；False 表示无需迁移 / 已迁移 / 失败。
+    """
+    import qc_client
+    try:
+        if qc_client.migrate_enabled_default(QC_CONFIG_PATH):
+            logger.info("质检存量配置已迁移为「默认开启」")
+            return True
+    except Exception as _e:  # noqa: BLE001  迁移失败不得阻断启动
+        logger.warning("质检存量迁移失败（不影响启动）：%s", _e)
+    return False

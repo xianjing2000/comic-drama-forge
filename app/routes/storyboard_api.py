@@ -276,7 +276,7 @@ def api_storyboard_shot_reorder():
     副作用：shot_id 保持原值不变（避免打断既有产物文件名映射），
     仅调整 shots 数组顺序与 shot_order 记录。
     """
-    data = request.json or {}
+    data = (request.get_json(silent=True) or {})
     # G4：判空看原始入参（_safe_project('') 返回真值 'project'，死守卫）
     project, err = _project_or_400(data.get('project_name') or '')
     order = data.get('order') or []

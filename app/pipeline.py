@@ -421,7 +421,7 @@ def _ep_log(project_name: str, episode_no: int, event: str, message: str,
 #: `upscale` 紧跟 `video`：对**集级原片**（video 步产出的整集视频）超分；
 #:    `final` 优先消费超分产物，故 `final` 落在最后一步。
 STEP_SEQUENCE = ("script", "tts_pre", "assets", "storyboard", "video",
-                 "upscale", "final")
+                  "upscale", "final")
 
 STEP_LABELS = {
     "script": "剧本生成",
@@ -618,16 +618,9 @@ class LeaseLostError(PipelineError):
     status = "lease_lost"
 
 
-# ===================== 宿主访问 =====================
-
-
-def _A():
-    """取宿主模块 app（延迟访问，避开循环导入）"""
-    import sys as _sys
-    mod = _sys.modules.get("app")
-    if mod is None:
-        raise PipelineError("宿主模块 app 尚未加载，无法运行流水线")
-    return mod
+# D-1（2026-10-16）：原 `_A()` 服务定位器（`sys.modules['app']`）已删除 —— 各调用点
+# 改为**函数内显式 import**（来源由 app.py 的实际导入锚定）。见
+# docs/D-1_B-6_落地说明_20261016.md。
 
 
 # ===================== 通用工具 =====================
@@ -642,9 +635,13 @@ def _run_task_worker(worker, args, registry_name: str, lock_name: str,
     为每次调用生成一个内部 task_id，预置初始状态，调用后读取最终状态并把该
     条目清掉（避免污染前端可见的任务列表）。
     """
-    A = _A()
-    registry = getattr(A, registry_name)
-    lock = getattr(A, lock_name)
+    # D-1（2026-10-16）：原 `getattr(A, registry_name/lock_name)` —— 任务注册表与锁的
+    # 唯一来源是 job_state（app 只是再导出），改显式映射。
+    from job_state import (generation_state, lock as _js_lock, dub_tasks, dub_lock,
+                           mix_tasks, mix_lock)
+    registry = {"generation_state": generation_state,
+                "dub_tasks": dub_tasks, "mix_tasks": mix_tasks}[registry_name]
+    lock = {"lock": _js_lock, "dub_lock": dub_lock, "mix_lock": mix_lock}[lock_name]
     tid = f"{prefix}_{int(time.time() * 1000)}_{os.getpid()}"
     state = {"status": "running", "progress": 0, "phase": "准备中",
              "results": [], "pipeline": True, "created_at": _now()}
@@ -774,7 +771,6 @@ def _char_setting_stale(project_name: str, name: str, asset_dir: str) -> bool:
                 break
         if not meta_path:
             return False
-            return False
         with open(meta_path, "r", encoding="utf-8") as f:
             meta_prompt = str((json.load(f) or {}).get("prompt") or "")
         if not meta_prompt:
@@ -838,14 +834,16 @@ def _playable(path: str) -> bool:
 
 
 def probe_script(ctx) -> bool:
-    A = _A()
-    p = A.novel_to_script.episode_script_path(A.SCRIPT_DIR, ctx["project_key"], ctx["episode_no"])
+    from config import SCRIPT_DIR
+    import novel_to_script
+    p = novel_to_script.episode_script_path(SCRIPT_DIR, ctx["project_key"], ctx["episode_no"])
     return _nonempty(p)
 
 
 def probe_assets(ctx) -> dict:
     """资产就绪判据：剧本里的每个角色/物品/场景都有非空基础图"""
-    A = _A()
+    from config import CHARACTERS_DIR, ITEMS_DIR, SCENES_DIR
+    _dirs = {"CHARACTERS_DIR": CHARACTERS_DIR, "ITEMS_DIR": ITEMS_DIR, "SCENES_DIR": SCENES_DIR}
     script = ctx.get("script") or {}
     out = {}
     for kind, dir_key, script_key in (
@@ -853,7 +851,7 @@ def probe_assets(ctx) -> dict:
         ("item", "ITEMS_DIR", "items"),
         ("scene", "SCENES_DIR", "scenes"),
     ):
-        base = os.path.join(getattr(A, dir_key), ctx["project_name"])
+        base = os.path.join(_dirs[dir_key], ctx["project_name"])
         names = [str(a.get("name") or "").strip()
                  for a in (script.get(script_key) or []) if isinstance(a, dict)]
         names = [n for n in names if n]
@@ -912,13 +910,15 @@ def probe_storyboard(ctx, quality: bool = True) -> dict:
     _sb_critical_issues），漂移会出现「探针判缺 → 复核判不缺」的反复失败。
     fail-open：判据求值异常一律按「达标」处理，绝不因本探针把整集打挂。
     """
-    A = _A()
-    d = A._ep_dir(os.path.join(A.STORYBOARDS_DIR, ctx["project_name"]), ctx["episode_no"])
+    from config import STORYBOARDS_DIR
+    from routes._shared import _ep_dir
+    from routes._shared import _shot_seq
+    d = _ep_dir(os.path.join(STORYBOARDS_DIR, ctx["project_name"]), ctx["episode_no"])
     shots = (ctx.get("script") or {}).get("shots") or []
     missing = []
     unqualified = []
     for i, s in enumerate(shots):
-        seq = A._shot_seq(s.get("shot_id", i + 1), i + 1)
+        seq = _shot_seq(s.get("shot_id", i + 1), i + 1)
         dst = os.path.join(d, f"shot_{seq:02d}.png")
         if not _nonempty(dst):
             missing.append(s.get("shot_id", i + 1))
@@ -948,8 +948,9 @@ def probe_storyboard(ctx, quality: bool = True) -> dict:
 
 
 def probe_video(ctx) -> dict:
-    A = _A()
-    d = A._ep_dir(os.path.join(A.VIDEOS_DIR, ctx["project_name"]), ctx["episode_no"])
+    from config import VIDEOS_DIR
+    from routes._shared import _ep_dir
+    d = _ep_dir(os.path.join(VIDEOS_DIR, ctx["project_name"]), ctx["episode_no"])
     # 2026-10-01 起只有整集模式（episode）：整集视频 = <tag>_full.mp4（历史命名兼容
     # episode_full.mp4）。逐镜 shot_NN.mp4 探测分支已随 per_shot/keyframe 模式废弃删除。
     tag = ctx.get("episode_tag") or f"ep{ctx['episode_no']:02d}"
@@ -963,8 +964,8 @@ def probe_video(ctx) -> dict:
 
 
 def final_path(ctx) -> str:
-    A = _A()
-    return os.path.join(A.FINAL_DIR, ctx["project_name"], f"ep{ctx['episode_no']:02d}_final.mp4")
+    from config import FINAL_DIR
+    return os.path.join(FINAL_DIR, ctx["project_name"], f"ep{ctx['episode_no']:02d}_final.mp4")
 
 
 def _deliverable_review(ctx) -> dict:
@@ -981,8 +982,8 @@ def _deliverable_review(ctx) -> dict:
     这里刻意不 fail-loud 上抛：调用点在断点续跑判定链上，抛错会中断整集生产，
     而「不知道 review」的后果仅是「可能少重做一集」，两害相权取其轻。
     """
-    A = _A()
-    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot",
+    from config import PROJECT_OUTPUT_DIR
+    idx_path = os.path.join(PROJECT_OUTPUT_DIR, "autopilot",
                             ctx["project_name"], "deliverables.json")
     try:
         data = read_json_strict(idx_path, {}) or {}
@@ -1031,8 +1032,8 @@ def _reset_deliverable_review(ctx, review: str, note: str = "") -> None:
 
     失败不阻断流水线（review 复位是「体验」问题，不影响成片本身）。
     """
-    A = _A()
-    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot",
+    from config import PROJECT_OUTPUT_DIR
+    idx_path = os.path.join(PROJECT_OUTPUT_DIR, "autopilot",
                             ctx["project_name"], "deliverables.json")
     # A-4：损坏文件不再静默当作空索引（否则下面「读改写」会用空 items 覆盖整个交付物索引）
     try:
@@ -1059,8 +1060,8 @@ def _reset_deliverable_review(ctx, review: str, note: str = "") -> None:
 
 
 def dub_manifest_path(ctx) -> str:
-    A = _A()
-    return os.path.join(A.DUB_DIR, ctx["project_name"],
+    from config import DUB_DIR
+    return os.path.join(DUB_DIR, ctx["project_name"],
                         f"ep{ctx['episode_no']:02d}_dub_manifest.json")
 
 
@@ -1096,8 +1097,9 @@ def _scene_segments(ctx) -> list:
 
     返回 [] = 该集没有逐场片段（非按场生成 / 尚未生成）→ 调用方回退整集原片路径。
     """
-    A = _A()
-    d = A._ep_dir(os.path.join(A.VIDEOS_DIR, ctx["project_name"]), ctx["episode_no"])
+    from config import VIDEOS_DIR
+    from routes._shared import _ep_dir
+    d = _ep_dir(os.path.join(VIDEOS_DIR, ctx["project_name"]), ctx["episode_no"])
     try:
         names = os.listdir(d)
     except OSError:
@@ -1246,7 +1248,7 @@ def _try_per_scene_upscale(ctx, scene_srcs, out_path) -> bool:
     全部成功且拼接可播放才返回 True（调用方采用）；任一场失败 / 拼接失败返回 False
     （调用方回落整集原片超分）。已超分场次直接复用（断点续跑）。
     """
-    A = _A()
+    from routes.final import video_processor
     scale = int(ctx["config"].get("upscale_scale") or 2)
     if scale not in (2, 3, 4):
         scale = 2
@@ -1339,7 +1341,7 @@ def _try_per_scene_upscale(ctx, scene_srcs, out_path) -> bool:
     tmp_concat = os.path.join(os.path.dirname(out_path),
                               f"_per_scene_concat_ep{ep_no:02d}.work")
     try:
-        cv = A.video_processor.concat_videos(up_scene_files, tmp_concat,
+        cv = video_processor.concat_videos(up_scene_files, tmp_concat,
                                              caller="pipeline.step_upscale.per_scene")
         if not cv or not _playable(cv):
             logger.warning("逐场超分：拼接失败或拼接产物不可播放，回落整集超分")
@@ -1366,8 +1368,8 @@ def _try_per_scene_upscale(ctx, scene_srcs, out_path) -> bool:
 
 def mix_output_path(ctx) -> str:
     """混音产物路径（流水线固定命名，便于幂等探测）"""
-    A = _A()
-    return os.path.join(A.mix_out_dir(ctx["project_name"]),
+    from dub_mix import mix_out_dir
+    return os.path.join(mix_out_dir(ctx["project_name"]),
                         f"ep{ctx['episode_no']:02d}_dubbed.mp4")
 
 
@@ -1382,8 +1384,8 @@ def upscale_path(ctx) -> str:
     VideoUpscaler 自身产出的文件名带时间戳（不可幂等），因此流水线会把结果
     归档到该确定性路径，重跑时 probe 命中即跳过。
     """
-    A = _A()
-    return os.path.join(A.UPSCALE_DIR, ctx["project_name"],
+    from config import UPSCALE_DIR
+    return os.path.join(UPSCALE_DIR, ctx["project_name"],
                         f"ep{ctx['episode_no']:02d}_upscaled.mp4")
 
 
@@ -1523,16 +1525,22 @@ def _qc_script_feedback_rewrite(client, script: dict, ctx: dict, cfg: dict):
 
 def step_script(ctx) -> dict:
     """章节正文 → 结构化剧本（含原文覆盖率守门 + 跨集连贯性编排）"""
-    A = _A()
+    from config import CONTINUITY_DIR
+    from config import NOVELS_DIR
+    from config import SCRIPT_DIR
+    from routes._shared import _current_llm_client
+    import continuity
+    import novel_to_script
+    from novel_parser import read_novel_text
     if probe_script(ctx) and not ctx["config"].get("overwrite_script"):
         return {"ok": True, "skipped": True, "artifact": _script_path(ctx),
                 "detail": {"note": "剧本已存在，跳过（断点续跑）"}}
 
-    client = A._current_llm_client()
+    client = _current_llm_client()
     if not client or not getattr(client, "configured", False):
         raise NeedsHumanError("尚未配置文本模型接口（AI 设置 → 文本分析），无法生成剧本")
 
-    text = A.read_novel_text(A.NOVELS_DIR, ctx["novel_meta"]["novel_id"])
+    text = read_novel_text(NOVELS_DIR, ctx["novel_meta"]["novel_id"])
     if not text:
         raise NeedsHumanError("小说正文为空，无法生成剧本")
 
@@ -1556,17 +1564,17 @@ def step_script(ctx) -> dict:
                         phase=f"script:{phase}")
 
 
-    conv = A.continuity.convert_chapter_with_continuity(
-        client, ctx["novel_meta"], text, chapter, ctx["project_key"], A.CONTINUITY_DIR,
+    conv = continuity.convert_chapter_with_continuity(
+        client, ctx["novel_meta"], text, chapter, ctx["project_key"], CONTINUITY_DIR,
         style=cfg.get("style") or "", target_shots=int(cfg.get("target_shots") or 0),
-        episode_no=ctx["episode_no"], save_dir=A.SCRIPT_DIR, progress_cb=_cb,
+        episode_no=ctx["episode_no"], save_dir=SCRIPT_DIR, progress_cb=_cb,
     )
     script = conv.get("script") or {}
     cov = conv.get("coverage") or {}
     val = conv.get("validation") or {}
     path = (conv.get("script_path")
-            or A.novel_to_script.save_episode_script(
-                script, A.SCRIPT_DIR, ctx["project_key"], ctx["episode_no"], ctx["project_key"]))
+            or novel_to_script.save_episode_script(
+                script, SCRIPT_DIR, ctx["project_key"], ctx["episode_no"], ctx["project_key"]))
 
     # ⭐ 2026-10-10（用户要求）：剧本质检 → 缺陷回传 LLM 重写 → 复检。
     #    补上此前的缺口：check_script 的 issues/suggestions 只被记日志，从未用于重写；
@@ -1582,12 +1590,12 @@ def step_script(ctx) -> dict:
                 #   的注释）：**不重编号就会把陈旧 scene_no 写回磁盘**，下游按场次渲染会
                 #   产出「前两场重复、尾部丢镜」的坏成片。这里补同样的收口，任何后置改写
                 #   都不得绕过场次编号。
-                _sn_norm = A.novel_to_script.normalize_scene_numbering(script.get("shots") or [])
+                _sn_norm = novel_to_script.normalize_scene_numbering(script.get("shots") or [])
                 if _sn_norm.get("renumbered"):
                     logger.warning("第%s集：质检重写落盘前修正 %d 个镜头的 scene_no"
                                    "（场数 %d）", ctx["episode_no"], _sn_norm["renumbered"],
                                    _sn_norm["scene_count"])
-                script["scene_flow"] = A.novel_to_script.collect_scene_flow(
+                script["scene_flow"] = novel_to_script.collect_scene_flow(
                     script.get("shots") or [])
                 _pn = script.setdefault("production_notes", {})
                 _pn["scene_count"] = len(script["scene_flow"])
@@ -1596,8 +1604,8 @@ def step_script(ctx) -> dict:
                     if isinstance(_w, list):
                         for _it in (_sn_norm.get("issues") or []):
                             _w.append("[场次自检] %s：%s" % (_it.get("id"), _it.get("detail")))
-                A.novel_to_script.save_episode_script(
-                    script, A.SCRIPT_DIR, ctx["project_key"], ctx["episode_no"],
+                novel_to_script.save_episode_script(
+                    script, SCRIPT_DIR, ctx["project_key"], ctx["episode_no"],
                     ctx["project_key"])
             except Exception as _e2:  # noqa: BLE001
                 logger.warning("质检重写后落盘失败（忽略）：%s", _e2)
@@ -1630,12 +1638,35 @@ def step_script(ctx) -> dict:
         return {"ok": False, "artifact": path, "detail": detail,
                 "error": f"原文覆盖率 {pct}% 低于阈值 {floor}%（{len(cov.get('missing') or [])} 处遗漏）"}
     ctx["script"] = script
+    # ⭐ 2026-10-19（剧本结构校验）：产出即体检 —— 空镜开场 / 旧格式 dialogue / 缺字段 /
+    #    节拍枚举 / bible 脱节（道具从未入镜、外观特征不在 bible）/ 动作链断裂 / 裸英文 prompt_h3。
+    #    **默认只记录**（写进步骤 detail，界面可见）+ 日志；需要硬拦时设
+    #    MJSCXT_SCRIPT_STRUCT_GATE=block（只在 P0 时失败）。校验器自身异常绝不影响剧本产出。
+    try:
+        import script_structure as _ss
+        _sc = _ss.check(script)
+        detail["structure_check"] = {"ok": _sc["ok"], "p0": _sc["p0"], "p1": _sc["p1"],
+                                     "info": _sc["info"], "stats": _sc["stats"],
+                                     "bible": _sc["bible"]}
+        if _sc["p0"] or _sc["p1"]:
+            logger.warning("%s", _ss.summarize(_sc))
+        else:
+            logger.info("%s", _ss.summarize(_sc))
+        _gate = str(os.environ.get("MJSCXT_SCRIPT_STRUCT_GATE") or "").strip().lower()
+        if _gate in ("block", "1", "true", "on", "yes") and not _sc["ok"]:
+            return {"ok": False, "artifact": path, "detail": detail,
+                    "error": "剧本结构校验未通过（P0 %d 项）：%s" % (
+                        len(_sc["p0"]),
+                        "；".join(str(x.get("message"))[:80] for x in _sc["p0"][:3]))}
+    except Exception as _sce:  # noqa: BLE001  校验是体检，绝不能把剧本产出拖失败
+        logger.warning("剧本结构校验失败（忽略，不影响产出）：%s", _sce)
     return {"ok": True, "artifact": path, "detail": detail}
 
 
 def _script_path(ctx) -> str:
-    A = _A()
-    return A.novel_to_script.episode_script_path(A.SCRIPT_DIR, ctx["project_key"], ctx["episode_no"])
+    from config import SCRIPT_DIR
+    import novel_to_script
+    return novel_to_script.episode_script_path(SCRIPT_DIR, ctx["project_key"], ctx["episode_no"])
 
 
 def step_tts_pre(ctx) -> dict:
@@ -1678,25 +1709,29 @@ def step_tts_pre(ctx) -> dict:
         return {"ok": True, "skipped": True,
                 "detail": {"note": "剧本无角色与镜头，跳过参考音色生成"}}
 
-    A = _A()
+    from asset_refs import _build_asset_index
+    from routes.tts import _dub_project_dir
+    from video_helpers import _ensure_voice_bank_refs
+    import tts_client
+    from tts_client import check_environment as tts_env_check
     try:
         # 项目全量角色（角色资产索引的键即角色名）→ 交给既有实现逐角色补参考音色。
         # 传 common=[] 是因为「已确认的公共池」与本步无关：本步要覆盖**全部**角色。
-        char_idx = A._build_asset_index(script.get("characters") or [],
+        char_idx = _build_asset_index(script.get("characters") or [],
                                         ctx["project_name"], "character")
         # 2026-10-05：TTS 环境自检 —— 不可用时直接返回精确跳过原因，
         # 不再静默跑一遍全部合成失败（用户会以为「配音完成了」其实什么都没有）。
         try:
-            _tts_env = A.tts_env_check()
+            _tts_env = tts_env_check()
         except AttributeError:
             _tts_env = {"available": True, "reasons": []}
         if not _tts_env.get("available"):
             return {"ok": True, "skipped": True,
                     "detail": {"note": "TTS 环境不可用，跳过参考音色生成：" + "；".join(_tts_env.get("reasons") or []),
                                "env_available": False}}
-        A._ensure_voice_bank_refs([], ctx["project_name"], all_characters=char_idx)
-        _dub_dir = A._dub_project_dir(ctx["project_name"])
-        _rows = A.tts_client.list_voice_bank(_dub_dir) or []
+        _ensure_voice_bank_refs([], ctx["project_name"], all_characters=char_idx)
+        _dub_dir = _dub_project_dir(ctx["project_name"])
+        _rows = tts_client.list_voice_bank(_dub_dir) or []
         _names = [str(r.get("character")) for r in _rows
                   if isinstance(r, dict) and r.get("character")]
         return {"ok": True, "skipped": False,
@@ -1723,12 +1758,12 @@ def _trigger_storyboard_prewarm(ctx: dict) -> None:
         shots = script.get("shots") or []
         if not shots:
             return
-        A = _A()
-        char_idx = A._build_asset_index(script.get("characters") or [],
+        from asset_refs import _build_asset_index
+        char_idx = _build_asset_index(script.get("characters") or [],
                                          ctx["project_name"], "character")
-        item_idx = A._build_asset_index(script.get("items") or [],
+        item_idx = _build_asset_index(script.get("items") or [],
                                        ctx["project_name"], "item")
-        scene_idx = A._build_asset_index(script.get("scenes") or [],
+        scene_idx = _build_asset_index(script.get("scenes") or [],
                                         ctx["project_name"], "scene")
         _sbh.prewarm_storyboard_prompts(
             ctx["project_name"], shots, char_idx, item_idx, scene_idx,
@@ -1761,12 +1796,13 @@ def _trigger_video_prewarm(ctx: dict) -> None:
 
 def step_assets(ctx) -> dict:
     """角色 / 物品 / 场景资产（项目级；三种类型各自带 AI 质检与重生成）"""
-    A = _A()
+    from config import CHARACTERS_DIR
+    from asset_worker import _generate_asset_task
     script = ctx.get("script") or {}
     pd = probe_assets(ctx)
     if pd.get("done"):
         return {"ok": True, "skipped": True, "detail": {"probe": pd},
-                "artifact": os.path.join(A.CHARACTERS_DIR, ctx["project_name"])}
+                "artifact": os.path.join(CHARACTERS_DIR, ctx["project_name"])}
 
     results, errs = {}, []
     for kind, script_key in (("character", "characters"), ("item", "items"), ("scene", "scenes")):
@@ -1789,7 +1825,7 @@ def step_assets(ctx) -> dict:
         ctx["progress"](f"生成{kind}资产（缺 {len(todo)}/{len(assets)} 个）", 20,
                         phase=f"assets:{kind}")
         final = _run_task_worker(
-            A._generate_asset_task, (todo, kind, ctx["project_name"], ctx["config"].get("style") or ""),
+            _generate_asset_task, (todo, kind, ctx["project_name"], ctx["config"].get("style") or ""),
             "generation_state", "lock",
             init={"total": len(todo), "asset_type": kind, "phase": f"{kind} 资产"},
             prefix=f"pipe_asset_{kind}")
@@ -1811,7 +1847,8 @@ def step_assets(ctx) -> dict:
 
 def step_storyboard(ctx) -> dict:
     """分镜图（逐镜生成，图片 AI 质检不达标自动换 seed 重生成并可阻断入库）"""
-    A = _A()
+    from asset_refs import _build_asset_index
+    from storyboard_helpers import _storyboard_worker
     pd = probe_storyboard(ctx)
     if pd.get("done"):
         # ⭐ T19（2026-10-13，用户指令「不是分镜齐备后生成提示词，应该是分镜在生成时」
@@ -1828,9 +1865,9 @@ def step_storyboard(ctx) -> dict:
     if not shots:
         raise NeedsHumanError("剧本没有镜头数据，无法生成分镜图")
 
-    char_idx = A._build_asset_index(script.get("characters") or [], ctx["project_name"], "character")
-    item_idx = A._build_asset_index(script.get("items") or [], ctx["project_name"], "item")
-    scene_idx = A._build_asset_index(script.get("scenes") or [], ctx["project_name"], "scene")
+    char_idx = _build_asset_index(script.get("characters") or [], ctx["project_name"], "character")
+    item_idx = _build_asset_index(script.get("items") or [], ctx["project_name"], "item")
+    scene_idx = _build_asset_index(script.get("scenes") or [], ctx["project_name"], "scene")
     ctx["progress"](f"生成分镜图（{len(shots)} 镜）", 34, phase="storyboard")
     # 审计 P1-3（2026-09-29）：托管 GPU 步骤也必须过并发闸门 —— 旧实现只闸手动链路，
     # 托管跑批期间手动任务可同时打 ComfyUI；且 has_other_running_gpu_tasks() 在托管
@@ -1838,12 +1875,15 @@ def step_storyboard(ctx) -> dict:
     with gpu_task_gate.run_gpu_task(
             f"pipe_sb_{int(time.time() * 1000)}", "托管·分镜图"):
         final = _run_task_worker(
-            A._storyboard_worker, (ctx["project_name"], shots, char_idx, item_idx, scene_idx,
+            _storyboard_worker, (ctx["project_name"], shots, char_idx, item_idx, scene_idx,
                                    ctx["episode_no"], ctx["config"].get("style") or ""),
             "generation_state", "lock",
             init={"total": len(shots), "phase": "分镜图生成"},
             prefix="pipe_sb")
     out = _outcome_from_task(final, "分镜图生成")
+    # ⚠️ 角色参考图记账不在这里落盘：本函数的 shots 是**原始对象**，而 worker 内部对
+    #    shots 做了浅拷贝，_ref_warnings 写不到这里。落盘改在 _storyboard_worker 收尾
+    #    （按「本轮实际处理过的镜号」增量合并，见 quality_stage.save_ref_warnings）。
     # ⭐ T12（2026-10-12）：把「软放行 / 带 critical_issues」如实带进步骤 detail ——
     #   count/success_count 只算真通过，软放行单列，界面上不再整片全绿。
     detail = {"count": out["count"], "total": len(shots), "blocked": out["blocked"],
@@ -1884,7 +1924,8 @@ def step_storyboard(ctx) -> dict:
 def step_video(ctx) -> dict:
     """整集视频生成（2026-10-01 起唯一模式：H3 一次生成整集连续视频；视频 AI
     质检门禁照常生效，不达标自动重生成，阻断不入库）"""
-    A = _A()
+    from qc_helpers import _qc_brief
+    from video_helpers import _video_generate_worker
     pd = probe_video(ctx)
     if pd.get("done"):
         return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["dir"]}
@@ -1903,7 +1944,7 @@ def step_video(ctx) -> dict:
     with gpu_task_gate.run_gpu_task(
             f"pipe_video_{int(time.time() * 1000)}", "托管·视频"):
         final = _run_task_worker(
-            A._video_generate_worker,
+            _video_generate_worker,
             (ctx["project_name"], shots, char_refs, scene_refs, {}, True, mode,
              int(ctx.get("timeout_per_segment") or 900),
              ctx.get("episode_tag") or f"ep{ctx['episode_no']:02d}",
@@ -1911,7 +1952,7 @@ def step_video(ctx) -> dict:
              "auto",   # keyframe_chain_mode：仅逐镜 keyframe 模式消费，整集模式恒 auto
              cfg.get("style") or ""),
             "generation_state", "lock",
-            init={"total": len(shots), "phase": "视频生成", "qc": A._qc_brief("video")},
+            init={"total": len(shots), "phase": "视频生成", "qc": _qc_brief("video")},
             prefix="pipe_video")
     out = _outcome_from_task(final, "视频生成")
     recheck = probe_video(ctx)
@@ -1967,7 +2008,12 @@ def _probe_concat_duration(concat_video: str, segments: list) -> float:
 def step_final(ctx) -> dict:
     """成片合成（2026-10-05 起仅整集模式）：优先采用超分产物为成片，无超分时
     回退整集原片（copy2），不再有逐镜拼接分支"""
-    A = _A()
+    from config import PROJECT_OUTPUT_DIR
+    from system_helpers import _maybe_clear_comfyui_history
+    from artifact_helpers import _maybe_reclaim_comfyui_output
+    from project_helpers import _project_caption_burn_enabled
+    from project_helpers import _project_subtitle_enabled
+    from routes.final import video_processor
     pd = probe_final(ctx)
     if pd.get("done"):
         return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["file"]}
@@ -2032,12 +2078,12 @@ def step_final(ctx) -> dict:
     _script_total = sum(float(x.get("duration") or 5) for x in _shots_all) or 1.0
 
     subbed = ""
-    if (A._project_subtitle_enabled(ctx["project_name"])
-            or A._project_caption_burn_enabled(ctx["project_name"])):
+    if (_project_subtitle_enabled(ctx["project_name"])
+            or _project_caption_burn_enabled(ctx["project_name"])):
         try:
             from dialogue_utils import dialogue_text
-            _want_dlg = A._project_subtitle_enabled(ctx["project_name"])
-            _want_cap = A._project_caption_burn_enabled(ctx["project_name"])
+            _want_dlg = _project_subtitle_enabled(ctx["project_name"])
+            _want_cap = _project_caption_burn_enabled(ctx["project_name"])
 
             def _cap_text(_s):
                 """镜头字幕文本：兼容 {text,kind} / 旧字符串 / 扁平 caption_text 三种形状。"""
@@ -2065,11 +2111,17 @@ def step_final(ctx) -> dict:
                 if _want_cap:
                     _ct = _cap_text(s)
                     if _ct:
+                        # 2026-10-18：台词字幕与 caption 同时开启时，两者是**同一时间窗**
+                        # 的两条 SRT，libass 默认都渲染在画面底部 → 两行字直接重叠糊掉。
+                        # 故有台词的镜头上把 caption 顶到画面上方（ASS \an8 覆盖标签，
+                        # libass 对 SRT 内联标签同样生效）；只开 caption 时保持底部原样。
+                        if _want_dlg and dialogue_text(s.get("dialogue")):
+                            _ct = "{\\an8}" + _ct
                         subs.append({"start": cur, "end": cur + dur, "text": _ct})
                 if _i >= len(_spans):
                     cur += dur
             if subs:
-                subbed = A.video_processor.add_subtitles(tmp, subs, out)
+                subbed = video_processor.add_subtitles(tmp, subs, out)
         except Exception as e:  # noqa: BLE001  字幕失败不阻断成片
             logger.warning("成片字幕生成跳过（不影响成片）：%s", e)
 
@@ -2143,7 +2195,7 @@ def step_final(ctx) -> dict:
                 # 只有「拿到电平」的结论才落盘（未判定没有结论可落，也免去无谓 IO）
                 _rep = _qs_audio.save_final_audio_qc(
                     ctx["project_name"], ctx["episode_no"], _audio_report,
-                    root=(getattr(A, "PROJECT_OUTPUT_DIR", "") or None))
+                    root=(PROJECT_OUTPUT_DIR or None))
                 if _rep:
                     _audio_report["report_path"] = _rep
             if not _audio_report.get("available"):
@@ -2175,8 +2227,8 @@ def step_final(ctx) -> dict:
                     note=("成片音轨客观层不合格：%s" % str(_audio_report.get("reason") or "")[:160])
                          if _audio_report.get("blocked") else "",
                     # root 必须由宿主模块派生（pipeline 内所有路径都是 A.* 口径）；
-                    # 不传会落到 config 的默认 output，与 A.PROJECT_OUTPUT_DIR 分裂。
-                    root=(getattr(A, "PROJECT_OUTPUT_DIR", "") or None))
+                    # 不传会落到 config 的默认 output，与 PROJECT_OUTPUT_DIR 分裂。
+                    root=(PROJECT_OUTPUT_DIR or None))
             except Exception as _qse:                        # noqa: BLE001
                 logger.warning("成片音频结论登记质量状态失败（忽略）：%s", _qse)
             if _audio_gate in ("block", "1", "true", "on", "yes") and _audio_report.get("blocked"):
@@ -2188,6 +2240,74 @@ def step_final(ctx) -> dict:
             logger.warning("成片音频客观层异常（已跳过，不影响成片）：%s", _aqe)
             _audio_report = {"enabled": True, "available": False,
                              "error": "%s: %s" % (type(_aqe).__name__, _aqe)}
+    # ---- ⭐ 2026-10-19（L3 自动验收门）：台词乱码率 + 角色参考图覆盖 ----
+    # 与上面的音频客观层同一范式：**函数内 import + 全 try**（AST 守卫脚本用受限命名空间
+    # exec 本函数，引用模块级新名字会 NameError 假红）；**默认只记录不阻断**。
+    #   · 乱码率 = 1 - 相似度(whisper 转写, 剧本台词)；超阈值 → A 层 failed（与音频层同口径），
+    #     但不删不改音频 —— 「打回重配」由人在界面上决定；
+    #   · 角色覆盖 = 生成期记账的「角色参考图缺失 / no_reference」镜头统计（零成本、不调模型）；
+    #   · env：MJSCXT_ACCEPTANCE_GATE=off 关闭；=block 超阈值时硬拦（默认不拦）；
+    #          MJSCXT_GARBLE_MAX 覆盖阈值（默认 0.20）。
+    _acc_gate = str(os.environ.get("MJSCXT_ACCEPTANCE_GATE") or "").strip().lower()
+    _acc_report: dict = {}
+    if _acc_gate not in ("0", "off", "false", "no"):
+        try:
+            import quality_stage as _qs_acc       # 函数内 import：exec 受限命名空间里没有模块级名
+            _acc_report = _qs_acc.acceptance_verdict(
+                out, project=ctx["project_name"], episode=ctx["episode_no"],
+                script=(ctx.get("script") or {}))
+            _sp = _acc_report.get("speech") or {}
+            _ca = _acc_report.get("cast") or {}
+            if _sp.get("available"):
+                _gr = float(_sp.get("garble_rate") or 0.0)
+                _th = float(_sp.get("threshold") or 0.0)
+                logger.info("成片验收门：台词乱码率 %.1f%%（阈值 %.0f%%）%s；转写 %s 字 / 剧本 %s 字",
+                            _gr * 100, _th * 100,
+                            "" if _sp.get("ok") else " → **超过阈值，建议重配该集**",
+                            _sp.get("transcript_chars"), _sp.get("expected_chars"))
+            else:
+                logger.info("成片验收门：乱码率未判定（%s）", _sp.get("error") or "环境不可用")
+            _gap = int(_ca.get("shots_missing_cast_ref") or 0) + int(_ca.get("shots_no_reference") or 0)
+            if _gap:
+                logger.warning(
+                    "成片验收门：角色参考图有缺口 —— 应出镜镜头 %s 个，缺角色图 %s 个、无参考 %s 个（镜号 %s）",
+                    _ca.get("shots_with_cast"), _ca.get("shots_missing_cast_ref"),
+                    _ca.get("shots_no_reference"),
+                    "、".join(str(x) for x in ((_ca.get("missing_cast_ref_shots") or [])
+                                               + (_ca.get("no_reference_shots") or []))[:12]))
+            _rep = _qs_acc.save_acceptance(ctx["project_name"], ctx["episode_no"],
+                                           _acc_report, root=(PROJECT_OUTPUT_DIR or None))
+            if _rep:
+                _acc_report["report_path"] = _rep
+            # A 层登记：只有「乱码率**已判定且超阈值**」才 failed（未判定 = skipped，不判缺陷）
+            try:
+                _sp_ok = _sp.get("ok")
+                _note = ""
+                if _sp_ok is False:
+                    _note = ("台词乱码率 %.0f%% 超过阈值 %.0f%%，建议重配该集"
+                             % (float(_sp.get("garble_rate") or 0) * 100,
+                                float(_sp.get("threshold") or 0) * 100))
+                _qs_acc.record_stage(
+                    ctx["project_name"], ctx["episode_no"], "A",
+                    "failed" if _sp_ok is False else ("passed" if _sp_ok is True else "skipped"),
+                    evidence={"acceptance_gate": True,
+                              "garble_rate": _sp.get("garble_rate"),
+                              "garble_threshold": _sp.get("threshold"),
+                              "cast_gap_shots": _gap},
+                    note=_note,
+                    root=(PROJECT_OUTPUT_DIR or None))
+            except Exception as _qse2:                   # noqa: BLE001
+                logger.warning("验收门结论登记质量状态失败（忽略）：%s", _qse2)
+            if _acc_gate in ("block", "1", "true", "on", "yes") and _sp.get("ok") is False:
+                raise PipelineError(
+                    "成片验收门判定不合格（台词乱码率 %.0f%% > 阈值 %.0f%%）：建议重配该集台词"
+                    % (float(_sp.get("garble_rate") or 0) * 100,
+                       float(_sp.get("threshold") or 0) * 100))
+        except PipelineError:
+            raise
+        except Exception as _ae:                             # noqa: BLE001  验收门绝不阻断落盘
+            logger.warning("成片验收门异常（已跳过，不影响成片）：%s", _ae)
+            _acc_report = {"enabled": True, "error": "%s: %s" % (type(_ae).__name__, _ae)}
     # ⭐ 2026-10-12（t17）：成片重新合成成功 → 清掉「已失效」标记（否则每轮轮转都会重做一次）。
     _stale_marker = out + ".stale.json"
     try:
@@ -2204,13 +2324,13 @@ def step_final(ctx) -> dict:
     # D-11a：成片步骤收尾 —— 滚动回收 ComfyUI 输出目录里的产物残留
     # （带进程内节流、全容错；回收是优化，任何异常都不影响成片）
     try:
-        A._maybe_reclaim_comfyui_output()
+        _maybe_reclaim_comfyui_output()
     except Exception as e:  # noqa: BLE001  回收是优化，绝不能阻断成片
         logger.debug("D-11a 成片收尾回收跳过：%s: %s", type(e).__name__, e)
     # 成片收尾 —— 顺手清空 ComfyUI 任务历史面板（只清记录，不碰磁盘产物）。
     # 一次成片要经过分镜/视频/配音等多次重跑，面板会累积几百条，容易被误读成废图堆积。
     try:
-        A._maybe_clear_comfyui_history("成片步骤收尾")
+        _maybe_clear_comfyui_history("成片步骤收尾")
     except Exception as e:  # noqa: BLE001  可观测性优化，绝不能阻断成片
         logger.debug("ComfyUI 任务历史清理跳过：%s: %s", type(e).__name__, e)
     return {"ok": True, "artifact": out,
@@ -2221,17 +2341,24 @@ def step_final(ctx) -> dict:
 
 def step_tts(ctx) -> dict:
     """配音：逐句合成 → 合并该集音轨 → 落配音清单"""
-    A = _A()
+    from routes._shared import _app_logger
+    from workers.audio import _apply_audio_lessons
+    from routes.tts import _dub_project_dir
+    from workers.audio import _dub_worker
+    from tts_client import build_dub_plan
+    from tts_client import default_voice_map
+    from tts_client import load_voice_map
+    from tts_client import save_voice_map
     pd = probe_tts(ctx)
     if pd.get("done"):
         return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["file"]}
     script = ctx.get("script") or {}
     project = ctx["project_name"]
-    out_dir = A._dub_project_dir(project)
+    out_dir = _dub_project_dir(project)
     vm_path = os.path.join(out_dir, "voice_map.json")
-    voice_map = A.load_voice_map(vm_path) or A.default_voice_map(
+    voice_map = load_voice_map(vm_path) or default_voice_map(
         script.get("characters") or [], project, ctx["episode_no"])
-    plan = A.build_dub_plan(script, voice_map, project, ctx["episode_no"],
+    plan = build_dub_plan(script, voice_map, project, ctx["episode_no"],
                             shot_ids=None, only_missing=False,
                             out_dir_wav=os.path.join(out_dir, "lines"))
     if not plan.get("lines"):
@@ -2241,18 +2368,18 @@ def step_tts(ctx) -> dict:
     # 2026-10-09 接线：_apply_audio_lessons 此前是**无调用者的孤岛函数**（守卫为此长期红）。
     # 按 audio 教训纠偏配音计划：纯就地修改、fail-open（失败只告警，不影响配音主链路）。
     try:
-        A._apply_audio_lessons(plan["lines"], project)
+        _apply_audio_lessons(plan["lines"], project)
     except Exception as _e:                       # noqa: BLE001
-        A._app_logger().warning("audio 教训回流失败（忽略）：%s", _e)
+        _app_logger().warning("audio 教训回流失败（忽略）：%s", _e)
 
     try:
-        A.save_voice_map(plan["voice_map"], vm_path)
+        save_voice_map(plan["voice_map"], vm_path)
     except Exception as e:  # noqa: BLE001
         logger.warning("音色映射保存失败（不影响本次合成）：%s", e)
 
     ctx["progress"](f"配音合成（{plan['line_count']} 句）", 82, phase="tts")
     final = _run_task_worker(
-        A._dub_worker, (project, plan, out_dir, "wav", ctx["episode_no"]),
+        _dub_worker, (project, plan, out_dir, "wav", ctx["episode_no"]),
         "dub_tasks", "dub_lock",
         init={"total": plan["line_count"], "phase": "配音合成",
               "project_name": project, "out_dir": out_dir},
@@ -2267,7 +2394,9 @@ def step_tts(ctx) -> dict:
 
 def step_mix(ctx) -> dict:
     """音画对齐混音：把该集配音按时间轴铺到成片上"""
-    A = _A()
+    from mix_helpers import _mix_prepare
+    from workers.audio import _mix_worker
+    from dub_mix import ffmpeg_available as mix_ffmpeg_check
     pd = probe_mix(ctx)
     if pd.get("done"):
         return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["file"]}
@@ -2279,17 +2408,17 @@ def step_mix(ctx) -> dict:
     if not _nonempty(fv):
         raise PipelineError("成片未就绪，无法混音")
 
-    env = A.mix_ffmpeg_check()
+    env = mix_ffmpeg_check()
     if not env.get("available"):
         raise NeedsHumanError("ffmpeg/ffprobe 不可用：" + "；".join(env.get("reasons") or []))
 
     out_name = os.path.basename(mix_output_path(ctx))
-    prepared = A._mix_prepare({"project_name": ctx["project_name"],
+    prepared = _mix_prepare({"project_name": ctx["project_name"],
                                "episode": ctx["episode_no"],
                                "video_path": fv})
     ctx["progress"](f"音画对齐混音（{len(prepared['entries'])} 句）", 92, phase="mix")
     final = _run_task_worker(
-        A._mix_worker, (prepared, out_name),
+        _mix_worker, (prepared, out_name),
         "mix_tasks", "mix_lock",
         init={"phase": "音画对齐", "project_name": ctx["project_name"],
               "video_path": fv, "out_name": out_name,
@@ -2315,7 +2444,7 @@ def step_upscale(ctx) -> dict:
     原因：本步骤默认开启，若按普通步骤「失败即 raise」，会把一整集已经跑完的
     成片拖成失败态，用户既拿不到交付、又要为「锦上添花」的环节买单重跑。
     """
-    A = _A()
+    from upscale_client import check_environment as upscale_env_check
     pd = probe_upscale(ctx)
     if pd.get("done"):
         return {"ok": True, "skipped": True, "detail": {"probe": pd}, "artifact": pd["file"]}
@@ -2358,7 +2487,7 @@ def step_upscale(ctx) -> dict:
 
     # 环境自检：不可用直接跳过，不进入重试循环
     try:
-        env = A.upscale_env_check()
+        env = upscale_env_check()
     except Exception as e:  # noqa: BLE001
         logger.warning("第%s集超分跳过（环境自检失败）：%s", ctx["episode_no"], e)
         return {"ok": True, "skipped": True,
@@ -2476,20 +2605,22 @@ def step_enabled(step: str, ctx) -> bool:
 
 def check_consistency(ctx) -> dict:
     """成片前的跨镜一致性复检（不达标即判失败，交由重试层处理）"""
-    A = _A()
+    from routes.consistency import _consistency_collect
+    from routes._shared import _qc_load_cfg
+    import consistency
     cfg = ctx["config"]
     if not cfg.get("require_consistency"):
         return {"ok": True, "skipped": True, "note": "未开启一致性门禁"}
     try:
-        collect = A._consistency_collect(ctx["project_name"], ctx["episode_no"])
+        collect = _consistency_collect(ctx["project_name"], ctx["episode_no"])
         if not collect.get("shot_images"):
             return {"ok": True, "skipped": True, "note": "尚无分镜图可比对"}
-        report = A.consistency.run(
+        report = consistency.run(
             ctx["project_name"],
             character_refs=collect["character_refs"],
             shot_images=collect["shot_images"],
             asset_dirs=collect["asset_dirs"],
-            cfg=A._qc_load_cfg(),
+            cfg=_qc_load_cfg(),
             include_assets=False, include_shots=True)
     except Exception as e:  # noqa: BLE001  一致性校验失败不阻断生产（仅记录）
         logger.warning("一致性复检异常（不阻断）：%s", e)
@@ -2509,16 +2640,31 @@ def check_consistency(ctx) -> dict:
 
 
 def _load_script_into_ctx(ctx) -> dict:
-    A = _A()
     p = _script_path(ctx)
     if not _nonempty(p):
         return {}
     try:
         with open(p, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
+            script = json.load(f) or {}
     except Exception as e:  # noqa: BLE001
         logger.warning("剧本读取失败 %s：%s", p, e)
         return {}
+    # ⭐ 2026-10-19（A2 角色名词表）：**只在内存里**把别名收敛到 bible 标准名 ——
+    #    磁盘剧本保持原样（可回滚）。不归一的话，「赵天监 / 赵安」这类写法会让下游
+    #    把同一个人当成多个角色，参考图与音色各绑一部分，表现为「角色长相漂移 + 音色不对」。
+    #    fail-open：规则缺失/异常一律忽略，行为与改动前逐字一致。
+    try:
+        import text_rules as _tr
+        _proj = ctx.get("project_key") or ctx.get("project_name") or ""
+        _aliases = _tr.load(_proj).get("aliases") or {}
+        if _aliases:
+            _n = _tr.canon_script(script, _aliases)
+            if _n:
+                logger.info("[角色名词表] 项目 %s 第 %s 集：剧本别名归一改写 %d 处",
+                            _proj, ctx.get("episode_no"), _n)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("角色名词表应用失败（忽略，按原名继续）：%s", e)
+    return script
 
 
 def _deliverable_of(ctx, steps: dict) -> str:
@@ -2543,7 +2689,11 @@ def _prefetch_next_scripts(ctx: dict, limit: int = 1) -> None:
     ⚠️ 章节映射按 chapters[N-1]（一章一集默认口径）；开 MJSCXT_EPISODE_SPLIT 拆章
     时集号≠章号，此预取的章节定位会偏——与既有行为一致，如需精确应走 episode_units。
     """
-    A = _A()
+    from config import CONTINUITY_DIR
+    from config import SCRIPT_DIR
+    from routes._shared import _current_llm_client
+    import continuity
+    import novel_to_script
     try:
         # ⭐ 2026-10-10：受项目计划开关控制（界面可勾选，默认开）。
         #    与 autopilot.prewarm_next_script 是同一开关的两个触发点：
@@ -2598,21 +2748,21 @@ def _prefetch_next_scripts(ctx: dict, limit: int = 1) -> None:
             logger.debug("剧本预热：未找到第 %s 集对应章节", next_no)
             return
         # 已存在直接跳过
-        script_path = A.novel_to_script.episode_script_path(A.SCRIPT_DIR, key, next_no, key)
+        script_path = novel_to_script.episode_script_path(SCRIPT_DIR, key, next_no, key)
         if _nonempty(script_path):
             logger.info("剧本预热：第 %s 集剧本已存在，跳过 %s", next_no, script_path)
             return
 
         def _worker():
             try:
-                client = A._current_llm_client()
+                client = _current_llm_client()
                 if not client or not getattr(client, "configured", False):
                     logger.warning("剧本预热：文本模型未配置，跳过 %s", key)
                     return
-                conv = A.continuity.convert_chapter_with_continuity(
-                    client, meta, text, ch_next, key, A.CONTINUITY_DIR,
+                conv = continuity.convert_chapter_with_continuity(
+                    client, meta, text, ch_next, key, CONTINUITY_DIR,
                     style=style, target_shots=target_shots, episode_no=next_no,
-                    save_dir=A.SCRIPT_DIR,
+                    save_dir=SCRIPT_DIR,
                 )
                 logger.info("剧本预热：第 %s 集剧本已生成 %s", next_no, conv.get("script_path") or "")
             except Exception as e:  # noqa: BLE001
@@ -2639,8 +2789,11 @@ def backfill_style_from_ai_settings(config: dict, project_name: str,
     if (config.get("style") or "").strip():
         return config["style"]
     try:
-        A = _A()
-        brief = (A.ai_chat.settings_view(A.AI_SETTINGS_PATH, project_name)
+        from config import AI_SETTINGS_PATH
+        from config import PROJECT_OUTPUT_DIR
+        import ai_chat
+        import style_kit
+        brief = (ai_chat.settings_view(AI_SETTINGS_PATH, project_name)
                  .get("style_brief") or "").strip()
     except Exception as e:  # noqa: BLE001
         logger.warning("AI 总控风格设定读取失败（本集沿用默认风格）：%s", e)
@@ -2656,9 +2809,9 @@ def backfill_style_from_ai_settings(config: dict, project_name: str,
         #    使风格优先级为：config.style → project_settings.style_brief → 项目 config.json。
         try:
             # ⚠️ 2026-10-14 修正：`PROJECTS_DIR` 在 **config** 模块里，不在 `app`（A）——
-            #    原先写成 `_A().PROJECTS_DIR` 会抛 AttributeError，被 except 吞掉后静默回落，
-            #    风格链路依旧断。这里改用 A.PROJECT_OUTPUT_DIR（app 模块确有该属性）拼接。
-            _cfgp = os.path.join(getattr(A, "PROJECT_OUTPUT_DIR", ""),
+            #    原先写成 `PROJECTS_DIR` 会抛 AttributeError，被 except 吞掉后静默回落，
+            #    风格链路依旧断。这里改用 PROJECT_OUTPUT_DIR（app 模块确有该属性）拼接。
+            _cfgp = os.path.join(PROJECT_OUTPUT_DIR,
                                  "projects", project_name, "config.json")
             if os.path.isfile(_cfgp):
                 with open(_cfgp, "r", encoding="utf-8") as _f:
@@ -2670,7 +2823,7 @@ def backfill_style_from_ai_settings(config: dict, project_name: str,
             logger.warning("项目 config.json 风格读取失败（沿用默认风格）：%s", e)
         if not brief:
             return ""
-    norm = _A().style_kit.normalize_style(brief) or brief
+    norm = style_kit.normalize_style(brief) or brief
     config["style"] = norm
     logger.info("第%s集：风格回填自 AI 总控设定（托管计划未带 style）：%s",
                 episode_no, norm)
@@ -2695,7 +2848,8 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
                     两类检查点都落在**尚未产出文件**的位置，因此不会留下半成品；
                     已完成的步骤全部保留，续跑时会被逐步骤探测跳过。
     """
-    A = _A()
+    from config import SCENE_GRID_MODE
+    import analytics
     started = time.time()
     backfill_style_from_ai_settings(config, project_name, episode_no)
     # 进度单调化：各步骤内部回报的百分比（如剧本步骤的 4%~18%）与整体锚点百分比
@@ -2752,7 +2906,7 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
             f"开始生产第{int(episode_no)}集",
             chapter_title=(chapter or {}).get("title"),
             style=(config.get("style") or ""),
-            grid_mode=bool(getattr(A, "SCENE_GRID_MODE", False)))
+            grid_mode=bool(SCENE_GRID_MODE))
 
     # ⭐ t1（2026-10-12）：开跑先取走「上一次执行体失联」留痕 —— 有则告警一次并落集级
     # 日志（lease_recovered）。这就是「worker 崩溃后任务不再静默挂死」的收口：下一个
@@ -2992,7 +3146,7 @@ def run_episode(config: dict, project_name: str, episode_no: int, novel_meta: di
     result.setdefault("episode_log", _episode_log_path(project_name, int(episode_no)))
     # 记账（时长 + 成功与否），供成本看板统计
     try:
-        A.analytics.record_event("pipeline", project_name,
+        analytics.record_event("pipeline", project_name,
                                  f"第{episode_no}集自动生产",
                                  int(result["elapsed_sec"]),
                                  units=len(result["steps"]),
@@ -3060,8 +3214,8 @@ def ctx_step_ctx(ctx):
 
 
 def dead_letter_path(project_name: str) -> str:
-    A = _A()
-    return os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name, "dead_letter.json")
+    from config import PROJECT_OUTPUT_DIR
+    return os.path.join(PROJECT_OUTPUT_DIR, "autopilot", project_name, "dead_letter.json")
 
 
 # P1-11（A-13）：死信文件损坏防护 —— 「.bak 快照 + 唯一临时名 + 损坏先恢复」
@@ -3282,11 +3436,12 @@ def mark_episode_outputs_stale(project_name: str, episode_no, reason: str,
     调用方（video_helpers.retry_shot / routes.final）不需要知道产物路径口径；
     返回 {"marked": ["final","upscale"], "final": <path>, "upscale": <path>, "reason": ...}。
     """
-    A = _A()
+    from config import FINAL_DIR
+    from config import UPSCALE_DIR
     ep = int(episode_no or 1)
     out = {"marked": [], "final": "", "upscale": "", "reason": str(reason or "")}
-    pairs = (("final", os.path.join(A.FINAL_DIR, project_name, f"ep{ep:02d}_final.mp4")),
-             ("upscale", os.path.join(A.UPSCALE_DIR, project_name, f"ep{ep:02d}_upscaled.mp4")))
+    pairs = (("final", os.path.join(FINAL_DIR, project_name, f"ep{ep:02d}_final.mp4")),
+             ("upscale", os.path.join(UPSCALE_DIR, project_name, f"ep{ep:02d}_upscaled.mp4")))
     for kind, path in pairs:
         out[kind] = path
         if mark_artifact_stale(path, reason, detail):
@@ -3352,8 +3507,8 @@ def record_deliverable(project_name: str, episode_no: int, path: str,
         logger.error("[预演拦截] 拒绝把非正式产物登记为成片（%s）：%s",
                      os.path.basename(str(path or "")), _why)
         raise PipelineError(f"不可交付的产物：{_why}")
-    A = _A()
-    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
+    from config import PROJECT_OUTPUT_DIR
+    idx_path = os.path.join(PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
     os.makedirs(os.path.dirname(idx_path), exist_ok=True)
     # A-4：这是一次「读改写」，损坏态若被静默读成空索引，会把**整个交付物索引**
     # 覆盖成只含本集的一条。故改为 fail-loud（read_json_strict 会先尝试从 .bak
@@ -3378,7 +3533,7 @@ def record_deliverable(project_name: str, episode_no: int, path: str,
     review_keep = bool(same_path and same_content)
     # 成片音频客观层结论（含无声镜号）随交付物一起登记：验收页可直接定位到镜号。
     meta = _final_audio_qc_meta(project_name, episode_no, meta,
-                               root=getattr(A, "PROJECT_OUTPUT_DIR", "") or None)
+                               root=PROJECT_OUTPUT_DIR or None)
     items[key] = {
         "episode_no": int(episode_no),
         "project": project_name,
@@ -3407,10 +3562,21 @@ def record_deliverable(project_name: str, episode_no: int, path: str,
 
 
 def list_deliverables(project_name: str = "") -> list:
-    A = _A()
-    root = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot")
-    projects = [project_name] if project_name else (
-        sorted(os.listdir(root)) if os.path.isdir(root) else [])
+    from config import PROJECT_OUTPUT_DIR
+    root = os.path.join(PROJECT_OUTPUT_DIR, "autopilot")
+    if project_name:
+        projects = [project_name]
+    else:
+        projects = sorted(os.listdir(root)) if os.path.isdir(root) else []
+        # ⭐ 2026-10-19（性能）：`output/autopilot/` 会积累大量历史/测试目录（实测 703 个），
+        #    逐个 `read_json_strict` 让本接口慢到 4 秒，而它被前端轮询。只保留仍有产物的项目。
+        try:
+            import autopilot as _ap
+            _valid = _ap._output_project_keys()
+        except Exception:  # noqa: BLE001
+            _valid = set()
+        if _valid:
+            projects = [p for p in projects if p in _valid]
     out = []
     for pj in projects:
         p = os.path.join(root, pj, "deliverables.json")
@@ -3451,8 +3617,8 @@ def set_deliverable_review(project_name: str, episode_no: int, review: str,
     （见 quality_stage.make_binding）。之后任一变化，批准即自动失效 ——
     这是防「批完又重渲、结论静默延续」的关键。
     """
-    A = _A()
-    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
+    from config import PROJECT_OUTPUT_DIR
+    idx_path = os.path.join(PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
     # A-4：统一走严格读；「文件不存在→{}」的既有契约不变，损坏时先试 .bak，
     # 无 .bak 才抛错（app.py:2117 的调用点已有 try/except 兜底，不会 500）。
     data = read_json_strict(idx_path, {}) or {}
@@ -3509,8 +3675,8 @@ def validate_deliverable_review(project_name: str, episode_no: int,
     返回 {"status": valid|invalid|unbound|none, "reason": ..., "item": {...}}。
     一切异常 fail-open：校验不出结果时**不误伤**，保持原 review 不动。
     """
-    A = _A()
-    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name,
+    from config import PROJECT_OUTPUT_DIR
+    idx_path = os.path.join(PROJECT_OUTPUT_DIR, "autopilot", project_name,
                             "deliverables.json")
     try:
         data = read_json_strict(idx_path, {}) or {}
@@ -3544,8 +3710,8 @@ def mark_deliverable_stale(project_name: str, episode_no: int, reason: str,
     这里给交付物打标，验收页就能提示「镜头有更新，请重新合成后再验收」，
     而不是让用户对着过期成片点验收。
     """
-    A = _A()
-    idx_path = os.path.join(A.PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
+    from config import PROJECT_OUTPUT_DIR
+    idx_path = os.path.join(PROJECT_OUTPUT_DIR, "autopilot", project_name, "deliverables.json")
     # A-4：损坏不再静默 `return {}`（那会让「成片已过期」的提示彻底消失）。
     # 记录不存在时仍返回 {}（原契约）；损坏时先试 .bak，无 .bak 才抛错。
     data = read_json_strict(idx_path, {}) or {}
@@ -3582,7 +3748,8 @@ def deliverable_path(project_name: str, filename: str) -> str:
     成片可能来自 output/dub_mix/（混音）或 output/final/（无配音），因此必须以
     索引里登记的路径为准；仅允许索引内的文件被访问，避免目录穿越。
     """
-    idx_path = os.path.join(_A().PROJECT_OUTPUT_DIR, "autopilot", project_name,
+    from config import PROJECT_OUTPUT_DIR
+    idx_path = os.path.join(PROJECT_OUTPUT_DIR, "autopilot", project_name,
                             "deliverables.json")
     # A-4 补充：损坏时不再静默返回 ""（等于「文件不存在」，会掩盖真实故障）。
     # 这里保持「解析不出路径 → ""」的原契约（调用方据此 404），但显式记 error；
