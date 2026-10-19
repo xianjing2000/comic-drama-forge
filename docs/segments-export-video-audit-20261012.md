@@ -3,7 +3,7 @@
 审计对象：提交 3ffc7a6 + ffdbe09（export_mode 默认 all→segments、段落盘 seg_%04d + concat + seg_map.json + _recompose_episode_video）
 生产现场：项目 逆天系统_全书 第 1 集，分镜阶段（截至 13:02 日志：shot 45 渲染中，44 已入库）
 数据根：C:\Users\liujianghua\AppData\Roaming\mjscxt-desktop\mjscxt-data
-运行后端：PID 15264，C:\mjscxt_p139\resources\backend\serve.py，12:29 重启加载本轮代码
+运行后端：PID 15264，D:\mjscxt-migrated\mjscxt_p139\resources\backend\serve.py，12:29 重启加载本轮代码
 日志：<数据根>\logs\serve_stdout.log（实时）
 
 ---
@@ -186,9 +186,9 @@ $APP    = "C:/Users/liujianghua/WorkBuddy/2026-09-09-16-55-22/漫剧生成系统
 ### S0（现在就做，必须在视频步骤开始前）
 1. 确认线上跑的就是 segments 默认：
 ```powershell
-(Get-FileHash 'C:/mjscxt_p139/resources/backend/comfyui_client.py' -Algorithm SHA256).Hash
+(Get-FileHash 'D:/mjscxt-migrated/mjscxt_p139/resources/backend/comfyui_client.py' -Algorithm SHA256).Hash
 (Get-FileHash "$APP/comfyui_client.py" -Algorithm SHA256).Hash
-Select-String -Path 'C:/mjscxt_p139/resources/backend/comfyui_client.py' -Pattern 'segments' | Select-Object -First 3 | ForEach-Object { $_.Line }
+Select-String -Path 'D:/mjscxt-migrated/mjscxt_p139/resources/backend/comfyui_client.py' -Pattern 'segments' | Select-Object -First 3 | ForEach-Object { $_.Line }
 ```
    判据：两份哈希一致（见 5.5）= 线上已生效。
 2. 确认没有 env 兜底：
@@ -291,7 +291,7 @@ git show --stat ffdbe09   # video_helpers.py +7/-1（_seg_sort_key 去扩展名�
   max_episode_attempts=2、step_max_retries=2；runtime.json paused=false。
 
 ### 5.4 生产运行实例
-- C:/mjscxt_p139/resources/backend/serve.py（PID 15264，12:29 重启；
+- D:/mjscxt-migrated/mjscxt_p139/resources/backend/serve.py（PID 15264，12:29 重启；
   __pycache__ideo_helpers.cpython-313.pyc 时间戳 12:29:28 = 该进程加载了本轮代码）。
 - 日志可见重启缘由：autopilot「托管已暂停：整体重启（加载分段导出新代码 + 释放内存）」。
 

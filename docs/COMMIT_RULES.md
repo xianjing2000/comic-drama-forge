@@ -69,3 +69,21 @@
   停止跟踪后，需从上游获取或保留本机副本。
 - `*.bak_*` / `*.rollback_*`：改代码时留的回溯快照，曾混进桌面安装包（实测 3 个约 710 KB）。
 - `%SystemDrive%/`：某次脚本把环境变量当字面量用，在仓库根建出该目录（已忽略）。
+
+## 七、提交前门禁（2026-10-16，Phase 0.5）
+
+改动 `app/` 后最容易犯两个错：**漏同步副本**（`_backend/`、运行镜像都在 .gitignore 里，
+CI 看不到本地漂移）、以及**可静态检出的未定义名**（曾有一例 NameError 在杀生产）。
+两道只读门禁把这两类挡在提交/发布之前：
+
+| 门禁 | 命令 | 抓什么 |
+|---|---|---|
+| 副本同步 | `python tools/check_app_sync.py` | 改了 `app/` 没同步到 `_backend/`/镜像（退出码非 0 = 漂移） |
+| 静态检查 | `python tools/lint_gate.py` | 语法错误 + 未定义名（需 `pip install pyflakes`） |
+
+接入位置：
+
+- **本地（推荐，opt-in）**：`git config core.hooksPath .githooks` → 提交前自动跑上面两条；
+  临时绕过用 `git commit --no-verify`。
+- **CI**：`tests.yml`（push/PR）跑静态检查；`desktop-release.yml` 打包后校验「打包后端 == 源码」。
+- 漂移时先 `python tools/sync_copies.py --apply` 同步副本（默认 dry-run，先看计划）。
