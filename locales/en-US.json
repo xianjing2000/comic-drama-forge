@@ -1789,6 +1789,8 @@
       "softLine": "Below QC bar (soft-accepted): {reason}",
       "criticalLine": "Critical issue: {text}",
       "softNoReason": "no reason recorded",
+      "blockedLine": "QC blocked: {reason}",
+      "blockedNoReason": "Failed QC (not saved — needs redo)",
       "criticalCount": "{n} critical issues",
       "noCritical": "no critical issue",
       "softHint": "Soft-accepted = below the QC bar but still delivered; NOT counted as passed. Consider redoing these shots."

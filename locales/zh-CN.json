@@ -1789,6 +1789,8 @@
       "softLine": "质检未达标（软放行）：{reason}",
       "criticalLine": "严重问题：{text}",
       "softNoReason": "未记录原因",
+      "blockedLine": "质检阻断：{reason}",
+      "blockedNoReason": "质检未通过（未入库，需重做）",
       "criticalCount": "{n} 条严重问题",
       "noCritical": "无严重问题",
       "softHint": "软放行 = 质检未达标但产物仍已入库，不计入成功；建议逐镜重做这些镜头。"
