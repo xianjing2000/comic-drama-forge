@@ -1,0 +1,31 @@
+【任务】你是短剧编剧。根据下方已定稿的分镜剧本，补写两个创作字段：episode_card（单集创作卡）和 evidence_ledger（证据链台账）。
+只输出一个 JSON 对象：{"episode_card": {...}, "evidence_ledger": [...]}。不要 markdown 代码块、不要解释文字、不要输出任何其他字段。
+
+【剧本信息】
+集名：<TITLE>
+情绪曲线：<EMOTION>
+场次攻防契约：<CONTRACTS>
+按镜头顺序的关键台词：
+<LINES>
+已有创作卡骨架（字段留空的请填实，有内容的请保留并精炼）：<CARD_SKETCH>
+
+【episode_card 字段要求（每项 25 字以内）】
+- core_drama_question：本集主角必须解决或推进的核心戏剧问题
+- protagonist_goal：主角主动争取的目标
+- obstacle：谁/什么在拦、为什么
+- fail_cost：失败会失去什么
+- urgency：为什么必须现在行动
+- info_gap：观众知道什么 / 主角知道什么 / 对立面知道什么（三项都写）
+- hook_line：可传播金句（由情境与代价支撑；没有就填空字符串）
+- payoff：本集兑现的爽点/情绪落点
+- hook_end：集尾钩子
+
+【evidence_ledger 要求】凡指控/身份/能力证明/秘密类台词，逐条登记（3~6 条）：
+- claim：台词声明（40 字以内）
+- speaker：说话角色
+- source：前置来源或铺垫（在哪交代过/由谁引出；找不到写「角色主观判断」）
+- evidence：观众能看到的可见证据（物证/动作/结果；找不到写「无直接可见证据」）
+- reveal_at：该声明被证实或推翻的镜头编号（整数）
+- consequence：对局势的后果（40 字以内）
+
+【输出】{"episode_card": {"core_drama_question": "...", "protagonist_goal": "...", "obstacle": "...", "fail_cost": "...", "urgency": "...", "info_gap": {"audience": "...", "protagonist": "...", "antagonist": "..."}, "hook_line": "...", "payoff": "...", "hook_end": "..."}, "evidence_ledger": [{"claim": "...", "speaker": "...", "source": "...", "evidence": "...", "reveal_at": 1, "consequence": "..."}]}
